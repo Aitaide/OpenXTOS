@@ -1,0 +1,44 @@
+# Build outputs
+*.o
+*.ko
+*.a
+*.so
+*.so.*
+*.d
+*.cmd
+.tmp_versions/
+modules.order
+Module.symvers
+
+# Kernel build artifacts
+kernel/linux/.config
+kernel/linux/.config.old
+kernel/linux/arch/*/boot/bzImage
+kernel/linux/arch/*/boot/Image
+kernel/linux/vmlinux
+kernel/linux/System.map
+kernel/linux/.version
+
+# Compiled binaries
+*.bin
+*.elf
+*.img
+
+# Editor/IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+
+# Logs and temporary files
+*.log
+*.tmp
+/tests/results/
+
+# Archives
+*.tar.gz
+*.tar.xz
+*.zip
+*.patch
