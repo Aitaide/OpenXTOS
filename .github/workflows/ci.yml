@@ -1,0 +1,32 @@
+name: XTOS source and system CI
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  userspace:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 2
+      - name: Verify source tree
+        run: ./scripts/verify_source_tree.sh
+      - name: Run user-space tests
+        run: ./scripts/test.sh
+      - name: Check project whitespace
+        run: git diff --check HEAD^ HEAD -- README.md CONTRIBUTING.md .gitignore .gitattributes .github scripts sdk tools tests system docs/system_build.md docs/signal_processing_benchmark.md docs/signal_processing_baseline.md plans/XTOS_Next_Development_Plan_Rev2.md examples/bci_test.c
+  system:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install host toolchain
+        run: sudo apt-get update && sudo apt-get install -y build-essential flex bison bc libssl-dev libelf-dev libc6-dev python3 cpio gzip kmod qemu-system-x86
+      - name: Build complete x86_64 system
+        run: JOBS=2 ./scripts/build_system.sh
+      - name: Boot and test system in QEMU
+        run: QEMU_TIMEOUT=180 ./scripts/verify_system.sh
+      - name: Check source tree remains clean
+        run: ./scripts/verify_source_tree.sh && test -z "$(git status --porcelain --untracked-files=normal)"

@@ -12,6 +12,7 @@ MAKEFLAGS += --include-dir=$(srctree)
 endif
 
 obj-y				+= cache/
+obj-$(CONFIG_XTOS_BCI)		+= xtos/
 obj-y				+= irqchip/
 obj-y				+= bus/
 

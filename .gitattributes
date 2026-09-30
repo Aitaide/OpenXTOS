@@ -1,0 +1,11 @@
+* text=auto eol=lf
+*.sh text eol=lf
+*.py text eol=lf
+*.c text eol=lf
+*.h text eol=lf
+*.md text eol=lf
+*.txt text eol=lf
+*.csv text eol=lf
+# Preserve upstream vendor fixtures, line endings, and binary data exactly.
+kernel/linux/** -text
+userspace/busybox/** -text

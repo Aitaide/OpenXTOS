@@ -1,62 +1,112 @@
-# XTOS - eXtended real-Time Operating System
+# XTOS
 
-全球首个面向AGI驱动的脑机接口应用优化的实时操作系统
+XTOS is an open-source real-time software foundation for brain-computer interface (BCI), AR/VR interaction, and AI-assisted research workloads.
 
-## 项目状态
+XTOS is currently built as a Linux 6.6 + PREEMPT_RT integration layer. It does not claim to replace the Linux scheduler or to provide medical-device certification.
 
-- **版本**: 开发中 (目标 v1.0.0)
-- **开始日期**: 2026年
-- **开发模式**: AI Agent全自动开发
+## Repository scope
 
-## 快速链接
+This repository is the complete XTOS development source tree. It includes the Linux 6.6.0 kernel source, PREEMPT_RT integration, XTOS kernel components, user-space SDK, tests, documentation, plans, and build scripts.
 
-- [技术规范](docs/XTOS_Technical_Specification.md)
-- [开发计划](plans/12_Month_Development_Plan.md)
-- [API文档](docs/api/) (开发中)
-- [示例代码](examples/) (开发中)
+Kernel configurations and build outputs are generated under `.build/` or a caller-provided output directory; source files remain in the repository.
 
-## 核心特性
+## Current capabilities
 
-- ✓ 超低延迟: 调度延迟<10μs, EEG处理<15ms
-- ✓ 多架构支持: x86_64, ARM64, RISC-V
-- ✓ 通用EEG设备: OpenBCI, Emotiv, Muse等
-- ✓ 多AI框架: PyTorch, TensorFlow, ONNX Runtime
-- ✓ 零样本学习: 5分钟快速校准
-- ✓ AR/VR集成: 基于OpenXR标准
+- Optional XTOS scheduler helper integrated through Kconfig.
+- BCI core, buffer, and OpenBCI serdev driver sources.
+- `libxtos-bci`: user-space BCI API.
+- `libxtos-rt`: Linux real-time policy, affinity, locked-memory, and SPSC queue helpers.
+- `libxtos-signal`: timestamp validation, correction, FFT power spectrum, configurable notch filtering, and a fourth-order band-pass baseline.
+- SSVEP frequency-domain feature baseline with harmonic power and local-noise SNR.
+- Reproducible signal-processing benchmark for FFT, band-pass, and SSVEP windows.
+- Virtual EEG replay and user-space pipeline tests.
+- Reproducible x86_64 Linux 6.6 + PREEMPT_RT preparation scripts.
 
-## 目录结构
+## Build prerequisites
 
-```
-xtos-project/
-├── docs/              # 技术文档
-├── plans/             # 开发计划
-├── kernel/            # 内核源码 (开发中)
-├── drivers/           # 设备驱动 (开发中)
-├── sdk/               # 用户空间SDK (开发中)
-├── tools/             # 开发工具 (开发中)
-├── examples/          # 示例应用 (开发中)
-├── tests/             # 测试套件 (开发中)
-└── scripts/           # 自动化脚本 (开发中)
+- Linux host
+- Git, curl, xz-utils, patch
+- GCC, GNU make, binutils
+- Python 3.10 or newer
+- Linux kernel build dependencies for a full kernel build
+- QEMU is optional and is required only for VM boot validation
+
+## Quick verification
+
+```sh
+./scripts/test.sh
 ```
 
-## 当前进度
+This runs the user-space libraries, scheduler tests, virtual EEG tests, and signal-processing tests without requiring a kernel source tree or hardware.
 
-**阶段1: 基础设施 (M1-M3)** - 进行中
-- [ ] M1: 环境搭建与内核原型
-- [ ] M2: 调度器核心实现
-- [ ] M3: 驱动框架与设备支持
+To collect the fixed-window signal-processing benchmark:
 
-## 联系方式
+```sh
+./scripts/benchmark_signal.sh
+```
 
-- 项目主页: https://github.com/xtos-project/xtos (筹建中)
-- 文档站点: https://xtos.ai (筹建中)
+The benchmark result is written under `.build/benchmarks/` and is not committed.
 
-## 许可证
+### Building the bundled system
 
-- 内核部分: GPL v2 (Linux内核要求)
-- SDK部分: Apache 2.0
-- 专有算法: 商业授权
+Install host prerequisites on Debian/Ubuntu:
 
----
+```sh
+sudo apt-get install build-essential flex bison bc libssl-dev libelf-dev libc6-dev python3 cpio gzip kmod qemu-system-x86
+```
 
-**注**: 本项目由AI Agent自动化开发，完整技术方案和进度计划详见 docs/ 和 plans/ 目录。
+Build and boot-verify the complete x86_64 development system:
+
+```sh
+JOBS=2 ./scripts/build_system.sh
+./scripts/verify_system.sh
+./scripts/run_system.sh
+```
+
+The build uses the committed Linux/PREEMPT_RT and BusyBox sources without source downloads. It produces `.build/images/xtos-bzImage` and `.build/images/xtos-rootfs.cpio.gz`, including kernel modules, a local shell, XTOS SDK libraries/headers, EEG tools, and guest self-tests. `BUILD_ROOT` can redirect all system build output to an external directory.
+
+This is a bootable development system, not a desktop distribution, disk installer, or production appliance. See `docs/system_build.md` for the architecture, output layout, and validation boundaries.
+
+## Verify the bundled Linux tree
+
+```sh
+./scripts/prepare_linux.sh
+```
+
+The repository contains Linux 6.6.0 with PREEMPT_RT and XTOS integrated under `kernel/linux/`. The script verifies that tree. Archive-based refresh is retired; the versioned source tree is authoritative.
+
+To build the kernel:
+
+```sh
+JOBS=4 ./scripts/build_kernel.sh
+```
+
+Kernel builds and QEMU results are local evidence. They are not committed to this repository.
+
+## Repository layout
+
+```text
+kernel/
+  linux/                 Complete Linux 6.6.0-rt15 + XTOS kernel source
+  patches/              XTOS integration patch and source history
+  xtos_defconfig        XTOS configuration fragment
+system/                 Root filesystem overlay and BusyBox configuration
+userspace/busybox/       Complete BusyBox 1.37.0 source
+sdk/                    User-space libraries and tests
+scripts/                Reproducible preparation, build, and test scripts
+tools/                  Virtual EEG tools and fixtures
+examples/               Small user-space examples
+tests/                  Scheduler tests
+docs/                   Maintained technical documentation
+plans/                  Development plans
+```
+
+## Status and limitations
+
+The x86_64 PREEMPT_RT build and QEMU boot path have been verified locally. Real EEG hardware, real ARM64/RISC-V boards, AR/VR hardware, deterministic target-hardware latency, medical safety, and AI model accuracy remain unverified.
+
+See `docs/XTOS_Phase2_Validation_Report.md`, `docs/eeg_user_pipeline.md`, and `docs/signal_processing_baseline.md` for the current evidence and boundaries.
+
+## License
+
+The bundled kernel source and PREEMPT_RT code follow their upstream licensing requirements. XTOS user-space components are released under Apache-2.0 unless a component file states otherwise. License review and SPDX headers are part of the release gate.

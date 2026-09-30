@@ -1,0 +1,12 @@
+# SPDX-License-Identifier: GPL-2.0
+
+config XTOS_SCHED
+	tristate "XTOS optional scheduler helper"
+	default n
+	help
+	  Build the XTOS O(1) priority-queue helper as a loadable module or
+	  built-in component.  This does not replace Linux's sched_class and
+	  does not alter normal task scheduling.  It is intended for explicit
+	  integrations that own the xtos_task control blocks.
+
+	  If unsure, say N.

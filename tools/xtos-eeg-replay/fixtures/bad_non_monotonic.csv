@@ -1,0 +1,4 @@
+# xtos-eeg-v1,channels=2,sample_rate_hz=250,unit=nanovolt
+1000000000,1.0,-1.0
+1004000000,1.5,-1.5
+1003000000,2.0,-2.0

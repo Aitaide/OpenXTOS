@@ -1,144 +1,26 @@
-# XTOS 项目状态
+# XTOS 当前状态
 
-**最后更新**: 自动生成  
-**开发模式**: AI Agent全自动开发
+最后更新：2026-10-01
 
----
+唯一开发目录：`/root/xtos-development/xtos`。
 
-## 🎯 当前阶段
+仓库直接包含 Linux 6.6.0 + PREEMPT_RT rt15、XTOS 内核组件、BusyBox 1.37.0、根文件系统、SDK、工具、测试、开发计划和架构设计。构建不下载基础源码，输出隔离在 `.build/`。
 
-**阶段1: 基础设施 (M1-M3)** - 第1个月 Week 1
+当前已验证：
 
-### 进行中的任务 (并行执行)
+- `scripts/build_system.sh` 完成 x86_64 内核、模块、BusyBox 和 initramfs 构建。
+- `scripts/verify_system.sh` 启动同一组镜像，输出 `realtime=1`、`xtos_modules=pass`、`guest_userspace=pass`、`XTOS_SYSTEM_TEST=PASS`。
+- 用户态测试、132 项信号处理断言、Python 对照测试和 SPSC 检查通过。
+- 信号处理与 SPSC 的 ASan/UBSan 检查通过；SPSC 的 ThreadSanitizer 检查通过。
 
-#### 子Agent-0: 环境搭建与内核编译
-- ✅ 创建项目目录结构
-- ✅ 初始化Git仓库
-- ✅ 下载Linux 6.6.0 LTS内核源码
-- 🔄 安装开发依赖包
-- ⏳ 应用PREEMPT_RT补丁
-- ⏳ 编译x86_64内核
-- ⏳ 运行cyclictest基准测试
+系统范围为可启动的 x86_64 开发系统，不是桌面发行版或硬盘安装器。XTOS 调度组件是辅助层，未替代 Linux 的常规任务调度。真实 OpenBCI 设备、ARM64/RISC-V 板卡、目标硬件最坏延迟和医疗安全均未验证。QEMU 结果不能作为硬件实时性能保证。
 
-**实时日志**: 
-```bash
-tail -f /root/.hermes/cache/delegation/live/deleg_7dd09c56/task-0.log
-```
+入口：`scripts/build_system.sh`、`scripts/verify_system.sh`、`scripts/run_system.sh`。详见 `docs/system_build.md`；开发任务、计划及架构设计继续保留在 `plans/` 和 `docs/`。
 
-#### 子Agent-1: 交叉编译工具链配置
-- ✅ 系统更新完成
-- 🔄 安装ARM64工具链 (gcc-aarch64-linux-gnu)
-- 🔄 安装RISC-V工具链 (gcc-riscv64-linux-gnu)
-- 🔄 安装QEMU虚拟化环境
-- ⏳ 验证工具链
-- ⏳ 测试交叉编译
-- ⏳ 编写自动化脚本
+## 历史状态记录
 
-**实时日志**:
-```bash
-tail -f /root/.hermes/cache/delegation/live/deleg_7dd09c56/task-1.log
-```
+以下历史文件和段落保留用于追溯，不代表当前实现和验证结论。旧记录中的 `/root/xtos-project`、阶段编号、待办项和性能数字均是历史上下文；当前状态以上文和 `docs/system_build.md` 为准。
 
----
-
-## 📊 已完成工作
-
-### 文档与规划
-- ✅ 技术规范文档 (9.4KB)
-- ✅ 12个月开发计划 (24KB)
-- ✅ 开发日志
-- ✅ 项目README
-- ✅ 监控脚本
-
-### 项目结构
-```
-/root/xtos-project/
-├── docs/                    ✅ 技术文档
-│   ├── XTOS_Technical_Specification.md
-│   └── development_log.md
-├── plans/                   ✅ 开发计划
-│   └── 12_Month_Development_Plan.md
-├── scripts/                 ✅ 自动化脚本
-│   └── monitor.sh
-├── kernel/                  🔄 内核源码 (下载中)
-│   └── linux/              ✅ Linux 6.6.0 已下载
-├── drivers/                 ⏳ 待创建
-├── sdk/                     ⏳ 待创建
-├── tools/                   ⏳ 待创建
-├── examples/                ⏳ 待创建
-├── tests/                   ⏳ 待创建
-└── README.md               ✅ 项目说明
-```
-
----
-
-## 🎯 下一步目标
-
-### Week 1 剩余任务
-- [ ] 完成内核编译 (x86_64)
-- [ ] 完成交叉编译工具链配置
-- [ ] 运行实时性能基准测试
-- [ ] 生成环境搭建报告
-
-### Week 2 计划
-- [ ] 开始调度器框架设计
-- [ ] 实现XTOS优先级队列
-- [ ] 编写调度器单元测试
-
----
-
-## 📈 性能目标跟踪
-
-| 指标 | 目标值 | 当前值 | 状态 |
-|------|--------|--------|------|
-| 最大调度延迟 | <50μs | 待测 | ⏳ |
-| 平均调度延迟 | <10μs | 待测 | ⏳ |
-| x86_64编译 | 成功 | 进行中 | 🔄 |
-| ARM64编译 | 成功 | 待测 | ⏳ |
-| RISC-V编译 | 成功 | 待测 | ⏳ |
-
----
-
-## 🤖 子Agent管理
-
-### 活跃子Agent (2个)
-- **sa-0-b2a493c1**: 环境搭建与内核编译
-- **sa-1-7db89654**: 交叉编译工具链
-
-### 控制命令
-```bash
-# 查看所有子Agent状态
-/root/xtos-project/scripts/monitor.sh
-
-# 查看特定子Agent日志
-tail -f /root/.hermes/cache/delegation/live/deleg_7dd09c56/task-0.log
-tail -f /root/.hermes/cache/delegation/live/deleg_7dd09c56/task-1.log
-```
-
----
-
-## 💡 关键信息
-
-### 系统资源
-- **CPU**: 16核
-- **内存**: 7.8GB (可用: 1.5GB)
-- **磁盘**: 188GB (可用: 144GB)
-
-### 技术栈
-- **基础内核**: Linux 6.6.0 LTS
-- **实时补丁**: PREEMPT_RT patch-6.6-rt15
-- **支持架构**: x86_64, ARM64, RISC-V
-- **开发语言**: C, Shell, Python (AI训练)
-
----
-
-## 📝 备注
-
-- 所有开发任务由AI Agent自动执行
-- 子Agent完成后会自动报告结果
-- 进度信息实时更新到日志文件
-- 本状态文档每次运行monitor.sh时刷新
-
----
-
-**Legend**: ✅ 完成 | 🔄 进行中 | ⏳ 待开始 | ❌ 失败
+- `docs/` 保留技术规格、调度器设计、驱动设计、信号处理、系统构建和验证边界。
+- `plans/` 保留开发计划和后续任务。
+- `FINAL_STATUS_SUMMARY.md`、`PROJECT_STATUS.md`、`TASK_SUMMARY.txt` 等保留为历史开发记录。

@@ -1,4 +1,12 @@
-# Build outputs
+# Local development outputs
+/.build/
+/kernel/preempt-rt-build/
+
+# Bundled source archives used only for optional refresh
+/kernel/*.tar
+/kernel/*.tar.*
+
+# Generic build outputs
 *.o
 *.ko
 *.a
@@ -6,25 +14,55 @@
 *.so.*
 *.d
 *.cmd
-.tmp_versions/
-modules.order
+*.mod
+*.mod.c
+*.mod.o
+*.order
 Module.symvers
+modules.order
+.vmlinux.export.*
+.tmp_vmlinux.*
 
-# Kernel build artifacts
-kernel/linux/.config
-kernel/linux/.config.old
-kernel/linux/arch/*/boot/bzImage
-kernel/linux/arch/*/boot/Image
-kernel/linux/vmlinux
-kernel/linux/System.map
-kernel/linux/.version
+# Kernel and image outputs
+**/.config
+**/.config.old
+**/bzImage
+**/Image
+**/vmlinux
+**/System.map
+**/initramfs.cpio*
 
 # Compiled binaries
 *.bin
 *.elf
 *.img
+/test_arm_final
+/test_riscv_final
+examples/bci_test
+sdk/libxtos-rt/test_rt
+sdk/libxtos-rt/test_spsc
+sdk/libxtos-rt/test_spsc_tsan
+sdk/libxtos-signal/test_signal
+sdk/libxtos-signal/test_signal_san
+tools/xtos-eeg-pipeline/xtos-eeg-pipeline
+tools/xtos-signal-benchmark/xtos-signal-benchmark
+tests/scheduler/test_priority_queue
 
-# Editor/IDE
+# Python caches
+__pycache__/
+*.py[cod]
+.pytest_cache/
+
+# Logs and generated evidence
+*.log
+*.tmp
+*.out
+*.stdout
+/docs/*_output.txt
+/docs/*_test_output.txt
+/tests/results/
+
+# Editors and OS files
 .vscode/
 .idea/
 *.swp
@@ -32,13 +70,15 @@ kernel/linux/.version
 *~
 .DS_Store
 
-# Logs and temporary files
-*.log
-*.tmp
-/tests/results/
-
-# Archives
+# Archives and downloaded patches
 *.tar.gz
-*.tar.xz
 *.zip
 *.patch
+!kernel/patches/
+!kernel/patches/*.patch
+
+# Preserve source fixtures shipped by the bundled BusyBox release.
+!userspace/busybox/**/*.patch
+!userspace/busybox/testsuite/*.zip
+!userspace/busybox/examples/bootfloppy/etc/init.d/
+!userspace/busybox/examples/bootfloppy/etc/init.d/rcS

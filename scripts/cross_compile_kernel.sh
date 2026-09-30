@@ -1,123 +1,40 @@
-#!/bin/bash
-# Kernel cross-compilation wrapper for ARM64 and RISC-V
-# Usage: ./cross_compile_kernel.sh <architecture> <kernel_source_dir> [config]
+#!/usr/bin/env bash
+# Cross-compile the bundled XTOS Linux kernel for ARM64 or RISC-V.
+set -euo pipefail
 
-set -e
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+ARCH_INPUT="${1:-}"
+JOBS="${JOBS:-$(nproc)}"
 
-ARCH=$1
-KERNEL_SRC=$2
-CONFIG=${3:-defconfig}
-
-# Color output
-RED='\033[0;31m'
-GREEN='\033[0;32m'
-YELLOW='\033[1;33m'
-BLUE='\033[0;34m'
-NC='\033[0m'
-
-usage() {
-    echo "Usage: $0 <arch> <kernel_source_dir> [config]"
-    echo "  arch: arm64 or riscv64"
-    echo "  kernel_source_dir: Path to Linux kernel source"
-    echo "  config: Kernel config (default: defconfig)"
-    echo ""
-    echo "Examples:"
-    echo "  $0 arm64 /path/to/linux-6.6"
-    echo "  $0 riscv64 /path/to/linux-6.6 defconfig"
-    exit 1
-}
-
-if [ -z "$ARCH" ] || [ -z "$KERNEL_SRC" ]; then
-    usage
-fi
-
-if [ ! -d "$KERNEL_SRC" ]; then
-    echo -e "${RED}Error: Kernel source directory '$KERNEL_SRC' not found${NC}"
-    exit 1
-fi
-
-case "$ARCH" in
+case "$ARCH_INPUT" in
     arm64|aarch64)
-        echo -e "${BLUE}=== ARM64 Kernel Cross-Compilation ===${NC}"
-        KARCH="arm64"
-        CROSS_COMPILE="aarch64-linux-gnu-"
+        KARCH=arm64
+        CROSS_COMPILE="${CROSS_COMPILE:-aarch64-linux-gnu-}"
+        IMAGE=Image
         ;;
-    riscv64|riscv)
-        echo -e "${BLUE}=== RISC-V Kernel Cross-Compilation ===${NC}"
-        KARCH="riscv"
-        CROSS_COMPILE="riscv64-linux-gnu-"
+    riscv|riscv64)
+        KARCH=riscv
+        CROSS_COMPILE="${CROSS_COMPILE:-riscv64-linux-gnu-}"
+        IMAGE=Image
         ;;
     *)
-        echo -e "${RED}Error: Unsupported architecture '$ARCH'${NC}"
-        exit 1
+        printf 'usage: %s <arm64|riscv64>\n' "$0" >&2
+        exit 2
         ;;
 esac
 
-# Check compiler
+KERNEL_SRC="$ROOT/kernel/linux"
+OUTPUT_DIR="${OUTPUT_DIR:-$ROOT/.build/kernel-$KARCH}"
 COMPILER="${CROSS_COMPILE}gcc"
-if ! command -v $COMPILER &> /dev/null; then
-    echo -e "${RED}Error: Compiler '$COMPILER' not found${NC}"
+if ! command -v "$COMPILER" >/dev/null 2>&1; then
+    printf 'error: cross compiler not found: %s\n' "$COMPILER" >&2
     exit 1
 fi
 
-cd "$KERNEL_SRC"
-
-echo -e "${YELLOW}Kernel source: $KERNEL_SRC${NC}"
-echo -e "${YELLOW}Architecture: $KARCH${NC}"
-echo -e "${YELLOW}Cross-compiler: $CROSS_COMPILE${NC}"
-echo -e "${YELLOW}Configuration: $CONFIG${NC}"
-echo ""
-
-# Step 1: Generate configuration
-echo -e "${GREEN}[1/3] Generating kernel configuration...${NC}"
-make ARCH=$KARCH CROSS_COMPILE=$CROSS_COMPILE $CONFIG
-
-if [ $? -ne 0 ]; then
-    echo -e "${RED}Configuration failed${NC}"
-    exit 1
-fi
-
-# Step 2: Build kernel
-echo ""
-echo -e "${GREEN}[2/3] Building kernel image...${NC}"
-make ARCH=$KARCH CROSS_COMPILE=$CROSS_COMPILE -j$(nproc)
-
-if [ $? -ne 0 ]; then
-    echo -e "${RED}Kernel build failed${NC}"
-    exit 1
-fi
-
-# Step 3: Build device trees
-echo ""
-echo -e "${GREEN}[3/3] Building device trees...${NC}"
-make ARCH=$KARCH CROSS_COMPILE=$CROSS_COMPILE dtbs
-
-if [ $? -ne 0 ]; then
-    echo -e "${YELLOW}Warning: Device tree build failed (non-fatal)${NC}"
-fi
-
-echo ""
-echo -e "${GREEN}✓ Kernel cross-compilation completed successfully!${NC}"
-echo ""
-echo "Output files:"
-if [ "$KARCH" = "arm64" ]; then
-    echo "  - Kernel: arch/arm64/boot/Image"
-    echo "  - Compressed: arch/arm64/boot/Image.gz"
-    ls -lh arch/arm64/boot/Image* 2>/dev/null | awk '{print "    ", $9, "("$5")"}'
-elif [ "$KARCH" = "riscv" ]; then
-    echo "  - Kernel: arch/riscv/boot/Image"
-    echo "  - Compressed: arch/riscv/boot/Image.gz"
-    ls -lh arch/riscv/boot/Image* 2>/dev/null | awk '{print "    ", $9, "("$5")"}'
-fi
-
-echo ""
-echo "To test with QEMU:"
-if [ "$KARCH" = "arm64" ]; then
-    echo "  qemu-system-aarch64 -M virt -cpu cortex-a57 -m 2048 \\"
-    echo "    -kernel arch/arm64/boot/Image \\"
-    echo "    -append \"console=ttyAMA0\" -nographic"
-elif [ "$KARCH" = "riscv" ]; then
-    echo "  qemu-system-riscv64 -M virt -m 2048 \\"
-    echo "    -kernel arch/riscv/boot/Image \\"
-    echo "    -append \"console=ttyS0\" -nographic"
-fi
+mkdir -p "$OUTPUT_DIR"
+make -C "$KERNEL_SRC" O="$OUTPUT_DIR" ARCH="$KARCH" CROSS_COMPILE="$CROSS_COMPILE" defconfig
+KCONFIG_CONFIG="$OUTPUT_DIR/.config" "$KERNEL_SRC/scripts/kconfig/merge_config.sh" -m "$OUTPUT_DIR/.config" \
+    "$ROOT/kernel/xtos_defconfig"
+make -C "$KERNEL_SRC" O="$OUTPUT_DIR" ARCH="$KARCH" CROSS_COMPILE="$CROSS_COMPILE" olddefconfig
+make -C "$KERNEL_SRC" O="$OUTPUT_DIR" ARCH="$KARCH" CROSS_COMPILE="$CROSS_COMPILE" -j"$JOBS" "$IMAGE" modules
+printf 'arch=%s\nimage=%s\noutput=%s\n' "$KARCH" "$OUTPUT_DIR/arch/$KARCH/boot/$IMAGE" "$OUTPUT_DIR"

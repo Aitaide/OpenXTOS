@@ -1,0 +1,33 @@
+# SPDX-License-Identifier: GPL-2.0
+#
+# XTOS Real-Time Operating System Drivers
+#
+
+config XTOS_BCI
+	tristate "XTOS BCI (Brain-Computer Interface) Framework"
+	default n
+	help
+	  Core framework for BCI/EEG device drivers. Provides a unified
+	  character-device interface and an internal ring buffer.
+
+	  The framework does not create hardware or sample data by itself.
+	  If unsure, say N.
+
+config XTOS_BCI_OPENBCI
+	tristate "OpenBCI Cyton serdev driver"
+	depends on XTOS_BCI
+	depends on SERIAL_DEV_BUS
+	default n
+	help
+	  Serdev skeleton for OpenBCI Cyton. It only binds when firmware
+	  describes an OpenBCI-compatible serdev device; it does not create
+	  a serial device or emulate hardware.
+
+config XTOS_BCI_DEBUG
+	bool "XTOS BCI Debug Support"
+	depends on XTOS_BCI
+	help
+	  Enable debug messages for BCI drivers. This adds overhead
+	  but helps troubleshooting device issues.
+
+	  If unsure, say N.
