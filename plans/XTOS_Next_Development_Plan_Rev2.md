@@ -72,12 +72,11 @@
 
 顺序：
 
-1. ONNX Runtime CPU基线已完成：固定模型、单线程CPU provider、输出误差、p50/p95/p99/p99.9/max延迟和安全降级路径均有脚本与测试。当前优先推进PyTorch模型导出后与ONNX输出对齐；如果依赖不可用，保留未验证状态，不生成占位结果。
-2. PyTorch模型导出后与ONNX输出对齐。
-3. TensorFlow/TFLite导出后与ONNX输出对齐。
-4. 记录p50/p95/p99/p99.9和最大延迟。
-5. 超时、模型加载失败、低置信度和输入质量不足时降级。
-6. 没有GPU前不实现或宣称CUDA/ROCm硬实时能力。
+1. ONNX Runtime CPU基线和PyTorch eager到ONNX输出对齐已完成：固定模型/输入、CPU provider、误差门槛、预测类别一致性和可选依赖降级均有脚本与测试。如果依赖不可用，保留未验证状态，不生成占位结果。
+2. TensorFlow/TFLite导出后与ONNX输出对齐。
+3. 记录p50/p95/p99/p99.9和最大延迟。
+4. 超时、模型加载失败、低置信度和输入质量不足时降级。
+5. 没有GPU前不实现或宣称CUDA/ROCm硬实时能力。
 
 交付门槛：
 

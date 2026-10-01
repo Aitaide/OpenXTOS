@@ -21,6 +21,7 @@ Kernel configurations and build outputs are generated under `.build/` or a calle
 - P300 ERP baseline with pre-stimulus correction, positive peak latency, window energy, and z-score thresholding.
 - Reproducible signal-processing benchmark for FFT, band-pass, SSVEP, and P300 windows.
 - ONNX Runtime CPU soft-real-time baseline with fixed-model output comparison, latency percentiles, and no-action degradation paths.
+- PyTorch eager-to-ONNX export parity baseline with fixed input/output comparison and explicit optional-dependency degradation.
 - Virtual EEG replay and user-space pipeline tests.
 - Reproducible x86_64 Linux 6.6 + PREEMPT_RT preparation scripts.
 
@@ -55,7 +56,16 @@ XTOS_ONNX_ROOT=.build/onnx-wheel-root ./scripts/benchmark_onnx.sh
 
 The ONNX result records model hash, runtime/provider, output error, and latency percentiles. Missing optional dependencies produce an explicit `unverified`/`no_action` result; they do not create a fabricated benchmark.
 
-The benchmark result is written under `.build/benchmarks/` and is not committed.
+To run the optional PyTorch eager-to-ONNX output parity check when isolated Torch, ONNX, and ONNX Runtime dependencies are available:
+
+```sh
+XTOS_TORCH_ROOT=.build/torch-root \\
+XTOS_ONNX_ROOT=.build/onnx-wheel-root \\
+XTOS_PROTOBUF_ROOT=.build/onnx-wheel-root \\
+./scripts/benchmark_torch_onnx.sh
+```
+
+The parity result records Torch/ONNX Runtime versions, CPU provider, fixed tensor shapes, thread counts, model hash, output error, and predicted-class agreement. Missing export dependencies produce `unverified`/`no_action` and do not create a fabricated result.
 
 ### Building the bundled system
 
