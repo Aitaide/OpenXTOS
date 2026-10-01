@@ -29,6 +29,7 @@ XTOS is a research-grade real-time operating system designed for brain-computer 
   - Real-time signal processing SDK
   - ONNX Runtime CPU inference baseline (optional)
   - PyTorch model export and parity validation (optional)
+  - TensorFlow/TFLite model export and parity validation (optional)
 
 ### Signal Processing Capabilities
 
@@ -47,6 +48,7 @@ XTOS supports CPU-based model inference for research purposes:
 
 - **ONNX Runtime 1.23.2**: Single-threaded CPU execution provider with numerical error validation and latency profiling
 - **PyTorch Export Parity**: Torch 2.6.0 → ONNX → ONNX Runtime with element-wise error and prediction class agreement
+- **TensorFlow/TFLite Export Parity**: TensorFlow 2.21.0 → TFLite → comparison with ONNX Runtime output
 
 **Scope Limitations**: The ML baseline represents user-space CPU inference capability only. It does not claim GPU acceleration, hard real-time guarantees for inference, medical-grade accuracy, or closed-loop control safety.
 
@@ -82,6 +84,11 @@ XTOS_TORCH_ROOT=/path/to/torch \
   XTOS_ONNX_ROOT=/path/to/onnx-runtime \
   XTOS_PROTOBUF_ROOT=/path/to/protobuf \
   ./scripts/benchmark_torch_onnx.sh
+
+# TensorFlow/TFLite Parity (requires tensorflow + onnxruntime + numpy)
+XTOS_TF_ROOT=/path/to/tensorflow \
+  XTOS_ONNX_ROOT=/path/to/onnx-runtime \
+  ./scripts/benchmark_tf_onnx.sh
 ```
 
 ### Output Artifacts
