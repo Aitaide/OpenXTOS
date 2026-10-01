@@ -52,6 +52,16 @@ XTOS supports CPU-based model inference for research purposes:
 
 **Scope Limitations**: The ML baseline represents user-space CPU inference capability only. It does not claim GPU acceleration, hard real-time guarantees for inference, medical-grade accuracy, or closed-loop control safety.
 
+### Real-Time Validation Tools
+
+For deployment on real x86_64 hardware, XTOS provides a complete real-time validation toolkit:
+
+- **System Configuration Checker** (`tools/realtime-test/rt_system_check.sh`): Validates kernel configuration, CPU isolation, clock sources, and generates optimization recommendations
+- **Long-Duration Latency Test** (`tools/realtime-test/rt_cyclictest.sh`): 24-hour cyclictest with SCHED_FIFO priority and CPU affinity
+- **Results Analysis** (`tools/realtime-test/rt_analyze.py`): Statistical analysis and real-time classification (hard RT < 100 μs)
+
+See `tools/realtime-test/README.md` for usage instructions. QEMU validation results do not represent real hardware latency characteristics.
+
 ### Build and Verification
 
 **Prerequisites:**

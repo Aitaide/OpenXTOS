@@ -1,0 +1,55 @@
+[2026-10-01 23:27:22] XTOS Real-Time System Configuration Check
+[2026-10-01 23:27:22] ==========================================
+[2026-10-01 23:27:22] Host: debian
+[2026-10-01 23:27:22] Date: Thu Oct  1 23:27:22 CST 2026
+[2026-10-01 23:27:22] 
+[2026-10-01 23:27:22] === Kernel Configuration ===
+[2026-10-01 23:27:22] Kernel version: 6.12.57+deb13-amd64
+[2026-10-01 23:27:22] ✗ PREEMPT_RT not detected (required for hard real-time)
+[2026-10-01 23:27:22] Command line: BOOT_IMAGE=/boot/vmlinuz-6.12.57+deb13-amd64 root=UUID=d8356a8f-9c18-40d7-b9f4-6f2f61690883 ro quiet
+[2026-10-01 23:27:22] ! NO_HZ_FULL not configured (consider isolcpus=domain,managed_irq,X-Y nohz_full=X-Y)
+[2026-10-01 23:27:22] ! No CPU isolation (consider isolcpus= for dedicated RT cores)
+[2026-10-01 23:27:22] 
+[2026-10-01 23:27:22] === CPU Configuration ===
+[2026-10-01 23:27:22] Architecture: x86_64
+[2026-10-01 23:27:22] CPU model: QEMU Virtual CPU version 2.5+
+[2026-10-01 23:27:22] Total CPUs: 16
+[2026-10-01 23:27:22] Online CPUs: 0-15
+[2026-10-01 23:27:22] ! CPU frequency scaling not available or disabled
+[2026-10-01 23:27:23] ⚠ Running under hypervisor: KVM
+[2026-10-01 23:27:23]   Real-time guarantees degraded in virtualized environments
+[2026-10-01 23:27:23] 
+[2026-10-01 23:27:23] === Memory Configuration ===
+[2026-10-01 23:27:23] Total memory: 7944 MB
+[2026-10-01 23:27:23] ⚠ THP enabled: [always] madvise never (recommend 'never' for deterministic latency)
+[2026-10-01 23:27:23] ⚠ Swap enabled: 8188 MB (can cause unpredictable latency)
+[2026-10-01 23:27:23] 
+[2026-10-01 23:27:23] === Interrupt Configuration ===
+[2026-10-01 23:27:23] ✓ irqbalance disabled
+[2026-10-01 23:27:23] IRQ affinity (first 5 entries):
+           CPU0       CPU1       CPU2       CPU3       CPU4       CPU5       CPU6       CPU7       CPU8       CPU9       CPU10      CPU11      CPU12      CPU13      CPU14      CPU15      
+  0:         40          0          0          0          0          0          0          0          0          0          0          0          0          0          0          0   IO-APIC   2-edge      timer
+  1:          0          0          0       1448          0          0          0          0          0          0          0          0          0          0          0          0   IO-APIC   1-edge      i8042
+  6:          0          0          0          0          0          3          0          0          0          0          0          0          0          0          0          0   IO-APIC   6-edge      floppy
+  8:          0          0          0          0          0          0          0          0          0          0          0          0          0          0          0          0   IO-APIC   8-edge      rtc0
+[2026-10-01 23:27:23] 
+[2026-10-01 23:27:23] === Clock Source ===
+[2026-10-01 23:27:23] Current: kvm-clock
+[2026-10-01 23:27:23] Available: kvm-clock tsc acpi_pm 
+[2026-10-01 23:27:23] ⚠ kvm-clock (virtualized, not suitable for RT guarantees)
+[2026-10-01 23:27:23] 
+[2026-10-01 23:27:23] === System Services ===
+[2026-10-01 23:27:23] ⚠ avahi-daemon running (may cause latency spikes)
+[2026-10-01 23:27:23] 
+[2026-10-01 23:27:23] === Security Features ===
+[2026-10-01 23:27:23] AppArmor: enabled (may add latency)
+[2026-10-01 23:27:23] 
+[2026-10-01 23:27:23] === Recommendations for RT Optimization ===
+[2026-10-01 23:27:23] 
+[2026-10-01 23:27:23] Kernel command line additions:
+[2026-10-01 23:27:23]   isolcpus=domain,managed_irq,2-15 nohz_full=2-15 rcu_nocbs=2-15
+[2026-10-01 23:27:23]   transparent_hugepage=never intel_pstate=disable processor.max_cstate=1
+[2026-10-01 23:27:23]   intel_idle.max_cstate=0 idle=poll
+[2026-10-01 23:27:23] 
+[2026-10-01 23:27:23] Runtime configuration:
+[2026-10-01 23:27:23]   echo performance | tee /sys/devices/system/cpu/cpu*/cpufreq/scaling_governor
