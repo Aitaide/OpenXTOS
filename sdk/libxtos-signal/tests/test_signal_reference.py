@@ -1,4 +1,5 @@
 import ctypes
+import json
 import math
 import subprocess
 import unittest
@@ -6,6 +7,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).parents[3]
 LIB_DIR = ROOT / "sdk" / "libxtos-signal"
+FIXTURE = LIB_DIR / "tests" / "fixtures" / "p300_trials.json"
 LIB = LIB_DIR / "libxtos-signal.so.1.0"
 
 
@@ -30,6 +32,20 @@ class P300Feature(ctypes.Structure):
         ("window_energy", ctypes.c_double),
         ("peak_index", ctypes.c_size_t),
         ("detected", ctypes.c_int),
+    ]
+
+
+class P300Quality(ctypes.Structure):
+    _fields_ = [
+        ("trials_total", ctypes.c_size_t),
+        ("trials_valid", ctypes.c_size_t),
+        ("trials_detected", ctypes.c_size_t),
+        ("trials_rejected", ctypes.c_size_t),
+        ("detection_rate", ctypes.c_double),
+        ("mean_peak_z_score", ctypes.c_double),
+        ("mean_peak_latency_ms", ctypes.c_double),
+        ("peak_latency_stddev_ms", ctypes.c_double),
+        ("passed", ctypes.c_int),
     ]
 
 
@@ -59,6 +75,16 @@ class SignalReferenceTests(unittest.TestCase):
             ctypes.POINTER(P300Feature),
         ]
         cls.library.xtos_signal_p300_feature.restype = ctypes.c_int
+        cls.library.xtos_signal_p300_quality_gate.argtypes = [
+            ctypes.POINTER(P300Feature),
+            ctypes.c_size_t,
+            ctypes.c_size_t,
+            ctypes.c_double,
+            ctypes.c_double,
+            ctypes.c_double,
+            ctypes.POINTER(P300Quality),
+        ]
+        cls.library.xtos_signal_p300_quality_gate.restype = ctypes.c_int
 
     @staticmethod
     def reference(values, sample_rate, target_frequency, harmonic_count, neighbor_bins):
@@ -86,6 +112,45 @@ class SignalReferenceTests(unittest.TestCase):
         noise_power = sum(noise_values) / len(noise_values)
         snr = signal_power / noise_power
         return target_bin, signal_power, noise_power, snr, 10.0 * math.log10(snr)
+
+    def test_c_matches_python_p300_quality_reference(self):
+        document = json.loads(FIXTURE.read_text())
+        trials_document = document["trials"]
+        values = [
+            (trial["peak_amplitude"], trial["peak_latency_ms"],
+             trial["peak_z_score"], trial["detected"])
+            for trial in trials_document
+        ]
+        gate = document["quality_gate"]
+        expected = document["expected"]
+        expected_rate = expected["detection_rate"]
+        expected_z = expected["mean_peak_z_score"]
+        expected_latency = expected["mean_peak_latency_ms"]
+        expected_stddev = expected["peak_latency_stddev_ms"]
+        trials = (P300Feature * len(trials_document))()
+        for index, trial in enumerate(trials_document):
+            trials[index] = P300Feature(
+                trial["baseline_mean"], trial["baseline_stddev"],
+                trial["peak_amplitude"], trial["peak_latency_ms"],
+                trial["peak_z_score"], trial["window_energy"],
+                trial["peak_index"], trial["detected"]
+            )
+        actual = P300Quality()
+        result = self.library.xtos_signal_p300_quality_gate(
+            trials, len(values), gate["min_valid_trials"], expected_rate,
+            gate["min_mean_z_score"], gate["max_latency_stddev_ms"],
+            ctypes.byref(actual)
+        )
+        self.assertEqual(result, 0)
+        self.assertEqual(actual.trials_total, expected["trials_total"])
+        self.assertEqual(actual.trials_valid, expected["trials_valid"])
+        self.assertEqual(actual.trials_detected, expected["trials_detected"])
+        self.assertEqual(actual.trials_rejected, expected["trials_rejected"])
+        self.assertAlmostEqual(actual.detection_rate, expected_rate, places=12)
+        self.assertAlmostEqual(actual.mean_peak_z_score, expected_z, places=12)
+        self.assertAlmostEqual(actual.mean_peak_latency_ms, expected_latency, places=12)
+        self.assertAlmostEqual(actual.peak_latency_stddev_ms, expected_stddev, places=12)
+        self.assertEqual(actual.passed, expected["passed"])
 
     def test_c_matches_python_p300_reference(self):
         sample_rate = 256

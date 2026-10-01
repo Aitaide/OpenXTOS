@@ -113,6 +113,26 @@ int xtos_signal_p300_feature(const double *input,
                              double detection_z_threshold,
                              struct xtos_p300_feature *result);
 
+struct xtos_p300_quality {
+    size_t trials_total;
+    size_t trials_valid;
+    size_t trials_detected;
+    size_t trials_rejected;
+    double detection_rate;
+    double mean_peak_z_score;
+    double mean_peak_latency_ms;
+    double peak_latency_stddev_ms;
+    int passed;
+};
+
+int xtos_signal_p300_quality_gate(const struct xtos_p300_feature *trials,
+                                  size_t trial_count,
+                                  size_t min_valid_trials,
+                                  double min_detection_rate,
+                                  double min_mean_z_score,
+                                  double max_latency_stddev_ms,
+                                  struct xtos_p300_quality *result);
+
 #ifdef __cplusplus
 }
 #endif

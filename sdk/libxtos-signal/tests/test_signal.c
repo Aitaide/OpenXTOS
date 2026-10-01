@@ -225,6 +225,73 @@ static int test_p300_feature(void)
     return 0;
 }
 
+static int test_p300_quality_gate(void)
+{
+    const struct xtos_p300_feature trials[] = {
+        {0.0, 1.0, 5.0, 350.0, 5.0, 25.0, 100, 1},
+        {0.0, 1.0, 4.5, 360.0, 4.5, 20.25, 100, 1},
+        {0.0, 1.0, 4.2, 340.0, 4.2, 17.64, 100, 1},
+        {0.0, 1.0, 2.0, 355.0, 2.0, 4.0, 100, 0},
+    };
+    struct xtos_p300_quality quality;
+
+    CHECK(xtos_signal_p300_quality_gate(trials, 4, 4, 0.75, 3.5, 10.0,
+                                        &quality) == 0);
+    CHECK(quality.trials_total == 4);
+    CHECK(quality.trials_valid == 4);
+    CHECK(quality.trials_detected == 3);
+    CHECK(quality.trials_rejected == 0);
+    CHECK(nearly_equal(quality.detection_rate, 0.75, 1e-12));
+    CHECK(nearly_equal(quality.mean_peak_z_score, 3.925, 1e-12));
+    CHECK(nearly_equal(quality.mean_peak_latency_ms, 351.25, 1e-12));
+    CHECK(nearly_equal(quality.peak_latency_stddev_ms, 7.39509972887452, 1e-12));
+    CHECK(quality.passed == 1);
+
+    CHECK(xtos_signal_p300_quality_gate(trials, 4, 4, 0.80, 3.5, 10.0,
+                                        &quality) == 0);
+    CHECK(quality.passed == 0);
+    CHECK(xtos_signal_p300_quality_gate(trials, 4, 4, 0.75, 3.5, 5.0,
+                                        &quality) == 0);
+    CHECK(quality.passed == 0);
+    {
+        struct xtos_p300_feature invalid[4];
+        memcpy(invalid, trials, sizeof(invalid));
+        invalid[2].peak_z_score = NAN;
+        CHECK(xtos_signal_p300_quality_gate(invalid, 4, 3, 0.5, 2.0, 20.0,
+                                            &quality) == 0);
+        CHECK(quality.trials_valid == 3);
+        CHECK(quality.trials_rejected == 1);
+        CHECK(quality.passed == 0);
+    }
+    {
+        struct xtos_p300_feature inconsistent[4];
+        memcpy(inconsistent, trials, sizeof(inconsistent));
+        inconsistent[1].peak_z_score = 3.0;
+        inconsistent[2].window_energy = 1.0;
+        CHECK(xtos_signal_p300_quality_gate(inconsistent, 4, 2, 0.5, 2.0, 20.0,
+                                            &quality) == 0);
+        CHECK(quality.trials_valid == 2);
+        CHECK(quality.trials_rejected == 2);
+        CHECK(quality.passed == 0);
+    }
+    {
+        struct xtos_p300_feature invalid[4];
+        memset(invalid, 0, sizeof(invalid));
+        CHECK(xtos_signal_p300_quality_gate(invalid, 4, 1, 0.5, 2.0, 20.0,
+                                            &quality) == 0);
+        CHECK(quality.trials_valid == 0);
+        CHECK(quality.trials_rejected == 4);
+        CHECK(quality.passed == 0);
+    }
+    CHECK(xtos_signal_p300_quality_gate(trials, 4, 0, 0.5, 2.0, 20.0,
+                                        &quality) == -1);
+    CHECK(xtos_signal_p300_quality_gate(trials, 4, 4, 1.1, 2.0, 20.0,
+                                        &quality) == -1);
+    CHECK(xtos_signal_p300_quality_gate(NULL, 4, 4, 0.5, 2.0, 20.0,
+                                        &quality) == -1);
+    return 0;
+}
+
 static int test_ssvep_feature(void)
 {
     double input[256];
@@ -264,6 +331,7 @@ int main(void)
         test_bandpass_filter() != 0 ||
         test_bandpass_in_place() != 0 ||
         test_p300_feature() != 0 ||
+        test_p300_quality_gate() != 0 ||
         test_ssvep_feature() != 0)
         return 1;
     printf("PASS assertions=%d\n", assertions);

@@ -389,6 +389,99 @@ int xtos_signal_p300_feature(const double *input,
     return 0;
 }
 
+static int p300_feature_is_valid(const struct xtos_p300_feature *trial)
+{
+    double expected_z_score;
+    double z_tolerance;
+
+    if (!isfinite(trial->baseline_mean) ||
+        !isfinite(trial->baseline_stddev) || trial->baseline_stddev <= 0.0 ||
+        !isfinite(trial->peak_amplitude) ||
+        !isfinite(trial->peak_latency_ms) || trial->peak_latency_ms < 0.0 ||
+        !isfinite(trial->peak_z_score) ||
+        !isfinite(trial->window_energy) || trial->window_energy < 0.0 ||
+        (trial->detected != 0 && trial->detected != 1))
+        return 0;
+    expected_z_score = trial->peak_amplitude / trial->baseline_stddev;
+    z_tolerance = 1e-9 * fmax(1.0, fabs(expected_z_score));
+    if (fabs(trial->peak_z_score - expected_z_score) > z_tolerance)
+        return 0;
+    if (trial->window_energy + 1e-12 <
+        trial->peak_amplitude * trial->peak_amplitude)
+        return 0;
+    return 1;
+}
+
+int xtos_signal_p300_quality_gate(const struct xtos_p300_feature *trials,
+                                  size_t trial_count,
+                                  size_t min_valid_trials,
+                                  double min_detection_rate,
+                                  double min_mean_z_score,
+                                  double max_latency_stddev_ms,
+                                  struct xtos_p300_quality *result)
+{
+    double z_sum = 0.0;
+    double latency_sum = 0.0;
+    double latency_mean;
+    double latency_variance = 0.0;
+    size_t index;
+
+    if (trials == NULL || result == NULL || trial_count == 0 ||
+        min_valid_trials == 0 || min_valid_trials > trial_count ||
+        min_detection_rate < 0.0 || min_detection_rate > 1.0 ||
+        !isfinite(min_detection_rate) || !isfinite(min_mean_z_score) ||
+        !isfinite(max_latency_stddev_ms) || max_latency_stddev_ms < 0.0) {
+        errno = EINVAL;
+        return -1;
+    }
+    result->trials_total = trial_count;
+    result->trials_valid = 0;
+    result->trials_detected = 0;
+    result->trials_rejected = 0;
+    result->detection_rate = 0.0;
+    result->mean_peak_z_score = 0.0;
+    result->mean_peak_latency_ms = 0.0;
+    result->peak_latency_stddev_ms = 0.0;
+    result->passed = 0;
+    for (index = 0; index < trial_count; index++) {
+        const struct xtos_p300_feature *trial = &trials[index];
+        if (!p300_feature_is_valid(trial)) {
+            result->trials_rejected++;
+            continue;
+        }
+        result->trials_valid++;
+        if (trial->detected)
+            result->trials_detected++;
+        z_sum += trial->peak_z_score;
+        latency_sum += trial->peak_latency_ms;
+    }
+    if (result->trials_valid == 0) {
+        return 0;
+    }
+    result->detection_rate = (double)result->trials_detected /
+                             (double)result->trials_valid;
+    result->mean_peak_z_score = z_sum / (double)result->trials_valid;
+    result->mean_peak_latency_ms = latency_sum / (double)result->trials_valid;
+    latency_mean = result->mean_peak_latency_ms;
+    for (index = 0; index < trial_count; index++) {
+        const struct xtos_p300_feature *trial = &trials[index];
+        if (!p300_feature_is_valid(trial))
+            continue;
+        {
+            double difference = trial->peak_latency_ms - latency_mean;
+            latency_variance += difference * difference;
+        }
+    }
+    result->peak_latency_stddev_ms = sqrt(latency_variance /
+                                          (double)result->trials_valid);
+    result->passed = result->trials_rejected == 0 &&
+                     result->trials_valid >= min_valid_trials &&
+                     result->detection_rate >= min_detection_rate &&
+                     result->mean_peak_z_score >= min_mean_z_score &&
+                     result->peak_latency_stddev_ms <= max_latency_stddev_ms;
+    return 0;
+}
+
 int xtos_signal_ssvep_feature(const double *input,
                               size_t n,
                               uint32_t sample_rate_hz,

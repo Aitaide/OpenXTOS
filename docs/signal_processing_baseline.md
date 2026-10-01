@@ -10,7 +10,7 @@
 - 可配置频率和Q值的二阶IIR陷波器
 - 可配置截止频率的四阶Butterworth带通基线
 - SSVEP目标频率及谐波功率、邻频噪声和SNR特征
-- P300 ERP基线校正、正向峰值、峰值延迟、窗口能量和z分数检测
+- P300 ERP基线、跨试次质量门禁和质量降级路径
 
 当前没有实现SSVEP分类器、P300分类器或AI推理。
 
@@ -30,6 +30,8 @@
 
 `xtos_signal_p300_feature`把输入前`baseline_samples`个样本作为刺激前基线，计算基线均值和总体标准差，再在相对刺激时间的`window_start_ms`到`window_end_ms`窗口内寻找最大正向基线校正峰值。输出峰值幅度、相对刺激延迟、窗口能量和z分数；z分数达到`detection_z_threshold`时将`detected`置为1。输入不会被修改，标准差为零、窗口越界、非有限值和参数错误会返回错误。它是ERP研究基线，不是P300分类器，也不判断刺激协议或试次统计。
 
+`xtos_signal_p300_quality_gate`聚合已经完成单窗口提取的多个试次，只接受有限且内部一致的特征记录。它统计总试次、有效试次、检测试次、拒绝试次、检测率、平均z分数和峰值延迟总体标准差；`passed`要求没有拒绝试次、有效试次达到下限、检测率和平均z分数达到下限、延迟标准差不超过上限。数据不足或质量不达标返回0且`passed=0`，参数错误返回-1。该门禁用于研究数据质量降级，不是跨被试分类准确率或医疗判定。
+
 ## 构建和测试
 
 ```sh
@@ -40,8 +42,8 @@ make clean && make test && make
 实际结果：
 
 ```text
-PASS assertions=132
-Python reference: 1 test OK
+PASS assertions=177
+Python reference: 3 tests OK
 ```
 
 测试覆盖：
@@ -59,6 +61,7 @@ Python reference: 1 test OK
 - 带通截止频率非法参数
 - 带通原地处理与独立输入输出结果一致
 - P300基线、正向峰值、延迟、z分数和窗口边界
+- P300跨试次质量门禁、无效特征拒绝、数据不足和参数错误
 - 10Hz基频和20Hz二次谐波SSVEP特征
 - SSVEP参数错误和谐波边界
 
@@ -68,8 +71,9 @@ Python reference: 1 test OK
 - `sdk/libxtos-signal/src/signal.c`
 - `sdk/libxtos-signal/tests/test_signal.c`
 - `sdk/libxtos-signal/tests/test_signal_reference.py`
+- `sdk/libxtos-signal/tests/fixtures/p300_trials.json`
 - `tools/xtos-signal-benchmark/`
 
 ## 边界
 
-这些测试是固定输入的算法单元测试，不是EEG硬件测试，也不代表滤波器或ERP检测满足医疗用途。带通基线采用因果IIR串联结构，存在启动瞬态和相位响应；SSVEP特征只验证频点功率和SNR计算，不代表刺激识别准确率；P300基线只验证单窗口正向峰值和阈值行为，不代表跨试次分类准确率。处理基准`xtos-signal-baseline-v2`同时记录P300特征路径的延迟、CPU和峰值RSS，性能数字仍受主机和系统负载影响。
+这些测试是固定输入的算法单元测试，不是EEG硬件测试，也不代表滤波器或ERP检测满足医疗用途。带通基线采用因果IIR串联结构，存在启动瞬态和相位响应；SSVEP特征只验证频点功率和SNR计算，不代表刺激识别准确率；P300基线和质量门禁只验证单窗口特征聚合、内部一致性和数据质量降级，不代表跨试次或跨被试分类准确率。处理基准`xtos-signal-baseline-v2`同时记录P300特征路径的延迟、CPU和峰值RSS，性能数字仍受主机和系统负载影响。
