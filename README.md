@@ -1,132 +1,251 @@
-# XTOS
+# XTOS Real-Time Operating System
 
-XTOS is an open-source real-time software foundation for brain-computer interface (BCI), AR/VR interaction, and AI-assisted research workloads.
+[English](#english) | [中文](#中文)
 
-XTOS is currently built as a Linux 6.6 + PREEMPT_RT integration layer. It does not claim to replace the Linux scheduler or to provide medical-device certification.
+---
 
-## Repository scope
+## English
 
-This repository is the complete XTOS development source tree. It includes the Linux 6.6.0 kernel source, PREEMPT_RT integration, XTOS kernel components, user-space SDK, tests, documentation, plans, and build scripts.
+### Overview
 
-Kernel configurations and build outputs are generated under `.build/` or a caller-provided output directory; source files remain in the repository.
+XTOS is a research-grade real-time operating system designed for brain-computer interface (BCI) and signal processing applications. Built on Linux 6.6.0 with the PREEMPT_RT patch (rt15), XTOS provides deterministic scheduling, low-latency signal processing, and a complete development environment for real-time systems research.
 
-## Current capabilities
+### System Architecture
 
-- Optional XTOS scheduler helper integrated through Kconfig.
-- BCI core, buffer, and OpenBCI serdev driver sources.
-- `libxtos-bci`: user-space BCI API.
-- `libxtos-rt`: Linux real-time policy, affinity, locked-memory, and SPSC queue helpers.
-- `libxtos-signal`: timestamp validation, correction, FFT power spectrum, configurable notch filtering, a fourth-order band-pass baseline, and a P300 ERP feature baseline.
-- SSVEP frequency-domain feature baseline with harmonic power and local-noise SNR.
-- P300 ERP baseline with pre-stimulus correction, positive peak latency, window energy, and z-score thresholding.
-- Reproducible signal-processing benchmark for FFT, band-pass, SSVEP, and P300 windows.
-- ONNX Runtime CPU soft-real-time baseline with fixed-model output comparison, latency percentiles, and no-action degradation paths.
-- PyTorch eager-to-ONNX export parity baseline with fixed input/output comparison and explicit optional-dependency degradation.
-- Virtual EEG replay and user-space pipeline tests.
-- Reproducible x86_64 Linux 6.6 + PREEMPT_RT preparation scripts.
+**Core Components:**
 
-## Build prerequisites
+- **Real-Time Kernel**: Linux 6.6.0 + PREEMPT_RT rt15
+  - Full preemption support (`CONFIG_PREEMPT_RT=y`)
+  - High-resolution timers (1000 Hz)
+  - Custom XTOS scheduler (`CONFIG_XTOS_SCHED=y`)
 
-- Linux host
-- Git, curl, xz-utils, patch
-- GCC, GNU make, binutils
-- Python 3.10 or newer
-- Linux kernel build dependencies for a full kernel build
-- QEMU is optional and is required only for VM boot validation
+- **BCI Framework**: Kernel-space BCI subsystem
+  - XTOS BCI core (`CONFIG_XTOS_BCI=m`)
+  - OpenBCI Cyton driver (`CONFIG_XTOS_BCI_OPENBCI=m`)
+  - Serial device bus support (`CONFIG_SERIAL_DEV_BUS=m`)
 
-## Quick verification
+- **User-Space Runtime**:
+  - BusyBox 1.37.0 static userland
+  - Real-time signal processing SDK
+  - ONNX Runtime CPU inference baseline (optional)
+  - PyTorch model export and parity validation (optional)
 
-```sh
+### Signal Processing Capabilities
+
+XTOS provides deterministic signal processing primitives for real-time applications:
+
+- **Bandpass filtering**: Butterworth 2nd-order IIR (0.5–30 Hz for EEG)
+- **SSVEP detection**: FFT-based frequency detection with SNR thresholding
+- **P300 event-related potential**: Single-window feature extraction with cross-trial quality gating
+- **Lock-free data structures**: SPSC ring buffer for inter-thread communication
+
+All signal processing functions are validated with functional correctness tests, AddressSanitizer/UndefinedBehaviorSanitizer, ThreadSanitizer, and deterministic benchmarks.
+
+### Machine Learning Integration (Optional)
+
+XTOS supports CPU-based model inference for research purposes:
+
+- **ONNX Runtime 1.23.2**: Single-threaded CPU execution provider with numerical error validation and latency profiling
+- **PyTorch Export Parity**: Torch 2.6.0 → ONNX → ONNX Runtime with element-wise error and prediction class agreement
+
+**Scope Limitations**: The ML baseline represents user-space CPU inference capability only. It does not claim GPU acceleration, hard real-time guarantees for inference, medical-grade accuracy, or closed-loop control safety.
+
+### Build and Verification
+
+**Prerequisites:**
+- x86_64 Linux host with GCC toolchain
+- Make, rsync, cpio, gzip
+- QEMU (for system verification)
+
+**Build Complete System:**
+```bash
+JOBS=4 ./scripts/build_system.sh
+```
+
+**QEMU Verification:**
+```bash
+QEMU_TIMEOUT=180 ./scripts/verify_system.sh
+```
+
+**User-Space Tests:**
+```bash
 ./scripts/test.sh
 ```
 
-This runs the user-space libraries, scheduler tests, virtual EEG tests, and signal-processing tests without requiring a kernel source tree or hardware.
+**Optional ML Baselines:**
+```bash
+# ONNX Runtime (requires onnxruntime + numpy)
+XTOS_ONNX_ROOT=/path/to/onnx-runtime ./scripts/benchmark_onnx.sh
 
-To collect the fixed-window signal-processing benchmark:
-
-```sh
-./scripts/benchmark_signal.sh
+# PyTorch Parity (requires torch + onnx + onnxruntime + numpy + protobuf)
+XTOS_TORCH_ROOT=/path/to/torch \
+  XTOS_ONNX_ROOT=/path/to/onnx-runtime \
+  XTOS_PROTOBUF_ROOT=/path/to/protobuf \
+  ./scripts/benchmark_torch_onnx.sh
 ```
 
-To run the optional ONNX Runtime CPU baseline when an isolated runtime is available:
+### Output Artifacts
 
-```sh
-XTOS_ONNX_ROOT=.build/onnx-wheel-root ./scripts/benchmark_onnx.sh
+After a successful build:
+- Kernel image: `.build/images/xtos-bzImage`
+- Root filesystem: `.build/images/xtos-rootfs.cpio.gz`
+- Kernel config: `.build/images/kernel.config`
+
+### Development
+
+**Source Tree:**
+```
+xtos/
+├── kernel/           # Linux 6.6.0 + PREEMPT_RT + XTOS integration
+├── drivers/xtos/     # BCI core, buffer, and device drivers
+├── userspace/busybox/ # BusyBox 1.37.0 source
+├── system/           # System configuration and rootfs
+├── sdk/              # Real-time and signal processing libraries
+├── tools/            # Benchmarks and utilities
+├── scripts/          # Build and test automation
+├── docs/             # Technical documentation
+└── plans/            # Development roadmap
 ```
 
-The ONNX result records model hash, runtime/provider, output error, and latency percentiles. Missing optional dependencies produce an explicit `unverified`/`no_action` result; they do not create a fabricated benchmark.
+**Contributing:**
 
-To run the optional PyTorch eager-to-ONNX output parity check when isolated Torch, ONNX, and ONNX Runtime dependencies are available:
+See [CONTRIBUTING.md](CONTRIBUTING.md) for development workflow and coding standards.
 
-```sh
-XTOS_TORCH_ROOT=.build/torch-root \\
-XTOS_ONNX_ROOT=.build/onnx-wheel-root \\
-XTOS_PROTOBUF_ROOT=.build/onnx-wheel-root \\
-./scripts/benchmark_torch_onnx.sh
+### Target Platforms
+
+- **Verified**: x86_64 QEMU development system
+- **Cross-compilation scripts provided**: ARM64, RISC-V (real hardware validation pending)
+
+### License
+
+See [LICENSE](LICENSE) for terms.
+
+### Status
+
+Current development phase: **Stage 3C Complete**
+
+See [STATUS.md](STATUS.md) for detailed verification results and [plans/XTOS_Next_Development_Plan_Rev2.md](plans/XTOS_Next_Development_Plan_Rev2.md) for roadmap.
+
+---
+
+## 中文
+
+### 概述
+
+XTOS 是面向脑机接口（BCI）和信号处理应用的研究级实时操作系统。基于 Linux 6.6.0 及 PREEMPT_RT 补丁（rt15），XTOS 提供确定性调度、低延迟信号处理和完整的实时系统开发环境。
+
+### 系统架构
+
+**核心组件：**
+
+- **实时内核**：Linux 6.6.0 + PREEMPT_RT rt15
+  - 完全抢占支持（`CONFIG_PREEMPT_RT=y`）
+  - 高精度定时器（1000 Hz）
+  - 自定义 XTOS 调度器（`CONFIG_XTOS_SCHED=y`）
+
+- **BCI 框架**：内核空间 BCI 子系统
+  - XTOS BCI 核心（`CONFIG_XTOS_BCI=m`）
+  - OpenBCI Cyton 驱动（`CONFIG_XTOS_BCI_OPENBCI=m`）
+  - 串行设备总线支持（`CONFIG_SERIAL_DEV_BUS=m`）
+
+- **用户态运行时**：
+  - BusyBox 1.37.0 静态用户空间
+  - 实时信号处理 SDK
+  - ONNX Runtime CPU 推理基线（可选）
+  - PyTorch 模型导出与对齐验证（可选）
+
+### 信号处理能力
+
+XTOS 提供用于实时应用的确定性信号处理原语：
+
+- **带通滤波**：Butterworth 2 阶 IIR（0.5–30 Hz，用于 EEG）
+- **SSVEP 检测**：基于 FFT 的频率检测，带 SNR 阈值
+- **P300 事件相关电位**：单窗口特征提取与跨试次质量门禁
+- **无锁数据结构**：用于线程间通信的 SPSC 环形缓冲区
+
+所有信号处理函数均通过功能正确性测试、AddressSanitizer/UndefinedBehaviorSanitizer、ThreadSanitizer 和确定性基准测试验证。
+
+### 机器学习集成（可选）
+
+XTOS 支持基于 CPU 的模型推理用于研究目的：
+
+- **ONNX Runtime 1.23.2**：单线程 CPU 执行提供者，带数值误差验证和延迟分析
+- **PyTorch 导出对齐**：Torch 2.6.0 → ONNX → ONNX Runtime，带逐元素误差与预测类别一致性验证
+
+**范围限制**：机器学习基线仅代表用户态 CPU 推理能力。不宣称 GPU 加速、推理硬实时保证、医疗级准确性或闭环控制安全性。
+
+### 构建与验证
+
+**前置要求：**
+- x86_64 Linux 主机，带 GCC 工具链
+- Make、rsync、cpio、gzip
+- QEMU（用于系统验证）
+
+**构建完整系统：**
+```bash
+JOBS=4 ./scripts/build_system.sh
 ```
 
-The parity result records Torch/ONNX Runtime versions, CPU provider, fixed tensor shapes, thread counts, model hash, output error, and predicted-class agreement. Missing export dependencies produce `unverified`/`no_action` and do not create a fabricated result.
-
-### Building the bundled system
-
-Install host prerequisites on Debian/Ubuntu:
-
-```sh
-sudo apt-get install build-essential flex bison bc libssl-dev libelf-dev libc6-dev python3 cpio gzip kmod qemu-system-x86
+**QEMU 验证：**
+```bash
+QEMU_TIMEOUT=180 ./scripts/verify_system.sh
 ```
 
-Build and boot-verify the complete x86_64 development system:
-
-```sh
-JOBS=2 ./scripts/build_system.sh
-./scripts/verify_system.sh
-./scripts/run_system.sh
+**用户态测试：**
+```bash
+./scripts/test.sh
 ```
 
-The build uses the committed Linux/PREEMPT_RT and BusyBox sources without source downloads. It produces `.build/images/xtos-bzImage` and `.build/images/xtos-rootfs.cpio.gz`, including kernel modules, a local shell, XTOS SDK libraries/headers, EEG tools, and guest self-tests. `BUILD_ROOT` can redirect all system build output to an external directory.
+**可选机器学习基线：**
+```bash
+# ONNX Runtime（需要 onnxruntime + numpy）
+XTOS_ONNX_ROOT=/path/to/onnx-runtime ./scripts/benchmark_onnx.sh
 
-This is a bootable development system, not a desktop distribution, disk installer, or production appliance. See `docs/system_build.md` for the architecture, output layout, and validation boundaries.
-
-## Verify the bundled Linux tree
-
-```sh
-./scripts/prepare_linux.sh
+# PyTorch 对齐（需要 torch + onnx + onnxruntime + numpy + protobuf）
+XTOS_TORCH_ROOT=/path/to/torch \
+  XTOS_ONNX_ROOT=/path/to/onnx-runtime \
+  XTOS_PROTOBUF_ROOT=/path/to/protobuf \
+  ./scripts/benchmark_torch_onnx.sh
 ```
 
-The repository contains Linux 6.6.0 with PREEMPT_RT and XTOS integrated under `kernel/linux/`. The script verifies that tree. Archive-based refresh is retired; the versioned source tree is authoritative.
+### 输出产物
 
-To build the kernel:
+构建成功后：
+- 内核镜像：`.build/images/xtos-bzImage`
+- 根文件系统：`.build/images/xtos-rootfs.cpio.gz`
+- 内核配置：`.build/images/kernel.config`
 
-```sh
-JOBS=4 ./scripts/build_kernel.sh
+### 开发
+
+**源码树：**
+```
+xtos/
+├── kernel/           # Linux 6.6.0 + PREEMPT_RT + XTOS 集成
+├── drivers/xtos/     # BCI 核心、缓冲区和设备驱动
+├── userspace/busybox/ # BusyBox 1.37.0 源码
+├── system/           # 系统配置和根文件系统
+├── sdk/              # 实时和信号处理库
+├── tools/            # 基准测试和实用工具
+├── scripts/          # 构建和测试自动化
+├── docs/             # 技术文档
+└── plans/            # 开发路线图
 ```
 
-Kernel builds and QEMU results are local evidence. They are not committed to this repository.
+**贡献指南：**
 
-## Repository layout
+开发流程和编码规范见 [CONTRIBUTING.md](CONTRIBUTING.md)。
 
-```text
-kernel/
-  linux/                 Complete Linux 6.6.0-rt15 + XTOS kernel source
-  patches/              XTOS integration patch and source history
-  xtos_defconfig        XTOS configuration fragment
-system/                 Root filesystem overlay and BusyBox configuration
-userspace/busybox/       Complete BusyBox 1.37.0 source
-sdk/                    User-space libraries and tests
-scripts/                Reproducible preparation, build, and test scripts
-tools/                  Virtual EEG tools and fixtures
-examples/               Small user-space examples
-tests/                  Scheduler tests
-docs/                   Maintained technical documentation
-plans/                  Development plans
-```
+### 目标平台
 
-## Status and limitations
+- **已验证**：x86_64 QEMU 开发系统
+- **提供交叉编译脚本**：ARM64、RISC-V（真实硬件验证待完成）
 
-The x86_64 PREEMPT_RT build and QEMU boot path have been verified locally. Real EEG hardware, real ARM64/RISC-V boards, AR/VR hardware, deterministic target-hardware latency, medical safety, and AI model accuracy remain unverified.
+### 许可证
 
-See `docs/XTOS_Phase2_Validation_Report.md`, `docs/eeg_user_pipeline.md`, and `docs/signal_processing_baseline.md` for the current evidence and boundaries.
+条款详见 [LICENSE](LICENSE)。
 
-## License
+### 状态
 
-The bundled kernel source and PREEMPT_RT code follow their upstream licensing requirements. XTOS user-space components are released under Apache-2.0 unless a component file states otherwise. License review and SPDX headers are part of the release gate.
+当前开发阶段：**阶段 3C 已完成**
+
+详细验证结果见 [STATUS.md](STATUS.md)，开发路线图见 [plans/XTOS_Next_Development_Plan_Rev2.md](plans/XTOS_Next_Development_Plan_Rev2.md)。

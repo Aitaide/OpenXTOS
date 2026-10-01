@@ -62,6 +62,17 @@ __pycache__/
 /docs/*_test_output.txt
 /tests/results/
 
+# Historical reports and work logs
+*_COMPLETE.md
+*_REPORT.md
+*_SUMMARY.md
+*_RESULTS.txt
+TASK_*.txt
+VERIFICATION_*.txt
+PROJECT_*.md
+setup_*.md
+cyclictest_*.md
+
 # Editors and OS files
 .vscode/
 .idea/
