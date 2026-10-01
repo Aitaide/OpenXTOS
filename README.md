@@ -102,9 +102,7 @@ xtos/
 ├── system/           # System configuration and rootfs
 ├── sdk/              # Real-time and signal processing libraries
 ├── tools/            # Benchmarks and utilities
-├── scripts/          # Build and test automation
-├── docs/             # Technical documentation
-└── plans/            # Development roadmap
+└── scripts/          # Build and test automation
 ```
 
 **Contributing:**
@@ -124,7 +122,7 @@ See [LICENSE](LICENSE) for terms.
 
 Current development phase: **Stage 3C Complete**
 
-See [STATUS.md](STATUS.md) for detailed verification results and [plans/XTOS_Next_Development_Plan_Rev2.md](plans/XTOS_Next_Development_Plan_Rev2.md) for roadmap.
+See [STATUS.md](STATUS.md) for detailed verification results.
 
 ---
 
@@ -226,9 +224,7 @@ xtos/
 ├── system/           # 系统配置和根文件系统
 ├── sdk/              # 实时和信号处理库
 ├── tools/            # 基准测试和实用工具
-├── scripts/          # 构建和测试自动化
-├── docs/             # 技术文档
-└── plans/            # 开发路线图
+└── scripts/          # 构建和测试自动化
 ```
 
 **贡献指南：**
@@ -248,4 +244,4 @@ xtos/
 
 当前开发阶段：**阶段 3C 已完成**
 
-详细验证结果见 [STATUS.md](STATUS.md)，开发路线图见 [plans/XTOS_Next_Development_Plan_Rev2.md](plans/XTOS_Next_Development_Plan_Rev2.md)。
+详细验证结果见 [STATUS.md](STATUS.md)。

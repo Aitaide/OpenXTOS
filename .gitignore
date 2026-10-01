@@ -73,6 +73,11 @@ PROJECT_*.md
 setup_*.md
 cyclictest_*.md
 
+# Documentation, plans, and internal tests (not for public repository)
+/docs/
+/plans/
+/tests/
+
 # Editors and OS files
 .vscode/
 .idea/
