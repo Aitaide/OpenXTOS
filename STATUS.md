@@ -16,7 +16,7 @@
 - P300 跨试次质量门禁已用固定 JSON fixture 验证有效/拒绝试次、检测率、z 分数和延迟离散度。
 - 阶段3C ONNX Runtime CPU基线已完成：固定 ONNX 模型、CPU provider、输出误差、延迟分位数和输入质量/超时/低置信度/模型加载失败降级测试通过。
 - 阶段3C PyTorch eager 到 ONNX 导出对齐已完成：固定模型和输入在隔离 Torch 2.6.0+debian、ONNX 1.20.1、ONNX Runtime 1.23.2、NumPy 2.2.4 环境中完成端到端导出、推理、误差和预测类别一致性验证；CPU provider、单线程配置生效，实测最大绝对误差为 `0.0`。
-- 阶段3D TensorFlow/TFLite 导出对齐已实现：工具 `tf_export.py` 支持 TensorFlow → TFLite 模型导出并与 ONNX Runtime CPU 输出对齐，验证逐元素误差和预测类别一致性；测试覆盖依赖缺失降级和完整对齐路径；基准脚本 `benchmark_tf_onnx.sh` 和文档 `docs/tf_tflite_export_parity.md` 已创建；当前主机 TensorFlow 依赖未就绪，待隔离环境准备完成后验证端到端数值对齐。
+- 阶段3D TensorFlow/TFLite 导出对齐已完成：TensorFlow 2.18.0 → TFLite → ONNX Runtime CPU 端到端验证通过，固定模型和输入在隔离 Debian TensorFlow 2.18.0、ONNX Runtime 1.23.2、NumPy 2.2.4 环境中完成导出、推理、误差和预测类别一致性验证；CPU provider、单线程配置生效，实测最大绝对误差为 `6.9e-08`；工具 `tf_export.py`、测试 `test_tf_onnx_parity.py`、基准脚本 `benchmark_tf_onnx.sh` 和文档 `docs/tf_tflite_onnx_parity.md` 已创建并接入 `scripts/test.sh`。
 - 阶段3C/3D 的官方 CPU wheel 运行证据使用 ONNX Runtime 1.23.2、NumPy 2.2.4；Debian 1.21.0 依赖路径保留为探测结果，不作为干净基准。
 
 系统范围为可启动的 x86_64 开发系统，不是桌面发行版或硬盘安装器。XTOS 调度组件是辅助层，未替代 Linux 的常规任务调度。P300 当前是单窗口研究基线和跨试次质量门禁，不是分类器。真实 OpenBCI 设备、ARM64/RISC-V 板卡、目标硬件最坏延迟和医疗安全均未验证。QEMU 结果不能作为硬件实时性能保证。
