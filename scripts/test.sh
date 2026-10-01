@@ -17,5 +17,6 @@ python3 -m unittest discover -s "$ROOT/sdk/libxtos-signal/tests" -p 'test_signal
 make -C "$ROOT/tools/xtos-eeg-pipeline" clean test
 make -C "$ROOT/tools/xtos-signal-benchmark" clean test
 python3 -m unittest discover -s "$ROOT/tools/xtos-eeg-replay" -p 'test_replay.py' -v
+python3 -m unittest discover -s "$ROOT/tools/xtos-onnx-baseline" -p 'test_onnx_baseline.py' -v
 make -C "$ROOT/tests/scheduler" clean test
 printf 'user_space_tests=pass\n'

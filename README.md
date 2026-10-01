@@ -20,6 +20,7 @@ Kernel configurations and build outputs are generated under `.build/` or a calle
 - SSVEP frequency-domain feature baseline with harmonic power and local-noise SNR.
 - P300 ERP baseline with pre-stimulus correction, positive peak latency, window energy, and z-score thresholding.
 - Reproducible signal-processing benchmark for FFT, band-pass, SSVEP, and P300 windows.
+- ONNX Runtime CPU soft-real-time baseline with fixed-model output comparison, latency percentiles, and no-action degradation paths.
 - Virtual EEG replay and user-space pipeline tests.
 - Reproducible x86_64 Linux 6.6 + PREEMPT_RT preparation scripts.
 
@@ -45,6 +46,14 @@ To collect the fixed-window signal-processing benchmark:
 ```sh
 ./scripts/benchmark_signal.sh
 ```
+
+To run the optional ONNX Runtime CPU baseline when an isolated runtime is available:
+
+```sh
+XTOS_ONNX_ROOT=.build/onnx-wheel-root ./scripts/benchmark_onnx.sh
+```
+
+The ONNX result records model hash, runtime/provider, output error, and latency percentiles. Missing optional dependencies produce an explicit `unverified`/`no_action` result; they do not create a fabricated benchmark.
 
 The benchmark result is written under `.build/benchmarks/` and is not committed.
 
