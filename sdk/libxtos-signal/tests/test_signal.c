@@ -235,6 +235,11 @@ static int test_p300_quality_gate(void)
     };
     struct xtos_p300_quality quality;
 
+    CHECK(xtos_signal_p300_quality_gate(trials, 4, 5, 0.75, 3.5, 10.0,
+                                        &quality) == 0);
+    CHECK(quality.trials_total == 4);
+    CHECK(quality.trials_valid == 4);
+    CHECK(quality.passed == 0);
     CHECK(xtos_signal_p300_quality_gate(trials, 4, 4, 0.75, 3.5, 10.0,
                                         &quality) == 0);
     CHECK(quality.trials_total == 4);

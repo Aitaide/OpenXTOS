@@ -123,6 +123,7 @@ class SignalReferenceTests(unittest.TestCase):
         ]
         gate = document["quality_gate"]
         expected = document["expected"]
+        min_detection_rate = gate["min_detection_rate"]
         expected_rate = expected["detection_rate"]
         expected_z = expected["mean_peak_z_score"]
         expected_latency = expected["mean_peak_latency_ms"]
@@ -137,7 +138,7 @@ class SignalReferenceTests(unittest.TestCase):
             )
         actual = P300Quality()
         result = self.library.xtos_signal_p300_quality_gate(
-            trials, len(values), gate["min_valid_trials"], expected_rate,
+            trials, len(values), gate["min_valid_trials"], min_detection_rate,
             gate["min_mean_z_score"], gate["max_latency_stddev_ms"],
             ctypes.byref(actual)
         )

@@ -427,7 +427,7 @@ int xtos_signal_p300_quality_gate(const struct xtos_p300_feature *trials,
     size_t index;
 
     if (trials == NULL || result == NULL || trial_count == 0 ||
-        min_valid_trials == 0 || min_valid_trials > trial_count ||
+        min_valid_trials == 0 ||
         min_detection_rate < 0.0 || min_detection_rate > 1.0 ||
         !isfinite(min_detection_rate) || !isfinite(min_mean_z_score) ||
         !isfinite(max_latency_stddev_ms) || max_latency_stddev_ms < 0.0) {
