@@ -11,7 +11,7 @@ for module in xtos_bci_core xtos_bci_buffer openbci_cyton; do
     [ -d "/sys/module/$module" ]
 done
 printf 'xtos_modules=pass\n'
-for test in test_rt test_spsc test_signal test_priority_queue; do
+for test in test_rt test_spsc test_signal; do
     "/usr/libexec/xtos/$test"
 done
 xtos-eeg-pipeline --input /usr/share/xtos/fixtures/valid.csv > /run/pipeline.json

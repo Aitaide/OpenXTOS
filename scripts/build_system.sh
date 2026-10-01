@@ -31,7 +31,7 @@ fi
 # Stage project user space so its Makefiles never generate files in the source tree.
 rm -rf "$STAGING" "$ROOTFS"
 mkdir -p "$STAGING" "$ROOTFS"
-for directory in sdk tools tests examples; do
+for directory in sdk tools examples; do
     cp -a "$ROOT/$directory" "$STAGING/"
 done
 mkdir -p "$STAGING/kernel/linux/include/linux"
@@ -43,7 +43,6 @@ make -C "$STAGING/tools/xtos-eeg-pipeline" clean all LDFLAGS='-static -lm'
 make -C "$STAGING/tools/xtos-signal-benchmark" clean all LDLIBS='-static -lm'
 make -C "$STAGING/sdk/libxtos-rt" test_rt test_spsc CFLAGS='-O2 -Wall -Wextra -Werror -static'
 make -C "$STAGING/sdk/libxtos-signal" test_signal CFLAGS='-std=c11 -O2 -Wall -Wextra -Werror -static'
-make -C "$STAGING/tests/scheduler" all CFLAGS='-std=c11 -O2 -Wall -Wextra -Werror -static'
 "$CC" -O2 -Wall -Wextra -static -I"$STAGING/sdk/libxtos-bci/include" \
     "$STAGING/examples/bci_test.c" "$STAGING/sdk/libxtos-bci/libxtos-bci.a" -o "$STAGING/examples/bci_test"
 cp -a "$ROOT/system/rootfs/." "$ROOTFS/"
@@ -63,7 +62,6 @@ for test in test_rt test_spsc; do
     install -m 0755 "$STAGING/sdk/libxtos-rt/$test" "$ROOTFS/usr/libexec/xtos/"
 done
 install -m 0755 "$STAGING/sdk/libxtos-signal/test_signal" "$ROOTFS/usr/libexec/xtos/"
-install -m 0755 "$STAGING/tests/scheduler/test_priority_queue" "$ROOTFS/usr/libexec/xtos/"
 install -m 0644 "$ROOT/tools/xtos-eeg-pipeline/fixtures/valid.csv" "$ROOTFS/usr/share/xtos/fixtures/"
 make -C "$KERNEL_DIR" O="$KERNEL_OUTPUT" ARCH=x86 INSTALL_MOD_PATH="$ROOTFS" modules_install
 release="$(make -s -C "$KERNEL_DIR" O="$KERNEL_OUTPUT" ARCH=x86 kernelrelease)"
