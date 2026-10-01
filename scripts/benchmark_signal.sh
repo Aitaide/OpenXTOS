@@ -5,7 +5,7 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 BUILD_ROOT="${BUILD_ROOT:-$ROOT/.build}"
 ITERATIONS="${ITERATIONS:-1000}"
 OUTPUT_DIR="$BUILD_ROOT/benchmarks"
-OUTPUT_FILE="$OUTPUT_DIR/xtos-signal-baseline-v1.json"
+OUTPUT_FILE="$OUTPUT_DIR/xtos-signal-baseline-v2.json"
 
 mkdir -p "$OUTPUT_DIR"
 make -C "$ROOT/tools/xtos-signal-benchmark" clean all
@@ -39,7 +39,7 @@ required = {"benchmark", "window_length", "sample_rate_hz", "channels",
             "iterations", "threads", "compiler", "compiler_flags",
             "git_commit", "host_kernel", "cpu_model", "operations"}
 missing = required.difference(document)
-if missing or set(document["operations"]) != {"fft_power", "bandpass", "ssvep_feature"}:
+if missing or set(document["operations"]) != {"fft_power", "bandpass", "ssvep_feature", "p300_feature"}:
     raise SystemExit(f"invalid benchmark document: missing={sorted(missing)}")
 print(f"benchmark={sys.argv[1]}")
 PY

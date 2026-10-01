@@ -19,7 +19,7 @@ class SignalBenchmarkTests(unittest.TestCase):
             )
             self.assertEqual(result.returncode, 0, result.stderr)
             document = json.loads(Path(output.name).read_text())
-        self.assertEqual(document["benchmark"], "xtos-signal-baseline-v1")
+        self.assertEqual(document["benchmark"], "xtos-signal-baseline-v2")
         self.assertEqual(document["window_length"], 256)
         self.assertEqual(document["sample_rate_hz"], 256)
         self.assertEqual(document["channels"], 2)
@@ -28,7 +28,7 @@ class SignalBenchmarkTests(unittest.TestCase):
         self.assertIn("compiler", document)
         self.assertIn("compiler_flags", document)
         self.assertEqual(
-            set(document["operations"]), {"fft_power", "bandpass", "ssvep_feature"}
+            set(document["operations"]), {"fft_power", "bandpass", "ssvep_feature", "p300_feature"}
         )
         for values in document["operations"].values():
             self.assertGreater(values["p50_ns"], 0)

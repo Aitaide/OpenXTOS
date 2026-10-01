@@ -185,6 +185,46 @@ static int test_bandpass_in_place(void)
     return 0;
 }
 
+static int test_p300_feature(void)
+{
+    double input[256] = {0.0};
+    struct xtos_p300_feature feature;
+    size_t index;
+
+    for (index = 0; index < 32; index++)
+        input[index] = (index & 1U) ? 1.0 : -1.0;
+    input[128] = 5.0;
+    CHECK(xtos_signal_p300_feature(input, 256, 256, 32, 250, 500, 4.0,
+                                   &feature) == 0);
+    CHECK(nearly_equal(feature.baseline_mean, 0.0, 1e-12));
+    CHECK(nearly_equal(feature.baseline_stddev, 1.0, 1e-12));
+    CHECK(nearly_equal(feature.peak_amplitude, 5.0, 1e-12));
+    CHECK(nearly_equal(feature.peak_latency_ms, 375.0, 1e-12));
+    CHECK(nearly_equal(feature.peak_z_score, 5.0, 1e-12));
+    CHECK(nearly_equal(feature.window_energy, 25.0, 1e-12));
+    CHECK(feature.peak_index == 128);
+    CHECK(feature.detected == 1);
+
+    input[128] = 2.0;
+    CHECK(xtos_signal_p300_feature(input, 256, 256, 32, 250, 500, 4.0,
+                                   &feature) == 0);
+    CHECK(feature.detected == 0);
+    CHECK(xtos_signal_p300_feature(input, 256, 256, 0, 250, 500, 4.0,
+                                   &feature) == -1);
+    CHECK(xtos_signal_p300_feature(input, 256, 256, 32, 500, 250, 4.0,
+                                   &feature) == -1);
+    CHECK(xtos_signal_p300_feature(input, 256, 256, 32, 250, 500, 0.0,
+                                   &feature) == -1);
+    CHECK(xtos_signal_p300_feature(input, 256, 256, 200, 250, 500, 4.0,
+                                   &feature) == -1);
+    {
+        double flat[256] = {0.0};
+        CHECK(xtos_signal_p300_feature(flat, 256, 256, 32, 250, 500, 4.0,
+                                       &feature) == -1);
+    }
+    return 0;
+}
+
 static int test_ssvep_feature(void)
 {
     double input[256];
@@ -223,6 +263,7 @@ int main(void)
         test_notch_filter() != 0 ||
         test_bandpass_filter() != 0 ||
         test_bandpass_in_place() != 0 ||
+        test_p300_feature() != 0 ||
         test_ssvep_feature() != 0)
         return 1;
     printf("PASS assertions=%d\n", assertions);

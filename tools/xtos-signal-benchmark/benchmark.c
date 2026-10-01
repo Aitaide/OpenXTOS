@@ -24,6 +24,10 @@
 #define TARGET_FREQUENCY_HZ 10.0
 #define HARMONIC_COUNT 2U
 #define NEIGHBOR_BINS 1U
+#define P300_BASELINE_SAMPLES 32U
+#define P300_WINDOW_START_MS 250U
+#define P300_WINDOW_END_MS 500U
+#define P300_Z_THRESHOLD 4.0
 
 struct samples {
     double values[CHANNELS][WINDOW_LENGTH];
@@ -87,6 +91,8 @@ static void initialize_samples(struct samples *samples)
             samples->values[channel][index] =
                 sin(10.0 * phase) + 0.5 * sin(20.0 * phase) +
                 0.25 * sin(9.0 * phase) + 0.1 * (double)channel;
+            if (channel == 0 && index == 128)
+                samples->values[channel][index] += 5.0;
         }
     }
 }
@@ -118,6 +124,18 @@ static int run_ssvep(const struct samples *samples)
     return xtos_signal_ssvep_feature(samples->values[0], WINDOW_LENGTH,
                                      SAMPLE_RATE_HZ, TARGET_FREQUENCY_HZ,
                                      HARMONIC_COUNT, NEIGHBOR_BINS, &feature);
+}
+
+static int run_p300(const struct samples *samples)
+{
+    struct xtos_p300_feature feature;
+
+    if (xtos_signal_p300_feature(samples->values[0], WINDOW_LENGTH,
+                                  SAMPLE_RATE_HZ, P300_BASELINE_SAMPLES,
+                                  P300_WINDOW_START_MS, P300_WINDOW_END_MS,
+                                  P300_Z_THRESHOLD, &feature) != 0)
+        return -1;
+    return feature.detected ? 0 : -1;
 }
 
 static int benchmark_operation(const char *name,
@@ -213,7 +231,7 @@ int main(int argc, char **argv)
     }
     initialize_samples(&samples);
     fprintf(output,
-            "{\n  \"benchmark\": \"xtos-signal-baseline-v1\",\n"
+            "{\n  \"benchmark\": \"xtos-signal-baseline-v2\",\n"
             "  \"window_length\": %u,\n  \"sample_rate_hz\": %u,\n"
             "  \"channels\": %u,\n  \"iterations\": %u,\n"
             "  \"threads\": 1,\n  \"compiler\": \"%s\",\n"
@@ -222,7 +240,8 @@ int main(int argc, char **argv)
             __VERSION__, "-std=c11 -Wall -Wextra -Werror -O2");
     if (benchmark_operation("fft_power", iterations, &samples, run_fft, output) != 0 ||
         benchmark_operation("bandpass", iterations, &samples, run_bandpass, output) != 0 ||
-        benchmark_operation("ssvep_feature", iterations, &samples, run_ssvep, output) != 0) {
+        benchmark_operation("ssvep_feature", iterations, &samples, run_ssvep, output) != 0 ||
+        benchmark_operation("p300_feature", iterations, &samples, run_p300, output) != 0) {
         fclose(output);
         return 1;
     }

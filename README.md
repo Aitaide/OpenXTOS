@@ -16,9 +16,10 @@ Kernel configurations and build outputs are generated under `.build/` or a calle
 - BCI core, buffer, and OpenBCI serdev driver sources.
 - `libxtos-bci`: user-space BCI API.
 - `libxtos-rt`: Linux real-time policy, affinity, locked-memory, and SPSC queue helpers.
-- `libxtos-signal`: timestamp validation, correction, FFT power spectrum, configurable notch filtering, and a fourth-order band-pass baseline.
+- `libxtos-signal`: timestamp validation, correction, FFT power spectrum, configurable notch filtering, a fourth-order band-pass baseline, and a P300 ERP feature baseline.
 - SSVEP frequency-domain feature baseline with harmonic power and local-noise SNR.
-- Reproducible signal-processing benchmark for FFT, band-pass, and SSVEP windows.
+- P300 ERP baseline with pre-stimulus correction, positive peak latency, window energy, and z-score thresholding.
+- Reproducible signal-processing benchmark for FFT, band-pass, SSVEP, and P300 windows.
 - Virtual EEG replay and user-space pipeline tests.
 - Reproducible x86_64 Linux 6.6 + PREEMPT_RT preparation scripts.
 

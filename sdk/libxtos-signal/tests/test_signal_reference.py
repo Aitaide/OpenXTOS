@@ -20,7 +20,20 @@ class SSVEPFeature(ctypes.Structure):
     ]
 
 
-class SSVEPReferenceTests(unittest.TestCase):
+class P300Feature(ctypes.Structure):
+    _fields_ = [
+        ("baseline_mean", ctypes.c_double),
+        ("baseline_stddev", ctypes.c_double),
+        ("peak_amplitude", ctypes.c_double),
+        ("peak_latency_ms", ctypes.c_double),
+        ("peak_z_score", ctypes.c_double),
+        ("window_energy", ctypes.c_double),
+        ("peak_index", ctypes.c_size_t),
+        ("detected", ctypes.c_int),
+    ]
+
+
+class SignalReferenceTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         subprocess.run(["make", "clean", "all"], cwd=LIB_DIR, check=True)
@@ -35,6 +48,17 @@ class SSVEPReferenceTests(unittest.TestCase):
             ctypes.POINTER(SSVEPFeature),
         ]
         cls.library.xtos_signal_ssvep_feature.restype = ctypes.c_int
+        cls.library.xtos_signal_p300_feature.argtypes = [
+            ctypes.POINTER(ctypes.c_double),
+            ctypes.c_size_t,
+            ctypes.c_uint32,
+            ctypes.c_size_t,
+            ctypes.c_uint32,
+            ctypes.c_uint32,
+            ctypes.c_double,
+            ctypes.POINTER(P300Feature),
+        ]
+        cls.library.xtos_signal_p300_feature.restype = ctypes.c_int
 
     @staticmethod
     def reference(values, sample_rate, target_frequency, harmonic_count, neighbor_bins):
@@ -62,6 +86,47 @@ class SSVEPReferenceTests(unittest.TestCase):
         noise_power = sum(noise_values) / len(noise_values)
         snr = signal_power / noise_power
         return target_bin, signal_power, noise_power, snr, 10.0 * math.log10(snr)
+
+    def test_c_matches_python_p300_reference(self):
+        sample_rate = 256
+        values = [0.0] * 256
+        for index in range(32):
+            values[index] = 1.0 if index % 2 else -1.0
+        values[128] = 5.0
+        baseline = values[:32]
+        baseline_mean = sum(baseline) / len(baseline)
+        baseline_stddev = math.sqrt(
+            sum((value - baseline_mean) ** 2 for value in baseline) / len(baseline)
+        )
+        corrected = [value - baseline_mean for value in values]
+        window = corrected[96:160]
+        peak_amplitude = max(window)
+        peak_index = 96 + window.index(peak_amplitude)
+        expected = (
+            baseline_mean,
+            baseline_stddev,
+            peak_amplitude,
+            (peak_index - 32) * 1000.0 / sample_rate,
+            peak_amplitude / baseline_stddev,
+            sum(value * value for value in window),
+            peak_index,
+            1,
+        )
+        input_array = (ctypes.c_double * len(values))(*values)
+        actual = P300Feature()
+        result = self.library.xtos_signal_p300_feature(
+            input_array, len(values), sample_rate, 32, 250, 500, 4.0,
+            ctypes.byref(actual)
+        )
+        self.assertEqual(result, 0)
+        self.assertAlmostEqual(actual.baseline_mean, expected[0], places=12)
+        self.assertAlmostEqual(actual.baseline_stddev, expected[1], places=12)
+        self.assertAlmostEqual(actual.peak_amplitude, expected[2], places=12)
+        self.assertAlmostEqual(actual.peak_latency_ms, expected[3], places=12)
+        self.assertAlmostEqual(actual.peak_z_score, expected[4], places=12)
+        self.assertAlmostEqual(actual.window_energy, expected[5], places=12)
+        self.assertEqual(actual.peak_index, expected[6])
+        self.assertEqual(actual.detected, expected[7])
 
     def test_c_matches_python_ssvep_reference(self):
         sample_rate = 256

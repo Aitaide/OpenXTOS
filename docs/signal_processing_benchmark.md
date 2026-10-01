@@ -2,7 +2,7 @@
 
 ## 目的
 
-`tools/xtos-signal-benchmark/`为当前C信号处理实现提供可重复的用户态基准入口。它记录固定窗口下的FFT功率谱、带通滤波和SSVEP特征三条路径的时间分布，同时记录CPU时间和峰值RSS。
+`tools/xtos-signal-benchmark/`为当前C信号处理实现提供可重复的用户态基准入口。它记录固定窗口下的FFT功率谱、带通滤波、SSVEP特征和P300 ERP特征四条路径的时间分布，同时记录CPU时间和峰值RSS。
 
 该基准用于比较同一主机、同一编译参数和同一提交下的变化。结果不能推导PREEMPT_RT硬实时上界，也不能代表真实EEG采集端到端延迟。
 
@@ -13,11 +13,11 @@
 - 通道数：2，当前基准操作使用第1通道
 - 带通：5–40Hz
 - SSVEP：10Hz基频、2个谐波、每侧1个邻频
+- P300：32点基线、250–500ms检测窗口、z分数阈值4.0
 - 默认迭代次数：1000
 - 线程数：1
 - 编译参数：`-std=c11 -Wall -Wextra -Werror -O2`
-
-输入由程序内固定公式生成，包含10Hz、20Hz、9Hz成分和通道偏置；不读取外部文件。
+- 输入：第1通道包含10Hz、20Hz、9Hz成分，并在第128点加入5.0幅度的正向ERP峰值；不读取外部文件。
 
 ## 运行
 
@@ -25,7 +25,7 @@
 ./scripts/benchmark_signal.sh
 ```
 
-结果写入`.build/benchmarks/xtos-signal-baseline-v1.json`，并包含Git提交、内核、CPU型号和编译器元数据。改变迭代次数：
+结果写入`.build/benchmarks/xtos-signal-baseline-v2.json`，并包含Git提交、内核、CPU型号和编译器元数据。改变迭代次数：
 
 ```sh
 ITERATIONS=10000 ./scripts/benchmark_signal.sh
@@ -40,5 +40,7 @@ ITERATIONS=10000 ./scripts/benchmark_signal.sh
 - FFT功率谱：p50约5.5微秒
 - 带通：p50约1.7微秒
 - SSVEP特征：p50约5.6微秒
+
+基准版本2还会输出`p300_feature`，其实际p50/p95/p99由每次运行生成，不在维护文档中固定主机相关数字。
 
 这些数字只用于说明输出尺度，不作为跨主机承诺；完整原始JSON不进入Git。

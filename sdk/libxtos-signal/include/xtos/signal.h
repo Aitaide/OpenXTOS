@@ -88,6 +88,31 @@ int xtos_signal_ssvep_feature(const double *input,
                               size_t neighbor_bins,
                               struct xtos_ssvep_feature *result);
 
+/*
+ * Research P300 ERP baseline: baseline_samples precede the stimulus, and
+ * the detection window is specified in milliseconds after that stimulus.
+ * The returned latency is relative to the stimulus; input remains unchanged.
+ */
+struct xtos_p300_feature {
+    double baseline_mean;
+    double baseline_stddev;
+    double peak_amplitude;
+    double peak_latency_ms;
+    double peak_z_score;
+    double window_energy;
+    size_t peak_index;
+    int detected;
+};
+
+int xtos_signal_p300_feature(const double *input,
+                             size_t n,
+                             uint32_t sample_rate_hz,
+                             size_t baseline_samples,
+                             uint32_t window_start_ms,
+                             uint32_t window_end_ms,
+                             double detection_z_threshold,
+                             struct xtos_p300_feature *result);
+
 #ifdef __cplusplus
 }
 #endif

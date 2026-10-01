@@ -302,6 +302,93 @@ static int is_ssvep_target_bin(size_t candidate,
     return 0;
 }
 
+int xtos_signal_p300_feature(const double *input,
+                             size_t n,
+                             uint32_t sample_rate_hz,
+                             size_t baseline_samples,
+                             uint32_t window_start_ms,
+                             uint32_t window_end_ms,
+                             double detection_z_threshold,
+                             struct xtos_p300_feature *result)
+{
+    double baseline_sum = 0.0;
+    double baseline_mean;
+    double variance_sum = 0.0;
+    double peak_amplitude;
+    double peak_z_score;
+    double window_energy = 0.0;
+    uint64_t window_start_offset;
+    uint64_t window_end_offset;
+    uint64_t window_start;
+    uint64_t window_end;
+    size_t index;
+    size_t peak_index;
+
+    if (input == NULL || result == NULL || sample_rate_hz == 0 ||
+        baseline_samples < 2 || baseline_samples >= n ||
+        window_start_ms >= window_end_ms || detection_z_threshold <= 0.0 ||
+        !isfinite(detection_z_threshold)) {
+        errno = EINVAL;
+        return -1;
+    }
+    window_start_offset = ((uint64_t)window_start_ms * sample_rate_hz + 500U) / 1000U;
+    window_end_offset = ((uint64_t)window_end_ms * sample_rate_hz + 500U) / 1000U;
+    if (window_start_offset >= window_end_offset ||
+        window_start_offset > SIZE_MAX - baseline_samples ||
+        window_end_offset > SIZE_MAX - baseline_samples) {
+        errno = EINVAL;
+        return -1;
+    }
+    window_start = baseline_samples + window_start_offset;
+    window_end = baseline_samples + window_end_offset;
+    if (window_start >= window_end || window_end > n) {
+        errno = EINVAL;
+        return -1;
+    }
+    for (index = 0; index < baseline_samples; index++) {
+        if (!isfinite(input[index])) {
+            errno = EINVAL;
+            return -1;
+        }
+        baseline_sum += input[index];
+    }
+    baseline_mean = baseline_sum / (double)baseline_samples;
+    for (index = 0; index < baseline_samples; index++) {
+        double centered = input[index] - baseline_mean;
+        variance_sum += centered * centered;
+    }
+    result->baseline_mean = baseline_mean;
+    result->baseline_stddev = sqrt(variance_sum / (double)baseline_samples);
+    if (!(result->baseline_stddev > 0.0) || !isfinite(result->baseline_stddev)) {
+        errno = EDOM;
+        return -1;
+    }
+    peak_index = (size_t)window_start;
+    peak_amplitude = input[peak_index] - baseline_mean;
+    for (index = (size_t)window_start; index < (size_t)window_end; index++) {
+        double centered;
+        if (!isfinite(input[index])) {
+            errno = EINVAL;
+            return -1;
+        }
+        centered = input[index] - baseline_mean;
+        window_energy += centered * centered;
+        if (centered > peak_amplitude) {
+            peak_amplitude = centered;
+            peak_index = index;
+        }
+    }
+    peak_z_score = peak_amplitude / result->baseline_stddev;
+    result->peak_amplitude = peak_amplitude;
+    result->peak_latency_ms = 1000.0 * (double)(peak_index - baseline_samples) /
+                              (double)sample_rate_hz;
+    result->peak_z_score = peak_z_score;
+    result->window_energy = window_energy;
+    result->peak_index = peak_index;
+    result->detected = peak_z_score >= detection_z_threshold ? 1 : 0;
+    return 0;
+}
+
 int xtos_signal_ssvep_feature(const double *input,
                               size_t n,
                               uint32_t sample_rate_hz,
