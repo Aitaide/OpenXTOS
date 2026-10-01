@@ -48,7 +48,7 @@ XTOS supports CPU-based model inference for research purposes:
 
 - **ONNX Runtime 1.23.2**: Single-threaded CPU execution provider with numerical error validation and latency profiling
 - **PyTorch Export Parity**: Torch 2.6.0 → ONNX → ONNX Runtime with element-wise error and prediction class agreement
-- **TensorFlow/TFLite Export Parity**: TensorFlow 2.21.0 → TFLite → comparison with ONNX Runtime output
+- **TensorFlow/TFLite Export Parity**: TensorFlow 2.18.0 → TFLite → comparison with ONNX Runtime output
 
 **Scope Limitations**: The ML baseline represents user-space CPU inference capability only. It does not claim GPU acceleration, hard real-time guarantees for inference, medical-grade accuracy, or closed-loop control safety.
 
@@ -127,7 +127,7 @@ See [LICENSE](LICENSE) for terms.
 
 ### Status
 
-Current development phase: **Stage 3C Complete**
+Current development phase: **Stage 3 Complete** (P300, ONNX Runtime, PyTorch, TensorFlow/TFLite baselines)
 
 See [STATUS.md](STATUS.md) for detailed verification results.
 
@@ -249,6 +249,6 @@ xtos/
 
 ### 状态
 
-当前开发阶段：**阶段 3C 已完成**
+当前开发阶段：**阶段 3 已完成**（P300、ONNX Runtime、PyTorch、TensorFlow/TFLite 基线）
 
 详细验证结果见 [STATUS.md](STATUS.md)。
