@@ -1,6 +1,6 @@
 # XTOS 当前状态
 
-最后更新：2026-10-01
+最后更新：2026-10-02
 
 唯一开发目录：`/root/xtos-development/xtos`。
 
@@ -19,6 +19,9 @@
 - 阶段3D TensorFlow/TFLite 导出对齐已完成：TensorFlow 2.18.0 → TFLite → ONNX Runtime CPU 端到端验证通过，固定模型和输入在隔离 Debian TensorFlow 2.18.0、ONNX Runtime 1.23.2、NumPy 2.2.4 环境中完成导出、推理、误差和预测类别一致性验证；CPU provider、单线程配置生效，实测最大绝对误差为 `6.9e-08`；工具 `tf_export.py`、测试 `test_tf_onnx_parity.py`、基准脚本 `benchmark_tf_onnx.sh` 和文档 `docs/tf_tflite_onnx_parity.md` 已创建并接入 `scripts/test.sh`。
 - 阶段3C/3D 的官方 CPU wheel 运行证据使用 ONNX Runtime 1.23.2、NumPy 2.2.4；Debian 1.21.0 依赖路径保留为探测结果，不作为干净基准。
 - 阶段4A 真实硬件 RT 验证工具包已准备：`tools/realtime-test/` 包含系统配置检查（`rt_system_check.sh`）、长时间 cyclictest 测试（`rt_cyclictest.sh`）、结果分析工具（`rt_analyze.py`）和完整使用文档（`README.md`）；工具包已在 QEMU 环境验证功能正确性，等待真实 x86_64 硬件部署和 24 小时延迟测试。
+- 阶段4B ARM64 与 x86_64 全面对齐：内核合并 `xtos_defconfig`（PREEMPT_RT + XTOS_SCHED + XTOS_BCI + HZ_1000），`verify_guest_arm64.sh` 在 QEMU guest 内加载全部 XTOS 内核模块并运行测试二进制（14/14 通过）。
+- 阶段4C RISC-V 64 从零完成：交叉构建 + OpenSBI 启动验证 5/5 + in-guest 验证 15/15（模块加载、test_rt/test_spsc/test_signal 全过）。
+- 阶段5 工程化发布的核心项已完成：fuzz 基础设施（`tools/xtos-fuzz/`，4027 变异输入通过 + 有效性自证）、CI 跨架构矩阵（x86 系统级 + ARM64/RISC-V 交叉构建）、ABI 版本化（三库版本头 + `check_abi.sh`）、SBOM（CycloneDX 1.5，`docs/sbom.json` + `--check` 防漂移）、可复现构建（`scripts/reproducible_env.sh`，x86_64 两次干净全量构建逐字节一致，QEMU 回归通过）。
 
 系统范围为可启动的 x86_64 开发系统，不是桌面发行版或硬盘安装器。XTOS 调度组件是辅助层，未替代 Linux 的常规任务调度。P300 当前是单窗口研究基线和跨试次质量门禁，不是分类器。真实 OpenBCI 设备、ARM64/RISC-V 板卡、目标硬件最坏延迟和医疗安全均未验证。QEMU 结果不能作为硬件实时性能保证。
 

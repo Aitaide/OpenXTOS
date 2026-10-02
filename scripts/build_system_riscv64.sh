@@ -281,10 +281,18 @@ EOF
 # Create /init symlink
 ln -sf sbin/init "$ROOTFS/init"
 
-# Build initramfs
-log "Packing RISC-V 64 initramfs..."
+# Build initramfs (reproducible: fixed mtimes, sorted entries, stable
+# ownership and gzip header). Requires scripts/reproducible_env.sh for the
+# SOURCE_DATE_EPOCH default; falls back to the HEAD commit time.
+REPRO_EPOCH="${SOURCE_DATE_EPOCH:-$(git -C "$ROOT" log -1 --pretty=%ct 2>/dev/null || date +%s)}"
+log "Packing RISC-V 64 initramfs (epoch=$REPRO_EPOCH)..."
 INITRAMFS="$BUILD_ROOT/initramfs-riscv64.cpio.gz"
-(cd "$ROOTFS" && find . | cpio -o -H newc | gzip -6) > "$INITRAMFS"
+(cd "$ROOTFS" \
+    && find . -print0 | LC_ALL=C sort -z \
+    | xargs -0 touch --no-dereference --date="@$REPRO_EPOCH" \
+    && find . -print0 | LC_ALL=C sort -z \
+    | cpio --null -o -H newc --owner=0:0 --reproducible 2>/dev/null \
+    | gzip -n -6) > "$INITRAMFS"
 
 # Summary
 log "=== RISC-V 64 Build Complete ==="

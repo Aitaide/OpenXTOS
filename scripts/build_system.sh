@@ -68,9 +68,11 @@ release="$(make -s -C "$KERNEL_DIR" O="$KERNEL_OUTPUT" ARCH=x86 kernelrelease)"
 rm -f "$ROOTFS/lib/modules/$release/build" "$ROOTFS/lib/modules/$release/source"
 depmod -b "$ROOTFS" "$release"
 chmod 0755 "$ROOTFS/init" "$ROOTFS/usr/bin/xtos-selftest"
+REPRO_EPOCH="${SOURCE_DATE_EPOCH:-$(git -C "$ROOT" log -1 --pretty=%ct 2>/dev/null || date +%s)}"
 (
     cd "$ROOTFS"
-    find . -print0 | LC_ALL=C sort -z | cpio --null -o -H newc --owner=0:0 2>/dev/null | gzip -n -9
+    find . -print0 | LC_ALL=C sort -z | xargs -0 touch --no-dereference --date="@$REPRO_EPOCH"
+    find . -print0 | LC_ALL=C sort -z | cpio --null -o -H newc --owner=0:0 --reproducible 2>/dev/null | gzip -n -9
 ) > "$IMAGES/xtos-rootfs.cpio.gz"
 install -m 0644 "$KERNEL_OUTPUT/arch/x86/boot/bzImage" "$IMAGES/xtos-bzImage"
 install -m 0644 "$KERNEL_OUTPUT/.config" "$IMAGES/kernel.config"
