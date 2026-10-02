@@ -176,13 +176,16 @@ mkdir -p "$ROOTFS/usr/lib" "$ROOTFS/usr/include/xtos"
 
 build_lib libxtos-rt
 cp "$ROOT/sdk/libxtos-rt/include/xtos/rt.h" "$ROOTFS/usr/include/xtos/"
+cp "$ROOT/sdk/libxtos-rt/include/xtos/rt_version.h" "$ROOTFS/usr/include/xtos/"
 cp "$ROOT/sdk/libxtos-rt/include/xtos/spsc.h" "$ROOTFS/usr/include/xtos/"
 
 build_lib libxtos-signal
 cp "$ROOT/sdk/libxtos-signal/include/xtos/signal.h" "$ROOTFS/usr/include/xtos/"
+cp "$ROOT/sdk/libxtos-signal/include/xtos/signal_version.h" "$ROOTFS/usr/include/xtos/"
 
 build_lib libxtos-bci
 cp "$ROOT/sdk/libxtos-bci/include/xtos/bci.h" "$ROOTFS/usr/include/xtos/"
+cp "$ROOT/sdk/libxtos-bci/include/xtos/bci_version.h" "$ROOTFS/usr/include/xtos/"
 
 # Verify all installed libraries are riscv64 (guards against stale host
 # artifacts in the sdk tree breaking Stage 4 static links)

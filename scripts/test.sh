@@ -13,6 +13,7 @@ trap cleanup EXIT
 make -C "$ROOT/sdk/libxtos-bci" clean all
 make -C "$ROOT/sdk/libxtos-rt" clean test all
 make -C "$ROOT/sdk/libxtos-signal" clean test all
+"$ROOT/scripts/check_abi.sh"
 python3 -m unittest discover -s "$ROOT/sdk/libxtos-signal/tests" -p 'test_signal_reference.py' -v
 make -C "$ROOT/tools/xtos-eeg-pipeline" clean test
 make -C "$ROOT/tools/xtos-signal-benchmark" clean test

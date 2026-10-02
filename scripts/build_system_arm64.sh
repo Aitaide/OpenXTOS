@@ -167,6 +167,7 @@ AR=aarch64-linux-gnu-ar \
 mkdir -p "$ROOTFS/usr/lib" "$ROOTFS/usr/include/xtos"
 cp "$ROOT/sdk/libxtos-rt/libxtos-rt.a" "$ROOTFS/usr/lib/"
 cp "$ROOT/sdk/libxtos-rt/include/xtos/rt.h" "$ROOTFS/usr/include/xtos/"
+cp "$ROOT/sdk/libxtos-rt/include/xtos/rt_version.h" "$ROOTFS/usr/include/xtos/"
 
 # libxtos-signal
 log "Building libxtos-signal..."
@@ -177,6 +178,7 @@ AR=aarch64-linux-gnu-ar \
 
 cp "$ROOT/sdk/libxtos-signal/libxtos-signal.a" "$ROOTFS/usr/lib/"
 cp "$ROOT/sdk/libxtos-signal/include/xtos/signal.h" "$ROOTFS/usr/include/xtos/"
+cp "$ROOT/sdk/libxtos-signal/include/xtos/signal_version.h" "$ROOTFS/usr/include/xtos/"
 
 # libxtos-bci
 log "Building libxtos-bci..."
@@ -187,6 +189,7 @@ AR=aarch64-linux-gnu-ar \
 
 cp "$ROOT/sdk/libxtos-bci/libxtos-bci.a" "$ROOTFS/usr/lib/"
 cp "$ROOT/sdk/libxtos-bci/include/xtos/bci.h" "$ROOTFS/usr/include/xtos/"
+cp "$ROOT/sdk/libxtos-bci/include/xtos/bci_version.h" "$ROOTFS/usr/include/xtos/"
 
 # Verify all installed libraries are aarch64 (guards against stale x86_64
 # artifacts in the sdk tree breaking Stage 4 static links)

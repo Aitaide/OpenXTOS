@@ -3,11 +3,13 @@ AR ?= ar
 CFLAGS = -Wall -Wextra -O2 -fPIC -I./include
 LDFLAGS = -shared
 
-# Library name
+# Library name and ABI version (keep in sync with include/xtos/bci_version.h)
 LIB_NAME = libxtos-bci
+LIB_MAJOR = 1
+LIB_MINOR = 0
 LIB_STATIC = $(LIB_NAME).a
-LIB_SHARED = $(LIB_NAME).so.1.0
-LIB_SONAME = $(LIB_NAME).so.1
+LIB_SHARED = $(LIB_NAME).so.$(LIB_MAJOR).$(LIB_MINOR)
+LIB_SONAME = $(LIB_NAME).so.$(LIB_MAJOR)
 
 # Source files
 SRCS = src/session.c
