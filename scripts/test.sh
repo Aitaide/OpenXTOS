@@ -5,7 +5,7 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
 export PYTHONDONTWRITEBYTECODE=1
 cleanup() {
-    for component in sdk/libxtos-bci sdk/libxtos-rt sdk/libxtos-signal tools/xtos-eeg-pipeline tools/xtos-signal-benchmark tools/xtos-fuzz; do
+    for component in sdk/libxtos-bci sdk/libxtos-rt sdk/libxtos-signal tools/xtos-eeg-pipeline tools/xtos-signal-benchmark tools/xtos-fuzz tools/xtos-sbom; do
         make -C "$ROOT/$component" clean >/dev/null 2>&1 || true
     done
 }
@@ -19,6 +19,8 @@ make -C "$ROOT/tools/xtos-eeg-pipeline" clean test
 make -C "$ROOT/tools/xtos-signal-benchmark" clean test
 python3 -m unittest discover -s "$ROOT/tools/xtos-eeg-replay" -p 'test_replay.py' -v
 make -C "$ROOT/tools/xtos-fuzz" check
+python3 -m unittest discover -s "$ROOT/tools/xtos-sbom" -p 'test_sbom.py' -v
+python3 "$ROOT/tools/xtos-sbom/gen_sbom.py" --check
 python3 -m unittest discover -s "$ROOT/tools/xtos-onnx-baseline" -p 'test_onnx_baseline.py' -v
 python3 -m unittest discover -s "$ROOT/tools/xtos-onnx-baseline" -p 'test_torch_onnx_parity.py' -v
 python3 -m unittest discover -s "$ROOT/tools/xtos-onnx-baseline" -p 'test_tf_onnx_parity.py' -v

@@ -17,6 +17,8 @@ jobs:
         run: ./scripts/test.sh
       - name: Extended fuzz round
         run: make -C tools/xtos-fuzz fuzz FUZZ_ROUNDS=300
+      - name: SBOM freshness check
+        run: python3 tools/xtos-sbom/gen_sbom.py --check
       - name: Check project whitespace
         run: git diff --check HEAD^ HEAD -- README.md CONTRIBUTING.md .gitignore .gitattributes .github scripts sdk tools tests system docs/system_build.md docs/signal_processing_benchmark.md docs/signal_processing_baseline.md docs/onnx_runtime_cpu_baseline.md docs/torch_onnx_export_parity.md plans/XTOS_Next_Development_Plan_Rev2.md examples/bci_test.c
   system:
