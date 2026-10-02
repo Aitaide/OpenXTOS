@@ -1,0 +1,7 @@
+# SPDX-License-Identifier: GPL-2.0
+
+menu "XTOS Real-Time Operating System"
+
+source "drivers/xtos/bci/Kconfig"
+
+endmenu

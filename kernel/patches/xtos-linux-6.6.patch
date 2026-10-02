@@ -1,0 +1,2078 @@
+diff --git a/drivers/Kconfig b/drivers/Kconfig
+index efb66e25f..aef95616b 100644
+--- a/drivers/Kconfig
++++ b/drivers/Kconfig
+@@ -4,6 +4,7 @@ menu "Device Drivers"
+ # Keep I/O buses first
+ 
+ source "drivers/amba/Kconfig"
++source "drivers/xtos/Kconfig"
+ source "drivers/eisa/Kconfig"
+ source "drivers/pci/Kconfig"
+ source "drivers/cxl/Kconfig"
+diff --git a/drivers/Makefile b/drivers/Makefile
+index 1bec7819a..bda9c0d4b 100644
+--- a/drivers/Makefile
++++ b/drivers/Makefile
+@@ -12,6 +12,7 @@ MAKEFLAGS += --include-dir=$(srctree)
+ endif
+ 
+ obj-y				+= cache/
++obj-$(CONFIG_XTOS_BCI)		+= xtos/
+ obj-y				+= irqchip/
+ obj-y				+= bus/
+ 
+diff --git a/init/Kconfig b/init/Kconfig
+index 6d35728b9..bb9a50e5d 100644
+--- a/init/Kconfig
++++ b/init/Kconfig
+@@ -467,6 +467,7 @@ source "kernel/irq/Kconfig"
+ source "kernel/time/Kconfig"
+ source "kernel/bpf/Kconfig"
+ source "kernel/Kconfig.preempt"
++source "kernel/sched/xtos/Kconfig"
+ 
+ menu "CPU/Task time and stats accounting"
+ 
+diff --git a/kernel/sched/Makefile b/kernel/sched/Makefile
+index 976092b7b..10ae9dd65 100644
+--- a/kernel/sched/Makefile
++++ b/kernel/sched/Makefile
+@@ -32,3 +32,4 @@ obj-y += core.o
+ obj-y += fair.o
+ obj-y += build_policy.o
+ obj-y += build_utility.o
++obj-$(CONFIG_XTOS_SCHED) += xtos_sched.o
+diff --git a/kernel/sched/xtos_sched.c b/kernel/sched/xtos_sched.c
+new file mode 100644
+index 000000000..4e45d203b
+--- /dev/null
++++ b/kernel/sched/xtos_sched.c
+@@ -0,0 +1,307 @@
++// SPDX-License-Identifier: GPL-2.0
++/*
++ * XTOS scheduler helper.
++ *
++ * This is deliberately not a sched_class.  It provides an opt-in, locked
++ * O(1) priority queue that an integration layer may use without changing
++ * Linux's scheduler selection, task_struct layout, or syscall ABI.
++ */
++
++#include <linux/atomic.h>
++#include <linux/cpumask.h>
++#include <linux/errno.h>
++#include <linux/init.h>
++#include <linux/kernel.h>
++#include <linux/ktime.h>
++#include <linux/module.h>
++#include <linux/percpu.h>
++#include <linux/sched.h>
++#include <linux/spinlock.h>
++#include <linux/xtos.h>
++
++#include "xtos_prio.h"
++
++static DEFINE_PER_CPU(struct xtos_rq, xtos_runqueues);
++static atomic64_t xtos_total_enqueues;
++static atomic64_t xtos_total_dequeues;
++static atomic64_t xtos_total_picks;
++
++static void xtos_remove_locked(struct xtos_rq *rq, struct xtos_task *task)
++{
++	int ret;
++
++	ret = xtos_queue_dequeue(&rq->queues, &task->queue_node,
++				 task->xtos_priority);
++		if (WARN_ON_ONCE(ret))
++			return;
++
++	if (task->last_enqueue) {
++		task->wait_time += ktime_get_ns() - task->last_enqueue;
++		task->last_enqueue = 0;
++	}
++	task->on_rq = false;
++	task->rq = NULL;
++}
++
++struct xtos_rq *xtos_rq_for_cpu(int cpu)
++{
++	if (cpu < 0 || cpu >= nr_cpu_ids || !cpu_possible(cpu))
++		return NULL;
++	return &per_cpu(xtos_runqueues, cpu);
++}
++EXPORT_SYMBOL_GPL(xtos_rq_for_cpu);
++
++void init_xtos_rq(struct xtos_rq *rq)
++{
++	if (!rq)
++		return;
++
++	spin_lock_init(&rq->lock);
++	xtos_queue_set_init(&rq->queues);
++	rq->curr = NULL;
++	rq->total_switches = 0;
++	rq->avg_latency_ns = 0;
++	rq->last_schedule_time = 0;
++}
++EXPORT_SYMBOL_GPL(init_xtos_rq);
++
++int enqueue_task_xtos(struct xtos_rq *rq, struct xtos_task *task)
++{
++	unsigned long flags;
++	int ret;
++
++	if (!rq || !task || !task->initialized)
++		return -EINVAL;
++	if (!XTOS_PRIO_VALID(task->xtos_priority))
++		return -EINVAL;
++
++	spin_lock_irqsave(&task->state_lock, flags);
++	spin_lock(&rq->lock);
++	if (task->on_rq) {
++		ret = -EBUSY;
++		goto out;
++	}
++	ret = xtos_queue_enqueue(&rq->queues, &task->queue_node,
++					task->xtos_priority);
++	if (ret)
++		goto out;
++
++	task->on_rq = true;
++	task->rq = rq;
++	task->last_enqueue = ktime_get_ns();
++	atomic64_inc(&xtos_total_enqueues);
++out:
++	spin_unlock(&rq->lock);
++	spin_unlock_irqrestore(&task->state_lock, flags);
++	return ret;
++}
++EXPORT_SYMBOL_GPL(enqueue_task_xtos);
++
++int dequeue_task_xtos(struct xtos_rq *rq, struct xtos_task *task)
++{
++	unsigned long flags;
++	int ret = 0;
++
++	if (!rq || !task || !task->initialized)
++		return -EINVAL;
++
++	spin_lock_irqsave(&task->state_lock, flags);
++	spin_lock(&rq->lock);
++	if (!task->on_rq || task->rq != rq) {
++		ret = -ENOENT;
++		goto out;
++	}
++	xtos_remove_locked(rq, task);
++	atomic64_inc(&xtos_total_dequeues);
++out:
++	spin_unlock(&rq->lock);
++	spin_unlock_irqrestore(&task->state_lock, flags);
++	return ret;
++}
++EXPORT_SYMBOL_GPL(dequeue_task_xtos);
++
++struct xtos_task *pick_next_task_xtos(struct xtos_rq *rq)
++{
++	unsigned long flags;
++	struct xtos_queue_node *node;
++	struct xtos_task *task = NULL;
++
++	if (!rq)
++		return NULL;
++
++	spin_lock_irqsave(&rq->lock, flags);
++	node = xtos_queue_pick(&rq->queues);
++	if (node) {
++		task = container_of(node, struct xtos_task, queue_node);
++		atomic64_inc(&xtos_total_picks);
++	}
++	spin_unlock_irqrestore(&rq->lock, flags);
++
++	return task;
++}
++EXPORT_SYMBOL_GPL(pick_next_task_xtos);
++
++int xtos_task_init(struct xtos_task *xt, struct task_struct *task)
++{
++	if (!xt)
++		return -EINVAL;
++
++	memset(xt, 0, sizeof(*xt));
++	spin_lock_init(&xt->state_lock);
++	xt->task = task;
++	xt->xtos_priority = XTOS_PRIO_NORMAL;
++	xt->base_priority = XTOS_PRIO_NORMAL;
++	xt->cpu_affinity = XTOS_CPU_AFFINITY_NONE;
++	xt->initialized = true;
++	return 0;
++}
++EXPORT_SYMBOL_GPL(xtos_task_init);
++
++void xtos_task_destroy(struct xtos_task *xt)
++{
++	unsigned long flags;
++	struct xtos_rq *rq;
++	struct task_struct *task;
++
++	if (!xt || !xt->initialized)
++		return;
++
++	spin_lock_irqsave(&xt->state_lock, flags);
++	rq = xt->rq;
++	if (rq) {
++		spin_lock(&rq->lock);
++		if (xt->on_rq)
++			xtos_remove_locked(rq, xt);
++		spin_unlock(&rq->lock);
++	}
++	task = xt->task;
++	xt->task = NULL;
++	xt->initialized = false;
++	spin_unlock_irqrestore(&xt->state_lock, flags);
++
++	/* The task pointer is non-owning; its lifetime belongs to the caller. */
++	(void)task;
++}
++EXPORT_SYMBOL_GPL(xtos_task_destroy);
++
++int xtos_set_priority(struct xtos_task *xt, int priority)
++{
++	unsigned long flags;
++	struct xtos_rq *rq;
++	int old_priority;
++	int ret;
++
++	if (!xt || !xt->initialized || !XTOS_PRIO_VALID(priority))
++		return -EINVAL;
++
++	spin_lock_irqsave(&xt->state_lock, flags);
++	old_priority = xt->xtos_priority;
++	if (old_priority == priority) {
++		spin_unlock_irqrestore(&xt->state_lock, flags);
++		return 0;
++	}
++
++	rq = xt->rq;
++	if (!rq) {
++		xt->xtos_priority = priority;
++		xt->base_priority = priority;
++		spin_unlock_irqrestore(&xt->state_lock, flags);
++		return 0;
++	}
++
++	spin_lock(&rq->lock);
++	if (!xt->on_rq) {
++		ret = -ENOENT;
++		goto out;
++	}
++	ret = xtos_queue_dequeue(&rq->queues, &xt->queue_node, old_priority);
++	if (ret)
++		goto out;
++	xt->xtos_priority = priority;
++	xt->base_priority = priority;
++	ret = xtos_queue_enqueue(&rq->queues, &xt->queue_node, priority);
++	if (WARN_ON_ONCE(ret))
++		xt->xtos_priority = old_priority;
++out:
++	spin_unlock(&rq->lock);
++	spin_unlock_irqrestore(&xt->state_lock, flags);
++	return ret;
++}
++EXPORT_SYMBOL_GPL(xtos_set_priority);
++
++int xtos_set_cpu_affinity(struct xtos_task *xt, int cpu)
++{
++	unsigned long flags;
++
++	if (!xt || !xt->initialized)
++		return -EINVAL;
++	if (cpu != XTOS_CPU_AFFINITY_NONE &&
++	    (cpu < 0 || cpu >= nr_cpu_ids || !cpu_possible(cpu)))
++		return -EINVAL;
++
++	spin_lock_irqsave(&xt->state_lock, flags);
++	/* Advisory metadata only; this helper does not migrate Linux tasks. */
++	xt->cpu_affinity = cpu;
++	spin_unlock_irqrestore(&xt->state_lock, flags);
++	return 0;
++}
++EXPORT_SYMBOL_GPL(xtos_set_cpu_affinity);
++
++int xtos_set_deadline(struct xtos_task *xt, __u64 deadline_ns)
++{
++	unsigned long flags;
++
++	if (!xt || !xt->initialized)
++		return -EINVAL;
++
++	spin_lock_irqsave(&xt->state_lock, flags);
++	xt->deadline_ns = deadline_ns;
++	spin_unlock_irqrestore(&xt->state_lock, flags);
++	return 0;
++}
++EXPORT_SYMBOL_GPL(xtos_set_deadline);
++
++void xtos_get_stats(struct xtos_task *xt, struct xtos_stats *stats)
++{
++	unsigned long flags;
++
++	if (!stats)
++		return;
++	memset(stats, 0, sizeof(*stats));
++	if (!xt || !xt->initialized)
++		return;
++
++	spin_lock_irqsave(&xt->state_lock, flags);
++	stats->total_runtime_ns = xt->total_runtime;
++	stats->wait_time_ns = xt->wait_time;
++	stats->context_switches = xt->context_switches;
++	stats->preempt_count = xt->preempt_count;
++	stats->deadline_misses = xt->deadline_misses;
++	spin_unlock_irqrestore(&xt->state_lock, flags);
++}
++EXPORT_SYMBOL_GPL(xtos_get_stats);
++
++static int __init xtos_sched_init(void)
++{
++	int cpu;
++
++	for_each_possible_cpu(cpu)
++		init_xtos_rq(&per_cpu(xtos_runqueues, cpu));
++
++	atomic64_set(&xtos_total_enqueues, 0);
++	atomic64_set(&xtos_total_dequeues, 0);
++	atomic64_set(&xtos_total_picks, 0);
++	pr_info("XTOS: optional O(1) scheduler helper initialized; Linux sched_class unchanged\n");
++	return 0;
++}
++module_init(xtos_sched_init);
++
++static void __exit xtos_sched_exit(void)
++{
++	pr_info("XTOS: scheduler helper unloaded\n");
++}
++module_exit(xtos_sched_exit);
++
++MODULE_LICENSE("GPL");
++MODULE_AUTHOR("XTOS Development Team");
++MODULE_DESCRIPTION("XTOS optional O(1) scheduler helper");
+diff --git a/kernel/sched/xtos_prio.h b/kernel/sched/xtos_prio.h
+new file mode 100644
+index 000000000..dc8c8caeb
+--- /dev/null
++++ b/kernel/sched/xtos_prio.h
+@@ -0,0 +1,35 @@
++/* SPDX-License-Identifier: GPL-2.0 */
++#ifndef _KERNEL_SCHED_XTOS_PRIO_H
++#define _KERNEL_SCHED_XTOS_PRIO_H
++
++#define XTOS_NR_PRIORITIES 15
++
++#define XTOS_PRIO_CRITICAL    0
++#define XTOS_PRIO_EEG_SIGNAL  1
++#define XTOS_PRIO_BCI_EVENT   2
++#define XTOS_PRIO_AR_RENDER   3
++#define XTOS_PRIO_AI_URGENT   4
++#define XTOS_PRIO_DEVICE_IO   5
++#define XTOS_PRIO_RT_HIGH     6
++#define XTOS_PRIO_RT_MED      7
++#define XTOS_PRIO_RT_LOW      8
++#define XTOS_PRIO_RT_MIN      9
++#define XTOS_PRIO_NORMAL      10
++#define XTOS_PRIO_BATCH_HIGH  11
++#define XTOS_PRIO_BATCH_MED   12
++#define XTOS_PRIO_BATCH_LOW   13
++#define XTOS_PRIO_IDLE        14
++
++#ifndef XTOS_PRIO_MIN
++#define XTOS_PRIO_MIN XTOS_PRIO_CRITICAL
++#endif
++#ifndef XTOS_PRIO_MAX
++#define XTOS_PRIO_MAX XTOS_PRIO_IDLE
++#endif
++
++#define XTOS_PRIO_VALID(prio) ((prio) >= XTOS_PRIO_MIN && \
++				   (prio) <= XTOS_PRIO_MAX)
++#define XTOS_PRIO_IS_RT(prio) ((prio) >= XTOS_PRIO_MIN && \
++				   (prio) <= XTOS_PRIO_RT_MIN)
++
++#endif /* _KERNEL_SCHED_XTOS_PRIO_H */
+diff --git a/kernel/sched/xtos/Kconfig b/kernel/sched/xtos/Kconfig
+new file mode 100644
+index 000000000..0885dd476
+--- /dev/null
++++ b/kernel/sched/xtos/Kconfig
+@@ -0,0 +1,12 @@
++# SPDX-License-Identifier: GPL-2.0
++
++config XTOS_SCHED
++	tristate "XTOS optional scheduler helper"
++	default n
++	help
++	  Build the XTOS O(1) priority-queue helper as a loadable module or
++	  built-in component.  This does not replace Linux's sched_class and
++	  does not alter normal task scheduling.  It is intended for explicit
++	  integrations that own the xtos_task control blocks.
++
++	  If unsure, say N.
+diff --git a/include/linux/xtos.h b/include/linux/xtos.h
+new file mode 100644
+index 000000000..08c18e659
+--- /dev/null
++++ b/include/linux/xtos.h
+@@ -0,0 +1,90 @@
++/* SPDX-License-Identifier: GPL-2.0 */
++#ifndef _LINUX_XTOS_H
++#define _LINUX_XTOS_H
++
++#include <linux/types.h>
++
++#define XTOS_PRIO_MIN 0
++#define XTOS_PRIO_MAX 14
++#define XTOS_NR_PRIORITIES 15
++#define XTOS_CPU_AFFINITY_NONE (-1)
++
++/* Metadata passed between a caller and the optional XTOS helper. */
++struct xtos_attr {
++	__s32 priority;
++	__s32 cpu_affinity;
++	__u64 deadline_ns;
++	__u8 eeg_sensitive;
++	__u8 __reserved[7];
++};
++
++struct xtos_stats {
++	__u64 total_runtime_ns;
++	__u64 wait_time_ns;
++	__u64 context_switches;
++	__u64 preempt_count;
++	__u64 deadline_misses;
++};
++
++#ifdef __KERNEL__
++
++#include <linux/sched.h>
++#include <linux/spinlock_types.h>
++#include <linux/xtos_queue.h>
++
++struct xtos_rq;
++
++/*
++ * XTOS task state is an opt-in control block.  It is not embedded in
++ * task_struct and does not change Linux's active sched_class.
++ */
++struct xtos_task {
++	struct task_struct *task; /* non-owning reference supplied by the caller */
++	int xtos_priority;
++	int base_priority;
++	__u64 deadline_ns;
++	int cpu_affinity;
++
++	bool eeg_sensitive;
++	__u64 last_eeg_event;
++	int eeg_boost_level;
++
++	__u64 total_runtime;
++	__u64 wait_time;
++	__u64 last_enqueue;
++	__u64 context_switches;
++	__u64 preempt_count;
++	__u64 deadline_misses;
++
++	struct xtos_queue_node queue_node;
++	struct xtos_rq *rq;
++	spinlock_t state_lock;
++	bool on_rq;
++	bool initialized;
++};
++
++struct xtos_rq {
++	spinlock_t lock;
++	struct xtos_queue_set queues;
++	struct xtos_task *curr;
++	__u64 total_switches;
++	__u64 avg_latency_ns;
++	__u64 last_schedule_time;
++};
++
++struct xtos_rq *xtos_rq_for_cpu(int cpu);
++void init_xtos_rq(struct xtos_rq *rq);
++int enqueue_task_xtos(struct xtos_rq *rq, struct xtos_task *task);
++int dequeue_task_xtos(struct xtos_rq *rq, struct xtos_task *task);
++struct xtos_task *pick_next_task_xtos(struct xtos_rq *rq);
++
++int xtos_task_init(struct xtos_task *xt, struct task_struct *task);
++void xtos_task_destroy(struct xtos_task *xt);
++int xtos_set_priority(struct xtos_task *xt, int priority);
++int xtos_set_cpu_affinity(struct xtos_task *xt, int cpu);
++int xtos_set_deadline(struct xtos_task *xt, __u64 deadline_ns);
++void xtos_get_stats(struct xtos_task *xt, struct xtos_stats *stats);
++
++#endif /* __KERNEL__ */
++
++#endif /* _LINUX_XTOS_H */
+diff --git a/include/linux/xtos_bci.h b/include/linux/xtos_bci.h
+new file mode 100644
+index 000000000..1730e013a
+--- /dev/null
++++ b/include/linux/xtos_bci.h
+@@ -0,0 +1,144 @@
++/* SPDX-License-Identifier: GPL-2.0 */
++/*
++ * XTOS BCI (Brain-Computer Interface) Driver Framework
++ * 
++ * Unified abstraction layer for EEG/brain sensing devices
++ * Copyright (C) 2026 XTOS Project
++ */
++
++#ifndef _LINUX_XTOS_BCI_H
++#define _LINUX_XTOS_BCI_H
++
++#include <linux/types.h>
++#include <linux/device.h>
++#include <linux/cdev.h>
++#include <linux/list.h>
++#include <linux/spinlock.h>
++#include <linux/wait.h>
++#include <linux/dma-mapping.h>
++
++/* BCI device interface types */
++enum xtos_bci_interface {
++	XTOS_BCI_SERIAL,
++	XTOS_BCI_USB,
++	XTOS_BCI_BLUETOOTH,
++	XTOS_BCI_NETWORK
++};
++
++/* Forward declarations */
++struct xtos_bci_dev;
++struct xtos_bci_ringbuf;
++
++/* Device operation callbacks */
++struct xtos_bci_device_ops {
++	/* Initialization and cleanup */
++	int (*init)(struct xtos_bci_dev *dev);
++	void (*cleanup)(struct xtos_bci_dev *dev);
++	
++	/* Data acquisition */
++	int (*start_stream)(struct xtos_bci_dev *dev);
++	int (*stop_stream)(struct xtos_bci_dev *dev);
++	int (*read_samples)(struct xtos_bci_dev *dev,
++	                    s32 *buffer,
++	                    size_t num_samples);
++	
++	/* Configuration */
++	int (*set_sampling_rate)(struct xtos_bci_dev *dev, int rate);
++	int (*set_channel_enable)(struct xtos_bci_dev *dev, 
++	                          int channel, 
++	                          bool enable);
++	int (*set_gain)(struct xtos_bci_dev *dev, 
++	                int channel, 
++	                int gain);
++	
++	/* Calibration */
++	int (*calibrate)(struct xtos_bci_dev *dev);
++	int (*impedance_check)(struct xtos_bci_dev *dev, 
++	                      __u32 *impedances_kohm);
++};
++
++/* BCI device descriptor */
++struct xtos_bci_dev {
++	/* Device identification */
++	char name[32];              /* Device name (e.g., "OpenBCI Cyton") */
++	int dev_id;                 /* Unique device ID */
++	
++	/* Hardware parameters */
++	int num_channels;           /* Number of channels */
++	int sampling_rate;          /* Sampling rate (Hz) */
++	int resolution_bits;        /* ADC resolution (bits) */
++	int input_range_mv;         /* Input range (millivolts, integer) */
++	
++	/* Connection information */
++	enum xtos_bci_interface interface;
++	void *hw_private;           /* Hardware private data */
++	
++	/* Operation callbacks */
++	const struct xtos_bci_device_ops *ops;
++	
++	/* Ring buffer */
++	struct xtos_bci_ringbuf *ringbuf;
++	
++	/* Character device */
++	struct cdev cdev;
++	struct device *device;
++	dev_t devt;                 /* Device number (major:minor) */
++	
++	/* Statistics */
++	unsigned long samples_read;
++	unsigned long samples_dropped;
++	unsigned long errors;
++	
++	/* State */
++	bool opened;
++	bool streaming;
++	spinlock_t lock;
++	
++	/* Global device list */
++	struct list_head list;
++};
++
++/* Zero-copy ring buffer */
++struct xtos_bci_ringbuf {
++	void *buffer;               /* DMA buffer */
++	dma_addr_t dma_handle;      /* DMA physical address */
++	size_t size;                /* Buffer size (bytes) */
++	
++	unsigned long write_pos;    /* Write pointer */
++	unsigned long read_pos;     /* Read pointer */
++	
++	spinlock_t lock;            /* Spinlock */
++	wait_queue_head_t wait;     /* Wait queue */
++	
++	/* Performance statistics */
++	unsigned long overruns;     /* Overflow count */
++	unsigned long max_fill;     /* Maximum fill level */
++};
++
++/* Core API functions */
++int xtos_bci_register_device(struct xtos_bci_dev *dev);
++void xtos_bci_unregister_device(struct xtos_bci_dev *dev);
++
++/* Ring buffer API */
++struct xtos_bci_ringbuf *xtos_bci_ringbuf_alloc(struct device *dev, size_t size);
++void xtos_bci_ringbuf_free(struct device *dev, struct xtos_bci_ringbuf *rb);
++int xtos_bci_ringbuf_write(struct xtos_bci_ringbuf *rb, 
++                           const void *data, 
++                           size_t len);
++int xtos_bci_ringbuf_read(struct xtos_bci_ringbuf *rb, 
++                          void *data, 
++                          size_t len);
++size_t xtos_bci_ringbuf_available(struct xtos_bci_ringbuf *rb);
++
++/* Device registration macro */
++#define XTOS_BCI_DEVICE_REGISTER(name, ops_ptr) \
++	static int __init name##_init(void) { \
++		return xtos_bci_register_device(&name##_dev); \
++	} \
++	static void __exit name##_exit(void) { \
++		xtos_bci_unregister_device(&name##_dev); \
++	} \
++	module_init(name##_init); \
++	module_exit(name##_exit);
++
++#endif /* _LINUX_XTOS_BCI_H */
+diff --git a/include/linux/xtos_queue.h b/include/linux/xtos_queue.h
+new file mode 100644
+index 000000000..821c812eb
+--- /dev/null
++++ b/include/linux/xtos_queue.h
+@@ -0,0 +1,129 @@
++/* SPDX-License-Identifier: GPL-2.0 */
++#ifndef _LINUX_XTOS_QUEUE_H
++#define _LINUX_XTOS_QUEUE_H
++
++/*
++ * Small, intrusive O(1) priority queue core shared by the kernel helper and
++ * the user-space unit test.  The caller provides any required locking.
++ */
++#ifdef __KERNEL__
++#include <linux/errno.h>
++#else
++#include <errno.h>
++#include <stddef.h>
++#endif
++
++#define XTOS_QUEUE_NR_PRIORITIES 15
++
++struct xtos_queue;
++
++struct xtos_queue_node {
++	struct xtos_queue_node *prev;
++	struct xtos_queue_node *next;
++	struct xtos_queue *owner;
++};
++
++struct xtos_queue {
++	struct xtos_queue_node *head;
++	struct xtos_queue_node *tail;
++};
++
++struct xtos_queue_set {
++	struct xtos_queue queue[XTOS_QUEUE_NR_PRIORITIES];
++	unsigned long bitmap;
++	unsigned int nr_running;
++};
++
++static inline int xtos_queue_prio_valid(int priority)
++{
++	return priority >= 0 && priority < XTOS_QUEUE_NR_PRIORITIES;
++}
++
++static inline void xtos_queue_set_init(struct xtos_queue_set *set)
++{
++	unsigned int i;
++
++	for (i = 0; i < XTOS_QUEUE_NR_PRIORITIES; i++) {
++		set->queue[i].head = NULL;
++		set->queue[i].tail = NULL;
++	}
++	set->bitmap = 0;
++	set->nr_running = 0;
++}
++
++static inline int xtos_queue_enqueue(struct xtos_queue_set *set,
++					 struct xtos_queue_node *node, int priority)
++{
++	struct xtos_queue *queue;
++
++	if (!set || !node || !xtos_queue_prio_valid(priority))
++		return -EINVAL;
++	if (node->owner)
++		return -EBUSY;
++
++	queue = &set->queue[priority];
++	node->prev = queue->tail;
++	node->next = NULL;
++	node->owner = queue;
++	if (queue->tail)
++		queue->tail->next = node;
++	else
++		queue->head = node;
++	queue->tail = node;
++	set->bitmap |= 1UL << priority;
++	set->nr_running++;
++
++	return 0;
++}
++
++static inline int xtos_queue_dequeue(struct xtos_queue_set *set,
++					 struct xtos_queue_node *node, int priority)
++{
++	struct xtos_queue *queue;
++
++	if (!set || !node || !xtos_queue_prio_valid(priority))
++		return -EINVAL;
++
++	queue = &set->queue[priority];
++	if (node->owner != queue)
++		return -ENOENT;
++
++	if (node->prev)
++		node->prev->next = node->next;
++	else
++		queue->head = node->next;
++	if (node->next)
++		node->next->prev = node->prev;
++	else
++		queue->tail = node->prev;
++
++	node->prev = NULL;
++	node->next = NULL;
++	node->owner = NULL;
++	if (!queue->head)
++		set->bitmap &= ~(1UL << priority);
++	if (set->nr_running)
++		set->nr_running--;
++
++	return 0;
++}
++
++static inline struct xtos_queue_node *xtos_queue_pick(struct xtos_queue_set *set)
++{
++	unsigned int priority;
++
++	if (!set)
++		return NULL;
++
++	while (set->bitmap) {
++		priority = (unsigned int)__builtin_ctzl(set->bitmap);
++		if (set->queue[priority].head)
++			return set->queue[priority].head;
++		/* Repair a stale bit and continue to the next priority. */
++		set->bitmap &= ~(1UL << priority);
++	}
++
++	return NULL;
++}
++
++#endif /* _LINUX_XTOS_QUEUE_H */
+diff --git a/include/uapi/linux/xtos_bci.h b/include/uapi/linux/xtos_bci.h
+new file mode 100644
+index 000000000..d00bef91e
+--- /dev/null
++++ b/include/uapi/linux/xtos_bci.h
+@@ -0,0 +1,70 @@
++/* SPDX-License-Identifier: GPL-2.0 WITH Linux-syscall-note */
++/*
++ * XTOS BCI (Brain-Computer Interface) User API
++ * 
++ * User-space API for BCI devices
++ * Copyright (C) 2026 XTOS Project
++ */
++
++#ifndef _UAPI_LINUX_XTOS_BCI_H
++#define _UAPI_LINUX_XTOS_BCI_H
++
++#include <linux/types.h>
++#include <linux/ioctl.h>
++
++/* ioctl magic number */
++#define XTOS_BCI_IOC_MAGIC 'X'
++
++/* Device information structure */
++struct xtos_bci_info {
++	char name[32];              /* Device name */
++	__u32 dev_id;               /* Device ID */
++	__u32 num_channels;         /* Number of channels */
++	__u32 sampling_rate;        /* Sampling rate (Hz) */
++	__u32 resolution_bits;      /* ADC resolution */
++	__u32 input_range_mv;       /* Input range (mV, integer) */
++	__u32 interface;            /* Interface type */
++};
++
++/* Channel configuration */
++struct xtos_bci_channel_config {
++	__u32 channel;              /* Channel index */
++	__u32 enabled;              /* Enable/disable */
++	__u32 gain;                 /* Gain setting */
++};
++
++/* Statistics */
++struct xtos_bci_stats {
++	__u64 samples_read;         /* Total samples read */
++	__u64 samples_dropped;      /* Samples dropped (overflow) */
++	__u64 errors;               /* Error count */
++	__u64 overruns;             /* Ring buffer overruns */
++};
++
++/* ioctl commands */
++
++/* Get device information */
++#define XTOS_BCI_GET_INFO       _IOR(XTOS_BCI_IOC_MAGIC, 1, struct xtos_bci_info)
++
++/* Data stream control */
++#define XTOS_BCI_START_STREAM   _IO(XTOS_BCI_IOC_MAGIC, 2)
++#define XTOS_BCI_STOP_STREAM    _IO(XTOS_BCI_IOC_MAGIC, 3)
++
++/* Parameter configuration */
++#define XTOS_BCI_SET_RATE       _IOW(XTOS_BCI_IOC_MAGIC, 4, __u32)
++#define XTOS_BCI_SET_CHANNEL    _IOW(XTOS_BCI_IOC_MAGIC, 5, struct xtos_bci_channel_config)
++#define XTOS_BCI_SET_CHANNELS   _IOW(XTOS_BCI_IOC_MAGIC, 6, __u32)
++
++/* Calibration */
++#define XTOS_BCI_CALIBRATE      _IO(XTOS_BCI_IOC_MAGIC, 7)
++#define XTOS_BCI_CHECK_IMP      _IOR(XTOS_BCI_IOC_MAGIC, 8, __u32[32])
++
++/* Statistics */
++#define XTOS_BCI_GET_STATS      _IOR(XTOS_BCI_IOC_MAGIC, 9, struct xtos_bci_stats)
++#define XTOS_BCI_RESET_STATS    _IO(XTOS_BCI_IOC_MAGIC, 10)
++
++/* Buffer size control */
++#define XTOS_BCI_GET_BUFSIZE    _IOR(XTOS_BCI_IOC_MAGIC, 11, __u32)
++#define XTOS_BCI_SET_BUFSIZE    _IOW(XTOS_BCI_IOC_MAGIC, 12, __u32)
++
++#endif /* _UAPI_LINUX_XTOS_BCI_H */
+diff --git a/drivers/xtos/Kconfig b/drivers/xtos/Kconfig
+new file mode 100644
+index 000000000..9a5ccee5d
+--- /dev/null
++++ b/drivers/xtos/Kconfig
+@@ -0,0 +1,7 @@
++# SPDX-License-Identifier: GPL-2.0
++
++menu "XTOS Real-Time Operating System"
++
++source "drivers/xtos/bci/Kconfig"
++
++endmenu
+diff --git a/drivers/xtos/Makefile b/drivers/xtos/Makefile
+new file mode 100644
+index 000000000..385ccc4ba
+--- /dev/null
++++ b/drivers/xtos/Makefile
+@@ -0,0 +1,6 @@
++# SPDX-License-Identifier: GPL-2.0
++#
++# Makefile for XTOS drivers
++#
++
++obj-$(CONFIG_XTOS_BCI) += bci/
+diff --git a/drivers/xtos/bci/Kconfig b/drivers/xtos/bci/Kconfig
+new file mode 100644
+index 000000000..bd15051a5
+--- /dev/null
++++ b/drivers/xtos/bci/Kconfig
+@@ -0,0 +1,33 @@
++# SPDX-License-Identifier: GPL-2.0
++#
++# XTOS Real-Time Operating System Drivers
++#
++
++config XTOS_BCI
++	tristate "XTOS BCI (Brain-Computer Interface) Framework"
++	default n
++	help
++	  Core framework for BCI/EEG device drivers. Provides a unified
++	  character-device interface and an internal ring buffer.
++
++	  The framework does not create hardware or sample data by itself.
++	  If unsure, say N.
++
++config XTOS_BCI_OPENBCI
++	tristate "OpenBCI Cyton serdev driver"
++	depends on XTOS_BCI
++	depends on SERIAL_DEV_BUS
++	default n
++	help
++	  Serdev skeleton for OpenBCI Cyton. It only binds when firmware
++	  describes an OpenBCI-compatible serdev device; it does not create
++	  a serial device or emulate hardware.
++
++config XTOS_BCI_DEBUG
++	bool "XTOS BCI Debug Support"
++	depends on XTOS_BCI
++	help
++	  Enable debug messages for BCI drivers. This adds overhead
++	  but helps troubleshooting device issues.
++
++	  If unsure, say N.
+diff --git a/drivers/xtos/bci/Makefile b/drivers/xtos/bci/Makefile
+new file mode 100644
+index 000000000..ad4378908
+--- /dev/null
++++ b/drivers/xtos/bci/Makefile
+@@ -0,0 +1,14 @@
++# SPDX-License-Identifier: GPL-2.0
++#
++# Makefile for XTOS BCI drivers
++#
++
++obj-$(CONFIG_XTOS_BCI) += xtos_bci_core.o
++obj-$(CONFIG_XTOS_BCI) += xtos_bci_buffer.o
++
++# Device drivers
++obj-$(CONFIG_XTOS_BCI_OPENBCI) += devices/openbci_cyton.o
++
++# Add more device drivers here
++# obj-$(CONFIG_XTOS_BCI_EMOTIV) += devices/emotiv_epoc.o
++# obj-$(CONFIG_XTOS_BCI_MUSE) += devices/muse_s.o
+diff --git a/drivers/xtos/bci/xtos_bci_core.c b/drivers/xtos/bci/xtos_bci_core.c
+new file mode 100644
+index 000000000..366da67d0
+--- /dev/null
++++ b/drivers/xtos/bci/xtos_bci_core.c
+@@ -0,0 +1,445 @@
++// SPDX-License-Identifier: GPL-2.0
++/*
++ * XTOS BCI Core Driver
++ * 
++ * Core framework for BCI device registration and management
++ * Copyright (C) 2026 XTOS Project
++ */
++
++#include <linux/module.h>
++#include <linux/kernel.h>
++#include <linux/init.h>
++#include <linux/fs.h>
++#include <linux/cdev.h>
++#include <linux/device.h>
++#include <linux/slab.h>
++#include <linux/uaccess.h>
++#include <linux/poll.h>
++#include <linux/dma-mapping.h>
++#include <linux/xtos_bci.h>
++#include <uapi/linux/xtos_bci.h>
++
++#define XTOS_BCI_NAME "xtos_bci"
++#define XTOS_BCI_MAX_DEVICES 16
++
++/* Global state */
++static dev_t xtos_bci_devt;
++static struct class *xtos_bci_class;
++static DEFINE_MUTEX(device_list_lock);
++static LIST_HEAD(device_list);
++static int next_dev_id = 0;
++
++/* Character device operations */
++static int xtos_bci_open(struct inode *inode, struct file *filp)
++{
++	struct xtos_bci_dev *dev;
++	unsigned long flags;
++	int ret;
++
++	dev = container_of(inode->i_cdev, struct xtos_bci_dev, cdev);
++
++	spin_lock_irqsave(&dev->lock, flags);
++	if (dev->opened) {
++		spin_unlock_irqrestore(&dev->lock, flags);
++		return -EBUSY;  /* Only one process can open */
++	}
++	dev->opened = true;
++	spin_unlock_irqrestore(&dev->lock, flags);
++
++	/* Initialize device */
++	if (dev->ops->init) {
++		ret = dev->ops->init(dev);
++		if (ret) {
++			dev->opened = false;
++			return ret;
++		}
++	}
++
++	filp->private_data = dev;
++	pr_info("xtos_bci: Device %s opened\n", dev->name);
++
++	return 0;
++}
++
++static int xtos_bci_release(struct inode *inode, struct file *filp)
++{
++	struct xtos_bci_dev *dev = filp->private_data;
++	unsigned long flags;
++
++	/* Stop streaming if active */
++	if (dev->streaming && dev->ops->stop_stream)
++		dev->ops->stop_stream(dev);
++
++	/* Cleanup device */
++	if (dev->ops->cleanup)
++		dev->ops->cleanup(dev);
++
++	spin_lock_irqsave(&dev->lock, flags);
++	dev->opened = false;
++	spin_unlock_irqrestore(&dev->lock, flags);
++
++	pr_info("xtos_bci: Device %s closed\n", dev->name);
++
++	return 0;
++}
++
++static ssize_t xtos_bci_read(struct file *filp, 
++                            char __user *buf, 
++                            size_t count, 
++                            loff_t *ppos)
++{
++	struct xtos_bci_dev *dev = filp->private_data;
++	struct xtos_bci_ringbuf *rb = dev->ringbuf;
++	size_t avail, to_copy;
++	unsigned long flags;
++	int ret;
++
++	if (!rb)
++		return -EINVAL;
++
++	/* Wait for data available */
++	if (filp->f_flags & O_NONBLOCK) {
++		spin_lock_irqsave(&rb->lock, flags);
++		avail = rb->write_pos - rb->read_pos;
++		spin_unlock_irqrestore(&rb->lock, flags);
++		
++		if (avail == 0)
++			return -EAGAIN;
++	} else {
++		ret = wait_event_interruptible(rb->wait, 
++		                               rb->write_pos > rb->read_pos);
++		if (ret)
++			return ret;
++	}
++
++	spin_lock_irqsave(&rb->lock, flags);
++
++	/* Calculate available data */
++	avail = rb->write_pos - rb->read_pos;
++	to_copy = min(count, avail);
++
++	if (to_copy > 0) {
++		size_t pos = rb->read_pos % rb->size;
++		size_t to_end = rb->size - pos;
++
++		spin_unlock_irqrestore(&rb->lock, flags);
++
++		/* Copy to user space */
++		if (to_copy <= to_end) {
++			if (copy_to_user(buf, rb->buffer + pos, to_copy))
++				return -EFAULT;
++		} else {
++			if (copy_to_user(buf, rb->buffer + pos, to_end))
++				return -EFAULT;
++			if (copy_to_user(buf + to_end, rb->buffer, to_copy - to_end))
++				return -EFAULT;
++		}
++
++		spin_lock_irqsave(&rb->lock, flags);
++		rb->read_pos += to_copy;
++		spin_unlock_irqrestore(&rb->lock, flags);
++
++		return to_copy;
++	}
++
++	spin_unlock_irqrestore(&rb->lock, flags);
++	return 0;
++}
++
++static __poll_t xtos_bci_poll(struct file *filp, poll_table *wait)
++{
++	struct xtos_bci_dev *dev = filp->private_data;
++	struct xtos_bci_ringbuf *rb = dev->ringbuf;
++	__poll_t mask = 0;
++	unsigned long flags;
++
++	if (!rb)
++		return EPOLLERR;
++
++	poll_wait(filp, &rb->wait, wait);
++
++	spin_lock_irqsave(&rb->lock, flags);
++	if (rb->write_pos > rb->read_pos)
++		mask |= EPOLLIN | EPOLLRDNORM;
++	spin_unlock_irqrestore(&rb->lock, flags);
++
++	return mask;
++}
++
++static int xtos_bci_mmap(struct file *filp, struct vm_area_struct *vma)
++{
++	struct xtos_bci_dev *dev = filp->private_data;
++	struct xtos_bci_ringbuf *rb = dev->ringbuf;
++	unsigned long size = vma->vm_end - vma->vm_start;
++
++	if (!rb)
++		return -EINVAL;
++
++	if (size > rb->size)
++		return -EINVAL;
++
++	/* Map DMA buffer to user space */
++	return dma_mmap_coherent(dev->device, vma, 
++	                        rb->buffer, 
++	                        rb->dma_handle, 
++	                        size);
++}
++
++static long xtos_bci_ioctl(struct file *filp, 
++                          unsigned int cmd, 
++                          unsigned long arg)
++{
++	struct xtos_bci_dev *dev = filp->private_data;
++	void __user *argp = (void __user *)arg;
++	int ret = 0;
++
++	switch (cmd) {
++	case XTOS_BCI_GET_INFO: {
++		struct xtos_bci_info info;
++		
++		strncpy(info.name, dev->name, sizeof(info.name));
++		info.dev_id = dev->dev_id;
++		info.num_channels = dev->num_channels;
++		info.sampling_rate = dev->sampling_rate;
++		info.resolution_bits = dev->resolution_bits;
++		info.input_range_mv = dev->input_range_mv;
++		info.interface = dev->interface;
++		
++		if (copy_to_user(argp, &info, sizeof(info)))
++			return -EFAULT;
++		break;
++	}
++
++	case XTOS_BCI_START_STREAM:
++		if (!dev->ops->start_stream)
++			return -EOPNOTSUPP;
++		ret = dev->ops->start_stream(dev);
++		break;
++
++	case XTOS_BCI_STOP_STREAM:
++		if (!dev->ops->stop_stream)
++			return -EOPNOTSUPP;
++		ret = dev->ops->stop_stream(dev);
++		break;
++
++	case XTOS_BCI_SET_RATE: {
++		u32 rate;
++		
++		if (copy_from_user(&rate, argp, sizeof(rate)))
++			return -EFAULT;
++		
++		if (!dev->ops->set_sampling_rate)
++			return -EOPNOTSUPP;
++		ret = dev->ops->set_sampling_rate(dev, rate);
++		break;
++	}
++
++	case XTOS_BCI_SET_CHANNEL: {
++		struct xtos_bci_channel_config cfg;
++		
++		if (copy_from_user(&cfg, argp, sizeof(cfg)))
++			return -EFAULT;
++		
++		if (!dev->ops->set_channel_enable)
++			return -EOPNOTSUPP;
++		ret = dev->ops->set_channel_enable(dev, cfg.channel, cfg.enabled);
++		break;
++	}
++
++	case XTOS_BCI_CALIBRATE:
++		if (!dev->ops->calibrate)
++			return -EOPNOTSUPP;
++		ret = dev->ops->calibrate(dev);
++		break;
++
++	case XTOS_BCI_CHECK_IMP: {
++		__u32 impedances_kohm[32];
++		
++		if (!dev->ops->impedance_check)
++			return -EOPNOTSUPP;
++		
++		ret = dev->ops->impedance_check(dev, impedances_kohm);
++		if (ret)
++			return ret;
++		
++		if (copy_to_user(argp, impedances_kohm, sizeof(impedances_kohm)))
++			return -EFAULT;
++		break;
++	}
++
++	case XTOS_BCI_GET_STATS: {
++		struct xtos_bci_stats stats;
++		unsigned long flags;
++		
++		spin_lock_irqsave(&dev->lock, flags);
++		stats.samples_read = dev->samples_read;
++		stats.samples_dropped = dev->samples_dropped;
++		stats.errors = dev->errors;
++		stats.overruns = dev->ringbuf ? dev->ringbuf->overruns : 0;
++		spin_unlock_irqrestore(&dev->lock, flags);
++		
++		if (copy_to_user(argp, &stats, sizeof(stats)))
++			return -EFAULT;
++		break;
++	}
++
++	case XTOS_BCI_RESET_STATS: {
++		unsigned long flags;
++		
++		spin_lock_irqsave(&dev->lock, flags);
++		dev->samples_read = 0;
++		dev->samples_dropped = 0;
++		dev->errors = 0;
++		if (dev->ringbuf)
++			dev->ringbuf->overruns = 0;
++		spin_unlock_irqrestore(&dev->lock, flags);
++		break;
++	}
++
++	default:
++		return -ENOTTY;
++	}
++
++	return ret;
++}
++
++static const struct file_operations xtos_bci_fops = {
++	.owner = THIS_MODULE,
++	.open = xtos_bci_open,
++	.release = xtos_bci_release,
++	.read = xtos_bci_read,
++	.poll = xtos_bci_poll,
++	.mmap = xtos_bci_mmap,
++	.unlocked_ioctl = xtos_bci_ioctl,
++};
++
++/* Device registration API */
++int xtos_bci_register_device(struct xtos_bci_dev *dev)
++{
++	int ret;
++
++	if (!dev || !dev->ops)
++		return -EINVAL;
++
++	mutex_lock(&device_list_lock);
++
++	/* Assign device ID */
++	dev->dev_id = next_dev_id++;
++
++	/* Allocate device number */
++	dev->devt = MKDEV(MAJOR(xtos_bci_devt), dev->dev_id);
++
++	/* Initialize character device */
++	cdev_init(&dev->cdev, &xtos_bci_fops);
++	dev->cdev.owner = THIS_MODULE;
++
++	ret = cdev_add(&dev->cdev, dev->devt, 1);
++	if (ret) {
++		pr_err("xtos_bci: Failed to add cdev: %d\n", ret);
++		goto err_cdev;
++	}
++
++	/* Create device node */
++	dev->device = device_create(xtos_bci_class, NULL, dev->devt, dev,
++	                           "xtos%d", dev->dev_id);
++	if (IS_ERR(dev->device)) {
++		ret = PTR_ERR(dev->device);
++		pr_err("xtos_bci: Failed to create device: %d\n", ret);
++		goto err_device;
++	}
++
++	/* Initialize state */
++	spin_lock_init(&dev->lock);
++	dev->opened = false;
++	dev->streaming = false;
++	dev->samples_read = 0;
++	dev->samples_dropped = 0;
++	dev->errors = 0;
++
++	/* Add to device list */
++	list_add_tail(&dev->list, &device_list);
++
++	mutex_unlock(&device_list_lock);
++
++	pr_info("xtos_bci: Registered device %s (ID %d) as /dev/xtos%d\n",
++	        dev->name, dev->dev_id, dev->dev_id);
++
++	return 0;
++
++err_device:
++	cdev_del(&dev->cdev);
++err_cdev:
++	mutex_unlock(&device_list_lock);
++	return ret;
++}
++EXPORT_SYMBOL_GPL(xtos_bci_register_device);
++
++void xtos_bci_unregister_device(struct xtos_bci_dev *dev)
++{
++	if (!dev)
++		return;
++
++	mutex_lock(&device_list_lock);
++
++	/* Remove from device list */
++	list_del(&dev->list);
++
++	/* Destroy device node */
++	device_destroy(xtos_bci_class, dev->devt);
++
++	/* Remove character device */
++	cdev_del(&dev->cdev);
++
++	mutex_unlock(&device_list_lock);
++
++	pr_info("xtos_bci: Unregistered device %s (ID %d)\n",
++	        dev->name, dev->dev_id);
++}
++EXPORT_SYMBOL_GPL(xtos_bci_unregister_device);
++
++/* Module initialization */
++static int __init xtos_bci_init(void)
++{
++	int ret;
++
++	/* Allocate character device region */
++	ret = alloc_chrdev_region(&xtos_bci_devt, 0, XTOS_BCI_MAX_DEVICES,
++	                         XTOS_BCI_NAME);
++	if (ret) {
++		pr_err("xtos_bci: Failed to allocate chrdev region: %d\n", ret);
++		return ret;
++	}
++
++	/* Create device class */
++	xtos_bci_class = class_create(XTOS_BCI_NAME);
++	if (IS_ERR(xtos_bci_class)) {
++		ret = PTR_ERR(xtos_bci_class);
++		pr_err("xtos_bci: Failed to create class: %d\n", ret);
++		goto err_class;
++	}
++
++	pr_info("xtos_bci: Core driver initialized (major %d)\n",
++	        MAJOR(xtos_bci_devt));
++
++	return 0;
++
++err_class:
++	unregister_chrdev_region(xtos_bci_devt, XTOS_BCI_MAX_DEVICES);
++	return ret;
++}
++
++static void __exit xtos_bci_exit(void)
++{
++	class_destroy(xtos_bci_class);
++	unregister_chrdev_region(xtos_bci_devt, XTOS_BCI_MAX_DEVICES);
++
++	pr_info("xtos_bci: Core driver unloaded\n");
++}
++
++module_init(xtos_bci_init);
++module_exit(xtos_bci_exit);
++
++MODULE_LICENSE("GPL v2");
++MODULE_AUTHOR("XTOS Project");
++MODULE_DESCRIPTION("XTOS BCI Core Driver Framework");
++MODULE_VERSION("1.0");
+diff --git a/drivers/xtos/bci/xtos_bci_buffer.c b/drivers/xtos/bci/xtos_bci_buffer.c
+new file mode 100644
+index 000000000..686eb2fad
+--- /dev/null
++++ b/drivers/xtos/bci/xtos_bci_buffer.c
+@@ -0,0 +1,218 @@
++// SPDX-License-Identifier: GPL-2.0
++/*
++ * XTOS BCI Ring Buffer Implementation
++ *
++ * Zero-copy DMA ring buffer for high-throughput data streaming
++ * Copyright (C) 2026 XTOS Project
++ */
++
++#include <linux/module.h>
++#include <linux/kernel.h>
++#include <linux/slab.h>
++#include <linux/dma-mapping.h>
++#include <linux/spinlock.h>
++#include <linux/wait.h>
++#include <linux/xtos_bci.h>
++
++/**
++ * xtos_bci_ringbuf_alloc - Allocate a DMA-backed ring buffer
++ * @dev: Device for DMA allocation
++ * @size: Buffer size in bytes (should be power of 2)
++ *
++ * Allocates a physically contiguous DMA buffer for zero-copy access
++ * Returns: Pointer to ring buffer structure or NULL on failure
++ */
++struct xtos_bci_ringbuf *xtos_bci_ringbuf_alloc(struct device *dev, size_t size)
++{
++	struct xtos_bci_ringbuf *rb;
++
++	if (!dev || size == 0)
++		return NULL;
++
++	rb = kzalloc(sizeof(*rb), GFP_KERNEL);
++	if (!rb)
++		return NULL;
++
++	/* Allocate DMA coherent memory */
++	rb->buffer = dma_alloc_coherent(dev, size, &rb->dma_handle, GFP_KERNEL);
++	if (!rb->buffer) {
++		pr_err("xtos_bci: Failed to allocate DMA buffer (%zu bytes)\n", size);
++		kfree(rb);
++		return NULL;
++	}
++
++	rb->size = size;
++	rb->write_pos = 0;
++	rb->read_pos = 0;
++	rb->overruns = 0;
++	rb->max_fill = 0;
++
++	spin_lock_init(&rb->lock);
++	init_waitqueue_head(&rb->wait);
++
++	pr_debug("xtos_bci: Allocated ring buffer: %zu bytes (DMA: 0x%llx)\n",
++	         size, (unsigned long long)rb->dma_handle);
++
++	return rb;
++}
++EXPORT_SYMBOL_GPL(xtos_bci_ringbuf_alloc);
++
++/**
++ * xtos_bci_ringbuf_free - Free a ring buffer
++ * @dev: Device used for DMA allocation
++ * @rb: Ring buffer to free
++ */
++void xtos_bci_ringbuf_free(struct device *dev, struct xtos_bci_ringbuf *rb)
++{
++	if (!rb)
++		return;
++
++	if (rb->buffer)
++		dma_free_coherent(dev, rb->size, rb->buffer, rb->dma_handle);
++
++	kfree(rb);
++
++	pr_debug("xtos_bci: Freed ring buffer\n");
++}
++EXPORT_SYMBOL_GPL(xtos_bci_ringbuf_free);
++
++/**
++ * xtos_bci_ringbuf_write - Write data to ring buffer
++ * @rb: Ring buffer
++ * @data: Data to write
++ * @len: Length of data in bytes
++ *
++ * Writes data to the ring buffer. If buffer is full, oldest data is discarded.
++ * This function is safe to call from interrupt context.
++ *
++ * Returns: Number of bytes written, or negative error code
++ */
++int xtos_bci_ringbuf_write(struct xtos_bci_ringbuf *rb,
++                           const void *data,
++                           size_t len)
++{
++	unsigned long flags;
++	size_t avail, fill;
++
++	if (!rb || !data || len == 0)
++		return -EINVAL;
++
++	if (len > rb->size)
++		return -E2BIG;
++
++	spin_lock_irqsave(&rb->lock, flags);
++
++	/* Calculate available space */
++	fill = rb->write_pos - rb->read_pos;
++	avail = rb->size - fill;
++
++	/* Track maximum fill level */
++	if (fill > rb->max_fill)
++		rb->max_fill = fill;
++
++	/* If buffer full, advance read pointer (discard oldest data) */
++	if (len > avail) {
++		rb->read_pos += (len - avail);
++		rb->overruns++;
++		pr_debug_ratelimited("xtos_bci: Ring buffer overflow, discarding %zu bytes\n",
++		                     len - avail);
++	}
++
++	/* Write data with wrap-around */
++	size_t pos = rb->write_pos % rb->size;
++	size_t to_end = rb->size - pos;
++
++	if (len <= to_end) {
++		/* Single contiguous write */
++		memcpy(rb->buffer + pos, data, len);
++	} else {
++		/* Split write (wraps around) */
++		memcpy(rb->buffer + pos, data, to_end);
++		memcpy(rb->buffer, data + to_end, len - to_end);
++	}
++
++	rb->write_pos += len;
++
++	spin_unlock_irqrestore(&rb->lock, flags);
++
++	/* Wake up waiting readers */
++	wake_up_interruptible(&rb->wait);
++
++	return len;
++}
++EXPORT_SYMBOL_GPL(xtos_bci_ringbuf_write);
++
++/**
++ * xtos_bci_ringbuf_read - Read data from ring buffer
++ * @rb: Ring buffer
++ * @data: Destination buffer
++ * @len: Maximum bytes to read
++ *
++ * Reads up to len bytes from the ring buffer.
++ *
++ * Returns: Number of bytes read, or negative error code
++ */
++int xtos_bci_ringbuf_read(struct xtos_bci_ringbuf *rb,
++                          void *data,
++                          size_t len)
++{
++	unsigned long flags;
++	size_t avail, to_copy;
++
++	if (!rb || !data || len == 0)
++		return -EINVAL;
++
++	spin_lock_irqsave(&rb->lock, flags);
++
++	/* Calculate available data */
++	avail = rb->write_pos - rb->read_pos;
++	to_copy = min(len, avail);
++
++	if (to_copy > 0) {
++		size_t pos = rb->read_pos % rb->size;
++		size_t to_end = rb->size - pos;
++
++		/* Read data with wrap-around */
++		if (to_copy <= to_end) {
++			/* Single contiguous read */
++			memcpy(data, rb->buffer + pos, to_copy);
++		} else {
++			/* Split read (wraps around) */
++			memcpy(data, rb->buffer + pos, to_end);
++			memcpy(data + to_end, rb->buffer, to_copy - to_end);
++		}
++
++		rb->read_pos += to_copy;
++	}
++
++	spin_unlock_irqrestore(&rb->lock, flags);
++
++	return to_copy;
++}
++EXPORT_SYMBOL_GPL(xtos_bci_ringbuf_read);
++
++/**
++ * xtos_bci_ringbuf_available - Get number of bytes available for reading
++ * @rb: Ring buffer
++ *
++ * Returns: Number of bytes available, or 0 if empty
++ */
++size_t xtos_bci_ringbuf_available(struct xtos_bci_ringbuf *rb)
++{
++	unsigned long flags;
++	size_t avail;
++
++	if (!rb)
++		return 0;
++
++	spin_lock_irqsave(&rb->lock, flags);
++	avail = rb->write_pos - rb->read_pos;
++	spin_unlock_irqrestore(&rb->lock, flags);
++
++	return avail;
++}
++EXPORT_SYMBOL_GPL(xtos_bci_ringbuf_available);
++
++MODULE_LICENSE("GPL v2");
++MODULE_AUTHOR("XTOS Project");
++MODULE_DESCRIPTION("XTOS BCI Ring Buffer Implementation");
+diff --git a/drivers/xtos/bci/devices/openbci_cyton.c b/drivers/xtos/bci/devices/openbci_cyton.c
+new file mode 100644
+index 000000000..33d034e69
+--- /dev/null
++++ b/drivers/xtos/bci/devices/openbci_cyton.c
+@@ -0,0 +1,439 @@
++// SPDX-License-Identifier: GPL-2.0
++/*
++ * OpenBCI Cyton Device Driver
++ * 
++ * Driver for OpenBCI Cyton 8-channel EEG board
++ * - 8 channels, 24-bit ADC (ADS1299)
++ * - Serial interface at 115200 baud
++ * - 250 Hz default sampling rate
++ * 
++ * Copyright (C) 2026 XTOS Project
++ */
++
++#include <linux/module.h>
++#include <linux/kernel.h>
++#include <linux/slab.h>
++#include <linux/tty.h>
++#include <linux/serial.h>
++#include <linux/serdev.h>
++#include <linux/of.h>
++#include <linux/workqueue.h>
++#include <linux/delay.h>
++#include <linux/xtos_bci.h>
++
++#define OPENBCI_PACKET_SIZE 33
++#define OPENBCI_START_BYTE 0xA0
++#define OPENBCI_NUM_CHANNELS 8
++#define OPENBCI_DEFAULT_RATE 250
++#define OPENBCI_VREF_MV 4500
++#define OPENBCI_VREF_NV 4500000000LL
++#define OPENBCI_GAIN 24
++#define OPENBCI_ADC_BITS 24
++
++/* OpenBCI private data */
++struct openbci_priv {
++	struct serdev_device *serdev;
++	
++	/* Packet parsing state */
++	unsigned char packet_buf[OPENBCI_PACKET_SIZE];
++	int packet_pos;
++	
++	/* Work queue for data processing */
++	struct work_struct read_work;
++	struct workqueue_struct *workqueue;
++	
++	/* Device state */
++	bool receiving;
++	
++	/* Statistics */
++	unsigned long packets_received;
++	unsigned long packets_dropped;
++};
++
++/* Global device instance */
++static struct xtos_bci_dev openbci_cyton_dev;
++static int openbci_stop_stream(struct xtos_bci_dev *dev);
++
++/**
++ * openbci_process_packet - Parse and process OpenBCI data packet
++ * @dev: BCI device
++ * @packet: Raw packet data (33 bytes)
++ *
++ * OpenBCI packet format:
++ *   Byte 0: Start byte (0xA0)
++ *   Bytes 1-24: 8 channels × 3 bytes/channel (24-bit ADC)
++ *   Bytes 25-30: Auxiliary data
++ *   Bytes 31-32: End bytes (0xCX where X cycles 0-F)
++ */
++static void openbci_process_packet(struct xtos_bci_dev *dev, 
++                                   unsigned char *packet)
++{
++	struct openbci_priv *priv = dev->hw_private;
++	s32 samples[OPENBCI_NUM_CHANNELS];
++	int i;
++
++	/* Verify start byte */
++	if (packet[0] != OPENBCI_START_BYTE) {
++		pr_debug("openbci: Invalid start byte: 0x%02x\n", packet[0]);
++		priv->packets_dropped++;
++		return;
++	}
++
++	/* Convert 24-bit ADC values to microvolts */
++	for (i = 0; i < OPENBCI_NUM_CHANNELS; i++) {
++		int32_t raw;
++		
++		/* Extract 3 bytes as 24-bit signed integer */
++		raw = ((int32_t)packet[1 + i*3] << 16) |
++		      ((int32_t)packet[2 + i*3] << 8) |
++		      ((int32_t)packet[3 + i*3]);
++		
++		/* Sign extension for 24-bit value */
++		if (raw & 0x800000)
++			raw |= 0xFF000000;
++		
++		/* Convert to nanovolts using integer arithmetic.  The
++		 * userspace API converts nV to floating-point units as needed. */
++		samples[i] = (s32)(((s64)raw * OPENBCI_VREF_NV) /
++				((s64)OPENBCI_GAIN * (1LL << 23)));
++	}
++
++	/* Write to ring buffer */
++	if (dev->ringbuf) {
++		int ret = xtos_bci_ringbuf_write(dev->ringbuf, samples, 
++		                                 sizeof(samples));
++		if (ret < 0) {
++			pr_err_ratelimited("openbci: Failed to write to ring buffer: %d\n", 
++			                   ret);
++			dev->samples_dropped += OPENBCI_NUM_CHANNELS;
++		} else {
++			dev->samples_read += OPENBCI_NUM_CHANNELS;
++		}
++	}
++
++	priv->packets_received++;
++}
++
++/**
++ * openbci_receive_buf - Serial data receive callback
++ */
++static int openbci_receive_buf(struct serdev_device *serdev,
++                              const unsigned char *data,
++                              size_t count)
++{
++	struct xtos_bci_dev *dev = serdev_device_get_drvdata(serdev);
++	struct openbci_priv *priv = dev->hw_private;
++	size_t i;
++
++	if (!priv->receiving)
++		return count;
++
++	for (i = 0; i < count; i++) {
++		unsigned char byte = data[i];
++
++		if (priv->packet_pos == 0 && byte == OPENBCI_START_BYTE) {
++			/* Start of new packet */
++			priv->packet_buf[priv->packet_pos++] = byte;
++		} else if (priv->packet_pos > 0 && priv->packet_pos < OPENBCI_PACKET_SIZE) {
++			/* Continue building packet */
++			priv->packet_buf[priv->packet_pos++] = byte;
++
++			/* Complete packet received */
++			if (priv->packet_pos == OPENBCI_PACKET_SIZE) {
++				openbci_process_packet(dev, priv->packet_buf);
++				priv->packet_pos = 0;
++			}
++		} else if (priv->packet_pos >= OPENBCI_PACKET_SIZE) {
++			/* Should never happen - reset */
++			pr_warn("openbci: Packet buffer overflow, resetting\n");
++			priv->packet_pos = 0;
++		}
++	}
++
++	return count;
++}
++
++static const struct serdev_device_ops openbci_serdev_ops = {
++	.receive_buf = openbci_receive_buf,
++};
++
++/**
++ * openbci_send_command - Send single-character command
++ */
++static int openbci_send_command(struct openbci_priv *priv, char cmd)
++{
++	int ret;
++
++	ret = serdev_device_write(priv->serdev, &cmd, 1, HZ);
++	if (ret < 0) {
++		pr_err("openbci: Failed to send command '%c': %d\n", cmd, ret);
++		return ret;
++	}
++
++	/* Small delay for command processing */
++	msleep(10);
++
++	return 0;
++}
++
++/**
++ * Device operation callbacks
++ */
++static int openbci_init(struct xtos_bci_dev *dev)
++{
++	struct openbci_priv *priv = dev->hw_private;
++	int ret;
++
++	pr_info("openbci: Initializing device\n");
++
++	/* Send soft reset */
++	ret = openbci_send_command(priv, 'v');  /* Request board info */
++	if (ret)
++		return ret;
++
++	msleep(100);
++
++	/* Allocate ring buffer (2 seconds of data) */
++	dev->ringbuf = xtos_bci_ringbuf_alloc(
++		&priv->serdev->dev,
++		dev->num_channels * dev->sampling_rate * sizeof(float) * 2
++	);
++	if (!dev->ringbuf) {
++		pr_err("openbci: Failed to allocate ring buffer\n");
++		return -ENOMEM;
++	}
++
++	priv->packet_pos = 0;
++	priv->receiving = false;
++	priv->packets_received = 0;
++	priv->packets_dropped = 0;
++
++	pr_info("openbci: Device initialized\n");
++
++	return 0;
++}
++
++static void openbci_cleanup(struct xtos_bci_dev *dev)
++{
++	struct openbci_priv *priv = dev->hw_private;
++
++	pr_info("openbci: Cleaning up device\n");
++
++	/* Stop streaming if active */
++	if (dev->streaming)
++		openbci_stop_stream(dev);
++
++	/* Free ring buffer */
++	if (dev->ringbuf) {
++		xtos_bci_ringbuf_free(&priv->serdev->dev, dev->ringbuf);
++		dev->ringbuf = NULL;
++	}
++}
++
++static int openbci_start_stream(struct xtos_bci_dev *dev)
++{
++	struct openbci_priv *priv = dev->hw_private;
++	int ret;
++
++	pr_info("openbci: Starting data stream\n");
++
++	priv->receiving = true;
++	priv->packet_pos = 0;
++
++	/* Send 'b' command to start streaming */
++	ret = openbci_send_command(priv, 'b');
++	if (ret) {
++		priv->receiving = false;
++		return ret;
++	}
++
++	dev->streaming = true;
++
++	pr_info("openbci: Data stream started\n");
++
++	return 0;
++}
++
++static int openbci_stop_stream(struct xtos_bci_dev *dev)
++{
++	struct openbci_priv *priv = dev->hw_private;
++	int ret;
++
++	pr_info("openbci: Stopping data stream\n");
++
++	dev->streaming = false;
++	priv->receiving = false;
++
++	/* Send 's' command to stop streaming */
++	ret = openbci_send_command(priv, 's');
++
++	pr_info("openbci: Data stream stopped (received %lu packets, dropped %lu)\n",
++	        priv->packets_received, priv->packets_dropped);
++
++	return ret;
++}
++
++static int openbci_set_sampling_rate(struct xtos_bci_dev *dev, int rate)
++{
++	struct openbci_priv *priv = dev->hw_private;
++	char cmd;
++
++	/* OpenBCI Cyton supports specific sample rates via tilde commands */
++	switch (rate) {
++	case 250:
++		cmd = '~';  /* ~6 = 250 Hz */
++		serdev_device_write(priv->serdev, "~6", 2, HZ);
++		break;
++	case 500:
++		cmd = '~';  /* ~5 = 500 Hz */
++		serdev_device_write(priv->serdev, "~5", 2, HZ);
++		break;
++	case 1000:
++		cmd = '~';  /* ~4 = 1000 Hz */
++		serdev_device_write(priv->serdev, "~4", 2, HZ);
++		break;
++	case 2000:
++		cmd = '~';  /* ~3 = 2000 Hz */
++		serdev_device_write(priv->serdev, "~3", 2, HZ);
++		break;
++	default:
++		pr_err("openbci: Unsupported sampling rate: %d Hz\n", rate);
++		return -EINVAL;
++	}
++
++	dev->sampling_rate = rate;
++	pr_info("openbci: Sampling rate set to %d Hz\n", rate);
++
++	return 0;
++}
++
++static int openbci_set_channel_enable(struct xtos_bci_dev *dev, 
++                                     int channel, 
++                                     bool enable)
++{
++	struct openbci_priv *priv = dev->hw_private;
++	char cmd[2];
++
++	if (channel < 0 || channel >= OPENBCI_NUM_CHANNELS)
++		return -EINVAL;
++
++	/* OpenBCI channel control: 1-8 = disable, ! = enable channel 1, etc */
++	if (enable) {
++		cmd[0] = '!' + channel;  /* '!' to '(' for channels 1-8 */
++	} else {
++		cmd[0] = '1' + channel;  /* '1' to '8' for channels 1-8 */
++	}
++
++	return openbci_send_command(priv, cmd[0]);
++}
++
++static int openbci_calibrate(struct xtos_bci_dev *dev)
++{
++	pr_info("openbci: Calibration not implemented\n");
++	return 0;
++}
++
++static int openbci_impedance_check(struct xtos_bci_dev *dev, __u32 *impedances_kohm)
++{
++	pr_info("openbci: Impedance check not implemented\n");
++	return -EOPNOTSUPP;
++}
++
++/* Device operations table */
++static const struct xtos_bci_device_ops openbci_ops = {
++	.init = openbci_init,
++	.cleanup = openbci_cleanup,
++	.start_stream = openbci_start_stream,
++	.stop_stream = openbci_stop_stream,
++	.set_sampling_rate = openbci_set_sampling_rate,
++	.set_channel_enable = openbci_set_channel_enable,
++	.calibrate = openbci_calibrate,
++	.impedance_check = openbci_impedance_check,
++};
++
++/**
++ * Serial device probe/remove
++ */
++static int openbci_probe(struct serdev_device *serdev)
++{
++	struct openbci_priv *priv;
++	int ret;
++
++	pr_info("openbci: Probing device\n");
++
++	/* Allocate private data */
++	priv = devm_kzalloc(&serdev->dev, sizeof(*priv), GFP_KERNEL);
++	if (!priv)
++		return -ENOMEM;
++
++	priv->serdev = serdev;
++
++	/* Configure serial device */
++	serdev_device_set_drvdata(serdev, &openbci_cyton_dev);
++	serdev_device_set_client_ops(serdev, &openbci_serdev_ops);
++
++	ret = serdev_device_open(serdev);
++	if (ret) {
++		pr_err("openbci: Failed to open serial device: %d\n", ret);
++		return ret;
++	}
++
++	/* Configure serial parameters: 115200 8N1 */
++	serdev_device_set_baudrate(serdev, 115200);
++	serdev_device_set_flow_control(serdev, false);
++
++	/* Initialize device descriptor */
++	strncpy(openbci_cyton_dev.name, "OpenBCI Cyton", 
++	        sizeof(openbci_cyton_dev.name) - 1);
++	openbci_cyton_dev.num_channels = OPENBCI_NUM_CHANNELS;
++	openbci_cyton_dev.sampling_rate = OPENBCI_DEFAULT_RATE;
++	openbci_cyton_dev.resolution_bits = OPENBCI_ADC_BITS;
++	openbci_cyton_dev.input_range_mv = OPENBCI_VREF_MV;
++	openbci_cyton_dev.interface = XTOS_BCI_SERIAL;
++	openbci_cyton_dev.hw_private = priv;
++	openbci_cyton_dev.ops = &openbci_ops;
++
++	/* Register with BCI core */
++	ret = xtos_bci_register_device(&openbci_cyton_dev);
++	if (ret) {
++		pr_err("openbci: Failed to register device: %d\n", ret);
++		serdev_device_close(serdev);
++		return ret;
++	}
++
++	pr_info("openbci: Device probed successfully\n");
++
++	return 0;
++}
++
++static void openbci_remove(struct serdev_device *serdev)
++{
++	pr_info("openbci: Removing device\n");
++
++	xtos_bci_unregister_device(&openbci_cyton_dev);
++	serdev_device_close(serdev);
++
++	pr_info("openbci: Device removed\n");
++}
++
++static const struct of_device_id openbci_of_match[] = {
++	{ .compatible = "openbci,cyton" },
++	{ }
++};
++MODULE_DEVICE_TABLE(of, openbci_of_match);
++
++static struct serdev_device_driver openbci_driver = {
++	.probe = openbci_probe,
++	.remove = openbci_remove,
++	.driver = {
++		.name = "openbci-cyton",
++		.of_match_table = openbci_of_match,
++	},
++};
++
++module_serdev_device_driver(openbci_driver);
++
++MODULE_LICENSE("GPL v2");
++MODULE_AUTHOR("XTOS Project");
++MODULE_DESCRIPTION("OpenBCI Cyton 8-Channel EEG Driver");
++MODULE_VERSION("1.0");

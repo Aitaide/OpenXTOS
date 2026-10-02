@@ -1,0 +1,43 @@
+OpenXTOS licensing notice
+=========================
+
+OpenXTOS combines components under different licenses. This file explains
+which parts are covered by which license and how they relate.
+
+1. Apache-2.0 (repository LICENSE)
+----------------------------------
+Applies to the XTOS-authored user-space material:
+  - sdk/libxtos-rt, sdk/libxtos-signal, sdk/libxtos-bci (source and headers)
+  - tools/xtos-eeg-pipeline, tools/xtos-signal-benchmark, tools/xtos-eeg-replay
+  - examples/
+  - system/ (rootfs skeleton, init scripts, busybox defconfig)
+  - scripts/ (build and verification automation)
+  - kernel/xtos_defconfig (kernel configuration fragment)
+
+2. GPL-2.0 (kernel side)
+------------------------
+  - kernel/linux/ is the upstream Linux 6.6.0 source, licensed under
+    GPL-2.0 WITH Linux-syscall-note (see kernel/linux/COPYING).
+  - kernel/patches/preempt-rt-6.6-rt15.patch is the upstream PREEMPT_RT
+    patch for Linux 6.6.0-rt15 (GPL-2.0).
+  - kernel/patches/xtos-linux-6.6.patch adds XTOS kernel components
+    (scheduler helper, BCI core/buffer, OpenBCI Cyton driver, UAPI
+    headers). These files carry "SPDX-License-Identifier: GPL-2.0" and
+    are kernel-space derivative work, so they are GPL-2.0.
+
+3. GPL-2.0 (userland)
+---------------------
+  - userspace/busybox/ is the unmodified BusyBox 1.37.0 release source
+    (GPL-2.0; see userspace/busybox/LICENSE).
+
+Why the combination works
+--------------------------
+The Apache-2.0 user-space SDK does not link against the GPL-2.0 kernel
+components. They communicate through the kernel UAPI boundary (ioctl
+and syscall ABI), which is expressly not a derivative-work relationship
+(the "Linux-syscall-note" in the kernel COPYING). Consequently the SDK
+stays Apache-2.0 while kernel-side XTOS code is GPL-2.0.
+
+If you modify files inside kernel/linux/, kernel/patches/, or
+userspace/busybox/, your modifications of those files are governed by
+their respective GPL-2.0 licenses.

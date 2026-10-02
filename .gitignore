@@ -1,0 +1,81 @@
+# Local development outputs
+/.build/
+/kernel/preempt-rt-build/
+
+# Bundled source archives used only for optional refresh
+/kernel/*.tar
+/kernel/*.tar.*
+
+# Generic build outputs
+*.o
+*.ko
+*.a
+*.so
+*.so.*
+*.d
+*.cmd
+*.mod
+*.mod.c
+*.mod.o
+*.order
+Module.symvers
+modules.order
+.vmlinux.export.*
+.tmp_vmlinux.*
+
+# Kernel and image outputs
+**/.config
+**/.config.old
+**/bzImage
+**/Image
+**/vmlinux
+**/System.map
+**/initramfs.cpio*
+
+# Compiled binaries
+*.bin
+*.elf
+*.img
+examples/bci_test
+sdk/libxtos-rt/test_rt
+sdk/libxtos-rt/test_spsc
+sdk/libxtos-rt/test_spsc_tsan
+sdk/libxtos-rt/tests/test_rt
+sdk/libxtos-rt/tests/test_spsc
+sdk/libxtos-rt/tests/test_spsc_tsan
+sdk/libxtos-signal/test_signal
+sdk/libxtos-signal/test_signal_san
+tools/xtos-eeg-pipeline/xtos-eeg-pipeline
+tools/xtos-signal-benchmark/xtos-signal-benchmark
+
+# Python caches
+__pycache__/
+*.py[cod]
+.pytest_cache/
+
+# Logs and temporary outputs
+*.log
+*.tmp
+*.out
+*.stdout
+
+# Editors and OS files
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+
+# Archives and downloaded patches
+*.tar.gz
+*.zip
+*.patch
+!kernel/patches/
+!kernel/patches/*.patch
+
+# Preserve source fixtures shipped by the bundled BusyBox release.
+!userspace/busybox/**/*.patch
+!userspace/busybox/testsuite/*.zip
+!userspace/busybox/examples/bootfloppy/etc/init.d/
+!userspace/busybox/examples/bootfloppy/etc/init.d/rcS

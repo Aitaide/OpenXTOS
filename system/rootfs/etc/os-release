@@ -1,0 +1,5 @@
+NAME="XTOS"
+ID=xtos
+VERSION="development"
+PRETTY_NAME="XTOS Linux PREEMPT_RT Development System"
+HOME_URL="https://github.com/Aitaide/XTOS"

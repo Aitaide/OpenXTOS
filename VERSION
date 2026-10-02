@@ -1,0 +1,6 @@
+# OpenXTOS version.
+#
+# Format: MAJOR.MINOR.PATCH[-PRERELEASE]
+#   0.x marks pre-1.0 development releases.
+XTOS_VERSION=0.9.0
+XTOS_RELEASE_DATE=2026-10-02

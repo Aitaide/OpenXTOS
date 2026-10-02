@@ -1,0 +1,53 @@
+name: OpenXTOS CI
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  build-x86:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install toolchain
+        run: sudo apt-get update && sudo apt-get install -y build-essential flex bison bc libssl-dev libelf-dev libc6-dev python3 cpio gzip kmod qemu-system-x86
+      - name: Build x86_64 system
+        run: |
+          . ./scripts/reproducible_env.sh
+          JOBS=2 ./scripts/build_system.sh
+      - name: Verify ABI metadata
+        run: ./scripts/check_abi.sh
+      - name: Boot and self-test in QEMU
+        run: QEMU_TIMEOUT=300 ./scripts/verify_system.sh
+      - name: Check source tree remains clean
+        run: ./scripts/verify_source_tree.sh && test -z "$(git status --porcelain --untracked-files=normal)"
+
+  cross-arch:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: arm64
+            script: ./scripts/build_system_arm64.sh
+            verify: ./scripts/verify_system_arm64.sh
+            packages: crossbuild-essential-arm64 qemu-system-arm
+          - arch: riscv64
+            script: ./scripts/build_system_riscv64.sh
+            verify: ./scripts/verify_system_riscv64.sh
+            packages: gcc-riscv64-linux-gnu qemu-system-misc opensbi
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install cross toolchain and QEMU
+        run: sudo apt-get update && sudo apt-get install -y build-essential flex bison bc libssl-dev libelf-dev libc6-dev python3 cpio gzip rsync kmod file ${{ matrix.packages }}
+      - name: Cross-compile (${{ matrix.arch }})
+        run: JOBS=2 ${{ matrix.script }}
+      - name: QEMU boot verification (${{ matrix.arch }})
+        run: |
+          if [ "${{ matrix.arch }}" = "arm64" ]; then
+            QEMU_TIMEOUT=300 ${{ matrix.verify }}
+          else
+            QEMU_TIMEOUT=360 ${{ matrix.verify }}
+          fi

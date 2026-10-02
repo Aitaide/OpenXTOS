@@ -1,0 +1,31 @@
+#!/bin/sh
+# SPDX-License-Identifier: Apache-2.0
+export PATH=/sbin:/bin:/usr/sbin:/usr/bin
+mount -t proc proc /proc
+mount -t sysfs sysfs /sys
+mount -t devtmpfs devtmpfs /dev
+mkdir -p /dev/pts /dev/shm /run /tmp
+mount -t devpts devpts /dev/pts
+mount -t tmpfs -o mode=1777 tmpfs /dev/shm
+chmod 1777 /tmp
+exec </dev/console >/dev/console 2>&1
+printf '\nXTOS development system\n'
+cat /etc/os-release
+printf 'kernel='; uname -r
+printf 'realtime='; cat /sys/kernel/realtime
+case " $(cat /proc/cmdline) " in
+    *' xtos.selftest=1 '*)
+        if /usr/bin/xtos-selftest; then
+            printf 'XTOS_SYSTEM_TEST=PASS\n'
+        else
+            printf 'XTOS_SYSTEM_TEST=FAIL\n'
+        fi
+        sync
+        poweroff -f
+        ;;
+esac
+printf '\nLocal development console (no network service).\n'
+while true; do
+    /bin/sh
+    sleep 1
+done

@@ -1,0 +1,22 @@
+#!/bin/sh
+# SPDX-License-Identifier: Apache-2.0
+set -eu
+[ "$(cat /sys/kernel/realtime)" = 1 ]
+zcat /proc/config.gz | grep -qx 'CONFIG_PREEMPT_RT=y'
+zcat /proc/config.gz | grep -qx 'CONFIG_XTOS_SCHED=y'
+modprobe xtos_bci_core
+modprobe xtos_bci_buffer
+modprobe openbci_cyton
+for module in xtos_bci_core xtos_bci_buffer openbci_cyton; do
+    [ -d "/sys/module/$module" ]
+done
+printf 'xtos_modules=pass\n'
+for test in test_rt test_spsc test_signal; do
+    "/usr/libexec/xtos/$test"
+done
+xtos-eeg-pipeline --input /usr/share/xtos/fixtures/valid.csv > /run/pipeline.json
+cat /run/pipeline.json
+grep -q '"status":"ok"' /run/pipeline.json
+xtos-signal-benchmark --iterations 20 --output /run/signal-benchmark.json
+[ -s /run/signal-benchmark.json ]
+printf 'guest_userspace=pass\n'
