@@ -1,5 +1,5 @@
-CC = gcc
-AR = ar
+CC ?= gcc
+AR ?= ar
 CFLAGS = -Wall -Wextra -O2 -fPIC -I./include
 LDFLAGS = -shared
 
