@@ -85,9 +85,18 @@
 - `test_rt`: PASS（12 assertions）
 - `test_spsc`: PASS（28 assertions）
 
+**In-guest 系统验证**（`./scripts/verify_guest_arm64.sh`，14 通过 / 0 失败，2026-10-02 第二轮）:
+- ✓ PREEMPT_RT active（/sys/kernel/realtime=1）+ CONFIG_PREEMPT_RT=y（ikconfig）
+- ✓ XTOS 调度器编译进内核（XTOS_SCHED=y，含 HZ_1000）
+- ✓ 三个 XTOS 内核模块在 ARM64 guest 内真实加载（xtos_bci_core / xtos_bci_buffer / openbci_cyton，经 /sys/module 存在性确认）
+- ✓ test_rt（12）/ test_spsc（28）/ test_signal（181 assertions）全部通过
+- ✓ 正常 poweroff、无 panic
+
+至此 ARM64 与 x86_64 的 QEMU 验证内容对齐（此前 ARM64 内核未启用 XTOS 组件，模块项为 ⚠ 跳过）。
+
 **已验证**:
-- 内核: `.build/kernel-install-arm64/Image`（35MB，6.6.0-rt15，CONFIG_PREEMPT_RT=y）
-- Initramfs: `.build/initramfs-arm64.cpio.gz`（71MB，含 BusyBox + test_rt + test_spsc + XTOS 静态库）
+- 内核: `.build/kernel-install-arm64/Image`（34MB，6.6.0-rt15，PREEMPT_RT + XTOS_SCHED + XTOS_BCI=m + HZ_1000）
+- Initramfs: `.build/initramfs-arm64.cpio.gz`（72MB，含 BusyBox + test_rt/test_spsc/test_signal/bci_test + XTOS 内核模块）
 - DTBs: `.build/kernel-install-arm64/dtbs/`
 - 工具链: aarch64-linux-gnu-gcc 14.2.0
 - QEMU: qemu-system-aarch64 10.0.13
@@ -98,7 +107,9 @@
 2. **test_rt / test_spsc 缺失于 initramfs**: 01:22 打包的 initramfs 早于库修复，不含测试二进制。修复：重新链接两个测试并重新打包。
 3. **验证脚本 PREEMPT_RT 误报**: 6.6-rt15 内核启动横幅不再打印 "PREEMPT_RT" 字样（显示为 `#1 SMP PREEMPT`）。修复：改为匹配 `Linux version …-rtN` 版本字符串；RT 状态另经 `include/config/auto.conf` 中 `CONFIG_PREEMPT_RT=y` 确认。
 4. **验证脚本 set -e 中止**: `((PASS++))` 在 PASS=0 时返回非零，`set -e` 下导致检查面板输出一列即退出。修复：改为 `PASS=$((PASS+1))` 算术展开。
-5. **initramfs 内 `/init` 与 `init=` 参数**: initramfs 存在 `/init` 时内核忽略 `init=` 参数。RT 自动化检查通过临时将 `/init` 指向 `rt_check.sh` 完成（验证后已还原为 BusyBox init）。
+5. **initramfs 内 `/init` 与 `init=` 参数**: initramfs 存在 `/init` 时内核忽略 `init=` 参数。RT 自动化检查通过临时将 `/init` 指向 `rt_check.sh` 完成（验证后已还原为 BusyBox init；正式化后由 `scripts/verify_guest_arm64.sh` + `system/rootfs/xtos-guest-check` 取代）。
+6. **内核态浮点编译失败（`-mgeneral-regs-only`）**: ARM64/RISC-V 内核禁用浮点指令，BCI 驱动的 float 类型（阻抗数组、输入量程）无法编译，XTOS_BCI 无法在 ARM64 启用。根治：内核态与 UAPI 整型化（阻抗 `__u32` kOhm、量程 `__u32` mV），ioctl 编号不变（float 与 u32 同为 4 字节），用户态 sdk/session.c/bci_test.c 同步修改；x86_64 用户态全量测试无回归。
+7. **`file` 命令判别归档不可靠**: file 5.46 对静态库只报 "current ar archive" 不含架构。归档校验改为交叉 objdump（ARM64: `architecture: aarch64`；RISC-V: `architecture: riscv:rv64`）。
 
 ## ARM64 特定配置
 

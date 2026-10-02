@@ -188,12 +188,12 @@ int xtos_bci_calibrate(xtos_bci_session_t *session)
 }
 
 int xtos_bci_check_impedance(xtos_bci_session_t *session,
-                            float *impedances,
+                            uint32_t *impedances_kohm,
                             uint32_t num_channels)
 {
-	float temp_impedances[32];
+	uint32_t temp_impedances[32];
 
-	if (!session || !impedances || num_channels == 0 || num_channels > 32) {
+	if (!session || !impedances_kohm || num_channels == 0 || num_channels > 32) {
 		errno = EINVAL;
 		return -1;
 	}
@@ -201,7 +201,7 @@ int xtos_bci_check_impedance(xtos_bci_session_t *session,
 	if (ioctl(session->fd, XTOS_BCI_CHECK_IMP, temp_impedances) < 0)
 		return -1;
 
-	memcpy(impedances, temp_impedances, num_channels * sizeof(float));
+	memcpy(impedances_kohm, temp_impedances, num_channels * sizeof(uint32_t));
 	return 0;
 }
 

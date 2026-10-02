@@ -112,7 +112,11 @@ else
 fi
 check_pattern "Run /init as init process" "Init started" && PASS=$((PASS+1)) || FAIL=$((FAIL+1))
 
-# XTOS modules (optional, may not load on ARM64 without adaptation)
+# XTOS kernel components: build_system_arm64.sh merges kernel/xtos_defconfig,
+# so XTOS_SCHED is built-in and the BCI modules load in the guest (verified via
+# the in-guest rt_check initramfs). The default-boot initramfs does not load
+# modules automatically, so keep these checks optional in this script; the
+# full in-guest validation runs separately (see docs/stage4b).
 check_pattern "xtos_bci" "XTOS BCI modules" "false"
 check_pattern "xtos_sched" "XTOS scheduler" "false"
 

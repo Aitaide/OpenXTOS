@@ -22,7 +22,7 @@ struct xtos_bci_info {
 	__u32 num_channels;         /* Number of channels */
 	__u32 sampling_rate;        /* Sampling rate (Hz) */
 	__u32 resolution_bits;      /* ADC resolution */
-	float input_range_mv;       /* Input range (mV) */
+	__u32 input_range_mv;       /* Input range (mV, integer) */
 	__u32 interface;            /* Interface type */
 };
 
@@ -57,7 +57,7 @@ struct xtos_bci_stats {
 
 /* Calibration */
 #define XTOS_BCI_CALIBRATE      _IO(XTOS_BCI_IOC_MAGIC, 7)
-#define XTOS_BCI_CHECK_IMP      _IOR(XTOS_BCI_IOC_MAGIC, 8, float[32])
+#define XTOS_BCI_CHECK_IMP      _IOR(XTOS_BCI_IOC_MAGIC, 8, __u32[32])
 
 /* Statistics */
 #define XTOS_BCI_GET_STATS      _IOR(XTOS_BCI_IOC_MAGIC, 9, struct xtos_bci_stats)

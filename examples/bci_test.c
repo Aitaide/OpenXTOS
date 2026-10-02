@@ -55,7 +55,7 @@ int main(int argc, char *argv[])
 	printf("  Channels: %u\n", info.num_channels);
 	printf("  Sampling Rate: %u Hz\n", info.sampling_rate);
 	printf("  Resolution: %u bits\n", info.resolution_bits);
-	printf("  Input Range: %.1f mV\n", info.input_range_mv);
+	printf("  Input Range: %u mV\n", info.input_range_mv);
 	printf("\n");
 
 	/* Allocate buffer */

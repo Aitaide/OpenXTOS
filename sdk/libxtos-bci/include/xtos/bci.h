@@ -26,7 +26,7 @@ struct xtos_bci_device_info {
 	uint32_t num_channels;      /* Number of channels */
 	uint32_t sampling_rate;     /* Sampling rate (Hz) */
 	uint32_t resolution_bits;   /* ADC resolution */
-	float input_range_mv;       /* Input range (mV) */
+	uint32_t input_range_mv;    /* Input range (mV, integer) */
 	uint32_t interface;         /* Interface type */
 };
 
@@ -131,13 +131,13 @@ int xtos_bci_calibrate(xtos_bci_session_t *session);
 /**
  * xtos_bci_check_impedance - Check electrode impedance
  * @session: Session handle
- * @impedances: Output array for impedance values (kOhms)
+ * @impedances_kohm: Output array for impedance values (kOhms, integer)
  * @num_channels: Number of channels
  *
  * Returns: 0 on success, -1 on failure
  */
 int xtos_bci_check_impedance(xtos_bci_session_t *session,
-                            float *impedances,
+                            uint32_t *impedances_kohm,
                             uint32_t num_channels);
 
 /**

@@ -253,16 +253,16 @@ static long xtos_bci_ioctl(struct file *filp,
 		break;
 
 	case XTOS_BCI_CHECK_IMP: {
-		float impedances[32];
+		__u32 impedances_kohm[32];
 		
 		if (!dev->ops->impedance_check)
 			return -EOPNOTSUPP;
 		
-		ret = dev->ops->impedance_check(dev, impedances);
+		ret = dev->ops->impedance_check(dev, impedances_kohm);
 		if (ret)
 			return ret;
 		
-		if (copy_to_user(argp, impedances, sizeof(impedances)))
+		if (copy_to_user(argp, impedances_kohm, sizeof(impedances_kohm)))
 			return -EFAULT;
 		break;
 	}

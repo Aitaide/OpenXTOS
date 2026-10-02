@@ -333,7 +333,7 @@ static int openbci_calibrate(struct xtos_bci_dev *dev)
 	return 0;
 }
 
-static int openbci_impedance_check(struct xtos_bci_dev *dev, float *impedances)
+static int openbci_impedance_check(struct xtos_bci_dev *dev, __u32 *impedances_kohm)
 {
 	pr_info("openbci: Impedance check not implemented\n");
 	return -EOPNOTSUPP;

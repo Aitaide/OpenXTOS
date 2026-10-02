@@ -50,8 +50,22 @@ if [ ! -f "$KERNEL_BUILD/.config" ]; then
     # Enable PREEMPT_RT
     "$ROOT/scripts/enable_rt_config.sh" "$KERNEL_BUILD/.config"
     
+    # Merge XTOS configuration fragment (scheduler helper + BCI modules),
+    # same as the x86_64 build in scripts/build_kernel.sh
+    KCONFIG_MERGE="$KERNEL_SRC/scripts/kconfig/merge_config.sh"
+    if [ -f "$KCONFIG_MERGE" ] && [ -f "$ROOT/kernel/xtos_defconfig" ]; then
+        log "Merging XTOS kernel configuration fragment..."
+        KCONFIG_CONFIG="$KERNEL_BUILD/.config" "$KCONFIG_MERGE" -m \
+            "$KERNEL_BUILD/.config" "$ROOT/kernel/xtos_defconfig"
+    else
+        warn "merge_config.sh or kernel/xtos_defconfig not found; XTOS kernel components disabled"
+    fi
+    
     # ARM64-specific: enable common peripherals
-    scripts/config --file "$KERNEL_BUILD/.config" \
+    make -C "$KERNEL_SRC" O="$KERNEL_BUILD" \
+        ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- \
+        scripts_config || true
+    "$KERNEL_SRC/scripts/config" --file "$KERNEL_BUILD/.config" \
         --enable SERIAL_AMBA_PL011 \
         --enable SERIAL_AMBA_PL011_CONSOLE \
         --enable VIRTIO_MMIO \
@@ -59,10 +73,12 @@ if [ ! -f "$KERNEL_BUILD/.config" ]; then
         --enable VIRTIO_NET \
         --enable VIRTIO_CONSOLE \
         --enable HW_RANDOM_VIRTIO \
-        --enable DRM_VIRTIO_GPU
+        --enable DRM_VIRTIO_GPU \
+        --enable SERIAL_DEV_BUS \
+        --enable SERIAL_DEV_CTRL_TTYPORT
     
-    # Disable x86-specific options
-    scripts/config --file "$KERNEL_BUILD/.config" \
+    # Disable x86-specific options (no-ops on arm64, kept for parity)
+    "$KERNEL_SRC/scripts/config" --file "$KERNEL_BUILD/.config" \
         --disable X86_INTEL_LPSS \
         --disable X86_PLATFORM_DEVICES
     
@@ -70,6 +86,15 @@ if [ ! -f "$KERNEL_BUILD/.config" ]; then
     make -C "$KERNEL_SRC" O="$KERNEL_BUILD" \
         ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- \
         olddefconfig
+    
+    # Verify required settings actually took effect
+    for setting in CONFIG_PREEMPT_RT=y CONFIG_XTOS_SCHED=y CONFIG_XTOS_BCI=m CONFIG_XTOS_BCI_OPENBCI=m; do
+        if ! grep -qx "$setting" "$KERNEL_BUILD/.config"; then
+            error "Required kernel setting missing after olddefconfig: $setting"
+            exit 1
+        fi
+    done
+    log "XTOS kernel settings verified: XTOS_SCHED=y XTOS_BCI=m XTOS_BCI_OPENBCI=m"
 fi
 
 log "Building ARM64 kernel image..."
@@ -166,7 +191,7 @@ cp "$ROOT/sdk/libxtos-bci/include/xtos/bci.h" "$ROOTFS/usr/include/xtos/"
 # Verify all installed libraries are aarch64 (guards against stale x86_64
 # artifacts in the sdk tree breaking Stage 4 static links)
 for lib in libxtos-rt libxtos-signal libxtos-bci; do
-    if ! file "$ROOTFS/usr/lib/$lib.a" 2>/dev/null | grep -q "aarch64\|ARM"; then
+    if ! aarch64-linux-gnu-objdump -f "$ROOTFS/usr/lib/$lib.a" 2>/dev/null | grep -q "architecture: aarch64"; then
         error "$ROOTFS/usr/lib/$lib.a is not an aarch64 archive"
         error "Clean the sdk build tree and re-run (make clean in sdk/$lib)"
         exit 1
@@ -203,6 +228,38 @@ if [ -d "$ROOT/sdk/libxtos-rt/tests" ]; then
 fi
 if [ "$TESTS_FAILED" -gt 0 ]; then
     warn "$TESTS_FAILED test binary(ies) failed to build; continuing"
+fi
+
+# Cross-compile the BCI example (mirrors x86_64 build_system.sh)
+if [ -f "$ROOT/examples/bci_test.c" ]; then
+    log "Building bci_test example..."
+    if aarch64-linux-gnu-gcc -O2 -Wall -Wextra -static \
+        -I"$ROOT/sdk/libxtos-bci/include" \
+        "$ROOT/examples/bci_test.c" \
+        "$ROOTFS/usr/lib/libxtos-bci.a" \
+        -o "$ROOTFS/bin/bci_test"; then
+        log "bci_test built"
+    else
+        warn "Failed to build bci_test"
+    fi
+fi
+
+# Cross-compile signal test (same suite the x86_64 guest runs)
+if [ -d "$ROOT/sdk/libxtos-signal/tests" ]; then
+    for test_src in "$ROOT/sdk/libxtos-signal/tests"/*.c; do
+        if [ -f "$test_src" ]; then
+            test_name=$(basename "$test_src" .c)
+            log "Building signal test: $test_name"
+            if ! aarch64-linux-gnu-gcc -static -O2 -std=c11 -Wall -Wextra \
+                "$test_src" \
+                -I"$ROOT/sdk/libxtos-signal/include" \
+                -L"$ROOTFS/usr/lib" \
+                -lxtos-signal -lm \
+                -o "$ROOTFS/bin/$test_name"; then
+                warn "Failed to build $test_name"
+            fi
+        fi
+    done
 fi
 
 # Stage 5: Create initramfs

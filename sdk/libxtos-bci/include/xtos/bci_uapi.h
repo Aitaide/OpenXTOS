@@ -12,7 +12,7 @@ struct xtos_bci_info {
     uint32_t num_channels;
     uint32_t sampling_rate;
     uint32_t resolution_bits;
-    float input_range_mv;
+    uint32_t input_range_mv;   /* mV, integer */
     uint32_t interface;
 };
 
@@ -36,7 +36,7 @@ struct xtos_bci_stats {
 #define XTOS_BCI_SET_CHANNEL    _IOW(XTOS_BCI_IOC_MAGIC, 5, struct xtos_bci_channel_config)
 #define XTOS_BCI_SET_CHANNELS   _IOW(XTOS_BCI_IOC_MAGIC, 6, uint32_t)
 #define XTOS_BCI_CALIBRATE      _IO(XTOS_BCI_IOC_MAGIC, 7)
-#define XTOS_BCI_CHECK_IMP      _IOR(XTOS_BCI_IOC_MAGIC, 8, float[32])
+#define XTOS_BCI_CHECK_IMP      _IOR(XTOS_BCI_IOC_MAGIC, 8, uint32_t[32])
 #define XTOS_BCI_GET_STATS      _IOR(XTOS_BCI_IOC_MAGIC, 9, struct xtos_bci_stats)
 #define XTOS_BCI_RESET_STATS    _IO(XTOS_BCI_IOC_MAGIC, 10)
 #define XTOS_BCI_GET_BUFSIZE    _IOR(XTOS_BCI_IOC_MAGIC, 11, uint32_t)

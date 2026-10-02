@@ -1,0 +1,50 @@
+#!/bin/sh
+# SPDX-License-Identifier: Apache-2.0
+# In-guest XTOS system validation for cross-compiled architectures.
+# Used as /init in a dedicated validation initramfs (see
+# scripts/verify_guest_arm64.sh / scripts/verify_guest_riscv64.sh).
+export PATH=/sbin:/bin:/usr/sbin:/usr/bin
+mount -t proc proc /proc
+mount -t sysfs sysfs /sys
+mount -t devtmpfs devtmpfs /dev 2>/dev/null || true
+mkdir -p /dev/pts /run /tmp
+printf 'XTOS_GUEST_CHECK=START\n'
+printf 'kernel='; uname -r
+printf 'arch='; uname -m
+printf 'realtime='; cat /sys/kernel/realtime 2>/dev/null || echo 0
+if [ -f /proc/config.gz ]; then
+    zcat /proc/config.gz | grep -x 'CONFIG_PREEMPT_RT=y' >/dev/null \
+        && printf 'preempt_rt=y\n' || printf 'preempt_rt=n\n'
+    zcat /proc/config.gz | grep -x 'CONFIG_XTOS_SCHED=y' >/dev/null \
+        && printf 'xtos_sched=y\n' || printf 'xtos_sched=n\n'
+fi
+printf '=== modules ===\n'
+MODULES_OK=1
+for module in xtos_bci_core xtos_bci_buffer openbci_cyton; do
+    if modprobe "$module" 2>/dev/null && [ -d "/sys/module/$module" ]; then
+        printf 'module_%s=ok\n' "$module"
+    else
+        printf 'module_%s=fail\n' "$module"
+        MODULES_OK=0
+    fi
+done
+[ "$MODULES_OK" = 1 ] && printf 'xtos_modules=pass\n' || printf 'xtos_modules=fail\n'
+printf '=== tests ===\n'
+TESTS_OK=1
+for test in test_rt test_spsc test_signal; do
+    if [ -x "/bin/$test" ]; then
+        if "/bin/$test" >/dev/null 2>&1; then
+            printf 'guest_%s=pass\n' "$test"
+        else
+            printf 'guest_%s=fail\n' "$test"
+            TESTS_OK=0
+        fi
+    else
+        printf 'guest_%s=missing\n' "$test"
+        TESTS_OK=0
+    fi
+done
+[ "$TESTS_OK" = 1 ] && printf 'guest_userspace=pass\n' || printf 'guest_userspace=fail\n'
+printf 'XTOS_GUEST_CHECK=DONE\n'
+sync
+poweroff -f

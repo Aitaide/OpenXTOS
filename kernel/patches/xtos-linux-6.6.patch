@@ -520,7 +520,7 @@ index 000000000..1730e013a
 +/* SPDX-License-Identifier: GPL-2.0 */
 +/*
 + * XTOS BCI (Brain-Computer Interface) Driver Framework
-+ *
++ * 
 + * Unified abstraction layer for EEG/brain sensing devices
 + * Copyright (C) 2026 XTOS Project
 + */
@@ -553,27 +553,27 @@ index 000000000..1730e013a
 +	/* Initialization and cleanup */
 +	int (*init)(struct xtos_bci_dev *dev);
 +	void (*cleanup)(struct xtos_bci_dev *dev);
-+
++	
 +	/* Data acquisition */
 +	int (*start_stream)(struct xtos_bci_dev *dev);
 +	int (*stop_stream)(struct xtos_bci_dev *dev);
 +	int (*read_samples)(struct xtos_bci_dev *dev,
 +	                    s32 *buffer,
 +	                    size_t num_samples);
-+
++	
 +	/* Configuration */
 +	int (*set_sampling_rate)(struct xtos_bci_dev *dev, int rate);
-+	int (*set_channel_enable)(struct xtos_bci_dev *dev,
-+	                          int channel,
++	int (*set_channel_enable)(struct xtos_bci_dev *dev, 
++	                          int channel, 
 +	                          bool enable);
-+	int (*set_gain)(struct xtos_bci_dev *dev,
-+	                int channel,
++	int (*set_gain)(struct xtos_bci_dev *dev, 
++	                int channel, 
 +	                int gain);
-+
++	
 +	/* Calibration */
 +	int (*calibrate)(struct xtos_bci_dev *dev);
-+	int (*impedance_check)(struct xtos_bci_dev *dev,
-+	                      float *impedances);
++	int (*impedance_check)(struct xtos_bci_dev *dev, 
++	                      __u32 *impedances_kohm);
 +};
 +
 +/* BCI device descriptor */
@@ -581,38 +581,38 @@ index 000000000..1730e013a
 +	/* Device identification */
 +	char name[32];              /* Device name (e.g., "OpenBCI Cyton") */
 +	int dev_id;                 /* Unique device ID */
-+
++	
 +	/* Hardware parameters */
 +	int num_channels;           /* Number of channels */
 +	int sampling_rate;          /* Sampling rate (Hz) */
 +	int resolution_bits;        /* ADC resolution (bits) */
-+	float input_range_mv;       /* Input range (millivolts) */
-+
++	int input_range_mv;         /* Input range (millivolts, integer) */
++	
 +	/* Connection information */
 +	enum xtos_bci_interface interface;
 +	void *hw_private;           /* Hardware private data */
-+
++	
 +	/* Operation callbacks */
 +	const struct xtos_bci_device_ops *ops;
-+
++	
 +	/* Ring buffer */
 +	struct xtos_bci_ringbuf *ringbuf;
-+
++	
 +	/* Character device */
 +	struct cdev cdev;
 +	struct device *device;
 +	dev_t devt;                 /* Device number (major:minor) */
-+
++	
 +	/* Statistics */
 +	unsigned long samples_read;
 +	unsigned long samples_dropped;
 +	unsigned long errors;
-+
++	
 +	/* State */
 +	bool opened;
 +	bool streaming;
 +	spinlock_t lock;
-+
++	
 +	/* Global device list */
 +	struct list_head list;
 +};
@@ -622,13 +622,13 @@ index 000000000..1730e013a
 +	void *buffer;               /* DMA buffer */
 +	dma_addr_t dma_handle;      /* DMA physical address */
 +	size_t size;                /* Buffer size (bytes) */
-+
++	
 +	unsigned long write_pos;    /* Write pointer */
 +	unsigned long read_pos;     /* Read pointer */
-+
++	
 +	spinlock_t lock;            /* Spinlock */
 +	wait_queue_head_t wait;     /* Wait queue */
-+
++	
 +	/* Performance statistics */
 +	unsigned long overruns;     /* Overflow count */
 +	unsigned long max_fill;     /* Maximum fill level */
@@ -641,11 +641,11 @@ index 000000000..1730e013a
 +/* Ring buffer API */
 +struct xtos_bci_ringbuf *xtos_bci_ringbuf_alloc(struct device *dev, size_t size);
 +void xtos_bci_ringbuf_free(struct device *dev, struct xtos_bci_ringbuf *rb);
-+int xtos_bci_ringbuf_write(struct xtos_bci_ringbuf *rb,
-+                           const void *data,
++int xtos_bci_ringbuf_write(struct xtos_bci_ringbuf *rb, 
++                           const void *data, 
 +                           size_t len);
-+int xtos_bci_ringbuf_read(struct xtos_bci_ringbuf *rb,
-+                          void *data,
++int xtos_bci_ringbuf_read(struct xtos_bci_ringbuf *rb, 
++                          void *data, 
 +                          size_t len);
 +size_t xtos_bci_ringbuf_available(struct xtos_bci_ringbuf *rb);
 +
@@ -805,7 +805,7 @@ index 000000000..d00bef91e
 +/* SPDX-License-Identifier: GPL-2.0 WITH Linux-syscall-note */
 +/*
 + * XTOS BCI (Brain-Computer Interface) User API
-+ *
++ * 
 + * User-space API for BCI devices
 + * Copyright (C) 2026 XTOS Project
 + */
@@ -826,7 +826,7 @@ index 000000000..d00bef91e
 +	__u32 num_channels;         /* Number of channels */
 +	__u32 sampling_rate;        /* Sampling rate (Hz) */
 +	__u32 resolution_bits;      /* ADC resolution */
-+	float input_range_mv;       /* Input range (mV) */
++	__u32 input_range_mv;       /* Input range (mV, integer) */
 +	__u32 interface;            /* Interface type */
 +};
 +
@@ -861,7 +861,7 @@ index 000000000..d00bef91e
 +
 +/* Calibration */
 +#define XTOS_BCI_CALIBRATE      _IO(XTOS_BCI_IOC_MAGIC, 7)
-+#define XTOS_BCI_CHECK_IMP      _IOR(XTOS_BCI_IOC_MAGIC, 8, float[32])
++#define XTOS_BCI_CHECK_IMP      _IOR(XTOS_BCI_IOC_MAGIC, 8, __u32[32])
 +
 +/* Statistics */
 +#define XTOS_BCI_GET_STATS      _IOR(XTOS_BCI_IOC_MAGIC, 9, struct xtos_bci_stats)
@@ -965,7 +965,7 @@ index 000000000..366da67d0
 +// SPDX-License-Identifier: GPL-2.0
 +/*
 + * XTOS BCI Core Driver
-+ *
++ * 
 + * Core framework for BCI device registration and management
 + * Copyright (C) 2026 XTOS Project
 + */
@@ -1047,9 +1047,9 @@ index 000000000..366da67d0
 +	return 0;
 +}
 +
-+static ssize_t xtos_bci_read(struct file *filp,
-+                            char __user *buf,
-+                            size_t count,
++static ssize_t xtos_bci_read(struct file *filp, 
++                            char __user *buf, 
++                            size_t count, 
 +                            loff_t *ppos)
 +{
 +	struct xtos_bci_dev *dev = filp->private_data;
@@ -1066,11 +1066,11 @@ index 000000000..366da67d0
 +		spin_lock_irqsave(&rb->lock, flags);
 +		avail = rb->write_pos - rb->read_pos;
 +		spin_unlock_irqrestore(&rb->lock, flags);
-+
++		
 +		if (avail == 0)
 +			return -EAGAIN;
 +	} else {
-+		ret = wait_event_interruptible(rb->wait,
++		ret = wait_event_interruptible(rb->wait, 
 +		                               rb->write_pos > rb->read_pos);
 +		if (ret)
 +			return ret;
@@ -1143,14 +1143,14 @@ index 000000000..366da67d0
 +		return -EINVAL;
 +
 +	/* Map DMA buffer to user space */
-+	return dma_mmap_coherent(dev->device, vma,
-+	                        rb->buffer,
-+	                        rb->dma_handle,
++	return dma_mmap_coherent(dev->device, vma, 
++	                        rb->buffer, 
++	                        rb->dma_handle, 
 +	                        size);
 +}
 +
-+static long xtos_bci_ioctl(struct file *filp,
-+                          unsigned int cmd,
++static long xtos_bci_ioctl(struct file *filp, 
++                          unsigned int cmd, 
 +                          unsigned long arg)
 +{
 +	struct xtos_bci_dev *dev = filp->private_data;
@@ -1160,7 +1160,7 @@ index 000000000..366da67d0
 +	switch (cmd) {
 +	case XTOS_BCI_GET_INFO: {
 +		struct xtos_bci_info info;
-+
++		
 +		strncpy(info.name, dev->name, sizeof(info.name));
 +		info.dev_id = dev->dev_id;
 +		info.num_channels = dev->num_channels;
@@ -1168,7 +1168,7 @@ index 000000000..366da67d0
 +		info.resolution_bits = dev->resolution_bits;
 +		info.input_range_mv = dev->input_range_mv;
 +		info.interface = dev->interface;
-+
++		
 +		if (copy_to_user(argp, &info, sizeof(info)))
 +			return -EFAULT;
 +		break;
@@ -1188,10 +1188,10 @@ index 000000000..366da67d0
 +
 +	case XTOS_BCI_SET_RATE: {
 +		u32 rate;
-+
++		
 +		if (copy_from_user(&rate, argp, sizeof(rate)))
 +			return -EFAULT;
-+
++		
 +		if (!dev->ops->set_sampling_rate)
 +			return -EOPNOTSUPP;
 +		ret = dev->ops->set_sampling_rate(dev, rate);
@@ -1200,10 +1200,10 @@ index 000000000..366da67d0
 +
 +	case XTOS_BCI_SET_CHANNEL: {
 +		struct xtos_bci_channel_config cfg;
-+
++		
 +		if (copy_from_user(&cfg, argp, sizeof(cfg)))
 +			return -EFAULT;
-+
++		
 +		if (!dev->ops->set_channel_enable)
 +			return -EOPNOTSUPP;
 +		ret = dev->ops->set_channel_enable(dev, cfg.channel, cfg.enabled);
@@ -1217,16 +1217,16 @@ index 000000000..366da67d0
 +		break;
 +
 +	case XTOS_BCI_CHECK_IMP: {
-+		float impedances[32];
-+
++		__u32 impedances_kohm[32];
++		
 +		if (!dev->ops->impedance_check)
 +			return -EOPNOTSUPP;
-+
-+		ret = dev->ops->impedance_check(dev, impedances);
++		
++		ret = dev->ops->impedance_check(dev, impedances_kohm);
 +		if (ret)
 +			return ret;
-+
-+		if (copy_to_user(argp, impedances, sizeof(impedances)))
++		
++		if (copy_to_user(argp, impedances_kohm, sizeof(impedances_kohm)))
 +			return -EFAULT;
 +		break;
 +	}
@@ -1234,14 +1234,14 @@ index 000000000..366da67d0
 +	case XTOS_BCI_GET_STATS: {
 +		struct xtos_bci_stats stats;
 +		unsigned long flags;
-+
++		
 +		spin_lock_irqsave(&dev->lock, flags);
 +		stats.samples_read = dev->samples_read;
 +		stats.samples_dropped = dev->samples_dropped;
 +		stats.errors = dev->errors;
 +		stats.overruns = dev->ringbuf ? dev->ringbuf->overruns : 0;
 +		spin_unlock_irqrestore(&dev->lock, flags);
-+
++		
 +		if (copy_to_user(argp, &stats, sizeof(stats)))
 +			return -EFAULT;
 +		break;
@@ -1249,7 +1249,7 @@ index 000000000..366da67d0
 +
 +	case XTOS_BCI_RESET_STATS: {
 +		unsigned long flags;
-+
++		
 +		spin_lock_irqsave(&dev->lock, flags);
 +		dev->samples_read = 0;
 +		dev->samples_dropped = 0;
@@ -1640,12 +1640,12 @@ index 000000000..33d034e69
 +// SPDX-License-Identifier: GPL-2.0
 +/*
 + * OpenBCI Cyton Device Driver
-+ *
++ * 
 + * Driver for OpenBCI Cyton 8-channel EEG board
 + * - 8 channels, 24-bit ADC (ADS1299)
 + * - Serial interface at 115200 baud
 + * - 250 Hz default sampling rate
-+ *
++ * 
 + * Copyright (C) 2026 XTOS Project
 + */
 +
@@ -1672,18 +1672,18 @@ index 000000000..33d034e69
 +/* OpenBCI private data */
 +struct openbci_priv {
 +	struct serdev_device *serdev;
-+
++	
 +	/* Packet parsing state */
 +	unsigned char packet_buf[OPENBCI_PACKET_SIZE];
 +	int packet_pos;
-+
++	
 +	/* Work queue for data processing */
 +	struct work_struct read_work;
 +	struct workqueue_struct *workqueue;
-+
++	
 +	/* Device state */
 +	bool receiving;
-+
++	
 +	/* Statistics */
 +	unsigned long packets_received;
 +	unsigned long packets_dropped;
@@ -1704,7 +1704,7 @@ index 000000000..33d034e69
 + *   Bytes 25-30: Auxiliary data
 + *   Bytes 31-32: End bytes (0xCX where X cycles 0-F)
 + */
-+static void openbci_process_packet(struct xtos_bci_dev *dev,
++static void openbci_process_packet(struct xtos_bci_dev *dev, 
 +                                   unsigned char *packet)
 +{
 +	struct openbci_priv *priv = dev->hw_private;
@@ -1721,16 +1721,16 @@ index 000000000..33d034e69
 +	/* Convert 24-bit ADC values to microvolts */
 +	for (i = 0; i < OPENBCI_NUM_CHANNELS; i++) {
 +		int32_t raw;
-+
++		
 +		/* Extract 3 bytes as 24-bit signed integer */
 +		raw = ((int32_t)packet[1 + i*3] << 16) |
 +		      ((int32_t)packet[2 + i*3] << 8) |
 +		      ((int32_t)packet[3 + i*3]);
-+
++		
 +		/* Sign extension for 24-bit value */
 +		if (raw & 0x800000)
 +			raw |= 0xFF000000;
-+
++		
 +		/* Convert to nanovolts using integer arithmetic.  The
 +		 * userspace API converts nV to floating-point units as needed. */
 +		samples[i] = (s32)(((s64)raw * OPENBCI_VREF_NV) /
@@ -1739,10 +1739,10 @@ index 000000000..33d034e69
 +
 +	/* Write to ring buffer */
 +	if (dev->ringbuf) {
-+		int ret = xtos_bci_ringbuf_write(dev->ringbuf, samples,
++		int ret = xtos_bci_ringbuf_write(dev->ringbuf, samples, 
 +		                                 sizeof(samples));
 +		if (ret < 0) {
-+			pr_err_ratelimited("openbci: Failed to write to ring buffer: %d\n",
++			pr_err_ratelimited("openbci: Failed to write to ring buffer: %d\n", 
 +			                   ret);
 +			dev->samples_dropped += OPENBCI_NUM_CHANNELS;
 +		} else {
@@ -1946,8 +1946,8 @@ index 000000000..33d034e69
 +	return 0;
 +}
 +
-+static int openbci_set_channel_enable(struct xtos_bci_dev *dev,
-+                                     int channel,
++static int openbci_set_channel_enable(struct xtos_bci_dev *dev, 
++                                     int channel, 
 +                                     bool enable)
 +{
 +	struct openbci_priv *priv = dev->hw_private;
@@ -1972,7 +1972,7 @@ index 000000000..33d034e69
 +	return 0;
 +}
 +
-+static int openbci_impedance_check(struct xtos_bci_dev *dev, float *impedances)
++static int openbci_impedance_check(struct xtos_bci_dev *dev, __u32 *impedances_kohm)
 +{
 +	pr_info("openbci: Impedance check not implemented\n");
 +	return -EOPNOTSUPP;
@@ -2022,7 +2022,7 @@ index 000000000..33d034e69
 +	serdev_device_set_flow_control(serdev, false);
 +
 +	/* Initialize device descriptor */
-+	strncpy(openbci_cyton_dev.name, "OpenBCI Cyton",
++	strncpy(openbci_cyton_dev.name, "OpenBCI Cyton", 
 +	        sizeof(openbci_cyton_dev.name) - 1);
 +	openbci_cyton_dev.num_channels = OPENBCI_NUM_CHANNELS;
 +	openbci_cyton_dev.sampling_rate = OPENBCI_DEFAULT_RATE;

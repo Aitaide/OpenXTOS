@@ -54,7 +54,7 @@ struct xtos_bci_device_ops {
 	/* Calibration */
 	int (*calibrate)(struct xtos_bci_dev *dev);
 	int (*impedance_check)(struct xtos_bci_dev *dev, 
-	                      float *impedances);
+	                      __u32 *impedances_kohm);
 };
 
 /* BCI device descriptor */
@@ -67,7 +67,7 @@ struct xtos_bci_dev {
 	int num_channels;           /* Number of channels */
 	int sampling_rate;          /* Sampling rate (Hz) */
 	int resolution_bits;        /* ADC resolution (bits) */
-	float input_range_mv;       /* Input range (millivolts) */
+	int input_range_mv;         /* Input range (millivolts, integer) */
 	
 	/* Connection information */
 	enum xtos_bci_interface interface;
