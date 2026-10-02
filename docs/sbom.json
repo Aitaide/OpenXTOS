@@ -1,15 +1,15 @@
 {
   "bomFormat": "CycloneDX",
   "specVersion": "1.5",
-  "serialNumber": "urn:uuid:367491e378675946a8dddbff79be2810f5be",
+  "serialNumber": "urn:uuid:05f62a22a83a671c477887c0845d04e69809",
   "version": 1,
   "metadata": {
-    "timestamp": "2026-10-02T06:32:00.314599+00:00",
+    "timestamp": "2026-10-02T09:02:54.670013+00:00",
     "component": {
       "type": "application",
       "bom-ref": "xtos-component-xtos-system",
       "name": "xtos",
-      "version": "1.0.0-dev",
+      "version": "0.9.0-devpreview.1",
       "licenses": [
         {
           "license": {
@@ -30,7 +30,7 @@
     "properties": [
       {
         "name": "xtos:git-commit",
-        "value": "9a7b90c92a950b0df03b36c4330f107b8afc5dd2"
+        "value": "b1126b1b7cb3037a5a08521ec8bf7d60258b9cbb"
       },
       {
         "name": "xtos:kernel-release",
@@ -47,7 +47,7 @@
       "type": "application",
       "bom-ref": "xtos-component-xtos-system",
       "name": "xtos",
-      "version": "1.0.0-dev",
+      "version": "0.9.0-devpreview.1",
       "licenses": [
         {
           "license": {

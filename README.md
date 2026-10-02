@@ -128,8 +128,8 @@ See [CONTRIBUTING.md](CONTRIBUTING.md) for development workflow and coding stand
 
 ### Target Platforms
 
-- **Verified**: x86_64 QEMU development system
-- **Cross-compilation scripts provided**: ARM64, RISC-V (real hardware validation pending)
+- **Verified in QEMU (full system + in-guest tests)**: x86_64, ARM64, RISC-V 64
+- **Real hardware validation**: pending (development boards and OpenBCI device required)
 
 ### License
 
@@ -137,7 +137,7 @@ See [LICENSE](LICENSE) for terms.
 
 ### Status
 
-Current development phase: **Stage 3 Complete** (P300, ONNX Runtime, PyTorch, TensorFlow/TFLite baselines)
+Current development phase: **Developer Preview** — three-architecture (x86_64 / ARM64 / RISC-V 64) QEMU-validated system with fuzzing, SBOM, ABI versioning, and reproducible builds (see STATUS.md)
 
 See [STATUS.md](STATUS.md) for detailed verification results.
 
@@ -250,8 +250,8 @@ xtos/
 
 ### 目标平台
 
-- **已验证**：x86_64 QEMU 开发系统
-- **提供交叉编译脚本**：ARM64、RISC-V（真实硬件验证待完成）
+- **QEMU 全系统级验证（含 in-guest 测试）**：x86_64、ARM64、RISC-V 64
+- **真实硬件验证**：待完成（需要开发板和 OpenBCI 设备）
 
 ### 许可证
 
@@ -259,6 +259,6 @@ xtos/
 
 ### 状态
 
-当前开发阶段：**阶段 3 已完成**（P300、ONNX Runtime、PyTorch、TensorFlow/TFLite 基线）
+当前开发阶段：**Developer Preview** —— 三架构（x86_64 / ARM64 / RISC-V 64）QEMU 验证系统，含 fuzz、SBOM、ABI 版本化与可复现构建（见 STATUS.md）
 
 详细验证结果见 [STATUS.md](STATUS.md)。

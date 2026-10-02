@@ -27,6 +27,16 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
 
+
+def project_version() -> str:
+    """Read the XTOS project version from the VERSION file."""
+    line = ""
+    for raw in (ROOT / "VERSION").read_text().splitlines():
+        raw = raw.strip()
+        if raw and not raw.startswith("#") and not line:
+            line = raw
+    return line.split("=", 1)[1].strip() if "=" in line else "unknown"
+
 LICENSE_KERNEL = "GPL-2.0 WITH Linux-syscall-note"
 LICENSE_GPL2 = "GPL-2.0-only"
 LICENSE_APACHE = "Apache-2.0"
@@ -247,7 +257,7 @@ def main() -> int:
         "type": "application",
         "bom-ref": system_ref,
         "name": "xtos",
-        "version": "1.0.0-dev",
+        "version": project_version(),
         "licenses": [{"license": {"id": LICENSE_APACHE}}],
         "description": ("XTOS real-time operating system research build: "
                         "Linux 6.6.0-rt15 kernel + XTOS BCI components + "
