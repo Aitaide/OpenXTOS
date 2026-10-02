@@ -48,6 +48,10 @@ sdk/libxtos-rt/tests/test_spsc_tsan
 sdk/libxtos-signal/test_signal
 sdk/libxtos-signal/test_signal_san
 tools/xtos-eeg-pipeline/xtos-eeg-pipeline
+tools/xtos-fuzz/fuzz_csv_parse
+tools/xtos-fuzz/fuzz_openbci_packet
+tools/xtos-fuzz/corpus/
+tools/xtos-fuzz/corpus-check/
 tools/xtos-signal-benchmark/xtos-signal-benchmark
 tests/scheduler/test_priority_queue
 

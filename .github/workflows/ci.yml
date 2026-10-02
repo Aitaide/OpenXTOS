@@ -13,8 +13,10 @@ jobs:
           fetch-depth: 2
       - name: Verify source tree
         run: ./scripts/verify_source_tree.sh
-      - name: Run user-space tests
+      - name: Run user-space tests (incl. fuzz check)
         run: ./scripts/test.sh
+      - name: Extended fuzz round
+        run: make -C tools/xtos-fuzz fuzz FUZZ_ROUNDS=300
       - name: Check project whitespace
         run: git diff --check HEAD^ HEAD -- README.md CONTRIBUTING.md .gitignore .gitattributes .github scripts sdk tools tests system docs/system_build.md docs/signal_processing_benchmark.md docs/signal_processing_baseline.md docs/onnx_runtime_cpu_baseline.md docs/torch_onnx_export_parity.md plans/XTOS_Next_Development_Plan_Rev2.md examples/bci_test.c
   system:
@@ -30,3 +32,34 @@ jobs:
         run: QEMU_TIMEOUT=180 ./scripts/verify_system.sh
       - name: Check source tree remains clean
         run: ./scripts/verify_source_tree.sh && test -z "$(git status --porcelain --untracked-files=normal)"
+  cross-arch-build:
+    # Cross-compile ARM64 and RISC-V 64 systems with a basic QEMU boot check.
+    # Full in-guest validation (module load + test binaries) runs on the
+    # development host via scripts/verify_guest_<arch>.sh; recorded results in
+    # docs/stage4b_arm64_cross_compilation.md and
+    # docs/stage4c_riscv64_cross_compilation.md.
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: arm64
+            script: ./scripts/build_system_arm64.sh
+            packages: crossbuild-essential-arm64 qemu-system-arm
+          - arch: riscv64
+            script: ./scripts/build_system_riscv64.sh
+            packages: gcc-riscv64-linux-gnu qemu-system-misc opensbi
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install cross toolchain and QEMU
+        run: sudo apt-get update && sudo apt-get install -y build-essential flex bison bc libssl-dev libelf-dev libc6-dev python3 cpio gzip rsync kmod file ${{ matrix.packages }}
+      - name: Cross-compile XTOS system (${{ matrix.arch }})
+        run: JOBS=2 ${{ matrix.script }}
+      - name: Basic QEMU boot verification (${{ matrix.arch }})
+        run: |
+          if [ "${{ matrix.arch }}" = "arm64" ]; then
+            QEMU_TIMEOUT=300 ./scripts/verify_system_arm64.sh
+          else
+            QEMU_TIMEOUT=360 ./scripts/verify_system_riscv64.sh
+          fi
