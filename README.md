@@ -107,6 +107,24 @@ Each library carries an ABI version header
 The Apache-2.0 SDK communicates with GPL-2.0 kernel components through
 the UAPI boundary (ioctl/syscall), not by linking; see `LICENSE-NOTICE`.
 
+## Attribution and brand use
+
+Commercial use remains permitted under the applicable component licenses.
+Preserve their required copyright, license, attribution and modification
+notices, and meet GPL corresponding-source obligations when distributing
+covered binaries. See [NOTICE](NOTICE) for project attribution information
+and [TRADEMARKS.md](TRADEMARKS.md) for the bilingual brand guide.
+
+Clear attribution of the actual upstream version, integrated components,
+modifications and https://xtos.cn is recommended in an About, system-information
+or open-source notices screen and accompanying documentation. This is not
+an additional software-license condition. Logo/co-branding permission is
+separate; attribution does not imply official certification or endorsement.
+
+Source distributions include these files at the repository root. Include
+the applicable notices and license texts with downstream artifacts; a logo
+or website link is not a substitute for GPL or Apache compliance.
+
 ## Upstream
 
 This repository is the open-source distribution of XTOS. It contains the

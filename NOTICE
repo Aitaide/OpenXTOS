@@ -1,0 +1,55 @@
+OpenXTOS attribution notice
+===========================
+
+OpenXTOS is the open-source distribution of XTOS, an independent real-time
+system developed on the Linux kernel.
+
+Project maintainer
+------------------
+Jiaxing ITADD Group Co., Ltd.
+Project website: https://xtos.cn
+Source repository: https://github.com/Aitaide/OpenXTOS
+
+Current public release baseline
+--------------------------------
+OpenXTOS version: 0.9.0
+Source commit: dd313955ad57542bcd2af8827157d1bbd0cf5e83
+
+Component notices
+-----------------
+OpenXTOS combines components under Apache-2.0, GPL-2.0, and GPL-2.0 WITH
+Linux-syscall-note. See LICENSE and LICENSE-NOTICE for the component boundary.
+Third-party notices and the original license files remain applicable to the
+component to which they relate.
+
+Downstream attribution
+----------------------
+When a public product, service, distribution, device, or system incorporates
+OpenXTOS or an OpenXTOS component, the distributor should provide a clear
+attribution in the product's About, system-information, open-source notices,
+or equivalent screen and in the accompanying documentation where practical.
+The attribution should identify:
+
+  OpenXTOS / XTOS
+  upstream version and, where available, source commit
+  https://xtos.cn
+  the downstream distributor
+  whether the downstream work has been modified
+
+Suggested wording:
+
+  Based on OpenXTOS 0.9.0 (source commit
+  dd313955ad57542bcd2af8827157d1bbd0cf5e83).
+  Project: https://xtos.cn
+  Distributed by: [downstream distributor].
+  Modifications: [brief description or "none"]
+
+This notice is an attribution guide. It does not modify the software licenses
+and does not replace, narrow, or add conditions to the applicable Apache-2.0
+or GPL-2.0 license. It does not grant
+permission to imply that a downstream product is official, certified, or
+endorsed by the XTOS project or Jiaxing ITADD Group Co., Ltd.
+
+Trademark and logo use
+----------------------
+Use of the XTOS/OpenXTOS names and logos is described in TRADEMARKS.md.
