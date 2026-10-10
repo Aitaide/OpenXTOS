@@ -46,13 +46,13 @@ XTOS、OpenXTOS 的名称和官方 Logo 用于识别项目。代码许可证不�
 
 The XTOS/OpenXTOS names and official logos identify the project. Software licenses do not automatically grant permission to use them as a downstream product name, primary brand, certification mark, or co-brand. They must not imply that the project provides, certifies, sponsors, or endorses the downstream product.
 
-准确、适度地以文字说明“基于 OpenXTOS”或“包含 libxtos-rt”不需要申请本说明额外设置的批准；适用法律允许的合理描述性使用不受本说明限制。建议附上实际上游版本和官网。不得把修改版称为官方发行版。
+准确、适度地以文字说明“基于 OpenXTOS”或“包含 libxtos-rt”不需要申请本说明额外设置的批准；适用法律允许的合理描述性使用不受本说明限制。Apache-2.0 第 6 条保留为合理、惯常地说明作品来源或再现适用 NOTICE 内容而使用相关名称或标识的权利。建议附上实际上游版本和官网。不得把修改版称为官方发行版。
 
-Accurate, proportionate textual descriptions such as "based on OpenXTOS" or "includes libxtos-rt" do not require an additional approval imposed by this document. Descriptive use permitted by applicable law is not restricted. Identify the actual upstream version and website, and do not call a modified downstream version an official release.
+Accurate, proportionate textual descriptions such as "based on OpenXTOS" or "includes libxtos-rt" do not require an additional approval imposed by this document. Descriptive use permitted by applicable law is not restricted. Apache-2.0 section 6 preserves reasonable and customary use of names or marks in describing the origin of the Work and reproducing the content of NOTICE where applicable. Identify the actual upstream version and website, and do not call a modified downstream version an official release.
 
-除适用法律允许的使用或另有授权外，使用官方 Logo 作为产品来源标识、认证标识或联合品牌，应先获得书面授权。授权应明确允许的使用场景、Logo 文件、展示位置、尺寸、版本标注、期限和撤回条件。授权不是代码使用许可，也不免除开源许可证义务。
+除 Apache-2.0 第 6 条或其他适用法律允许的使用及已有授权外，将官方 Logo 用作主要产品品牌、认证标识、联合品牌或超出合理来源说明的其他用途，应先获得书面授权。授权应明确允许的使用场景、Logo 文件、展示位置、尺寸、版本标注、期限和撤回条件。不得以 Logo 授权限制 GPL-2.0 或 Apache-2.0 授予的代码权利，也不免除开源许可证义务。
 
-Except for uses permitted by applicable law or otherwise authorized, obtain written permission before using an official logo as a product-origin, certification, or co-branding mark. Permission should specify the context, logo asset, placement, size, version attribution, term, and withdrawal conditions. Brand permission is not permission to use the code and does not remove software-license obligations.
+Except for uses permitted by Apache-2.0 section 6 or other applicable law, or otherwise authorized, obtain written permission before using an official logo as a primary product brand, certification mark, co-branding mark, or other use beyond reasonable source identification. Permission should specify the context, logo asset, placement, size, version attribution, term, and withdrawal conditions. Brand permission is not permission to use the code and does not remove software-license obligations.
 
 获得授权后，应使用提供的官方 Logo，不得拉伸、变形、裁切关键图形、去掉标识文字或擅自改变颜色；修改版产品须同时标明自己的厂商身份和修改情况。普通来源标注不代表官方认证，也不代表官方提供支持或担保。
 
@@ -108,7 +108,11 @@ This guide does not retroactively add restrictions to released software. Mandato
 
 来源仓库 / Source: https://github.com/Aitaide/OpenXTOS
 
-品牌事项联系 / Brand enquiries: org@dcom.si
+项目联系 / Project contact: org@dcom.si
+
+项目联系用于转达咨询，不构成 Logo 授权；具体授权须由具备相应权限的权利方书面确认。
+
+Project contact is for routing enquiries, not a logo authorization. Any specific permission must be confirmed in writing by the party with the relevant authority.
 
 参考 / References:
 
