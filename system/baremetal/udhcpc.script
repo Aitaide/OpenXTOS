@@ -1,0 +1,11 @@
+#!/bin/sh
+case "$1" in
+bound|renew)
+ ip addr flush dev "$interface"
+ ifconfig "$interface" "$ip" netmask "$subnet"
+ for GW in $router; do ip route replace default via "$GW" dev "$interface"; break; done
+ : > /etc/resolv.conf
+ for NS in $dns; do echo "nameserver $NS" >> /etc/resolv.conf; done
+ echo "XTOS_DHCP=$interface:$ip" >/dev/console
+ ;;
+esac

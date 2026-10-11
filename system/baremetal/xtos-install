@@ -1,0 +1,83 @@
+#!/bin/sh
+# SPDX-License-Identifier: Apache-2.0
+set -eu
+export PATH=/usr/sbin:/usr/bin:/sbin:/bin
+fail() { echo "refused: $*" >&2; exit 1; }
+[ "$#" = 4 ] || { echo 'usage: xtos-install /dev/DISK EXPECTED_SERIAL EXPECTED_BYTES ERASE-XTOS' >&2; exit 2; }
+DISK=$1 EXPECTED_SERIAL=$2 EXPECTED_BYTES=$3
+[ "$4" = ERASE-XTOS ] || fail 'confirmation token'
+grep -qw 'xtos.installer=1' /proc/cmdline || fail 'installer boot required'
+case "$DISK" in /dev/nvme[0-9]*n[0-9]*|/dev/sd[a-z]*) ;; *) fail 'unsupported disk path';; esac
+[ "$(readlink -f "$DISK")" = "$DISK" ] || fail 'disk aliases forbidden'
+NAME=${DISK#/dev/}
+SYS=/sys/class/block/$NAME
+[ -b "$DISK" ] && [ -d "$SYS" ] && [ ! -e "$SYS/partition" ] || fail 'whole block disk required'
+case "$EXPECTED_BYTES" in ''|*[!0-9]*) fail 'capacity must be bytes';; esac
+[ "$EXPECTED_BYTES" -ge 2147483648 ] || fail 'disk smaller than 2 GiB'
+identity() {
+    [ "$(cat "$SYS/removable")" = 0 ] || fail 'removable disk'
+    SERIAL=$(lsblk -dn -o SERIAL "$DISK" | sed 's/^ *//;s/ *$//')
+    [ -n "$SERIAL" ] && [ "$SERIAL" = "$EXPECTED_SERIAL" ] || fail 'serial mismatch'
+    [ "$(blockdev --getsize64 "$DISK")" = "$EXPECTED_BYTES" ] || fail 'capacity mismatch'
+    for DEV in "$SYS" "$SYS"/"$NAME"*; do
+        [ -e "$DEV/dev" ] || continue
+        ID=$(cat "$DEV/dev")
+        awk -v id="$ID" '$3==id {found=1} END {exit !found}' /proc/self/mountinfo && fail 'mounted disk or partition'
+        [ -z "$(ls "$DEV/holders")" ] || fail 'disk has active holders'
+    done
+    for SWAP in $(awk 'NR>1 {print $1}' /proc/swaps); do
+        case "$SWAP" in "$DISK"|"$DISK"[0-9]*|"$DISK"p[0-9]*) fail 'active swap';; esac
+    done
+}
+[ -s /payload/rootfs.tar.gz ] && [ -s /payload/bzImage ] && [ -s /payload/boot.cpio.gz ] || fail 'payload missing'
+(cd /payload && sha256sum -c sha256.txt) || fail 'payload checksum'
+identity
+printf 'Installing serial=%s bytes=%s disk=%s\n' "$EXPECTED_SERIAL" "$EXPECTED_BYTES" "$DISK"
+# Repeat all identity and occupancy checks immediately before the first write.
+identity
+sfdisk --wipe always --wipe-partitions always "$DISK" <<EOF
+label: gpt
+size=2M,type=21686148-6449-6E6F-744E-656564454649
+size=256M,type=U
+ type=L
+EOF
+case "$NAME" in nvme*) P=${DISK}p;; *) P=$DISK;; esac
+for N in 2 3; do
+    COUNT=0
+    while [ ! -b "$P$N" ]; do COUNT=$((COUNT+1)); [ "$COUNT" -lt 20 ] || fail 'partition timeout'; sleep 1; done
+done
+identity
+mkfs.vfat -F 32 "${P}2"
+identity
+# Disable features introduced after the vendored 6.6 kernel.
+mkfs.ext4 -F -O ^orphan_file,^metadata_csum_seed "${P}3"
+mkdir -p /mnt/xtos
+mount "${P}3" /mnt/xtos
+trap 'umount /mnt/xtos/boot/efi 2>/dev/null || true; umount /mnt/xtos 2>/dev/null || true' EXIT
+ tar -xzf /payload/rootfs.tar.gz -C /mnt/xtos
+mkdir -p /mnt/xtos/boot/efi /mnt/xtos/boot/grub
+mount "${P}2" /mnt/xtos/boot/efi
+cp /payload/bzImage /mnt/xtos/boot/bzImage
+cp /payload/boot.cpio.gz /mnt/xtos/boot/initramfs.gz
+UUID=$(blkid -s UUID -o value "${P}3")
+[ -n "$UUID" ] || fail 'missing root UUID'
+printf 'UUID=%s / ext4 defaults 0 1\n' "$UUID" > /mnt/xtos/etc/fstab
+cat > /mnt/xtos/boot/grub/grub.cfg <<EOF
+set timeout=3
+set default=0
+serial --unit=0 --speed=115200
+terminal_input console serial
+terminal_output console serial
+menuentry 'XTOS persistent system' {
+ search --no-floppy --fs-uuid --set=root $UUID
+ linux /boot/bzImage console=tty0 console=ttyS0,115200 xtos.root=$UUID
+ initrd /boot/initramfs.gz
+}
+EOF
+grub-install --target=i386-pc --boot-directory=/mnt/xtos/boot "$DISK"
+grub-install --target=x86_64-efi --efi-directory=/mnt/xtos/boot/efi --boot-directory=/mnt/xtos/boot --no-nvram --removable
+sync
+umount /mnt/xtos/boot/efi
+umount /mnt/xtos
+trap - EXIT
+echo 'XTOS_INSTALL=PASS'
