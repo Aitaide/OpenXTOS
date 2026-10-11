@@ -1,6 +1,6 @@
 #!/bin/bash
 # ARM64 cross-compile build script for XTOS
-# Requires: aarch64-linux-gnu-gcc, make, rsync, cpio, gzip
+# Requires: aarch64-linux-gnu-gcc, make, rsync, cpio, gzip, host python3
 
 set -e
 
@@ -270,6 +270,13 @@ log "=== Stage 5: Creating ARM64 initramfs ==="
 
 # Create essential directories
 mkdir -p "$ROOTFS"/{dev,proc,sys,tmp,root,etc,mnt}
+
+# Optional XTOS_* metadata is passed literally; regenerate even in reused build roots.
+KERNEL_RELEASE="$(cat "$KERNEL_BUILD/include/config/kernel.release")"
+python3 "$ROOT/scripts/gen_system_identity.py" --output-dir "$ROOTFS/etc" \
+    --image-type "${XTOS_IMAGE_TYPE:-core}" --arch arm64 --kernel-release "$KERNEL_RELEASE" \
+    --build-id "${XTOS_BUILD_ID:-unknown}" --source-state "${XTOS_SOURCE_STATE:-unknown}" \
+    --hardware-profile "${XTOS_HARDWARE_PROFILE:-unknown}"
 
 # Create /etc/inittab
 cat > "$ROOTFS/etc/inittab" << 'EOF'

@@ -1,6 +1,6 @@
 #!/bin/bash
 # RISC-V 64 cross-compile build script for XTOS
-# Requires: riscv64-linux-gnu-gcc, make, rsync, cpio, gzip, file
+# Requires: riscv64-linux-gnu-gcc, make, rsync, cpio, gzip, file, host python3
 #
 # Mirrors build_system_arm64.sh: RT kernel + BusyBox + XTOS user-space
 # libraries + static test binaries + initramfs, for qemu-system-riscv64.
@@ -266,6 +266,13 @@ log "=== Stage 5: Creating RISC-V 64 initramfs ==="
 
 # Create essential directories
 mkdir -p "$ROOTFS"/{dev,proc,sys,tmp,root,etc,mnt}
+
+# Optional XTOS_* metadata is passed literally; regenerate even in reused build roots.
+KERNEL_RELEASE="$(cat "$KERNEL_BUILD/include/config/kernel.release")"
+python3 "$ROOT/scripts/gen_system_identity.py" --output-dir "$ROOTFS/etc" \
+    --image-type "${XTOS_IMAGE_TYPE:-core}" --arch riscv64 --kernel-release "$KERNEL_RELEASE" \
+    --build-id "${XTOS_BUILD_ID:-unknown}" --source-state "${XTOS_SOURCE_STATE:-unknown}" \
+    --hardware-profile "${XTOS_HARDWARE_PROFILE:-unknown}"
 
 # Create /etc/inittab
 cat > "$ROOTFS/etc/inittab" << 'EOF'
