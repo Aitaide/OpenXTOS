@@ -102,3 +102,6 @@ cyclictest_*.md
 !userspace/busybox/testsuite/*.zip
 !userspace/busybox/examples/bootfloppy/etc/init.d/
 !userspace/busybox/examples/bootfloppy/etc/init.d/rcS
+
+# Stray downloaded packages (userspace fetches keep them under .build/)
+/*.deb

@@ -1,10 +1,10 @@
 {
   "bomFormat": "CycloneDX",
   "specVersion": "1.5",
-  "serialNumber": "urn:uuid:05f62a22a83a671c477887c0845d04e69809",
+  "serialNumber": "urn:uuid:1d667286810591fa266d8f5fd76b464ba752",
   "version": 1,
   "metadata": {
-    "timestamp": "2026-10-02T09:02:54.670013+00:00",
+    "timestamp": "2026-10-11T02:32:41.108543+00:00",
     "component": {
       "type": "application",
       "bom-ref": "xtos-component-xtos-system",
@@ -30,7 +30,7 @@
     "properties": [
       {
         "name": "xtos:git-commit",
-        "value": "b1126b1b7cb3037a5a08521ec8bf7d60258b9cbb"
+        "value": "e04f4a08d98ac71f731fb6f8e138c4833840615f"
       },
       {
         "name": "xtos:kernel-release",
@@ -280,7 +280,7 @@
       "hashes": [
         {
           "alg": "SHA-256",
-          "content": "651a264d8768722d1d0fd1eadf45a431f63b79a9a99f398701fa288fb2c3b047"
+          "content": "28472d89545f3173c0fa29dfc6914536675c3e47df20d9293490b45bbfc9b0c5"
         }
       ]
     },
