@@ -1,0 +1,41 @@
+#!/bin/sh
+# --init is PID 1 handoff only. BusyBox inittab calls this without arguments as sysinit.
+BB=/usr/libexec/xtos/busybox
+export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+export LANG=C.UTF-8 LC_ALL=C.UTF-8 GOTOOLCHAIN=local GOROOT=/usr/lib/go
+if [ "${1-}" = --init ]; then
+    exec "$BB" init
+fi
+[ "$#" -eq 0 ] || { echo 'XTOS_START_ERROR unexpected arguments'; exit 1; }
+set -e
+"$BB" mkdir -p /dev/pts /dev/shm /run /tmp
+"$BB" mountpoint -q /dev/pts || "$BB" mount -t devpts -o mode=0620,gid=5 devpts /dev/pts
+"$BB" mountpoint -q /dev/shm || "$BB" mount -t tmpfs -o mode=1777,nosuid,nodev,size=25% tmpfs /dev/shm
+"$BB" chmod 1777 /tmp
+"$BB" hostname xtos-live
+/usr/sbin/ip link set lo up
+# Read the RTC for diagnosis only: a present RTC is not proof of synchronized time.
+"$BB" hwclock -u -r 2>/dev/null || echo 'XTOS_RTC unavailable'
+echo 'XTOS_SYSTEM_IDENTITY_BEGIN'
+"$BB" cat /etc/os-release
+"$BB" uname -a
+if [ -r /sys/kernel/realtime ]; then
+    echo "XTOS_REALTIME realtime=$("$BB" cat /sys/kernel/realtime)"
+else
+    echo 'XTOS_REALTIME realtime=unknown'
+fi
+echo 'XTOS_LIVE mode=overlay lower=squashfs upper=tmpfs persistence=0 media_required=1'
+/usr/bin/clock status
+# Prepare the ephemeral host key and print its public fingerprint before readiness.
+/usr/libexec/xtos/xtos-ssh --prepare || echo 'XTOS_SSH unavailable'
+for path in /sys/class/net/*; do
+    [ -e "$path" ] || continue
+    interface=${path##*/}
+    case "$interface" in ''|lo|*[!A-Za-z0-9_.-]*|-*) continue ;; esac
+    [ "${#interface}" -le 15 ] || continue
+    [ -e "$path/device" ] && [ ! -d "$path/wireless" ] && [ "$("$BB" cat "$path/type")" = 1 ] || continue
+    /usr/sbin/ip link set dev "$interface" up || continue
+    # Bound initial negotiation; XTOS_READY says startup completed, not that DHCP succeeded.
+    "$BB" udhcpc -n -q -t 3 -T 3 -i "$interface" -s /usr/libexec/xtos/xtos-dhcp &
+done
+echo 'XTOS_READY mode=live persistence=0 clock=see-status network=see-XTOS_DHCP'

@@ -1,0 +1,94 @@
+#!/bin/sh
+# Initramfs-only entrypoint. The boot medium stays mounted for the whole session.
+BB=/bin/busybox
+export PATH=/bin:/sbin
+
+fail() {
+    echo "XTOS_LIVE_ERROR $*" >/dev/console
+    echo 'Recovery root shell; no automatic installation or disk writes.' >/dev/console
+    while :; do "$BB" sh </dev/console >/dev/console 2>&1; done
+}
+
+"$BB" mkdir -p /dev /proc /sys /run /newroot
+"$BB" mount -t devtmpfs devtmpfs /dev || fail 'devtmpfs mount failed'
+"$BB" mount -t proc proc /proc || fail 'proc mount failed'
+"$BB" mount -t sysfs sysfs /sys || fail 'sysfs mount failed'
+case " $("$BB" cat /proc/cmdline) " in
+    *' xtos.live=1 '*) ;;
+    *) fail 'xtos.live=1 is required' ;;
+esac
+"$BB" mount -t tmpfs -o mode=0755,size=32M tmpfs /run || fail 'run tmpfs mount failed'
+"$BB" mkdir -p /run/live-media /run/live-lower /run/live-rw
+
+eligible() {
+    node=$1
+    # sysfs ancestry, never a guessed device-name or an explicit host disk override.
+    real=$("$BB" readlink -f "$node") || return 1
+    parent=${real%/*}
+    removable=
+    if [ -r "$node/removable" ]; then
+        removable=$("$BB" cat "$node/removable")
+    elif [ -f "$node/partition" ] && [ -r "$parent/removable" ]; then
+        removable=$("$BB" cat "$parent/removable")
+    fi
+    [ "$removable" = 1 ] && return 0
+    [ -r "$node/device/type" ] && [ "$("$BB" cat "$node/device/type")" = 5 ]
+}
+
+scan() {
+    matches=0
+    selected=
+    "$BB" mdev -s || fail 'device discovery failed'
+    for node in /sys/class/block/*; do
+        [ -e "$node" ] || continue
+        eligible "$node" || continue
+        name=${node##*/}
+        [ -b "/dev/$name" ] || continue
+        "$BB" mount -t iso9660 -o ro,nodev,nosuid "/dev/$name" /run/live-media 2>/dev/null || continue
+        if [ -f /run/live-media/live/XTOS_LIVE_ID ] &&
+           [ "$("$BB" cat /run/live-media/live/XTOS_LIVE_ID)" = 'XTOS-LIVE-DEVELOPER-1' ] &&
+           [ -f /run/live-media/live/rootfs.squashfs ] &&
+           [ -f /run/live-media/live/rootfs.sha256 ]; then
+            matches=$((matches + 1))
+            selected="/dev/$name"
+        fi
+        "$BB" umount /run/live-media || fail 'cannot release probed media'
+    done
+}
+
+elapsed=0
+settled=0
+while [ "$elapsed" -lt 30 ]; do
+    scan
+    [ "$matches" -le 1 ] || fail 'ambiguous matching Live media; remove duplicate images'
+    if [ "$matches" -eq 1 ]; then
+        [ "$settled" -eq 1 ] && break
+        settled=1
+    else
+        settled=0
+    fi
+    "$BB" sleep 1
+    elapsed=$((elapsed + 1))
+done
+[ "$matches" -eq 1 ] || fail 'no eligible Live medium found within 30 seconds'
+"$BB" mount -t iso9660 -o ro,nodev,nosuid "$selected" /run/live-media || fail 'Live medium mount failed'
+[ "$("$BB" cat /run/live-media/live/XTOS_LIVE_ID)" = 'XTOS-LIVE-DEVELOPER-1' ] || fail 'Live marker changed'
+manifest=$("$BB" cat /run/live-media/live/rootfs.sha256) || fail 'checksum manifest missing'
+digest=${manifest%% *}
+case "$digest" in *[!0-9a-fA-F]*|'') fail 'invalid checksum manifest' ;; esac
+[ "${#digest}" -eq 64 ] && [ "$manifest" = "$digest  rootfs.squashfs" ] || fail 'checksum manifest must name only rootfs.squashfs'
+(cd /run/live-media/live && "$BB" sha256sum -c rootfs.sha256) || fail 'rootfs checksum mismatch'
+loop=$("$BB" losetup -f) || fail 'no free loop device'
+"$BB" losetup -r "$loop" /run/live-media/live/rootfs.squashfs || fail 'read-only loop association failed'
+"$BB" mount -t squashfs -o ro,nodev "$loop" /run/live-lower || fail 'read-only SquashFS mount failed'
+"$BB" mount -t tmpfs -o mode=0755,size=50% tmpfs /run/live-rw || fail 'RAM upper mount failed'
+"$BB" mkdir -p /run/live-rw/upper /run/live-rw/work
+"$BB" mount -t overlay overlay -o lowerdir=/run/live-lower,upperdir=/run/live-rw/upper,workdir=/run/live-rw/work /newroot || fail 'RAM overlay mount failed'
+"$BB" mkdir -p /newroot/run /newroot/dev /newroot/proc /newroot/sys
+"$BB" mount --move /run /newroot/run || fail 'run mount transfer failed'
+"$BB" mount --move /dev /newroot/dev || fail 'dev mount transfer failed'
+"$BB" mount --move /proc /newroot/proc || fail 'proc mount transfer failed'
+"$BB" mount --move /sys /newroot/sys || fail 'sys mount transfer failed'
+echo "XTOS_LIVE_ROOT media=$selected lower=squashfs upper=tmpfs persistence=0 media_required=1"
+exec "$BB" switch_root /newroot /sbin/xtos-start --init
+fail 'switch_root failed'
