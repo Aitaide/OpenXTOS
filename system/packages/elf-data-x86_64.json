@@ -1,0 +1,150 @@
+{
+  "architecture": "x86_64",
+  "data_files": [
+    {
+      "package": "golang-1.24-src",
+      "path": "/usr/share/go-1.24/src/crypto/internal/boring/syso/goboringcrypto_linux_arm64.syso",
+      "purpose": "go-cross-compile-object",
+      "sha256": "396762b4e072e0d9dd1668a9c6fbb2fae3226d5e4c26a8b09cf871ee53b9ca72"
+    },
+    {
+      "package": "golang-1.24-src",
+      "path": "/usr/share/go-1.24/src/debug/elf/testdata/compressed-32.obj",
+      "purpose": "go-test-fixture",
+      "sha256": "5f4f73b9e4b78881dbc133b777ef6504023a2e7ffd367690692b238e9e9b1f34"
+    },
+    {
+      "package": "golang-1.24-src",
+      "path": "/usr/share/go-1.24/src/debug/elf/testdata/gcc-386-freebsd-exec",
+      "purpose": "go-test-fixture",
+      "sha256": "e8a147f428f86cecb08283ae37ab76c70710f015a51589780ce64a5a727b2a27"
+    },
+    {
+      "package": "golang-1.24-src",
+      "path": "/usr/share/go-1.24/src/debug/elf/testdata/go-relocation-test-clang-arm.obj",
+      "purpose": "go-test-fixture",
+      "sha256": "c430bcd7c5156012f69519cebdb41c628402a38e9e7a4d762201240030939dd1"
+    },
+    {
+      "package": "golang-1.24-src",
+      "path": "/usr/share/go-1.24/src/debug/elf/testdata/go-relocation-test-clang-x86.obj",
+      "purpose": "go-test-fixture",
+      "sha256": "48477464bbd2c753c27833505f90065084aead6cb3901ed12cdee683a44642b1"
+    },
+    {
+      "package": "golang-1.24-src",
+      "path": "/usr/share/go-1.24/src/debug/elf/testdata/go-relocation-test-gcc441-x86.obj",
+      "purpose": "go-test-fixture",
+      "sha256": "e047a8828383904449b752aa5074031e2af90a3bd92df5deb4fc2f0afbbb8a1d"
+    },
+    {
+      "package": "golang-1.24-src",
+      "path": "/usr/share/go-1.24/src/debug/elf/testdata/go-relocation-test-gcc482-aarch64.obj",
+      "purpose": "go-test-fixture",
+      "sha256": "b77a9d858ab8132a3742bc6e9bd84cb644b59567aacaf78b127726485adc9d7a"
+    },
+    {
+      "package": "golang-1.24-src",
+      "path": "/usr/share/go-1.24/src/debug/elf/testdata/go-relocation-test-gcc482-ppc64le.obj",
+      "purpose": "go-test-fixture",
+      "sha256": "f1b3d89638fd31e3a503fff01ea9b04749541d4f81a2cf48c0409f1bff08d024"
+    },
+    {
+      "package": "golang-1.24-src",
+      "path": "/usr/share/go-1.24/src/debug/elf/testdata/go-relocation-test-gcc492-arm.obj",
+      "purpose": "go-test-fixture",
+      "sha256": "bac6fcea8bd34e1062af9d35d9f91fb5a01b54d9d52dc256bad90aed39dcbe49"
+    },
+    {
+      "package": "golang-1.24-src",
+      "path": "/usr/share/go-1.24/src/debug/elf/testdata/go-relocation-test-gcc492-mips64.obj",
+      "purpose": "go-test-fixture",
+      "sha256": "e455f54fe754687ec9b193068167f858322dc05b25f696921f23075dfe5475df"
+    },
+    {
+      "package": "golang-1.24-src",
+      "path": "/usr/share/go-1.24/src/debug/elf/testdata/go-relocation-test-gcc492-mipsle.obj",
+      "purpose": "go-test-fixture",
+      "sha256": "352badf2e25625d8a7e12f8ea0f19ed8907de13b8a2fe24f263807a7d1c09c8f"
+    },
+    {
+      "package": "golang-1.24-src",
+      "path": "/usr/share/go-1.24/src/debug/elf/testdata/go-relocation-test-gcc493-mips64le.obj",
+      "purpose": "go-test-fixture",
+      "sha256": "3f8b7732623e05bf23f8d766d294d544733ad127f0fae02fefe27891e6f75da4"
+    },
+    {
+      "package": "golang-1.24-src",
+      "path": "/usr/share/go-1.24/src/debug/elf/testdata/go-relocation-test-gcc5-ppc.obj",
+      "purpose": "go-test-fixture",
+      "sha256": "b18fffe1e6c6c6f26b3f59fee95002838a230db0448d6705afa219e47943f8c6"
+    },
+    {
+      "package": "golang-1.24-src",
+      "path": "/usr/share/go-1.24/src/debug/elf/testdata/go-relocation-test-gcc531-s390x.obj",
+      "purpose": "go-test-fixture",
+      "sha256": "01603594d04e2e7fc3f9bfe1014505fb85c3044a0091c6cc0171ff1200f88de7"
+    },
+    {
+      "package": "golang-1.24-src",
+      "path": "/usr/share/go-1.24/src/debug/elf/testdata/go-relocation-test-gcc540-mips.obj",
+      "purpose": "go-test-fixture",
+      "sha256": "0f1aaa29f60679bab240fe856fccca2eb48e6bd39b2f284199f2f1325d8aa433"
+    },
+    {
+      "package": "golang-1.24-src",
+      "path": "/usr/share/go-1.24/src/debug/elf/testdata/go-relocation-test-gcc620-sparc64.obj",
+      "purpose": "go-test-fixture",
+      "sha256": "4be5099dd1dc09bb2faca87e311d5c0002ec88a4336b8e3ea64715e610c1c537"
+    },
+    {
+      "package": "golang-1.24-src",
+      "path": "/usr/share/go-1.24/src/debug/elf/testdata/go-relocation-test-gcc720-riscv64.obj",
+      "purpose": "go-test-fixture",
+      "sha256": "6ec38b3539409145695cec679e5f0685466fcbe45d9b6d05ecae20d0163d9151"
+    },
+    {
+      "package": "golang-1.24-src",
+      "path": "/usr/share/go-1.24/src/debug/elf/testdata/libtiffxx.so_",
+      "purpose": "go-test-fixture",
+      "sha256": "b404bb0dea8873c604573510c590f6766d167a4532756b5b67d9e9ecc995043c"
+    },
+    {
+      "package": "golang-1.24-src",
+      "path": "/usr/share/go-1.24/src/runtime/pprof/testdata/test32",
+      "purpose": "go-test-fixture",
+      "sha256": "827cd4089331a50008a2ff66efe1bff36aaf38164b9c37bd6dce29e7521c0c4c"
+    },
+    {
+      "package": "golang-1.24-src",
+      "path": "/usr/share/go-1.24/src/runtime/pprof/testdata/test32be",
+      "purpose": "go-test-fixture",
+      "sha256": "e5eaa96312de0a2073c6f52934906cc2817440faeaca44a73dc8d9221abb0c50"
+    },
+    {
+      "package": "golang-1.24-src",
+      "path": "/usr/share/go-1.24/src/runtime/pprof/testdata/test64be",
+      "purpose": "go-test-fixture",
+      "sha256": "d37dc2d5ec8d1d216efc5977af03497a2531df90f54c3225d7098ced92c5af46"
+    },
+    {
+      "package": "golang-1.24-src",
+      "path": "/usr/share/go-1.24/src/runtime/race/race_linux_arm64.syso",
+      "purpose": "go-cross-compile-object",
+      "sha256": "1ecac22e214ca4e83aadf3cbb56edd53f998d9cad87d114e583fa117289d18c2"
+    },
+    {
+      "package": "golang-1.24-src",
+      "path": "/usr/share/go-1.24/src/runtime/race/race_linux_ppc64le.syso",
+      "purpose": "go-cross-compile-object",
+      "sha256": "349e6cb9975244fe4115ea7c253f672ef607cbfb92362088b81f1d6881a4cd3f"
+    },
+    {
+      "package": "golang-1.24-src",
+      "path": "/usr/share/go-1.24/src/runtime/race/race_linux_s390x.syso",
+      "purpose": "go-cross-compile-object",
+      "sha256": "7471de6b66ce74924904185cdbf5a23943a31c105bb76889c652fcb7e8c5a8dd"
+    }
+  ],
+  "schema_version": 1
+}

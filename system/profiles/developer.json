@@ -1,0 +1,15 @@
+{
+  "schema_version": 1,
+  "name": "developer",
+  "description": "XTOS daily development userspace; native Python and Go toolchains",
+  "package_format": "deb",
+  "repository_suite": "trixie",
+  "architectures": ["x86_64"],
+  "extends": "core",
+  "requested_packages": ["nano", "curl", "git", "openssh-client", "python3", "python3-venv", "python3-pip", "python3-dev", "golang-go", "gcc", "g++", "make", "pkg-config", "libc6-dev", "binutils", "gawk", "strace"],
+  "required_commands": ["nano", "curl", "git", "ssh", "python3", "pip3", "go", "gcc", "g++", "make", "pkg-config", "strace"],
+  "defaults": {"LANG": "C.UTF-8", "LC_ALL": "C.UTF-8", "GOTOOLCHAIN": "local", "GOROOT": "/usr/lib/go"},
+  "python_packages_policy": "Project dependencies belong in venv; system Python is managed",
+  "ai_environment": "Fixed CPU AI packages are integrated in T17, not claimed by T04",
+  "runtime_layer": "userspace-only; not a bootable Developer image yet"
+}

@@ -1,0 +1,37 @@
+{
+  "architectures": [
+    "x86_64"
+  ],
+  "clock_policy": "RTC state reported; synchronization requires explicit configured server",
+  "defaults": {
+    "GOROOT": "/usr/lib/go",
+    "GOTOOLCHAIN": "local",
+    "LANG": "C.UTF-8",
+    "LC_ALL": "C.UTF-8"
+  },
+  "description": "Private XTOS Live Developer candidate user-space package layer",
+  "extends": "developer",
+  "name": "live-developer",
+  "network_policy": "Private test image; key-only SSH, no native firewall before T13-T16 implementation",
+  "package_format": "deb",
+  "persistent_storage": false,
+  "repository_suite": "trixie",
+  "requested_packages": [
+    "dropbear-bin",
+    "sudo",
+    "chrony",
+    "squashfs-tools",
+    "rt-tests",
+    "nftables"
+  ],
+  "required_commands": [
+    "dropbear",
+    "dropbearkey",
+    "sudo",
+    "chronyd",
+    "mksquashfs",
+    "cyclictest",
+    "nft"
+  ],
+  "schema_version": 1
+}
