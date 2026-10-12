@@ -28,7 +28,7 @@ PERSIST=0
 "$BB" mountpoint -q /run/persist 2>/dev/null && PERSIST=1
 case " $(cat /proc/cmdline) " in *' xtos.persist='*) PERSIST_REQUESTED=1 ;; *) PERSIST_REQUESTED=0 ;; esac
 echo "XTOS_LIVE mode=overlay lower=squashfs upper=tmpfs persistence=$PERSIST requested=$PERSIST_REQUESTED media_required=1"
-usr/bin/clock status
+/usr/bin/clock status
 # Prepare the ephemeral host key and print its public fingerprint before readiness.
 /usr/libexec/xtos/xtos-ssh --prepare || echo 'XTOS_SSH unavailable'
 for path in /sys/class/net/*; do

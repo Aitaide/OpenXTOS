@@ -151,7 +151,7 @@ def build(args):
     if not args.busybox.is_file():raise ValueError('static BusyBox missing')
     detail=subprocess.check_output(['readelf','-l',str(args.busybox)],text=True)
     if 'INTERP' in detail:raise ValueError('initramfs BusyBox must be static')
-    for name in ['init',*RUNTIME_FILES]:
+    for name in ['init','xtos-persist-check',*RUNTIME_FILES]:
         if not (ROOT/'system/live'/name).is_file():raise ValueError('Live runtime source missing: '+name)
     key=validate_public_key(args.authorized_key) if args.authorized_key else None
     for tool in ['grub-mkrescue','xorriso','cpio','gzip']:
@@ -165,6 +165,11 @@ def build(args):
     try:
         runtime=stage/'rootfs';shutil.copytree(root,runtime,symlinks=True)
         run([sys.executable,ROOT/'scripts/configure_userspace.py','--rootfs',runtime])
+        persistent_variant = bool(args.kernel_extra and 'xtos.persist=' in args.kernel_extra)
+        live_storage = ('read-only Live medium plus optional labeled ext4 persistence for /home and /root; '
+                        'tmpfs overlay elsewhere' if persistent_variant else
+                        'read-only Live medium plus nonpersistent tmpfs overlay')
+        live_motd = ('optional /home+/root persistence' if persistent_variant else 'no persistence')
         # Base package /etc/os-release is regenerated from honest VERSION/build metadata.
         buildid='live-'+sha(image)[:12]+'-'+manifest['lock_sha256'][:12]
         run([sys.executable,ROOT/'scripts/gen_system_identity.py','--output-dir',runtime/'etc','--image-type','developer','--arch','x86_64','--kernel-release',release,'--source-state','dirty','--build-id',buildid])
@@ -182,7 +187,7 @@ def build(args):
         write(runtime,'etc/shells','/bin/sh\n/bin/bash\n/usr/bin/sh\n/usr/bin/bash\n')
         logo = ' _____ _  _____  ___ \n|_   _/ \\\\|_   _|/ __|\n  | |/ _ \\\\ | | | (__ \n  |_/_/ \\\\\\\\_|_|  \\\\___|\n'
         write(runtime,'etc/issue','XTOS Bate \\\\r  \\\\n \\\\l\n\n')
-        write(runtime,'etc/motd',logo+'\n XTOS Bate Developer Live  |  RAM overlay, no persistence\n Commands: info, net show, hw, clock, pkg, fw, rt status\n\n')
+        write(runtime,'etc/motd',logo+'\n XTOS Bate Developer Live  |  '+live_motd+'\n Commands: info, net show, hw, clock, pkg, fw, rt status\n\n')
         write(runtime,'etc/profile','# XTOS system profile\nexport LANG=C.UTF-8 LC_ALL=C.UTF-8\nif [ "$EUID" = 0 ]; then PS1="\\\\[\\\\e[1;32m\\\\]xtos#\\\\[\\\\e[0m\\\\] "; else PS1="\\\\[\\\\e[1;36m\\\\]xtos$\\\\[\\\\e[0m\\\\] "; fi\n[ -f /etc/motd ] && [ -n "${PS1:-}" ] && cat /etc/motd\n')
         home=runtime/'home/xtos';shutil.copytree(runtime/'etc/skel',home,symlinks=True)
         os.chown(home,1000,1000)
@@ -218,6 +223,7 @@ def build(args):
         for app in apps:
             if app!='busybox':(early/'bin'/app).symlink_to('busybox')
         shutil.copy2(ROOT/'system/live/init',early/'init');(early/'init').chmod(0o755)
+        shutil.copy2(ROOT/'system/live/xtos-persist-check',early/'xtos-persist-check');(early/'xtos-persist-check').chmod(0o755)
         (early/'newroot').mkdir()
         pack_initramfs(early,iso/'boot/initramfs.gz',epoch)
         shutil.copy2(image,iso/'boot/bzImage')
@@ -227,7 +233,7 @@ def build(args):
         product=images/'xtos-developer-live-x86_64.iso'
         env=dict(os.environ,SOURCE_DATE_EPOCH=str(epoch),LC_ALL='C',TZ='UTC')
         run(['grub-mkrescue','-o',product,iso],env=env)
-        provenance={'schema_version':1,'status':'built-unverified-live-candidate','architecture':'x86_64','kernel_release':release,'kernel_sha256':sha(image),'kernel_config_sha256':sha(kernel/'.config'),'userspace_lock_sha256':manifest['lock_sha256'],'source_git_head':subprocess.check_output(['git','-C',str(ROOT),'rev-parse','HEAD'],text=True).strip(),'source_state':'dirty','authorized_public_key_sha256':hashlib.sha256(key.encode()).hexdigest() if key else None,'rootfs_squashfs_sha256':sha(squash),'initramfs_sha256':sha(iso/'boot/initramfs.gz'),'iso_sha256':sha(product),'iso_bytes':product.stat().st_size,'epoch':epoch,'storage':'read-only Live medium plus nonpersistent tmpfs overlay','ssh':'publickey only when provisioned','firewall':'not implemented; private test candidate only','secure_boot':'unverified/unsupported','private_key_included':False}
+        provenance={'schema_version':1,'status':'built-unverified-live-candidate','architecture':'x86_64','kernel_release':release,'kernel_sha256':sha(image),'kernel_config_sha256':sha(kernel/'.config'),'userspace_lock_sha256':manifest['lock_sha256'],'source_git_head':subprocess.check_output(['git','-C',str(ROOT),'rev-parse','HEAD'],text=True).strip(),'source_state':'dirty','authorized_public_key_sha256':hashlib.sha256(key.encode()).hexdigest() if key else None,'rootfs_squashfs_sha256':sha(squash),'initramfs_sha256':sha(iso/'boot/initramfs.gz'),'iso_sha256':sha(product),'iso_bytes':product.stat().st_size,'epoch':epoch,'storage':live_storage,'ssh':'publickey only when provisioned','firewall':'implemented for private QEMU validation; physical policy deployment unverified','secure_boot':'unverified/unsupported','private_key_included':False}
         write(stage,'images/build-manifest.json',json.dumps(provenance,sort_keys=True,indent=2)+'\n')
         write(stage,'images/SHA256SUMS',sha(product)+'  '+product.name+'\n'+sha(images/'build-manifest.json')+'  build-manifest.json\n')
         if output.exists():raise ValueError('output appeared during build')

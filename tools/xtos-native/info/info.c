@@ -15,8 +15,10 @@
 #include <net/if.h>
 #include <arpa/inet.h>
 #include <ifaddrs.h>
-#include <time.h>
 #include <dirent.h>
+#include <sys/stat.h>
+#include <sys/sysmacros.h>
+#include <limits.h>
 #include <ctype.h>
 
 #define LINE_MAX_LEN 512
@@ -73,6 +75,38 @@ static int count_cpus(void) {
 static void sanitize_ascii(char *s) {
     for (; *s; s++)
         if ((unsigned char)*s < 0x20 || (unsigned char)*s > 0x7e) *s = '?';
+}
+
+static int live_persistence_active(void) {
+    struct stat lower, upper, persist;
+    if (stat("/run/live-lower", &lower) < 0 || !S_ISDIR(lower.st_mode) ||
+        stat("/run/live-rw", &upper) < 0 || !S_ISDIR(upper.st_mode) ||
+        stat("/run/persist", &persist) < 0 || !S_ISDIR(persist.st_mode))
+        return 0;
+    FILE *mounts = fopen("/proc/self/mountinfo", "r");
+    if (!mounts) return 0;
+    int home = 0, root = 0, probe = 0;
+    char *line = NULL;
+    size_t cap = 0;
+    while (getline(&line, &cap, mounts) >= 0) {
+        unsigned int maj, min;
+        char point[PATH_MAX];
+        if (sscanf(line, "%*u %*u %u:%u %*s %4095s", &maj, &min, point) != 3) continue;
+        if (maj != major(persist.st_dev) || min != minor(persist.st_dev)) continue;
+        if (strcmp(point, "/home") == 0) home = 1;
+        if (strcmp(point, "/root") == 0) root = 1;
+        if (strcmp(point, "/run/persist") == 0) probe = 1;
+    }
+    int read_ok = !ferror(mounts);
+    free(line);
+    if (fclose(mounts) != 0 || !read_ok || !home || !root || !probe) return 0;
+    FILE *f = fopen("/run/persist/XTOS_PERSIST_ID", "r");
+    if (!f) return 0;
+    char marker[64];
+    int valid = fgets(marker, sizeof(marker), f) != NULL &&
+                strcmp(marker, "XTOS-PERSIST-1\n") == 0;
+    if (fclose(f) != 0) return 0;
+    return valid;
 }
 
 /* CPU model name from /proc/cpuinfo */
@@ -313,6 +347,9 @@ int main(int argc, char **argv) {
     gethostname(hostname, sizeof(hostname) - 1);
     struct sysinfo si;
     sysinfo(&si);
+    int persistence = live_persistence_active();
+    char storage[LINE_MAX_LEN];
+    snprintf(storage, sizeof(storage), "Live overlay (RAM), persistence=%d", persistence);
 
     if (json) {
         printf("{");
@@ -338,7 +375,7 @@ int main(int argc, char **argv) {
         print_json_string("dmi_board", board, 1);
         print_json_int("memory_total_kb", mem_total, 1);
         print_json_int("memory_avail_kb", mem_avail, 1);
-        print_json_string("storage", "Live overlay (RAM), persistence=0", 1);
+        print_json_string("storage", storage, 1);
         print_json_string("hostname", hostname, 1);
         print_json_int("uptime_seconds", si.uptime, 1);
         print_json_string("build_id", id.build_id, 1);
@@ -375,7 +412,7 @@ int main(int argc, char **argv) {
             int first = 1;
             list_block_devices(0, &first);
         }
-        printf("Storage:   Live overlay (RAM), persistence=0\n");
+        printf("Storage:   %s\n", storage);
         printf("Hostname:  %s\n", hostname);
         printf("Uptime:    %ldm %lds\n", si.uptime / 60, si.uptime % 60);
         int first = 1;

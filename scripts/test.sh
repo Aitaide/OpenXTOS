@@ -21,6 +21,11 @@ python3 -m unittest discover -s "$ROOT/tools/xtos-eeg-replay" -p 'test_replay.py
 make -C "$ROOT/tools/xtos-fuzz" check
 python3 -m unittest discover -s "$ROOT/tools/xtos-sbom" -p 'test_sbom.py' -v
 python3 "$ROOT/tools/xtos-sbom/gen_sbom.py" --check
+python3 "$ROOT/tests/test_native_tools_persist.py"
+python3 "$ROOT/tests/test_native_tools_rt.py"
+python3 "$ROOT/tests/test_live_build.py"
+python3 "$ROOT/tests/test_live_runtime.py"
+python3 "$ROOT/tests/test_live_fsck_policy.py"
 python3 -m unittest discover -s "$ROOT/tools/xtos-onnx-baseline" -p 'test_onnx_baseline.py' -v
 python3 -m unittest discover -s "$ROOT/tools/xtos-onnx-baseline" -p 'test_torch_onnx_parity.py' -v
 python3 -m unittest discover -s "$ROOT/tools/xtos-onnx-baseline" -p 'test_tf_onnx_parity.py' -v

@@ -1,12 +1,15 @@
 #!/usr/bin/env python3
-"""Two-boot persistence end-to-end test.
+"""Opt-in persistence on a dedicated ext4 volume: five-boot QEMU acceptance.
 
-Boots the xtos.persist=XTOS-PERSIST variant twice with a marked ext4 disk:
-boot 1 writes /root/PERSIST-PROOF, boot 2 reads it back. Also verifies the
-boot-medium write-sentinel stays untouched.
+Boots the xtos.persist=XTOS-PERSIST variant with marked ext4 fixtures: writes a
+proof on boot 1, reads it byte-for-byte on boot 2, checks /home on boot 3,
+forces and verifies e2fsck repair on boot 4, then damages a copy of the
+superblock and proves boot 5 stays RAM-only. QEMU writes only disposable disk
+copies inside a fresh evidence directory; the source fixture is read-only.
 """
 import hashlib
 import json
+import os
 import re
 import shutil
 import socket
@@ -16,10 +19,10 @@ import time
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
-CANDIDATE = ROOT / ".build/live/candidate-20p2"
-DISK = ROOT / ".build/live/persist-test-disk.raw"
-KEY = ROOT / ".build/live/keys/verification"
-EVIDENCE = ROOT / ".build/live/evidence-20p2"
+CANDIDATE = Path(os.environ.get("XTOS_PERSIST_CANDIDATE", ROOT / ".build/live/candidate-20p2"))
+DISK = Path(os.environ.get("XTOS_PERSIST_DISK", ROOT / ".build/live/persist-test-disk.raw"))
+KEY = Path(os.environ.get("XTOS_PERSIST_KEY", ROOT / ".build/live/keys/verification"))
+EVIDENCE = Path(os.environ.get("XTOS_PERSIST_EVIDENCE", ROOT / ".build/live/evidence-20p2"))
 
 
 def sha(path):
@@ -31,8 +34,9 @@ def sha(path):
 
 
 class PersistGuest:
-    def __init__(self, evidence, tag):
+    def __init__(self, evidence, tag, disk=DISK):
         self.tag = tag
+        self.disk = Path(disk).resolve()
         self.log = (evidence / f"{tag}.serial.log").open("wb")
         self.err = (evidence / f"{tag}.qemu.log").open("wb")
         sockpath = evidence / f"{tag}.sock"
@@ -46,7 +50,7 @@ class PersistGuest:
                 "-monitor", "none", "-no-reboot",
                 "-serial", f"unix:{sockpath},server=on,wait=off",
                 "-cdrom", str(CANDIDATE / "images/xtos-developer-live-x86_64.iso"), "-boot", "d",
-                "-drive", f"file={DISK},format=raw,if=none,id=persist",
+                "-drive", f"file={self.disk},format=raw,if=none,id=persist",
                 "-device", "nvme,drive=persist,serial=XTOS-PERSIST-TEST",
                 "-netdev", f"user,id=net,hostfwd=tcp:127.0.0.1:{self.port}-:22",
                 "-device", "virtio-net-pci,netdev=net"]
@@ -139,30 +143,53 @@ class PersistGuest:
                 self.process.wait(timeout=10)
             except Exception:
                 self.process.kill()
-        self.log.close()
-        self.err.close()
 
 
 def main() -> int:
+    safe_roots = [(ROOT / ".build/live").resolve(), Path("/root/.hermes/cache/scratch").resolve()]
+    def within_safe_root(path):
+        resolved = path.resolve()
+        return any(resolved != base and resolved.is_relative_to(base) for base in safe_roots)
+    if not within_safe_root(CANDIDATE) or not within_safe_root(DISK) or not within_safe_root(EVIDENCE):
+        print("refusing: candidate, source disk, and evidence must be inside .build/live or private scratch")
+        return 2
+    if EVIDENCE.exists() or EVIDENCE.is_symlink():
+        print("refusing: use a fresh evidence directory; existing evidence will not be removed")
+        return 2
+    if not CANDIDATE.is_dir() or not DISK.is_file() or DISK.is_symlink():
+        print("skip: candidate or regular-file source disk missing")
+        return 0
     if not (CANDIDATE / "images/xtos-developer-live-x86_64.iso").is_file():
-        print("skip: candidate-20p2 variant not built")
+        print("skip: persistence candidate ISO missing")
         return 0
-    if not DISK.is_file():
-        print("skip: persistence test disk missing")
-        return 0
-    if shutil.which("qemu-system-x86_64") is None:
-        print("skip: QEMU unavailable")
+    if not KEY.is_file() or shutil.which("qemu-system-x86_64") is None or shutil.which("tune2fs") is None:
+        print("skip: SSH key, QEMU, or tune2fs unavailable")
         return 0
 
-    disk_before = sha(DISK)
-    if EVIDENCE.exists():
-        shutil.rmtree(EVIDENCE)
+    # All writes go to fresh disposable copies inside the newly-created evidence
+    # directory. The caller's base image is only read and hashed.
     EVIDENCE.mkdir(parents=True)
+    WORK_DISK = EVIDENCE / "persist-working.raw"
+    REPAIR_DISK = EVIDENCE / "persist-force-fsck.raw"
+    CORRUPT_DISK = EVIDENCE / "persist-corrupt.raw"
+    shutil.copyfile(DISK, WORK_DISK)
+    shutil.copyfile(DISK, REPAIR_DISK)
+    forced = subprocess.run(["tune2fs", "-E", "force_fsck", str(REPAIR_DISK)], capture_output=True, text=True, timeout=30)
+    if forced.returncode != 0:
+        print(f"force-fsck fixture setup failed: {forced.stderr[:200]}")
+        return 1
+    disk_before = sha(DISK)
+    working_before = sha(WORK_DISK)
+    repair_before = sha(REPAIR_DISK)
+    if repair_before == working_before:
+        print("refusing: repair fixture must differ from working copy")
+        return 1
 
     failures = []
 
     # ---- boot 1: write proof file ----
-    g1 = PersistGuest(EVIDENCE, "boot1")
+    g1 = PersistGuest(EVIDENCE, "boot1", disk=WORK_DISK)
+    info_storage = None
     try:
         g1.wait_for(rb"XTOS_READY[^\r\n]*[\r\n]")
         g1.trust_serial_hostkey()
@@ -176,6 +203,16 @@ def main() -> int:
         print(f"  boot1 seeded authorized_keys: {seeded}")
         if not re.search(r"^8\d\s", seeded):
             failures.append(f"root authorized_keys not seeded properly: {seeded!r} {r.stderr[:100]}")
+        r = g1.ssh("info --json")
+        try:
+            info = json.loads((r.stdout or "").strip())
+        except json.JSONDecodeError as exc:
+            failures.append(f"persistent info JSON invalid: {r.stdout[:160]!r}: {exc}")
+        else:
+            info_storage = info.get("storage")
+            print(f"  boot1 info storage: {info_storage}")
+            if info_storage != "Live overlay (RAM), persistence=1":
+                failures.append(f"boot1 info did not report persistence=1: {info_storage!r}")
         r = g1.ssh("echo PERSIST-PROOF-$(date +%s) > /root/PERSIST-PROOF && cat /root/PERSIST-PROOF && sync")
         proof_line = (r.stdout or "").strip()
         print(f"  boot1 wrote: {proof_line[:50]}")
@@ -192,7 +229,7 @@ def main() -> int:
         g1.close()
 
     # ---- boot 2: read it back ----
-    g2 = PersistGuest(EVIDENCE, "boot2")
+    g2 = PersistGuest(EVIDENCE, "boot2", disk=WORK_DISK)
     try:
         g2.wait_for(rb"XTOS_READY[^\r\n]*[\r\n]")
         g2.trust_serial_hostkey()
@@ -217,7 +254,7 @@ def main() -> int:
         g2.close()
 
     # ---- home skeleton check ----
-    g3 = PersistGuest(EVIDENCE, "boot3")
+    g3 = PersistGuest(EVIDENCE, "boot3", disk=WORK_DISK)
     try:
         g3.wait_for(rb"XTOS_READY[^\r\n]*[\r\n]")
         g3.trust_serial_hostkey()
@@ -233,13 +270,55 @@ def main() -> int:
     finally:
         g3.close()
 
-    # sentinel: the proof survived 3 boots; disk hash CHANGED (that's the point)
-    disk_after = sha(DISK)
-    print(f"  disk modified by test: {disk_before != disk_after}")
+    # ---- boot 4: fsck force-check in an independent disposable image ----
+    repair_guest = PersistGuest(EVIDENCE, "boot4", disk=REPAIR_DISK)
+    try:
+        repair_guest.wait_for(rb"XTOS_PERSIST_FSCK device=.*rc=1 action=accept")
+        repair_guest.wait_for(rb"XTOS_READY[^\r\n]*[\r\n]")
+        m = re.search(rb"persistence=(\d+)", bytes(repair_guest.data))
+        p4 = m.group(1).decode() if m else "?"
+        print(f"  boot4 (force fsck) persistence={p4}")
+        if p4 != "1":
+            failures.append(f"force-fsck volume not mounted after correction (persistence={p4})")
+    finally:
+        repair_guest.close()
+    fsck = subprocess.run(["tune2fs", "-l", str(REPAIR_DISK)], capture_output=True, text=True, timeout=30)
+    if fsck.returncode != 0 or "Filesystem state:         clean" not in fsck.stdout:
+        failures.append("force-fsck image is not clean after e2fsck")
+
+    # ---- refusal: damaged superblock copy must fall back to RAM-only ----
+    shutil.copyfile(DISK, CORRUPT_DISK)
+    with CORRUPT_DISK.open("r+b") as f:
+        f.seek(1080)  # ext superblock magic
+        f.write(b"\x00\x00")
+    g5 = PersistGuest(EVIDENCE, "boot5", disk=CORRUPT_DISK)
+    try:
+        g5.wait_for(rb"XTOS_READY[^\r\n]*[\r\n]")
+        m = re.search(rb"persistence=(\d+)", bytes(g5.data))
+        p5 = m.group(1).decode() if m else "?"
+        print(f"  boot5 (corrupt sb) persistence={p5}")
+        if p5 != "0":
+            failures.append(f"corrupted disk mounted persistent (persistence={p5})")
+    finally:
+        g5.close()
+
+    if sha(DISK) != disk_before:
+        failures.append("source fixture image was modified during the run")
+    disk_after = sha(WORK_DISK)
+    if disk_after == working_before:
+        failures.append("QEMU did not modify isolated persistence test disk")
     (EVIDENCE / "persistence-results.json").write_text(json.dumps({
+        "clean_input_unchanged": sha(DISK) == disk_before,
+        "working_disk_modified": disk_after != working_before,
         "boot1_persistence": persist, "proof_recovered": "PERSIST-PROOF-" in content,
+        "info_storage": info_storage, "force_fsck_rc": 1,
+        "force_fsck_state_clean": "Filesystem state:         clean" in fsck.stdout,
+        "damaged_superblock_persistence": p5,
         "disk_bytes": DISK.stat().st_size,
     }, indent=2))
+
+    # Disposable copies stay inside the evidence directory for audit; only the
+    # source fixture (DISK) is guaranteed byte-identical to the starting hash.
 
     if failures:
         print(f"FAIL: {len(failures)}")

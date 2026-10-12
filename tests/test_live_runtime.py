@@ -116,8 +116,8 @@ class BootContractTests(unittest.TestCase):
         path = LIVE / 'xtos-start'
         self.assertTrue(path.is_file(), 'missing Live startup')
         text = path.read_text()
-        for contract in ['--init', 'exec "$BB" init', 'XTOS_READY', 'persistence=0',
-                         'clock status', 'udhcpc', 'device', 'wireless',
+        for contract in ['--init', 'exec "$BB" init', 'XTOS_READY',
+                         'clock status', 'PERSIST=0', 'persistence=$PERSIST', 'udhcpc', 'device', 'wireless',
                          'GOTOOLCHAIN=local', 'GOROOT=/usr/lib/go']:
             self.assertIn(contract, text)
         self.assertNotIn('xtos-ssh &', text)

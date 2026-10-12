@@ -148,6 +148,8 @@ def validate_mode(candidate,evidence,key,mode,timeout):
             jdata=json.loads(j)
             if not jdata.get('realtime_active'):
                 raise RuntimeError('info --json realtime_active should be true')
+            if jdata.get('storage') != 'Live overlay (RAM), persistence=0':
+                raise RuntimeError('default RAM-only storage status incorrect: '+repr(jdata.get('storage')))
             rows['info_json_keys']=sorted(jdata.keys())
             # XTOS-native network tool: net show must list eth0.
             net=g.ssh('xtos','net show').stdout
