@@ -22,7 +22,23 @@
     "chrony",
     "squashfs-tools",
     "rt-tests",
-    "nftables"
+    "nftables",
+    "python3-numpy",
+    "python3-scipy",
+    "python3-pandas",
+    "python3-matplotlib",
+    "python3-onnxruntime",
+    "firmware-iwlwifi",
+    "firmware-atheros",
+    "firmware-ath9k-htc",
+    "firmware-realtek",
+    "wpasupplicant",
+    "iw",
+    "trace-cmd",
+    "linux-perf",
+    "pciutils",
+    "usbutils",
+    "e2fsprogs"
   ],
   "required_commands": [
     "dropbear",
@@ -31,7 +47,18 @@
     "chronyd",
     "mksquashfs",
     "cyclictest",
-    "nft"
+    "nft",
+    "python3 -c \"import numpy\"",
+    "python3 -c \"import scipy\"",
+    "python3 -c \"import onnxruntime\"",
+    "wpa_supplicant",
+    "iw",
+    "trace-cmd",
+    "perf",
+    "lspci",
+    "lsusb",
+    "mkfs.ext4",
+    "tune2fs"
   ],
   "schema_version": 1
 }

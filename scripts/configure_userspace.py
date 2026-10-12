@@ -15,9 +15,13 @@ def safe_path(root, relative):
     return path
 
 
-def put(root, relative, text, mode=0o644):
+def put(root, relative, text, mode=0o644, expect_symlink_target=None):
     path=safe_path(root,relative)
-    if path.is_symlink():raise ValueError(f'refusing symlink output: {relative}')
+    if path.is_symlink():
+        if expect_symlink_target is None:raise ValueError(f'refusing symlink output: {relative}')
+        # Intentional wrapper replacement: only for the exact packaged target.
+        if os.readlink(path)!=expect_symlink_target:raise ValueError(f'unexpected symlink target for {relative}')
+        path.unlink()
     path.parent.mkdir(parents=True,exist_ok=True)
     path.write_text(text,encoding='utf-8');path.chmod(mode)
 
@@ -36,6 +40,24 @@ def link(root, relative, target):
     path.symlink_to(target)
 
 
+def library_soname_link(root, relative, subdir_target):
+    """Create a SONAME symlink whose target sits one directory below (e.g.
+    libblas.so.3 -> blas/libblas.so.3). Only for packaged library dirs."""
+    path=safe_path(root,relative)
+    parts=subdir_target.split('/')
+    if len(parts)!=2 or parts[0] in ('','..','.') or parts[1] in ('','..','.') or not parts[1]:
+        raise ValueError('unsafe library soname target')
+    candidate=path.parent/parts[0]/parts[1]
+    if not candidate.resolve().is_relative_to(root) or not candidate.is_file():
+        raise ValueError(f'packaged library target missing: {subdir_target}')
+    if path.is_symlink():
+        if os.readlink(path)==subdir_target:return
+        path.unlink()
+    elif path.exists():
+        raise ValueError(f'refusing to replace real file: {relative}')
+    path.symlink_to(subdir_target)
+
+
 def configure(root):
     if root.is_symlink() or root.absolute().resolve()!=root.absolute():raise ValueError('rootfs path must not contain symlinks')
     root=root.absolute()
@@ -49,6 +71,12 @@ def configure(root):
     (root/'tmp').chmod(0o1777)
     for alias,target in [('sh','dash'),('vi','vim.tiny'),('awk','gawk')]:
         if (root/'usr/bin'/target).is_file():link(root,'usr/bin/'+alias,target)
+    # BLAS/LAPACK SONAME links: Debian ships real libs under blas/ and lapack/
+    # subdirectories and relies on update-alternatives (maintainer scripts never
+    # run here). numpy/scipy link against the plain SONAME — provide it.
+    for soname,subdir in [('libblas.so.3','blas'),('liblapack.so.3','lapack')]:
+        real=root/'usr/lib/x86_64-linux-gnu'/subdir/soname
+        if real.is_file():library_soname_link(root,'usr/lib/x86_64-linux-gnu/'+soname,subdir+'/'+soname)
     put(root,'etc/profile.d/xtos-developer.sh','export LANG=C.UTF-8\nexport LC_ALL=C.UTF-8\nexport GOTOOLCHAIN=local\nexport GOROOT=/usr/lib/go\n')
     # Non-login shells (dropbear ssh exec) never source profile.d; wrap go/gofmt
     # so the toolchain resolves GOROOT itself. Real binaries live under
@@ -57,7 +85,14 @@ def configure(root):
         real=safe_path(root,'usr/lib/go/bin/'+wrapper)
         if real.is_file():
             script='#!/bin/sh\n'+('if [ -z "$GOROOT" ]; then export GOROOT=/usr/lib/go; fi\n' if wrapper=='go' else '')+'exec %s "$@"\n'%target
-            put(root,'usr/bin/'+wrapper,script,0o755)
+            expected_link=None
+            link_path=root/('usr/bin/'+wrapper)
+            if link_path.is_symlink():
+                resolved=(link_path.parent/os.readlink(link_path)).resolve()
+                real_resolved=real.resolve()
+                if resolved!=real_resolved:raise ValueError(f'packaged {wrapper} symlink does not point at the wrapped binary')
+                expected_link=os.readlink(link_path)
+            put(root,'usr/bin/'+wrapper,script,0o755,expect_symlink_target=expected_link)
     # Disable local collection/sidecar activity in the offline image and new-user template.
     put(root,'root/.config/go/telemetry/mode','off\n')
     put(root,'etc/skel/.config/go/telemetry/mode','off\n')

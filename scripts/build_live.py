@@ -20,7 +20,7 @@ from userspace_root import open_owned_root
 
 REQUIRED_CONFIG=['CONFIG_PREEMPT_RT=y','CONFIG_SQUASHFS=y','CONFIG_SQUASHFS_ZLIB=y','CONFIG_OVERLAY_FS=y','CONFIG_BLK_DEV_LOOP=y','CONFIG_ISO9660_FS=y','CONFIG_USB_STORAGE=y','CONFIG_DEVTMPFS=y']
 RUNTIME_FILES={'xtos-start':'sbin/xtos-start','xtos-dhcp':'usr/libexec/xtos/xtos-dhcp','xtos-ssh':'usr/libexec/xtos/xtos-ssh','xtos-console':'usr/libexec/xtos/xtos-console'}
-NATIVE_TOOLS={'info':'usr/bin/info','net':'usr/bin/net','hw':'usr/bin/hw','clock':'usr/bin/clock','pkg':'usr/bin/pkg','fw':'usr/bin/fw'}
+NATIVE_TOOLS={'info':'usr/bin/info','net':'usr/bin/net','hw':'usr/bin/hw','clock':'usr/bin/clock','pkg':'usr/bin/pkg','fw':'usr/bin/fw','rt':'usr/bin/rt','persist':'usr/bin/persist'}
 
 
 def run(command, **kwargs):
@@ -182,7 +182,7 @@ def build(args):
         write(runtime,'etc/shells','/bin/sh\n/bin/bash\n/usr/bin/sh\n/usr/bin/bash\n')
         logo = ' _____ _  _____  ___ \n|_   _/ \\\\|_   _|/ __|\n  | |/ _ \\\\ | | | (__ \n  |_/_/ \\\\\\\\_|_|  \\\\___|\n'
         write(runtime,'etc/issue','XTOS Bate \\\\r  \\\\n \\\\l\n\n')
-        write(runtime,'etc/motd',logo+'\n XTOS Bate Developer Live  |  RAM overlay, no persistence\n Commands: info, net show, hw, clock, pkg, fw\n\n')
+        write(runtime,'etc/motd',logo+'\n XTOS Bate Developer Live  |  RAM overlay, no persistence\n Commands: info, net show, hw, clock, pkg, fw, rt status\n\n')
         write(runtime,'etc/profile','# XTOS system profile\nexport LANG=C.UTF-8 LC_ALL=C.UTF-8\nif [ "$EUID" = 0 ]; then PS1="\\\\[\\\\e[1;32m\\\\]xtos#\\\\[\\\\e[0m\\\\] "; else PS1="\\\\[\\\\e[1;36m\\\\]xtos$\\\\[\\\\e[0m\\\\] "; fi\n[ -f /etc/motd ] && [ -n "${PS1:-}" ] && cat /etc/motd\n')
         home=runtime/'home/xtos';shutil.copytree(runtime/'etc/skel',home,symlinks=True)
         os.chown(home,1000,1000)
@@ -221,7 +221,7 @@ def build(args):
         (early/'newroot').mkdir()
         pack_initramfs(early,iso/'boot/initramfs.gz',epoch)
         shutil.copy2(image,iso/'boot/bzImage')
-        grub='set timeout=3\nset default=0\nserial --unit=0 --speed=115200\nterminal_input console serial\nterminal_output console serial\nmenuentry "XTOS Bate Developer Live (RAM writes, no installation)" {\n linux /boot/bzImage console=tty0 console=ttyS0,115200 xtos.live=1\n initrd /boot/initramfs.gz\n}\n'
+        grub='set timeout=3\nset default=0\nserial --unit=0 --speed=115200\nterminal_input console serial\nterminal_output console serial\nmenuentry "XTOS Bate Developer Live (RAM writes, no installation)" {\n linux /boot/bzImage console=tty0 console=ttyS0,115200 xtos.live=1'+((' '+args.kernel_extra) if args.kernel_extra else '')+'\n initrd /boot/initramfs.gz\n}\n'
         write(iso,'boot/grub/grub.cfg',grub)
         images=stage/'images';images.mkdir()
         product=images/'xtos-developer-live-x86_64.iso'
@@ -243,6 +243,7 @@ def main():
     p.add_argument('--kernel-build',type=Path,required=True)
     p.add_argument('--busybox',type=Path,required=True)
     p.add_argument('--output-dir',type=Path,required=True)
+    p.add_argument('--kernel-extra',default='',help='extra kernel cmdline for test/persistence variants')
     p.add_argument('--authorized-key',type=Path,help='explicit public key only; never a private key')
     p.add_argument('--epoch',type=int)
     args=p.parse_args()

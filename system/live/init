@@ -72,6 +72,51 @@ while [ "$elapsed" -lt 30 ]; do
 done
 [ "$matches" -eq 1 ] || fail 'no eligible Live medium found within 30 seconds'
 "$BB" mount -t iso9660 -o ro,nodev,nosuid "$selected" /run/live-media || fail 'Live medium mount failed'
+# Optional opt-in persistence: xtos.persist=<partition-label>
+PERSIST_LABEL=
+CMDLINE=$(cat /proc/cmdline)
+case " $CMDLINE " in
+    *' xtos.persist='*) PERSIST_LABEL=${CMDLINE##* xtos.persist=} ;;
+esac
+[ -z "$PERSIST_LABEL" ] || PERSIST_LABEL=${PERSIST_LABEL%% *}
+case "$PERSIST_LABEL" in *[!A-Za-z0-9._-]*) fail 'invalid xtos.persist label' ;; esac
+PERSIST_DEV=
+PERSIST_MODE=0
+if [ -n "$PERSIST_LABEL" ]; then
+    "$BB" mkdir -p /run/persist-probe
+    PERSIST_WAITED=0
+    while :; do
+        for node in /sys/class/block/*; do
+            [ -e "$node" ] || continue
+            name=${node##*/}
+            [ -b "/dev/$name" ] || continue
+            label=$("$BB" blkid "/dev/$name" 2>/dev/null)
+            case "$label" in *"LABEL=\"$PERSIST_LABEL\""*) ;; *) continue ;; esac
+            # The labeled partition must carry the XTOS persistence marker; anything
+            # else is refused (no accidental overwrites of random USB partitions).
+            "$BB" mount -t ext4 -o ro "/dev/$name" /run/persist-probe 2>/dev/null || continue
+            if [ -f /run/persist-probe/XTOS_PERSIST_ID ] &&
+               [ "$("$BB" cat /run/persist-probe/XTOS_PERSIST_ID)" = 'XTOS-PERSIST-1' ]; then
+                PERSIST_DEV="/dev/$name"
+            fi
+            "$BB" umount /run/persist-probe
+            [ -n "$PERSIST_DEV" ] && break
+        done
+        [ -n "$PERSIST_DEV" ] && break
+        # Block discovery can lag init start (e.g. NVMe namespaces). Retry like
+        # the Live-media scan, but bounded, and stay RAM-only on timeout.
+        [ "$PERSIST_WAITED" -ge 30 ] && break
+        "$BB" sleep 1
+        PERSIST_WAITED=$((PERSIST_WAITED + 1))
+        "$BB" mdev -s 2>/dev/null
+    done
+    if [ -n "$PERSIST_DEV" ]; then
+        PERSIST_MODE=1
+    else
+        seen=$("$BB" ls /sys/class/block 2>/dev/null | tr '\n' ' ')
+        echo "XTOS_LIVE_PERSIST label=$PERSIST_LABEL not-found-or-unmarked after ${PERSIST_WAITED}s (seen: ${seen:-none}); continuing RAM-only"
+    fi
+fi
 [ "$("$BB" cat /run/live-media/live/XTOS_LIVE_ID)" = 'XTOS-LIVE-DEVELOPER-1' ] || fail 'Live marker changed'
 manifest=$("$BB" cat /run/live-media/live/rootfs.sha256) || fail 'checksum manifest missing'
 digest=${manifest%% *}
@@ -84,11 +129,46 @@ loop=$("$BB" losetup -f) || fail 'no free loop device'
 "$BB" mount -t tmpfs -o mode=0755,size=50% tmpfs /run/live-rw || fail 'RAM upper mount failed'
 "$BB" mkdir -p /run/live-rw/upper /run/live-rw/work
 "$BB" mount -t overlay overlay -o lowerdir=/run/live-lower,upperdir=/run/live-rw/upper,workdir=/run/live-rw/work /newroot || fail 'RAM overlay mount failed'
+if [ "$PERSIST_MODE" -eq 1 ]; then
+    "$BB" mkdir -p /run/persist
+    "$BB" mount -t ext4 -o rw,relatime "$PERSIST_DEV" /run/persist || fail 'persistence mount failed'
+    "$BB" mkdir -p /run/persist/home /run/persist/root
+    # Seed first-boot home content from the image (skeleton) without overwriting
+    [ -d /run/persist/home/xtos ] || "$BB" cp -a /run/live-lower/home/xtos /run/persist/home/
+    [ -d /run/persist/root ] || { "$BB" mkdir -p /run/persist/root; "$BB" chmod 700 /run/persist/root; }
+    # Seed the packaged SSH admin key once: without it xtos-ssh stays disabled and
+    # a persistent boot would silently lose remote access (image /root is masked
+    # by the bind mount). Seeds when missing OR empty (an unclean poweroff can
+    # commit the inode but lose the data, leaving a 0-byte file); only fills the
+    # gap, never overwrites non-empty user content.
+    if [ ! -s /run/persist/root/.ssh/authorized_keys ]; then
+        "$BB" mkdir -p /run/persist/root/.ssh
+        "$BB" chmod 700 /run/persist/root/.ssh
+        if [ -f /run/live-lower/root/.ssh/authorized_keys ]; then
+            "$BB" cp /run/live-lower/root/.ssh/authorized_keys /run/persist/root/.ssh/authorized_keys
+            "$BB" chmod 600 /run/persist/root/.ssh/authorized_keys
+            "$BB" sync
+        fi
+        [ -s /run/persist/root/.ssh/authorized_keys ] ||
+            echo 'XTOS_LIVE_PERSIST warning: ssh admin key seed produced an empty file'
+    fi
+fi
+if [ "$PERSIST_MODE" -eq 1 ]; then
+    # Bind BEFORE moving /run into /newroot: after `mount --move /run /newroot/run`
+    # the old /run path no longer exists in this namespace and bind sources under
+    # it would fail with ENOENT.
+    "$BB" mount --bind /run/persist/home /newroot/home || fail 'persistent home bind failed'
+    "$BB" mount --bind /run/persist/root /newroot/root || fail 'persistent root bind failed'
+fi
 "$BB" mkdir -p /newroot/run /newroot/dev /newroot/proc /newroot/sys
 "$BB" mount --move /run /newroot/run || fail 'run mount transfer failed'
 "$BB" mount --move /dev /newroot/dev || fail 'dev mount transfer failed'
 "$BB" mount --move /proc /newroot/proc || fail 'proc mount transfer failed'
 "$BB" mount --move /sys /newroot/sys || fail 'sys mount transfer failed'
-echo "XTOS_LIVE_ROOT media=$selected lower=squashfs upper=tmpfs persistence=0 media_required=1"
+if [ "$PERSIST_MODE" -eq 1 ]; then
+    echo "XTOS_LIVE_ROOT media=$selected lower=squashfs upper=tmpfs persistence=1 persist=$PERSIST_DEV media_required=1"
+else
+    echo "XTOS_LIVE_ROOT media=$selected lower=squashfs upper=tmpfs persistence=0 media_required=1"
+fi
 exec "$BB" switch_root /newroot /sbin/xtos-start --init
 fail 'switch_root failed'

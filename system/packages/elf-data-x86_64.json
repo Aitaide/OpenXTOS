@@ -144,6 +144,18 @@
       "path": "/usr/share/go-1.24/src/runtime/race/race_linux_s390x.syso",
       "purpose": "go-cross-compile-object",
       "sha256": "7471de6b66ce74924904185cdbf5a23943a31c105bb76889c652fcb7e8c5a8dd"
+    },
+    {
+      "package": "linux-perf",
+      "path": "/usr/lib/perf-core/perf-read-vdso32",
+      "purpose": "perf-i386-vdso-helper",
+      "sha256": "531beb6dec659df7bca4841b123bd88b862c0bce959db287e5d1acacd498fa33"
+    },
+    {
+      "package": "linux-perf",
+      "path": "/usr/lib/perf-core/perf-read-vdsox32",
+      "purpose": "perf-i386-vdso-helper",
+      "sha256": "bf802d0f21b32f1726f1e0bd889af2422eac8b2ba786ede253517bcfc096c2af"
     }
   ],
   "schema_version": 1

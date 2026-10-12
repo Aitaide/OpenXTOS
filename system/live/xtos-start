@@ -24,8 +24,11 @@ if [ -r /sys/kernel/realtime ]; then
 else
     echo 'XTOS_REALTIME realtime=unknown'
 fi
-echo 'XTOS_LIVE mode=overlay lower=squashfs upper=tmpfs persistence=0 media_required=1'
-/usr/bin/clock status
+PERSIST=0
+"$BB" mountpoint -q /run/persist 2>/dev/null && PERSIST=1
+case " $(cat /proc/cmdline) " in *' xtos.persist='*) PERSIST_REQUESTED=1 ;; *) PERSIST_REQUESTED=0 ;; esac
+echo "XTOS_LIVE mode=overlay lower=squashfs upper=tmpfs persistence=$PERSIST requested=$PERSIST_REQUESTED media_required=1"
+usr/bin/clock status
 # Prepare the ephemeral host key and print its public fingerprint before readiness.
 /usr/libexec/xtos/xtos-ssh --prepare || echo 'XTOS_SSH unavailable'
 for path in /sys/class/net/*; do
@@ -38,4 +41,4 @@ for path in /sys/class/net/*; do
     # Bound initial negotiation; XTOS_READY says startup completed, not that DHCP succeeded.
     "$BB" udhcpc -n -q -t 3 -T 3 -i "$interface" -s /usr/libexec/xtos/xtos-dhcp &
 done
-echo 'XTOS_READY mode=live persistence=0 clock=see-status network=see-XTOS_DHCP'
+echo "XTOS_READY mode=live persistence=$PERSIST clock=see-status network=see-XTOS_DHCP"

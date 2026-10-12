@@ -79,6 +79,7 @@ def acquire(profile, work, lock_output):
     status.write_text('')
     sources = (
         f'deb [signed-by={KEYRING}] https://deb.debian.org/debian trixie main\n'
+        f'deb [signed-by={KEYRING}] https://deb.debian.org/debian trixie non-free-firmware\n'
         f'deb [signed-by={KEYRING}] https://security.debian.org/debian-security trixie-security main\n'
     )
     (work/'apt/etc/sources.list').write_text(sources)

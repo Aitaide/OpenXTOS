@@ -354,18 +354,27 @@ def load_elf_data_policy(policy_path, root, manifest):
         digest = entry['sha256']
         package = entry['package']
         purpose = entry['purpose']
-        if not isinstance(path, str) or not re.fullmatch(
-                r'/usr/share/go-([0-9]+(?:\.[0-9]+)*)/src/.+', path):
-            invalid('path must be an exact file below /usr/share/go-<version>/src')
+        if not isinstance(path, str) or not (
+                re.fullmatch(r'/usr/share/go-([0-9]+(?:\.[0-9]+)*)/src/.+', path)
+                or (path.startswith('/usr/lib/perf-core/') and path.count('/') == 4)):
+            invalid('path must be an exact file below /usr/share/go-<version>/src '
+                    'or /usr/lib/perf-core')
         if (path != posixpath.normpath(path) or '\\' in path or any(
                 part in ('', '.', '..') for part in path.split('/')[1:])
                 or any(char in path for char in '*?[]{}')
                 or any(ord(char) < 0x20 for char in path)):
             invalid(f'path is not canonical or contains a pattern: {path}')
-        if package != 'golang-1.24-src' or not path.startswith('/usr/share/go-1.24/src/'):
-            invalid(f'path/package must identify golang-1.24-src source data: {path}')
-        if purpose not in ('go-test-fixture', 'go-cross-compile-object'):
-            invalid(f'unsupported purpose for {path}')
+        if path.startswith('/usr/lib/perf-core/'):
+            if package != 'linux-perf':
+                invalid(f'perf-core data must belong to linux-perf: {path}')
+            if purpose != 'perf-i386-vdso-helper':
+                invalid(f'unsupported purpose for {path}')
+        elif package == 'golang-1.24-src' and path.startswith('/usr/share/go-1.24/src/'):
+            if purpose not in ('go-test-fixture', 'go-cross-compile-object'):
+                invalid(f'unsupported purpose for {path}')
+        else:
+            invalid(f'path/package must identify golang-1.24-src source data or '
+                    f'linux-perf helper data: {path}')
         if not isinstance(digest, str) or not re.fullmatch(r'[0-9a-f]{64}', digest):
             invalid(f'invalid sha256 for {path}')
         if path in entries:
@@ -476,6 +485,11 @@ def verify_rootfs(rootfs, lock_path=None, elf_data_policy=None):
                         continue
                     if path in inspected:
                         continue
+                    if logical.startswith('/usr/lib/firmware/') or logical.startswith('/lib/firmware/'):
+                        # Firmware blobs are ELF payloads for OTHER architectures
+                        # (Qualcomm Hexagon DSPs, ARM MCUs). They are device data,
+                        # not host runtime binaries — excluded from closure checks.
+                        continue
                     header = elf_header(path)
                     if header is None:
                         continue
@@ -509,6 +523,8 @@ def verify_rootfs(rootfs, lock_path=None, elf_data_policy=None):
                     search = []
                     for tag in re.findall(r'\((?:RUNPATH|RPATH)\).*?\[([^\]]*)\]', detail):
                         for entry in tag.split(':'):
+                            if entry == '':
+                                continue  # empty RUNPATH list / separators are no-ops
                             expanded = entry.replace('${ORIGIN}', origin).replace('$ORIGIN', origin)
                             if not expanded.startswith('/') or '$' in expanded:
                                 fail(logical, f'unsafe or unsupported RPATH/RUNPATH: {entry}')
