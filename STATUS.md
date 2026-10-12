@@ -1,6 +1,6 @@
 # XTOS 当前状态
 
-最后更新：2026-10-02
+最后更新：2026-10-12
 
 唯一开发目录：`/root/xtos-development/xtos`。
 
@@ -22,6 +22,9 @@
 - 阶段4B ARM64 与 x86_64 全面对齐：内核合并 `xtos_defconfig`（PREEMPT_RT + XTOS_SCHED + XTOS_BCI + HZ_1000），`verify_guest_arm64.sh` 在 QEMU guest 内加载全部 XTOS 内核模块并运行测试二进制（14/14 通过）。
 - 阶段4C RISC-V 64 从零完成：交叉构建 + OpenSBI 启动验证 5/5 + in-guest 验证 15/15（模块加载、test_rt/test_spsc/test_signal 全过）。
 - 阶段5 工程化发布的核心项已完成：fuzz 基础设施（`tools/xtos-fuzz/`，4027 变异输入通过 + 有效性自证）、CI 跨架构矩阵（x86 系统级 + ARM64/RISC-V 交叉构建）、ABI 版本化（三库版本头 + `check_abi.sh`）、SBOM（CycloneDX 1.5，`docs/sbom.json` + `--check` 防漂移）、可复现构建（`scripts/reproducible_env.sh`，x86_64 两次干净全量构建逐字节一致，QEMU 回归通过）。
+- Live 开发者镜像（私有，2026-10-11/12）：`scripts/build_live.py` 产出 SquashFS+overlay 的 Live ISO（BIOS/UEFI × CD/USB 四模式，`scripts/verify_live.py` 全部通过）；镜像内含锁定 Debian 用户态（live-developer v2/v3：numpy/scipy/pandas/matplotlib/onnxruntime、WiFi 固件、perf/trace-cmd）、六个静态原生系统工具（`fw`/`net`/`info`/`hw`/`clock`/`pkg`）及 `rt`（RT 状态/调优/cyclictest 包装）与 `persist`。
+- 可选持久化（2026-10-12）：内核命令行 `xtos.persist=XTOS-PERSIST` + 带 `XTOS_PERSIST_ID` 标记的 ext4 卷，仅对 `/home` 与 `/root` 生效（bind mount 覆盖 overlay），系统镜像保持不可变。`tests/test_live_persistence.py` 三靴 QEMU 循环通过：两靴 `persistence=1`、`/root` 证明文件跨重启逐字节恢复、`/home/xtos` 绑定与首靴种子正常、SSH 管理密钥自动补种（含掉电后 0 字节自愈）。默认 RAM-only 路径已在含持久化代码的当前源码上回归（candidate-21 bios-cd，20 项检查全过，内部盘 sentinel 未被写入）。
+- 私有裸机安装器与 USB 物理运行时验证证据保留在 `.build/baremetal/`；Secure Boot 与物理硬件延迟未验证。
 
 系统范围为可启动的 x86_64 开发系统，不是桌面发行版或硬盘安装器。XTOS 调度组件是辅助层，未替代 Linux 的常规任务调度。P300 当前是单窗口研究基线和跨试次质量门禁，不是分类器。真实 OpenBCI 设备、ARM64/RISC-V 板卡、目标硬件最坏延迟和医疗安全均未验证。QEMU 结果不能作为硬件实时性能保证。
 
