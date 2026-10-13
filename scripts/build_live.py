@@ -20,7 +20,7 @@ from userspace_root import open_owned_root
 
 REQUIRED_CONFIG=['CONFIG_PREEMPT_RT=y','CONFIG_SQUASHFS=y','CONFIG_SQUASHFS_ZLIB=y','CONFIG_OVERLAY_FS=y','CONFIG_BLK_DEV_LOOP=y','CONFIG_ISO9660_FS=y','CONFIG_USB_STORAGE=y','CONFIG_DEVTMPFS=y']
 RUNTIME_FILES={'xtos-start':'sbin/xtos-start','xtos-dhcp':'usr/libexec/xtos/xtos-dhcp','xtos-ssh':'usr/libexec/xtos/xtos-ssh','xtos-console':'usr/libexec/xtos/xtos-console'}
-NATIVE_TOOLS={'info':'usr/bin/info','net':'usr/bin/net','hw':'usr/bin/hw','clock':'usr/bin/clock','pkg':'usr/bin/pkg','fw':'usr/bin/fw','rt':'usr/bin/rt','persist':'usr/bin/persist'}
+NATIVE_TOOLS={'info':'usr/bin/info','net':'usr/bin/net','hw':'usr/bin/hw','clock':'usr/bin/clock','pkg':'usr/bin/pkg','fw':'usr/bin/fw','rt':'usr/bin/rt','persist':'usr/bin/persist','events':'usr/bin/events'}
 
 
 def run(command, **kwargs):
@@ -163,7 +163,17 @@ def build(args):
     output.parent.mkdir(parents=True,exist_ok=True)
     stage=Path(tempfile.mkdtemp(prefix='.'+output.name+'-',dir=output.parent));stage.chmod(0o755)
     try:
-        runtime=stage/'rootfs';shutil.copytree(root,runtime,symlinks=True)
+        runtime=stage/'rootfs'
+        # A locked rootfs must never contain device nodes; one stray node breaks
+        # copytree on some filesystems and would ship a bogus /dev into the ISO.
+        stray=[]
+        for current,dirs,files in os.walk(root,followlinks=False):
+            for name in files:
+                candidate=Path(current)/name
+                if candidate.is_socket() or (candidate.exists() and not candidate.is_file() and not candidate.is_symlink()):
+                    stray.append(str(candidate))
+        if stray:raise ValueError('device/socket nodes in userspace root: '+', '.join(stray[:5]))
+        shutil.copytree(root,runtime,symlinks=True)
         run([sys.executable,ROOT/'scripts/configure_userspace.py','--rootfs',runtime])
         persistent_variant = bool(args.kernel_extra and 'xtos.persist=' in args.kernel_extra)
         live_storage = ('read-only Live medium plus optional labeled ext4 persistence for /home and /root; '
@@ -181,13 +191,34 @@ def build(args):
         run(['depmod','-b',runtime,release])
         build_native_tools(runtime)
         install_sdk(runtime,stage)
+        # liblsl (Lab Streaming Layer) from the pinned upstream build; the lock
+        # covers the .so hash (see tools/lsl/build_lsl.sh + tests/test_lsl_build.py).
+        lsl_dir=Path(os.environ.get('XTOS_LSL_DIR',ROOT/'.build/userspace/live-developer-lsl'))
+        lsl_lib=lsl_dir/'install/lib/liblsl.so.1.17.7'
+        if lsl_lib.is_file():
+            expected='75c0aeb9df2992e19cc7034f6f9a51f45dd61bba6dc3d29b5a38917d575090c1'
+            if sha(lsl_lib)!=expected:raise ValueError('liblsl.so hash mismatch; rerun tools/lsl/build_lsl.sh')
+            (runtime/'usr/lib/x86_64-linux-gnu').mkdir(parents=True,exist_ok=True)
+            for name in ('liblsl.so.1.17.7','liblsl.so.2','liblsl.so'):
+                shutil.copy2(lsl_dir/'install/lib'/name,runtime/'usr/lib/x86_64-linux-gnu'/name)
+            (runtime/'usr/include/lsl').mkdir(parents=True,exist_ok=True)
+            for header in sorted((lsl_dir/'install/include/lsl').glob('*.h')):
+                shutil.copy2(header,runtime/'usr/include/lsl'/header.name)
+            for header in ('lsl_c.h','lsl_cpp.h'):
+                shutil.copy2(lsl_dir/'install/include'/header,runtime/'usr/include'/header)
+            write(runtime,'usr/share/xtos/lsl-provision.json',
+                '{"component":"liblsl","version":"v1.17.7","license":"MIT",'
+                '"upstream":"https://github.com/sccn/liblsl",'
+                '"lib_sha256":"'+expected+'"}\n')
+        elif os.environ.get('XTOS_LSL_REQUIRED')=='1':
+            raise ValueError('liblsl required but not built (run tools/lsl/build_lsl.sh)')
         write(runtime,'etc/passwd','root:x:0:0:root:/root:/bin/bash\nxtos:x:1000:1000:XTOS Developer:/home/xtos:/bin/bash\n')
         write(runtime,'etc/group','root:x:0:\nxtos:x:1000:\n')
         write(runtime,'etc/shadow',account_shadow(bool(key)),0o600)
         write(runtime,'etc/shells','/bin/sh\n/bin/bash\n/usr/bin/sh\n/usr/bin/bash\n')
         logo = ' _____ _  _____  ___ \n|_   _/ \\\\|_   _|/ __|\n  | |/ _ \\\\ | | | (__ \n  |_/_/ \\\\\\\\_|_|  \\\\___|\n'
         write(runtime,'etc/issue','XTOS Bate \\\\r  \\\\n \\\\l\n\n')
-        write(runtime,'etc/motd',logo+'\n XTOS Bate Developer Live  |  '+live_motd+'\n Commands: info, net show, hw, clock, pkg, fw, rt status\n\n')
+        write(runtime,'etc/motd',logo+'\n XTOS Bate Developer Live  |  '+live_motd+'\n Commands: info, net show, hw, clock, pkg, fw, rt status, events\n\n')
         write(runtime,'etc/profile','# XTOS system profile\nexport LANG=C.UTF-8 LC_ALL=C.UTF-8\nif [ "$EUID" = 0 ]; then PS1="\\\\[\\\\e[1;32m\\\\]xtos#\\\\[\\\\e[0m\\\\] "; else PS1="\\\\[\\\\e[1;36m\\\\]xtos$\\\\[\\\\e[0m\\\\] "; fi\n[ -f /etc/motd ] && [ -n "${PS1:-}" ] && cat /etc/motd\n')
         home=runtime/'home/xtos';shutil.copytree(runtime/'etc/skel',home,symlinks=True)
         os.chown(home,1000,1000)

@@ -38,7 +38,7 @@ def run(command, log_dir, name, apt_config=None):
         env['APT_CONFIG']=str(Path(apt_config).absolute())
     elif Path(command[0]).name in ('apt-get','apt-cache','apt-config'):
         raise ValueError('isolated early APT configuration is required')
-    result = subprocess.run(command, text=True, capture_output=True, timeout=480, env=env)
+    result = subprocess.run(command, text=True, capture_output=True, timeout=1500, env=env)
     (log_dir / (name + '.log')).write_text(result.stdout + result.stderr)
     if result.returncode:
         raise RuntimeError(f'{name} failed ({result.returncode}): {result.stderr[-1500:]}')

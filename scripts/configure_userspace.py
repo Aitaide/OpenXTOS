@@ -5,6 +5,8 @@ import hashlib
 import json
 from pathlib import Path
 import os
+import shutil
+import subprocess
 from userspace_root import open_owned_root
 
 
@@ -77,6 +79,18 @@ def configure(root):
     for soname,subdir in [('libblas.so.3','blas'),('liblapack.so.3','lapack')]:
         real=root/'usr/lib/x86_64-linux-gnu'/subdir/soname
         if real.is_file():library_soname_link(root,'usr/lib/x86_64-linux-gnu/'+soname,subdir+'/'+soname)
+    # Compiled locale data: the locked pipeline never runs 'locales' postinst,
+    # so C.UTF-8 (used by every login shell) has no compiled definition and bash
+    # prints 'setlocale: cannot change locale (C.UTF-8)' on every invocation.
+    # Generate the minimal C.utf8 locale into the rootfs using localedef from
+    # the packaged glibc; only C.utf8 — no per-language archives.
+    localedef=shutil.which('localedef')
+    if localedef is None:raise ValueError('host localedef missing (needs glibc >= 2.41 host toolchain)')
+    dest=root/'usr/lib/locale'
+    if dest.is_symlink():raise ValueError('refusing symlink locale dir')
+    dest.mkdir(parents=True,exist_ok=True)
+    subprocess.run([localedef,'--no-archive','-i','C','-f','UTF-8',str(dest/'C.utf8')],env=dict(os.environ,LC_ALL='C'),check=True)
+    put(root,'usr/share/xtos/locale-provision.json',json.dumps({'schema_version':1,'locales':['C.utf8'],'source':'host localedef (glibc)','reason':'bash setlocale warning without compiled C.UTF-8'},indent=2)+'\n')
     put(root,'etc/profile.d/xtos-developer.sh','export LANG=C.UTF-8\nexport LC_ALL=C.UTF-8\nexport GOTOOLCHAIN=local\nexport GOROOT=/usr/lib/go\n')
     # Non-login shells (dropbear ssh exec) never source profile.d; wrap go/gofmt
     # so the toolchain resolves GOROOT itself. Real binaries live under

@@ -239,6 +239,8 @@ class PersistTests(unittest.TestCase):
         cls.mkfs.write_text(f"#!{sys.executable}\n" + "import json, sys\n" +
                             f"from pathlib import Path\nr = Path({str(cls.fixture)!r})\n" +
                             "with (r / 'trace').open('a') as f: f.write('mkfs ' + json.dumps(sys.argv[1:]) + '\\n')\n" +
+                            "if sys.argv[1] in ('open', 'close'):\n" +
+                            "    import sys as s; s.exit(0)\n" +
                             "assert sys.argv[1:4] == ['-F', '-L', 'XTOS-PERSIST']\n" +
                             "target = Path(sys.argv[4])\nassert target.parent == r / 'dev'\n" +
                             f"target.write_bytes({bytes(superblock())!r})\n")
@@ -250,6 +252,7 @@ class PersistTests(unittest.TestCase):
             "XTOS_DEV_ROOT": cls.fixture / "dev",
             "XTOS_TMP_ROOT": cls.fixture / "run",
             "XTOS_MKFS_PATH": cls.mkfs,
+            "XTOS_CRYPTSETUP_PATH": cls.mkfs,  # stub doubles as cryptsetup: argv recorded in trace
             "SOURCE_PATH": SRC,
         }
         harness = cls.base / "harness.c"
@@ -363,10 +366,32 @@ class PersistTests(unittest.TestCase):
                     self.refuse(cmd, self.device, "--confirm", message="ancestor/descendant is mounted")
 
     def test_live_media_sibling_protected(self):
+        # The mounted Live partition itself and a whole-disk Live medium
+        # (superfloppy) stay protected...
         for point in ("/run/live-media", "/run/live-media/iso", "/run/live-lower"):
-            self.mounts.write_text(mount_line() + mount_line(dev="8:2", point=point, source="/dev/alias", filesystem="iso9660", number=2))
-            self.refuse("setup", self.device, "--confirm", message="live boot medium")
-            self.refuse("marker", self.device, "--confirm", message="live boot medium")
+            self.mounts.write_text(mount_line() + mount_line(dev="8:1", point=point, source="/dev/alias", filesystem="iso9660", number=2))
+            self.refuse("setup", self.device, "--confirm", message="mounted Live medium itself")
+            self.refuse("marker", self.device, "--confirm", message="mounted Live medium itself")
+        # Whole-disk Live medium (device 8:0 has no partition entry): its
+        # partition disk1 must be refused.
+        for point in ("/run/live-media", "/run/live-lower"):
+            self.mounts.write_text(mount_line() + mount_line(dev="8:0", point=point, source="/dev/alias", filesystem="iso9660", number=2))
+            self.refuse("setup", self.device, "--confirm", message="whole-disk Live medium")
+            self.refuse("marker", self.device, "--confirm", message="whole-disk Live medium")
+
+    def test_live_media_sibling_partition_is_valid_target(self):
+        # A sibling partition of a partitioned Live disk is a valid target
+        # (single-USB persistence; xtos.toram further decouples the session).
+        self.mounts.write_text(mount_line() + mount_line(dev="8:2", point="/run/live-media", source="/dev/alias", filesystem="iso9660", number=2))
+        for cmd in ("setup", "marker"):
+            with self.subTest(cmd=cmd):
+                self.setUp()
+                self.mounts.write_text(mount_line() + mount_line(dev="8:2", point="/run/live-media", source="/dev/alias", filesystem="iso9660", number=2))
+                r = self.run_tool(cmd, self.device, "--confirm")
+                self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+                self.assertIn("PERSIST_SETUP", r.stdout)
+                self.assertTrue(any(s.startswith("mkfs") for s in self.trace()) if cmd == "setup"
+                                else any("mount ext4" in s for s in self.trace()))
 
     def test_existing_persistence_is_refused(self):
         self.mounts.write_text(mount_line() + mount_line(dev="8:2", point="/run/persist", filesystem="ext4", number=2))
@@ -552,6 +577,40 @@ class PersistTests(unittest.TestCase):
         self.assertTrue(json.loads(self.run_tool("status", "--json").stdout)["active"])
         self.mounts.write_text(self.mounts.read_text() + mount_line(dev="8:2", root="/root", point="/root", filesystem="ext4", number=5))
         self.assertFalse(json.loads(self.run_tool("status", "--json").stdout)["active"])
+
+    def test_luks_open_close_gates_and_header_check(self):
+        # LUKS magic header (LUKS\xba\xbe + version 2) on the fixture device.
+        self.device.write_bytes(b"LUKS\xba\xbe\x02\x00" + bytes(4088))
+        # CLI shape: --confirm required, action must be open|close.
+        for args in (("luks", self.device),
+                     ("luks", self.device, "open"),
+                     ("luks", self.device, "unlock", "--confirm"),
+                     ("luks", self.device, "open", "--confirm", "extra")):
+            with self.subTest(args=args):
+                r = self.run_tool(*args)
+                self.assertEqual(r.returncode, 2, r.stdout + r.stderr)
+                self.assertNotIn("PERSIST_LUKS", r.stdout)
+        # Wrong header: no LUKS magic -> refused even with --confirm.
+        self.device.write_bytes(superblock())
+        self.refuse("luks", self.device, "open", "--confirm", message="does not carry a LUKS header")
+        # Real header, valid CLI: cryptsetup fork+exec with fixed argv.
+        self.device.write_bytes(b"LUKS\xba\xbe\x02\x00" + bytes(4088))
+        r = self.run_tool("luks", self.device, "open", "--confirm")
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertIn("PERSIST_LUKS", r.stdout)
+        self.assertIn("mapper=/dev/mapper/xtos-persist-", r.stdout)
+        opens = [line for line in self.trace() if line.startswith("mkfs")]
+        self.assertEqual(len(opens), 1, self.trace())  # cryptsetup ran exactly once
+        r = self.run_tool("luks", self.device, "close", "--confirm")
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertIn("action=close", r.stdout)
+        # Non-root is refused before any fork.
+        self.device.write_bytes(b"LUKS\xba\xbe\x02\x00" + bytes(4088))
+        (self.fixture / "trace").write_text("")  # clear earlier successful runs
+        r = self.run_tool("luks", self.device, "open", "--confirm", fault="nonroot")
+        self.assertEqual(r.returncode, 1, r.stdout + r.stderr)
+        self.assertIn("requires root", r.stderr)
+        self.assertFalse(any(s.startswith("fork") for s in self.trace()), self.trace())
 
     def test_status_candidates_exact_labels_ext4_json_and_no_shell(self):
         name = 'odd";touch SENTINEL;#'

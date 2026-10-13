@@ -16,6 +16,7 @@
 #include <sys/ioctl.h>
 #include <sys/mount.h>
 #include <sys/stat.h>
+#include <sys/statfs.h>
 #include <sys/sysmacros.h>
 #include <sys/wait.h>
 #include <unistd.h>
@@ -305,19 +306,33 @@ static int check_unused(const struct device *device) {
     }
     for (size_t i = 0; i < mounts.count; i++) {
         const struct mount_entry *m = &mounts.entries[i];
+        /* Same-medium persistence: the mounted Live partition itself and any
+         * partition of a whole-disk Live medium (superfloppy/loop image) stay
+         * protected. A DIFFERENT partition of a partitioned Live disk is a
+         * valid target: the running system never writes it, and xtos.toram
+         * further decouples the session from the medium. */
+        if (beneath(m->point, "/run/live-media") || beneath(m->point, "/run/live-lower")) {
+            if (m->dev == device->dev) {
+                fail("target is the mounted Live medium itself");
+                goto out;
+            }
+            int contained = 0;
+            for (size_t j = 0; j < blocks.count; j++) {
+                if (blocks.entries[j].dev == m->dev &&
+                    related(blocks.entries[j].node, device->node)) {
+                    contained = 1;
+                    break;
+                }
+            }
+            if (contained) {
+                fail("target belongs to the mounted whole-disk Live medium");
+                goto out;
+            }
+            continue; /* sibling partition of a partitioned Live disk: allowed */
+        }
         if (dev_related(m->dev, device, &blocks)) {
             fail("target or an ancestor/descendant is mounted");
             goto out;
-        }
-        /* Protect all partitions of the boot medium, even if only its sibling
-         * partition is mounted. Mountinfo device IDs do not depend on aliases. */
-        if (beneath(m->point, "/run/live-media") || beneath(m->point, "/run/live-lower")) {
-            for (size_t j = 0; j < blocks.count; j++) {
-                if (blocks.entries[j].dev == m->dev && related(blocks.entries[j].node, device->parent)) {
-                    fail("target belongs to the live boot medium");
-                    goto out;
-                }
-            }
         }
     }
     for (size_t i = 0; i < blocks.count; i++) {
@@ -453,6 +468,82 @@ static int mount_and_mark(const struct device *device) {
     return rc;
 }
 
+#ifndef XTOS_CRYPTSETUP_PATH
+#define XTOS_CRYPTSETUP_PATH "/usr/sbin/cryptsetup"
+#endif
+
+/* LUKS magic "LUKS\xba\xbe" + version 2 at offset 6. */
+static int luks_detected(int fd) {
+    unsigned char hdr[8];
+    ssize_t n;
+    do { n = pread(fd, hdr, sizeof(hdr), 0); } while (n < 0 && errno == EINTR);
+    return n == (ssize_t)sizeof(hdr) && hdr[0] == 'L' && hdr[1] == 'U' && hdr[2] == 'K' &&
+           hdr[3] == 'S' && hdr[4] == 0xba && hdr[5] == 0xbe && (hdr[6] == 1 || hdr[6] == 2);
+}
+
+static int run_cryptsetup(char *const args[]) {
+    pid_t pid = fork();
+    if (pid < 0) return fail("cannot fork cryptsetup");
+    if (!pid) {
+        char *const env[] = {"PATH=/usr/sbin:/usr/bin:/sbin:/bin", "LC_ALL=C", NULL};
+        execve(XTOS_CRYPTSETUP_PATH, args, env);
+        _exit(127);
+    }
+    int status;
+    pid_t waited;
+    do { waited = waitpid(pid, &status, 0); } while (waited < 0 && errno == EINTR);
+    if (waited != pid) return fail("cannot wait for cryptsetup");
+    if (!WIFEXITED(status)) return fail("cryptsetup terminated by signal");
+    if (WEXITSTATUS(status) == 127) return fail("cryptsetup not available in this image");
+    if (WEXITSTATUS(status)) return fail("cryptsetup failed");
+    return 0;
+}
+
+/* Open a LUKS volume as /dev/mapper/<name>. The passphrase comes from the
+ * controlling terminal: cryptsetup reads it interactively. We never accept
+ * passphrases as argv (process listings would leak them). */
+static int luks_open(const char *device, const char *name) {
+    char dev_buf[PATH_MAX], name_buf[64];
+    snprintf(dev_buf, sizeof(dev_buf), "%s", device);
+    snprintf(name_buf, sizeof(name_buf), "%s", name);
+    char *const open_args[] = {"cryptsetup", "open", "--type", "luks", dev_buf, name_buf, NULL};
+    return run_cryptsetup(open_args);
+}
+
+static int luks_close(const char *name) {
+    char name_buf[64];
+    snprintf(name_buf, sizeof(name_buf), "%s", name);
+    char *const close_args[] = {"cryptsetup", "close", name_buf, NULL};
+    return run_cryptsetup(close_args);
+}
+
+static int cmd_luks(const char *input, const char *action) {
+    /* persist luks <dev> open|close --confirm: explicit gate on the mapping
+     * operation too, because opening changes the device-visible state. */
+    if (geteuid() != 0) { fail("luks requires root"); return 1; }
+    struct device device = {.fd = -1};
+    int rc = 1;
+    if (device_open(&device, input) < 0 || check_unused(&device) < 0) goto out;
+    if (!luks_detected(device.fd)) {
+        fail("target does not carry a LUKS header");
+        goto out;
+    }
+    char name[64];
+    snprintf(name, sizeof(name), "xtos-persist-%d", (int)(major(device.dev) * 1000 + minor(device.dev) % 1000));
+    if (strcmp(action, "open") == 0) {
+        if (luks_open(device.path, name) < 0) goto out;
+        printf("PERSIST_LUKS device=%s action=open mapper=/dev/mapper/%s\n", device.path, name);
+        printf("PERSIST_NEXT persist marker /dev/mapper/%s --confirm (then boot normally)\n", name);
+    } else {
+        if (luks_close(name) < 0) goto out;
+        printf("PERSIST_LUKS device=%s action=close mapper=/dev/mapper/%s\n", device.path, name);
+    }
+    rc = 0;
+out:
+    if (device.fd >= 0 && close(device.fd) < 0) { fail("cannot close target device"); rc = 1; }
+    return rc;
+}
+
 static int cmd_setup(const char *input, int marker_only) {
     if (geteuid() != 0) { fail("setup and marker require root"); return 1; }
     struct device device = {.fd = -1};
@@ -495,6 +586,8 @@ static int cmd_status(int json) {
     struct mounts mounts = {0};
     struct blocks blocks = {0};
     char **candidates = NULL;
+    int *candidate_luks = NULL;
+    uint64_t *candidate_bytes = NULL;
     size_t count = 0;
     int rc = 1;
     if (load_mounts(&mounts) < 0 || load_blocks(&blocks) < 0) goto out;
@@ -506,15 +599,24 @@ static int cmd_status(int json) {
         int fd = open(devpath, O_RDONLY | O_CLOEXEC | O_NOFOLLOW | O_NONBLOCK);
         if (fd < 0) continue; /* Unprivileged status may not read every device. */
         struct stat st;
+        int luks = luks_detected(fd);
         int match = fstat(fd, &st) == 0 && S_ISBLK(st.st_mode) &&
-                    st.st_rdev == blocks.entries[i].dev && ext4_label(fd);
+                    st.st_rdev == blocks.entries[i].dev && (ext4_label(fd) || luks);
+        uint64_t bytes = 0;
+        if (match && ioctl(fd, BLKGETSIZE64, &bytes) < 0) { close(fd); match = 0; }
         if (close(fd) < 0) { fail("cannot close candidate device"); goto out; }
         if (!match) continue;
         char **next = realloc(candidates, (count + 1) * sizeof(*candidates));
-        if (!next) { fail("out of memory"); goto out; }
+        int *next_luks = realloc(candidate_luks, (count + 1) * sizeof(*candidate_luks));
+        uint64_t *next_bytes = realloc(candidate_bytes, (count + 1) * sizeof(*candidate_bytes));
+        if (!next || !next_luks || !next_bytes) { fail("out of memory"); goto out; }
         candidates = next;
+        candidate_luks = next_luks;
+        candidate_bytes = next_bytes;
         candidates[count] = strdup(devpath);
         if (!candidates[count]) { fail("out of memory"); goto out; }
+        candidate_luks[count] = luks;
+        candidate_bytes[count] = bytes;
         count++;
     }
     const struct mount_entry *persist = mountpoint(&mounts, "/run/persist");
@@ -529,6 +631,16 @@ static int cmd_status(int json) {
         root_ok = root && root->dev == persist->dev && strcmp(root->root, root_root) == 0;
     }
     int active = persist && home_ok && root_ok;
+    long long avail_mb = -1, total_mb = -1;
+    int capacity_pct = -1;
+    if (persist) {
+        struct statfs vfs;
+        if (statfs("/run/persist", &vfs) == 0 && vfs.f_blocks) {
+            total_mb = (long long)((unsigned long long)vfs.f_blocks * vfs.f_bsize / (1024 * 1024));
+            avail_mb = (long long)((unsigned long long)vfs.f_bavail * vfs.f_bsize / (1024 * 1024));
+            capacity_pct = (int)(100 * ((unsigned long long)vfs.f_blocks - vfs.f_bfree) / (unsigned long long)vfs.f_blocks);
+        }
+    }
     if (json) {
         printf("{\"label\":\"%s\",\"marker\":\"%s\",\"active\":%s,\"persistence\":%d,"
                "\"mounted\":%s,\"home_persistent\":%s,\"root_persistent\":%s,\"candidates\":[",
@@ -537,14 +649,28 @@ static int cmd_status(int json) {
         for (size_t i = 0; i < count; i++) {
             if (i) putchar(',');
             printf("{\"device\":"); json_string(candidates[i]);
-            printf(",\"label\":\"%s\",\"filesystem\":\"ext4\"}", PERSIST_LABEL);
+            if (candidate_luks[i]) printf(",\"luks\":true");
+            else printf(",\"label\":\"%s\",\"filesystem\":\"ext4\"", PERSIST_LABEL);
+            printf(",\"bytes\":%llu", (unsigned long long)candidate_bytes[i]);
+            putchar('}');
         }
-        printf("],\"scope\":[\"/home\",\"/root\"]}\n");
+        printf("],\"scope\":[\"/home\",\"/root\"]");
+        if (active) printf(",\"usage_percent\":%d,\"total_mb\":%lld,\"avail_mb\":%lld", capacity_pct, total_mb, avail_mb);
+        printf("}\n");
     } else {
         printf("XTOS Persist Status\nMode:      %s (persistence=%d)\n",
                active ? "ACTIVE" : persist ? "INCOMPLETE" : "RAM-only", active);
-        printf("Home/root: %s/%s\nCandidates:\n", home_ok ? "persistent" : "volatile", root_ok ? "persistent" : "volatile");
-        for (size_t i = 0; i < count; i++) printf("  %s label=%s filesystem=ext4\n", candidates[i], PERSIST_LABEL);
+        printf("Home/root: %s/%s\n", home_ok ? "persistent" : "volatile", root_ok ? "persistent" : "volatile");
+        if (active && capacity_pct >= 0) {
+            printf("Usage:     %d%% (%lldMB free of %lldMB)\n", capacity_pct, avail_mb, total_mb);
+            if (capacity_pct >= 95) printf("WARNING:   persistence volume is >=95%% full; writes may fail\n");
+            else if (capacity_pct >= 85) printf("WARNING:   persistence volume is >=85%% full\n");
+        }
+        printf("Candidates:\n");
+        for (size_t i = 0; i < count; i++)
+            printf("  %s %s size=%lluMB\n", candidates[i],
+                   candidate_luks[i] ? "luks=1 (run: persist luks <dev> open --confirm)" : "label=" PERSIST_LABEL,
+                   (unsigned long long)(candidate_bytes[i] / (1024 * 1024)));
         if (!count) printf("  (none; run: persist setup <partition> --confirm)\n");
         printf("Enable:    add xtos.persist=%s to the kernel command line\n", PERSIST_LABEL);
     }
@@ -552,6 +678,8 @@ static int cmd_status(int json) {
 out:
     for (size_t i = 0; i < count; i++) free(candidates[i]);
     free(candidates);
+    free(candidate_luks);
+    free(candidate_bytes);
     free(mounts.entries);
     free(blocks.entries);
     return rc;
@@ -562,6 +690,7 @@ static void usage(void) {
         "usage: persist status [--json]\n"
         "       persist setup <partition> --confirm\n"
         "       persist marker <partition> --confirm\n"
+        "       persist luks <partition> open|close --confirm\n"
         "setup DESTROYS ALL DATA; marker writes only to existing ext4 labeled XTOS-PERSIST.\n"
         "Both writes require root, an unused partition, and explicit --confirm.\n"
         "Persistence covers /home and /root only. The system image stays immutable.\n"
@@ -576,6 +705,13 @@ int main(int argc, char **argv) {
         if (argc == 4 && strcmp(argv[3], "--confirm") == 0)
             return cmd_setup(argv[2], strcmp(argv[1], "marker") == 0);
         if (argc == 3) fprintf(stderr, "persist: explicit --confirm is required\n");
+    } else if (argc == 5 && strcmp(argv[1], "luks") == 0 &&
+               (strcmp(argv[3], "open") == 0 || strcmp(argv[3], "close") == 0) &&
+               strcmp(argv[4], "--confirm") == 0) {
+        return cmd_luks(argv[2], argv[3]);
+    } else if (argc == 4 && strcmp(argv[1], "luks") == 0 &&
+               (strcmp(argv[3], "open") == 0 || strcmp(argv[3], "close") == 0)) {
+        fprintf(stderr, "persist: explicit --confirm is required\n");
     }
     usage();
     return 2;
