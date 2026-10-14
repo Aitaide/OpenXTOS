@@ -18,6 +18,7 @@
 #include <linux/netlink.h>
 #include <linux/rtnetlink.h>
 #include <dirent.h>
+#include "xtos_ui.h"
 
 #define NLMSG_SIZE  4096
 
@@ -213,7 +214,7 @@ static int show_interfaces(const char *specific, int json) {
             strncpy(names[nifaces++], ifa->ifa_name, IFNAMSIZ - 1);
     }
 
-    if (!json) printf("NAME       STATE   MTU    SPEED     ADDRESSES\n");
+    if (!json) printf("%s%s%s\n", XUI_LABEL_S, "NAME       STATE   MTU    SPEED     ADDRESSES", XUI_RESET_S);
     else printf("[");
 
     for (int i = 0; i < nifaces; i++) {
@@ -260,8 +261,10 @@ static int show_interfaces(const char *specific, int json) {
             printf("%s\n  {\"name\": \"%s\", \"up\": %s, \"oper_state\": \"%s\", \"mtu\": %d, \"speed_mbps\": %ld, \"addresses\": \"%s\"}",
                    i > 0 ? "," : "", name, up ? "true" : "false", state, mtu, speed, addrs);
         } else {
-            printf("%-10s %-6s %-6d %-9s %s\n",
-                   name, up ? "up" : "down", mtu,
+            printf("%-10s ", name);
+            if (up) printf("%sup     %s", XUI_OK_S, XUI_RESET_S);
+            else printf("%sdown   %s", XUI_DIM_S, XUI_RESET_S);
+            printf("%-6d %-9s %s\n", mtu,
                    speed > 0 ? speedbuf : "-", addrs[0] ? addrs : "-");
         }
     }
@@ -289,7 +292,7 @@ static int show_routes(void) {
     rtm->rtm_family = AF_INET;
     if (send(fd, nlh, nlh->nlmsg_len, 0) < 0) { perror("net: send"); close(fd); return 1; }
 
-    printf("%-18s %-15s %-15s %s\n", "DESTINATION", "GATEWAY", "GENMASK", "IFACE");
+    printf("%s%-18s %-15s %-15s%s %s\n", XUI_LABEL_S, "DESTINATION", "GATEWAY", "GENMASK", XUI_RESET_S, "IFACE");
     int n = 0;
     for (;;) {
         ssize_t len = recv(fd, buf, sizeof(buf), 0);

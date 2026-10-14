@@ -17,7 +17,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 SRC = ROOT / "tools" / "xtos-native" / "persist" / "persist.c"
-FLAGS = ["-static", "-O2", "-Wall", "-Wextra", "-Werror"]
+FLAGS = ["-static", "-O2", "-Wall", "-Wextra", "-Werror", "-I", str(ROOT / "tools" / "xtos-native" / "common")]
 
 HARNESS = r'''
 #define _GNU_SOURCE

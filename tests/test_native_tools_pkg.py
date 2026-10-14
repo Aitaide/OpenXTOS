@@ -28,7 +28,7 @@ def main() -> int:
 
     with tempfile.TemporaryDirectory() as td:
         binary = Path(td) / "pkg"
-        subprocess.run(["gcc", "-O2", "-Wall", "-Wextra", "-Werror", "-static",
+        subprocess.run(["gcc", "-O2", "-Wall", "-Wextra", "-Werror", "-static", "-I", str(ROOT / "tools" / "xtos-native" / "common"),
                         "-o", str(binary), str(SRC)], check=True)
         target = rootfs / "usr/bin/.pkg-selftest"
         shutil.copy2(binary, target)

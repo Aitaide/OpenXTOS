@@ -16,7 +16,7 @@ def main() -> int:
     with tempfile.TemporaryDirectory() as td:
         out = Path(td) / "net"
         subprocess.run(
-            ["gcc", "-O2", "-Wall", "-Wextra", "-Werror", "-static", "-o", str(out), str(NET)],
+            ["gcc", "-O2", "-Wall", "-Wextra", "-Werror", "-static", "-I", str(ROOT / "tools" / "xtos-native" / "common"), "-o", str(out), str(NET)],
             check=True,
         )
         r = subprocess.run([str(out), "route"], capture_output=True, text=True, timeout=15)

@@ -13,6 +13,7 @@
 #include <ctype.h>
 #include <sys/wait.h>
 #include <sys/stat.h>
+#include "xtos_ui.h"
 
 #define CHRONYD_PATH "/usr/sbin/chronyd"
 #define STATE_PATH   "/run/clock.json"
@@ -78,11 +79,16 @@ static int do_status(int json) {
         if (last_result[0]) printf(" \"last_result\": \"%s\",", last_result);
         printf(" \"warning\": \"Wall time is unverified; use monotonic time for elapsed durations.\"}\n");
     } else {
-        printf("XTOS_CLOCK utc=%s synchronized=false source=%s", utc, has_success ? "chronyd-one-shot" : "unsynchronized");
+        xui_init();
+        printf("%s%s%s", XUI_LABEL_S, "XTOS_CLOCK", XUI_RESET_S);
+        printf(" utc=%s synchronized=", utc);
+        if (has_success) XUI_OK("true");
+        else XUI_WARN("false");
+        printf(" source=%s", has_success ? "chronyd-one-shot" : "unsynchronized");
         if (last_server[0]) printf(" last_server=%s", last_server);
         if (last_result[0]) printf(" last_result=%s", last_result);
         printf("\n");
-        printf("  warning: Wall time is unverified; use monotonic time for elapsed durations.\n");
+        XUI_WARN("  warning: Wall time is unverified; use monotonic time for elapsed durations.\n");
     }
     return 0;
 }

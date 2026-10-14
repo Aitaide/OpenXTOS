@@ -23,6 +23,7 @@ python3 -m unittest discover -s "$ROOT/tools/xtos-sbom" -p 'test_sbom.py' -v
 python3 "$ROOT/tools/xtos-sbom/gen_sbom.py" --check
 python3 "$ROOT/tests/test_native_tools_persist.py"
 python3 "$ROOT/tests/test_native_tools_rt.py"
+python3 "$ROOT/tests/test_native_tools_ui.py"
 python3 "$ROOT/tests/test_live_build.py"
 python3 "$ROOT/tests/test_live_runtime.py"
 python3 "$ROOT/tests/test_live_fsck_policy.py"

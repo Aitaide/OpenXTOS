@@ -28,6 +28,7 @@
 #include <linux/netfilter/nfnetlink.h>
 #include <linux/netfilter/nf_tables.h>
 #include <linux/netfilter/nfnetlink.h>
+#include "xtos_ui.h"
 
 /* nftables netlink uses struct nlattr with these userspace helpers */
 #define rtattr nlattr
@@ -295,6 +296,7 @@ static int fw_delete_table(void) {
 }
 
 static int fw_status(void) {
+    xui_init();
     if (nl_open() < 0) {
         fprintf(stderr, "fw: cannot open netfilter netlink: %s\n", strerror(errno));
         return 1;
@@ -347,9 +349,13 @@ static int fw_status(void) {
     }
 
     if (found) {
-        printf("XTOS_FW_STATUS enabled=true table=%s\n", TABLE_NAME);
+        printf("%s%s%s enabled=", XUI_LABEL_S, "XTOS_FW_STATUS", XUI_RESET_S);
+        XUI_OK("true");
+        printf(" table=%s\n", TABLE_NAME);
     } else {
-        printf("XTOS_FW_STATUS enabled=false table=%s\n", TABLE_NAME);
+        printf("%s%s%s enabled=", XUI_LABEL_S, "XTOS_FW_STATUS", XUI_RESET_S);
+        XUI_DIM("false");
+        printf(" table=%s\n", TABLE_NAME);
     }
     return 0;
 }

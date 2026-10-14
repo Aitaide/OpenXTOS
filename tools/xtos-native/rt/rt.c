@@ -19,6 +19,7 @@
 #include <errno.h>
 #include <fcntl.h>
 #include <sys/stat.h>
+#include "xtos_ui.h"
 
 #define LINE_MAX_LEN 512
 
@@ -81,15 +82,19 @@ static int show_status(int json) {
                rt_runtime_us == rt_period_us ? "off (runtime==period)" : "enabled");
         printf("  \"irq_affinity\": [\n");
     } else {
-        printf("XTOS Real-time Status\n");
-        printf("Kernel:     %s\n", realtime == 1 ? "PREEMPT_RT active" : "not realtime!");
-        printf("CPUs:       %d online, isolated: %s\n", ncpu,
+        xui_init();
+        XUI_TITLE("XTOS Real-time Status\n");
+        XUI_LABEL("Kernel:     ");
+        if (realtime == 1) XUI_OK("PREEMPT_RT active\n");
+        else XUI_BAD("not realtime!\n");
+        XUI_LABEL("CPUs:       "); printf("%d online, isolated: %s\n", ncpu,
                isolated[0] ? isolated : "none");
-        printf("RT budget:  runtime %ld us / period %ld us → throttling %s\n",
-               rt_runtime_us, rt_period_us,
-               rt_runtime_us < 0 ? "disabled" :
-               rt_runtime_us == rt_period_us ? "off" : "ON");
-        printf("IRQ affinity (non-housekeeping CPUs):\n");
+        XUI_LABEL("RT budget:  "); printf("runtime %ld us / period %ld us → throttling ",
+               rt_runtime_us, rt_period_us);
+        if (rt_runtime_us < 0) XUI_OK("disabled\n");
+        else if (rt_runtime_us == rt_period_us) XUI_OK("off\n");
+        else XUI_WARN("ON\n");
+        XUI_LABEL("IRQ affinity (non-housekeeping CPUs):\n");
     }
 
     /* IRQ list with affinity */
@@ -129,14 +134,15 @@ static int show_status(int json) {
 
     /* Recommended section */
     if (!json) {
-        printf("\nRecommendation:\n");
+        printf("\n");
+        XUI_TITLE("Recommendation:\n");
         if (realtime != 1)
-            printf("  Kernel is NOT PREEMPT_RT — check the booted image.\n");
+            XUI_BAD("  Kernel is NOT PREEMPT_RT — check the booted image.\n");
         if (rt_runtime_us > 0 && rt_runtime_us < rt_period_us)
-            printf("  rt tune would set runtime=-1 (disable throttling) for "
+            XUI_WARN("  rt tune would set runtime=-1 (disable throttling) for "
                    "deterministic RT loops.\n");
         if (!isolated[0] && ncpu >= 4)
-            printf("  No isolated CPUs. For BCI acquisition: boot with "
+            XUI_DIM("  No isolated CPUs. For BCI acquisition: boot with "
                    "isolcpus=dom0,managed_irq,N-M (keep 0-%d for housekeeping).\n",
                    ncpu/2 - 1);
     }

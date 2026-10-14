@@ -16,7 +16,7 @@ FW = ROOT / "tools" / "xtos-native" / "fw" / "fw.c"
 def build_fw(tmpdir: Path) -> Path:
     out = tmpdir / "fw"
     subprocess.run(
-        ["gcc", "-O2", "-Wall", "-Wextra", "-Werror", "-static", "-o", str(out), str(FW)],
+        ["gcc", "-O2", "-Wall", "-Wextra", "-Werror", "-static", "-I", str(ROOT / "tools" / "xtos-native" / "common"), "-o", str(out), str(FW)],
         check=True,
     )
     return out

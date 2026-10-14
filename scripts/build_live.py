@@ -60,7 +60,9 @@ def write(root, relative, text, mode=0o644):
     if target.is_symlink():target.unlink()
     if not target.parent.resolve().is_relative_to(root):raise ValueError('staging path escapes root')
     target.parent.mkdir(parents=True,exist_ok=True)
-    target.write_text(text);target.chmod(mode)
+    # Explicit UTF-8: the locale of the calling environment must never decide
+    # how motd/logo bytes are encoded (LC_ALL=C would default to ASCII).
+    target.write_text(text,encoding='utf-8');target.chmod(mode)
 
 
 def tool_from_root(root, relative):
@@ -87,6 +89,7 @@ def pack_initramfs(stage, output, epoch):
 
 def build_native_tools(stage):
     """Compile XTOS-native C tools as static binaries into the staging rootfs."""
+    include=ROOT/'tools'/'xtos-native'/'common'
     for name,target in NATIVE_TOOLS.items():
         directory=ROOT/'tools'/'xtos-native'/name
         source=directory/(name+'.c')
@@ -94,7 +97,7 @@ def build_native_tools(stage):
         output=stage/target
         output.parent.mkdir(parents=True,exist_ok=True)
         run([os.environ.get('CC','gcc'),'-O2','-Wall','-Wextra','-Werror','-static',
-             '-o',str(output),str(source)])
+             '-I',str(include),'-o',str(output),str(source)])
         output.chmod(0o755)
 
 
@@ -219,9 +222,21 @@ def build(args):
         write(runtime,'etc/group','root:x:0:\nxtos:x:1000:\n')
         write(runtime,'etc/shadow',account_shadow(bool(key)),0o600)
         write(runtime,'etc/shells','/bin/sh\n/bin/bash\n/usr/bin/sh\n/usr/bin/bash\n')
-        logo = ' _____ _  _____  ___ \n|_   _/ \\\\|_   _|/ __|\n  | |/ _ \\\\ | | | (__ \n  |_/_/ \\\\\\\\_|_|  \\\\___|\n'
+        # UTF-8 block-letter logo; motd colors are interactive-login cosmetics
+        # (8-color SGR, real login consoles only; SSH/script paths never render
+        # motd). The console is LANG=C.UTF-8 so the blocks decode correctly.
+        logo = (
+            '██╗  ██╗████████╗ ██████╗ ███████╗\n'
+            '╚██╗██╔╝╚══██╔══╝██╔═══██╗██╔════╝\n'
+            ' ╚███╔╝    ██║   ██║   ██║███████╗\n'
+            ' ██╔██╗    ██║   ██║   ██║╚════██║\n'
+            '██╔╝ ██╗   ██║   ╚██████╔╝███████║\n'
+            '╚═╝  ╚═╝   ╚═╝    ╚═════╝ ╚══════╝\n')
         write(runtime,'etc/issue','XTOS Bate \\\\r  \\\\n \\\\l\n\n')
-        write(runtime,'etc/motd',logo+'\n XTOS Bate Developer Live  |  '+live_motd+'\n Commands: info, net show, hw, clock, pkg, fw, rt status, events\n\n')
+        motd=('\033[1;96m'+logo+'\033[0m'
+              '\n \033[1mXTOS Bate Developer Live\033[0m  |  '+live_motd+'\n'
+              ' \033[2mCommands: info, net show, hw, clock, pkg, fw, rt status, events\033[0m\n\n')
+        write(runtime,'etc/motd',motd)
         write(runtime,'etc/profile','# XTOS system profile\nexport LANG=C.UTF-8 LC_ALL=C.UTF-8\nif [ "$EUID" = 0 ]; then PS1="\\\\[\\\\e[1;32m\\\\]xtos#\\\\[\\\\e[0m\\\\] "; else PS1="\\\\[\\\\e[1;36m\\\\]xtos$\\\\[\\\\e[0m\\\\] "; fi\n[ -f /etc/motd ] && [ -n "${PS1:-}" ] && cat /etc/motd\n')
         home=runtime/'home/xtos';shutil.copytree(runtime/'etc/skel',home,symlinks=True)
         os.chown(home,1000,1000)

@@ -15,7 +15,7 @@ def main() -> int:
         return 0
     with tempfile.TemporaryDirectory() as td:
         binary = Path(td) / "rt"
-        subprocess.run(["gcc", "-O2", "-Wall", "-Wextra", "-Werror", "-static",
+        subprocess.run(["gcc", "-O2", "-Wall", "-Wextra", "-Werror", "-static", "-I", str(ROOT / "tools" / "xtos-native" / "common"),
                         "-o", str(binary), str(SRC)], check=True)
 
         failures = []

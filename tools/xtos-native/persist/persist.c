@@ -21,6 +21,7 @@
 #include <sys/wait.h>
 #include <unistd.h>
 #include <limits.h>
+#include "xtos_ui.h"
 
 /* Compile-time roots allow isolated proc/sys fixtures. Device validation and
  * destructive syscalls are never relaxed in the production binary. */
@@ -658,21 +659,30 @@ static int cmd_status(int json) {
         if (active) printf(",\"usage_percent\":%d,\"total_mb\":%lld,\"avail_mb\":%lld", capacity_pct, total_mb, avail_mb);
         printf("}\n");
     } else {
-        printf("XTOS Persist Status\nMode:      %s (persistence=%d)\n",
-               active ? "ACTIVE" : persist ? "INCOMPLETE" : "RAM-only", active);
-        printf("Home/root: %s/%s\n", home_ok ? "persistent" : "volatile", root_ok ? "persistent" : "volatile");
+        xui_init();
+        XUI_TITLE("XTOS Persist Status\n");
+        XUI_LABEL("Mode:      ");
+        if (active) XUI_OK("ACTIVE (persistence=%d)\n", active);
+        else if (persist) XUI_WARN("INCOMPLETE (persistence=%d)\n", active);
+        else XUI_DIM("RAM-only (persistence=%d)\n", active);
+        XUI_LABEL("Home/root: ");
+        printf("%s/%s\n", home_ok ? "persistent" : "volatile", root_ok ? "persistent" : "volatile");
         if (active && capacity_pct >= 0) {
-            printf("Usage:     %d%% (%lldMB free of %lldMB)\n", capacity_pct, avail_mb, total_mb);
-            if (capacity_pct >= 95) printf("WARNING:   persistence volume is >=95%% full; writes may fail\n");
-            else if (capacity_pct >= 85) printf("WARNING:   persistence volume is >=85%% full\n");
+            XUI_LABEL("Usage:     ");
+            printf("%d%% (%lldMB free of %lldMB)\n", capacity_pct, avail_mb, total_mb);
+            if (capacity_pct >= 95) XUI_BAD("WARNING:   persistence volume is >=95%% full; writes may fail\n");
+            else if (capacity_pct >= 85) XUI_WARN("WARNING:   persistence volume is >=85%% full\n");
         }
-        printf("Candidates:\n");
-        for (size_t i = 0; i < count; i++)
-            printf("  %s %s size=%lluMB\n", candidates[i],
-                   candidate_luks[i] ? "luks=1 (run: persist luks <dev> open --confirm)" : "label=" PERSIST_LABEL,
-                   (unsigned long long)(candidate_bytes[i] / (1024 * 1024)));
-        if (!count) printf("  (none; run: persist setup <partition> --confirm)\n");
-        printf("Enable:    add xtos.persist=%s to the kernel command line\n", PERSIST_LABEL);
+        XUI_LABEL("Candidates:\n");
+        for (size_t i = 0; i < count; i++) {
+            printf("  %s ", candidates[i]);
+            if (candidate_luks[i]) XUI_ACC("luks=1 (run: persist luks <dev> open --confirm)");
+            else printf("label=%s", PERSIST_LABEL);
+            printf(" size=%lluMB\n", (unsigned long long)(candidate_bytes[i] / (1024 * 1024)));
+        }
+        if (!count) XUI_DIM("  (none; run: persist setup <partition> --confirm)\n");
+        XUI_LABEL("Enable:    ");
+        XUI_ACC("add xtos.persist=%s to the kernel command line\n", PERSIST_LABEL);
     }
     rc = 0;
 out:

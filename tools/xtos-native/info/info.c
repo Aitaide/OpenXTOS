@@ -20,6 +20,7 @@
 #include <sys/sysmacros.h>
 #include <limits.h>
 #include <ctype.h>
+#include "xtos_ui.h"
 
 #define LINE_MAX_LEN 512
 
@@ -157,7 +158,7 @@ static int count_numa_nodes(void) {
 static void list_block_devices(int json, int *first) {
     DIR *d = opendir("/sys/block");
     if (!d) return;
-    if (!json) printf("Storage:\n");
+    if (!json) printf("%s%s%s\n", XUI_LABEL_S, "Storage:", XUI_RESET_S);
     else printf(",\n  \"block_devices\": [");
     struct dirent *e;
     int n = 0;
@@ -278,7 +279,7 @@ static void list_interfaces(int json, int *first) {
         }
     }
 
-    if (!json) printf("Network:\n");
+    if (!json) printf("%s%s%s\n", XUI_LABEL_S, "Network:", XUI_RESET_S);
     else printf(",\n  \"interfaces\": [");
 
     for (int i = 0; i < nifaces; i++) {
@@ -321,7 +322,9 @@ static void list_interfaces(int json, int *first) {
                    (*first) ? "" : ",", name, up ? "true" : "false", speed, addrs);
             *first = 0;
         } else {
-            printf("  %-10s %-6s", name, up ? "up" : "down");
+            printf("  %-10s ", name);
+            if (up) printf("%sup    %s", XUI_OK_S, XUI_RESET_S);
+            else printf("%sdown  %s", XUI_DIM_S, XUI_RESET_S);
             if (speed > 0) printf("%ldMb/s", speed);
             else printf("%-9s", "-");
             printf(" %s\n", addrs[0] ? addrs : "no address");
@@ -385,41 +388,47 @@ int main(int argc, char **argv) {
         list_interfaces(1, &first);
         printf("\n}\n");
     } else {
+        xui_init();
         if (id.label[0]) printf("%s", id.label);
         else printf("XTOS");
         if (id.version[0]) printf(" %s", id.version);
         if (id.release_name[0]) printf(" (%s)", id.release_name);
         printf("\n");
-        printf("Kernel:    %s %s\n", uts.release, uts.machine);
-        printf("Realtime:  %s\n", realtime == 1 ? "PREEMPT_RT active" : "inactive");
+        XUI_LABEL("Kernel:    "); printf("%s %s\n", uts.release, uts.machine);
+        XUI_LABEL("Realtime:  ");
+        if (realtime == 1) XUI_OK("PREEMPT_RT active\n");
+        else XUI_BAD("inactive\n");
         char model[LINE_MAX_LEN];
         cpu_model(model, sizeof(model));
-        printf("CPU:       %d cores, %s%s%s\n", cpus, uts.machine,
+        XUI_LABEL("CPU:       "); printf("%d cores, %s%s%s\n", cpus, uts.machine,
                model[0] ? ", " : "", model[0] ? model : "");
         int nodes = count_numa_nodes();
-        if (nodes > 1) printf("NUMA:      %d nodes\n", nodes);
+        if (nodes > 1) { XUI_LABEL("NUMA:      "); printf("%d nodes\n", nodes); }
         char vendor[LINE_MAX_LEN], product[LINE_MAX_LEN], board[LINE_MAX_LEN];
         dmi_value("sys_vendor", vendor, sizeof(vendor));
         dmi_value("product_name", product, sizeof(product));
         dmi_value("board_name", board, sizeof(board));
-        if (vendor[0] || product[0])
-            printf("Model:     %s %s%s%s\n", vendor, product,
+        if (vendor[0] || product[0]) {
+            XUI_LABEL("Model:     "); printf("%s %s%s%s\n", vendor, product,
                    board[0] ? " (" : "", board[0] ? board : "");
-        if (board[0] && !product[0]) printf("Board:     %s\n", board);
-        if (mem_total > 0)
-            printf("Memory:    %ld MB total, %ld MB available\n", mem_total / 1024, mem_avail / 1024);
+        }
+        if (board[0] && !product[0]) { XUI_LABEL("Board:     "); printf("%s\n", board); }
+        if (mem_total > 0) {
+            XUI_LABEL("Memory:    "); printf("%ld MB total, %ld MB available\n", mem_total / 1024, mem_avail / 1024);
+        }
         {
             int first = 1;
             list_block_devices(0, &first);
         }
-        printf("Storage:   %s\n", storage);
-        printf("Hostname:  %s\n", hostname);
-        printf("Uptime:    %ldm %lds\n", si.uptime / 60, si.uptime % 60);
+        XUI_LABEL("Storage:   "); printf("%s\n", storage);
+        XUI_LABEL("Hostname:  "); printf("%s\n", hostname);
+        XUI_LABEL("Uptime:    "); printf("%ldm %lds\n", si.uptime / 60, si.uptime % 60);
         int first = 1;
         list_interfaces(0, &first);
-        if (id.build_id[0])
-            printf("Build:     %s (source: %s)\n", id.build_id,
+        if (id.build_id[0]) {
+            XUI_LABEL("Build:     "); XUI_DIM("%s (source: %s)\n", id.build_id,
                    id.source_state[0] ? id.source_state : "unknown");
+        }
     }
     return 0;
 }

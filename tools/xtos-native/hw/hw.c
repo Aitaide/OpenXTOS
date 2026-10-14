@@ -12,6 +12,7 @@
 #include <dirent.h>
 #include <sys/utsname.h>
 #include <sys/sysinfo.h>
+#include "xtos_ui.h"
 
 #define LINE_MAX_LEN 512
 
@@ -40,7 +41,7 @@ static int list_pci(int json) {
         fprintf(stderr, "hw: cannot open /sys/bus/pci/devices\n");
         return 1;
     }
-    if (!json) printf("PCI_ADDRESS  VENDOR  DEVICE  CLASS     DRIVER\n");
+    if (!json) printf("%s%s%s\n", XUI_LABEL_S, "PCI_ADDRESS  VENDOR  DEVICE  CLASS     DRIVER", XUI_RESET_S);
     else printf("[");
     struct dirent *entry;
     int first = 1;
@@ -105,7 +106,7 @@ static int list_usb(int json) {
         fprintf(stderr, "hw: cannot open /sys/bus/usb/devices\n");
         return 1;
     }
-    if (!json) printf("USB_PATH  VENDOR  PRODUCT  BUS  DEV  CLASS\n");
+    if (!json) printf("%s%s%s\n", XUI_LABEL_S, "USB_PATH  VENDOR  PRODUCT  BUS  DEV  CLASS", XUI_RESET_S);
     else printf("[");
     struct dirent *entry;
     int first = 1;
@@ -183,13 +184,18 @@ static int show_link(const char *ifname, int json) {
         printf("{\n  \"interface\": \"%s\",\n  \"oper_state\": \"%s\",\n  \"speed_mbps\": %ld,\n  \"carrier\": %s,\n  \"duplex\": \"%s\",\n  \"mac\": \"%s\",\n  \"mtu\": %ld\n}\n",
                ifname, operstate, speed, carrier == 1 ? "true" : "false", duplex, mac, mtu);
     } else {
-        printf("Interface:  %s\n", ifname);
-        printf("State:      %s\n", operstate);
-        printf("Speed:      %ld Mbps\n", speed);
-        printf("Duplex:     %s\n", duplex);
-        printf("Carrier:    %s\n", carrier == 1 ? "yes" : "no");
-        printf("MAC:        %s\n", mac);
-        printf("MTU:        %ld\n", mtu);
+        xui_init();
+        XUI_LABEL("Interface:  "); printf("%s\n", ifname);
+        XUI_LABEL("State:      ");
+        if (strcmp(operstate, "up") == 0) XUI_OK("%s\n", operstate);
+        else XUI_DIM("%s\n", operstate);
+        XUI_LABEL("Speed:      "); printf("%ld Mbps\n", speed);
+        XUI_LABEL("Duplex:     "); printf("%s\n", duplex);
+        XUI_LABEL("Carrier:    ");
+        if (carrier == 1) XUI_OK("yes\n");
+        else XUI_BAD("no\n");
+        XUI_LABEL("MAC:        "); printf("%s\n", mac);
+        XUI_LABEL("MTU:        "); printf("%ld\n", mtu);
     }
     return 0;
 }
@@ -209,14 +215,15 @@ static int show_summary(int json) {
         printf("  \"uptime_seconds\": %ld\n", si.uptime);
         printf("}\n");
     } else {
-        printf("XTOS Hardware Summary\n");
-        printf("Kernel:  %s %s\n", uts.release, uts.machine);
-        printf("CPUs:    %d\n", si.procs);
-        printf("Memory:  %lu MB\n", si.totalram / (1024 * 1024));
-        printf("Uptime:  %lds\n", si.uptime);
+        xui_init();
+        XUI_TITLE("XTOS Hardware Summary\n");
+        XUI_LABEL("Kernel:  "); printf("%s %s\n", uts.release, uts.machine);
+        XUI_LABEL("CPUs:    "); printf("%d\n", si.procs);
+        XUI_LABEL("Memory:  "); printf("%lu MB\n", si.totalram / (1024 * 1024));
+        XUI_LABEL("Uptime:  "); printf("%lds\n", si.uptime);
 
         /* Block devices */
-        printf("\nBlock devices:\n");
+        printf("\n%s%s%s\n", XUI_LABEL_S, "Block devices:", XUI_RESET_S);
         DIR *dir = opendir("/sys/block");
         if (dir) {
             struct dirent *entry;
@@ -239,7 +246,7 @@ static int show_summary(int json) {
         }
 
         /* Network interfaces */
-        printf("\nNetwork:\n");
+        printf("\n%s%s%s\n", XUI_LABEL_S, "Network:", XUI_RESET_S);
         dir = opendir("/sys/class/net");
         if (dir) {
             struct dirent *entry;

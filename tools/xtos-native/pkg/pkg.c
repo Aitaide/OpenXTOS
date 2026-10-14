@@ -14,6 +14,7 @@
 #include <errno.h>
 #include <sys/stat.h>
 #include <sys/types.h>
+#include "xtos_ui.h"
 
 /* Minimal SHA-256 (public-domain style implementation) */
 typedef struct { uint32_t state[8]; uint64_t bitlen; uint8_t data[64]; uint32_t datalen; } sha256_ctx;
@@ -327,7 +328,8 @@ static struct manifest_pkg *find_pkg(const char *name) {
 }
 
 static int cmd_list(int json, const char *filter) {
-    if (!json) printf("%-32s %-28s %-8s %s\n", "NAME", "VERSION", "ARCH", "FILES");
+    xui_init();
+    if (!json) printf("%s%-32s %-28s %-8s%s %s\n", XUI_LABEL_S, "NAME", "VERSION", "ARCH", XUI_RESET_S, "FILES");
     else printf("[\n");
     int count = 0;
     for (int i = 0; i < npkgs; i++) {
@@ -367,12 +369,13 @@ static int cmd_show(int json, const char *name) {
         printf("  \"source_url\": \"%s\"\n", p->source_url);
         printf("}\n");
     } else {
-        printf("Package:   %s\n", p->name);
-        printf("Version:   %s\n", p->version);
-        printf("Arch:      %s\n", p->arch);
-        printf("Deb size:  %ld bytes (sha256 %s)\n", p->deb_size, p->sha256);
-        printf("Installed: %d files, %ld bytes (%.1f MB)\n", nfiles, total, total / 1048576.0);
-        printf("Source:    %s\n", p->source_url);
+        xui_init();
+        XUI_LABEL("Package:   "); printf("%s\n", p->name);
+        XUI_LABEL("Version:   "); printf("%s\n", p->version);
+        XUI_LABEL("Arch:      "); printf("%s\n", p->arch);
+        XUI_LABEL("Deb size:  "); printf("%ld bytes (sha256 %s)\n", p->deb_size, p->sha256);
+        XUI_LABEL("Installed: "); printf("%d files, %ld bytes (%.1f MB)\n", nfiles, total, total / 1048576.0);
+        XUI_LABEL("Source:    "); printf("%s\n", p->source_url);
     }
     return 0;
 }
@@ -430,9 +433,13 @@ static int cmd_verify(const char *name, int json) {
     if (json)
         printf("{\"checked\": %d, \"missing\": %d, \"corrupt\": %d, \"overridden\": %d, \"ok\": %d}\n",
                checked, missing, corrupt, overridden, checked - missing - corrupt - overridden);
-    else
-        printf("PKG_VERIFY checked=%d ok=%d missing=%d corrupt=%d overridden=%d\n",
-               checked, checked - missing - corrupt - overridden, missing, corrupt, overridden);
+    else {
+        xui_init();
+        printf("%s%s%s checked=%d ok=", XUI_LABEL_S, "PKG_VERIFY", XUI_RESET_S, checked);
+        if (missing + corrupt == 0) XUI_OK("%d", checked - missing - corrupt - overridden);
+        else XUI_BAD("%d", checked - missing - corrupt - overridden);
+        printf(" missing=%d corrupt=%d overridden=%d\n", missing, corrupt, overridden);
+    }
     return (missing + corrupt) > 0 ? 1 : 0;
 }
 
@@ -450,17 +457,18 @@ static int cmd_size(void) {
 }
 
 static int cmd_summary(void) {
+    xui_init();
     long total = 0;
     int files = 0;
     for (int i = 0; i < npkgs; i++)
         for (int j = 0; j < pkgs[i].nfiles; j++)
             if (file_pool[pkgs[i].file_start + j].type == 0) { total += file_pool[pkgs[i].file_start + j].size; files++; }
-    printf("XTOS Package Summary\n");
-    printf("Architecture:  %s\n", g_arch);
-    printf("Packages:      %d\n", npkgs);
-    printf("Files:         %d (%.1f MB installed)\n", files, total / 1048576.0);
-    printf("Lock SHA256:   %s\n", g_lock_sha);
-    printf("Source:        %s\n", MANIFEST_PATH);
+    XUI_TITLE("XTOS Package Summary\n");
+    XUI_LABEL("Architecture:  "); printf("%s\n", g_arch);
+    XUI_LABEL("Packages:      "); printf("%d\n", npkgs);
+    XUI_LABEL("Files:         "); printf("%d (%.1f MB installed)\n", files, total / 1048576.0);
+    XUI_LABEL("Lock SHA256:   "); XUI_DIM("%s\n", g_lock_sha);
+    XUI_LABEL("Source:        "); XUI_DIM("%s\n", MANIFEST_PATH);
     return 0;
 }
 
