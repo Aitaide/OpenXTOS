@@ -13,7 +13,7 @@ import subprocess
 import time
 
 MODES=('bios-cd','uefi-cd','bios-usb','uefi-usb')
-info_version_marker='0.9.0-devpreview.1'
+info_version_marker='1.0.0-beta.1'
 
 
 def sha(path):
