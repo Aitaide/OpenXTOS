@@ -210,6 +210,9 @@ def build(args):
                 '{"component":"liblsl","version":"v1.17.7","license":"MIT",'
                 '"upstream":"https://github.com/sccn/liblsl",'
                 '"lib_sha256":"'+expected+'"}\n')
+            # In-guest acceptance source used by scripts/verify_live.py (compiles
+            # against the shipped headers inside the live system).
+            shutil.copy2(ROOT/'scripts/guest_lsl_pair.cpp',runtime/'usr/share/xtos/lsl-pair.cpp')
         elif os.environ.get('XTOS_LSL_REQUIRED')=='1':
             raise ValueError('liblsl required but not built (run tools/lsl/build_lsl.sh)')
         write(runtime,'etc/passwd','root:x:0:0:root:/root:/bin/bash\nxtos:x:1000:1000:XTOS Developer:/home/xtos:/bin/bash\n')

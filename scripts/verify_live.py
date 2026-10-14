@@ -194,6 +194,36 @@ def validate_mode(candidate,evidence,key,mode,timeout):
             rows['fw_full_cycle']='pass'
             rows['fw_enable']=fwenable
             rows['fw_disable']=fwdisable
+            # liblsl (Lab Streaming Layer) shipped in the image: compile and run
+            # an outlet->resolve->inlet localhost round-trip inside the guest
+            # using the image's own headers and library.
+            lsl_cmd=('set -e; '
+                     'test -f /usr/include/lsl_cpp.h; '
+                     'ls /usr/lib/x86_64-linux-gnu/liblsl.so.2 >/dev/null; '
+                     'printf "[lab]\\nKnownPeers={127.0.0.1}\\n" > /root/lsl_api.cfg; '
+                     'g++ -O2 -I /usr/include /usr/share/xtos/lsl-pair.cpp -o /root/lsl-pair -L /usr/lib/x86_64-linux-gnu -llsl; '
+                     'LSLAPICFG=/root/lsl_api.cfg LD_LIBRARY_PATH=/usr/lib/x86_64-linux-gnu /root/lsl-pair 2>/root/lsl-stderr.log; '
+                     'echo GUEST_LSL=PASS')
+            r=g.ssh('root',lsl_cmd,timeout=300)
+            if 'GUEST_LSL=PASS' not in r.stdout or 'GUEST_LSL_PAIR=PASS' not in r.stdout:
+                raise RuntimeError('in-guest LSL round-trip failed:\n'+r.stdout+r.stderr[-500:])
+            rows['lsl_in_guest']=r.stdout.strip().splitlines()[-2:]
+            # events tool: deterministic AR/VR event-source simulation.
+            r=g.ssh('root','events --seed 7 --count 20 --interval-us 0 | wc -l; '
+                          'events --seed 7 --count 20 --interval-us 0 > /root/ev1.jsonl; '
+                          'events --seed 7 --count 20 --interval-us 0 > /root/ev2.jsonl; '
+                          'cmp /root/ev1.jsonl /root/ev2.jsonl; '
+                          'grep -c \'"src":"sim"\' /root/ev1.jsonl; '
+                          'head -1 /root/ev1.jsonl; echo GUEST_EVENTS=PASS',timeout=120)
+            out=r.stdout
+            if 'GUEST_EVENTS=PASS' not in out:
+                raise RuntimeError('events tool failed in guest:\n'+out+r.stderr[-300:])
+            lines=[l for l in out.splitlines() if l.strip().isdigit()]
+            if not lines or int(lines[0])!=20:
+                raise RuntimeError('events line count wrong: '+repr(lines[:2]))
+            if not lines[1:] or int(lines[1])!=20:
+                raise RuntimeError('events sim-src count wrong: '+repr(lines[:3]))
+            rows['events_in_guest']=out.strip().splitlines()[-2:]
             text=g.data.decode(errors='replace')
             if 'XTOS Bate' not in text and 'xtos' not in text:
                 raise RuntimeError('XTOS branding missing from console')
