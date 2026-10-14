@@ -43,6 +43,7 @@ sdk/libxtos-rt/test_spsc_tsan
 sdk/libxtos-rt/tests/test_rt
 sdk/libxtos-rt/tests/test_spsc
 sdk/libxtos-rt/tests/test_spsc_tsan
+sdk/libxtos-bci/tests/test_samples
 sdk/libxtos-signal/test_signal
 sdk/libxtos-signal/test_signal_san
 tools/xtos-eeg-pipeline/xtos-eeg-pipeline

@@ -88,7 +88,7 @@ int xtos_bci_stop(xtos_bci_session_t *session);
 /**
  * xtos_bci_read_samples - Read samples (blocking)
  * @session: Session handle
- * @buffer: Output buffer for samples
+ * @buffer: Output buffer for samples in microvolts
  * @num_samples: Number of samples to read
  *
  * Returns: Number of samples read, or -1 on failure

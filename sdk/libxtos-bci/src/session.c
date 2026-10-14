@@ -130,18 +130,51 @@ ssize_t xtos_bci_read_samples(xtos_bci_session_t *session,
                              float *buffer,
                              size_t num_samples)
 {
-	ssize_t ret;
+    int32_t *raw_samples;
+    size_t bytes_needed;
+    size_t bytes_read = 0;
 
-	if (!session || !buffer || num_samples == 0) {
-		errno = EINVAL;
-		return -1;
-	}
+    if (!session || !buffer || num_samples == 0) {
+        errno = EINVAL;
+        return -1;
+    }
+    if (num_samples > SIZE_MAX / sizeof(*raw_samples)) {
+        errno = EOVERFLOW;
+        return -1;
+    }
 
-	ret = read(session->fd, buffer, num_samples * sizeof(float));
-	if (ret < 0)
-		return -1;
+    bytes_needed = num_samples * sizeof(*raw_samples);
+    raw_samples = malloc(bytes_needed);
+    if (!raw_samples)
+        return -1;
 
-	return ret / sizeof(float);
+    while (bytes_read < bytes_needed) {
+        ssize_t ret = read(session->fd,
+                           (char *)raw_samples + bytes_read,
+                           bytes_needed - bytes_read);
+        if (ret < 0) {
+            if (errno == EINTR)
+                continue;
+            free(raw_samples);
+            return -1;
+        }
+        if (ret == 0)
+            break;
+        bytes_read += (size_t)ret;
+    }
+
+    if (bytes_read % sizeof(*raw_samples) != 0) {
+        free(raw_samples);
+        errno = EIO;
+        return -1;
+    }
+
+    for (size_t index = 0; index < bytes_read / sizeof(*raw_samples); index++)
+        buffer[index] = (float)raw_samples[index] / 1000.0f;
+
+    bytes_read /= sizeof(*raw_samples);
+    free(raw_samples);
+    return (ssize_t)bytes_read;
 }
 
 int xtos_bci_set_sampling_rate(xtos_bci_session_t *session, uint32_t rate)

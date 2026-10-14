@@ -10,6 +10,7 @@ LIB_MINOR = 0
 LIB_STATIC = $(LIB_NAME).a
 LIB_SHARED = $(LIB_NAME).so.$(LIB_MAJOR).$(LIB_MINOR)
 LIB_SONAME = $(LIB_NAME).so.$(LIB_MAJOR)
+TEST_BINARY = tests/test_samples
 
 # Source files
 SRCS = src/session.c
@@ -28,6 +29,12 @@ $(LIB_SHARED): $(OBJS)
 
 %.o: %.c
 	$(CC) $(CFLAGS) -c $< -o $@
+
+test: $(TEST_BINARY)
+	./$(TEST_BINARY)
+
+$(TEST_BINARY): tests/test_samples.c $(SRCS) include/xtos/bci.h include/xtos/bci_uapi.h
+	$(CC) $(CFLAGS) -o $@ tests/test_samples.c $(SRCS) -lm
 
 clean:
 	rm -f $(OBJS) $(LIB_STATIC) $(LIB_SHARED) $(LIB_SONAME) $(LIB_NAME).so
