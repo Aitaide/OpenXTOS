@@ -10,18 +10,17 @@ jobs:
     timeout-minutes: 90
     steps:
       - uses: actions/checkout@v4
+      - name: Test distribution packaging helpers
+        run: python3 scripts/test_distribution_packaging.py && python3 scripts/test_source_packaging.py
       - name: Install toolchain
         run: sudo apt-get update && sudo apt-get install -y build-essential flex bison bc libssl-dev libelf-dev libc6-dev python3 cpio gzip kmod qemu-system-x86
       - name: Build x86_64 system
         run: |
           . ./scripts/reproducible_env.sh
           JOBS=2 ./scripts/build_system.sh
-      - name: Build SDK shared libraries for ABI checks
-        run: |
-          for lib in libxtos-rt libxtos-signal libxtos-bci; do
-            make -C "sdk/$lib" clean all
-          done
       - name: Verify ABI metadata
+        env:
+          XTOS_ABI_SDK_ROOT: ${{ github.workspace }}/.build/userspace-source/sdk
         run: ./scripts/check_abi.sh
       - name: Boot and self-test in QEMU
         run: QEMU_TIMEOUT=300 ./scripts/verify_system.sh

@@ -88,9 +88,15 @@ for name, target in (
 (stage / "root/.ssh/authorized_keys").write_text("")
 (stage / "etc/shells").write_text("/bin/sh\n")
 
-# Preserve absolute ELF interpreters and shared dependencies for the installer.
+host_files = set()
+
 def copy_file(path):
     source = pathlib.Path(path)
+    host_files.add(str(source))
+    try:
+        host_files.add(str(source.resolve(strict=True)))
+    except OSError:
+        pass
     destination = stage / str(source).lstrip("/")
     destination.parent.mkdir(parents=True, exist_ok=True)
     shutil.copy2(source, destination)
@@ -102,22 +108,40 @@ for name in (
     "chrt", "taskset",
 ):
     path = shutil.which(name)
+    if not path and name == "grub-bios-setup":
+        # Ubuntu installs grub-pc-bin's helper under its platform directory;
+        # Debian and some distributions also provide a PATH symlink.
+        candidate = pathlib.Path("/usr/lib/grub/i386-pc/grub-bios-setup")
+        if candidate.is_file():
+            path = str(candidate)
     if not path:
         raise RuntimeError(f"missing {name}")
     copy_file(path)
+    if name == "grub-bios-setup":
+        # grub-install invokes this by PATH name on Ubuntu as well as Debian.
+        path_link = stage / "usr/sbin/grub-bios-setup"
+        if not path_link.exists():
+            path_link.parent.mkdir(parents=True, exist_ok=True)
+            path_link.symlink_to("/usr/lib/grub/i386-pc/grub-bios-setup")
     output = subprocess.run(["ldd", path], capture_output=True, text=True, check=False).stdout
     for dependency in re.findall(r"(/[^\s()]+)", output):
         if pathlib.Path(dependency).is_file():
             copy_file(dependency)
 
-for path in ("/usr/lib/grub", "/usr/share/grub", "/etc/mke2fs.conf"):
+for path in ("/usr/lib/grub", "/usr/share/grub", "/etc/mke2fs.conf", "/usr/share/doc/liblzo2-dev/copyright"):
     source = pathlib.Path(path)
+    host_files.add(str(source))
     destination = stage / source.relative_to("/")
     if source.is_dir():
         shutil.copytree(source, destination, dirs_exist_ok=True)
     else:
         copy_file(source)
+(pathlib.Path(sys.argv[2]) / "host-files.txt").write_text("".join(f"{path}\n" for path in sorted(host_files)))
 PY
+
+python3 "$ROOT/scripts/record_static_runtime.py" "${CC:-gcc}" "$B/static-runtime-files.txt"
+cat "$B/static-runtime-files.txt" >> "$B/host-files.txt"
+python3 "$ROOT/scripts/collect_distribution_notices.py" "$ROOT" "$B/rootfs" "$B/host-files.txt"
 
 release="$(cat "$B/kernel-build/include/config/kernel.release")"
 python3 "$ROOT/scripts/gen_system_identity.py" --output-dir "$B/rootfs/etc" \

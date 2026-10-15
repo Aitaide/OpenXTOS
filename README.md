@@ -23,7 +23,7 @@ Replace the example path, serial, and capacity with values read from the target.
 
 ## Build from source
 
-Linux, BusyBox, SDK, and integration sources are included in the repository. A Debian/Ubuntu x86_64 host needs the kernel build tools (`build-essential flex bison bc libssl-dev libelf-dev libc6-dev python3 cpio gzip kmod`) and the baremetal image tools (`grub-pc-bin grub-efi-amd64-bin grub2-common xorriso mtools dosfstools e2fsprogs fdisk util-linux dropbear-bin rt-tests pciutils iproute2 openssh-client qemu-system-x86 ovmf`).
+Linux, BusyBox, SDK, and integration sources are included in the repository. A Debian/Ubuntu x86_64 host needs the kernel build tools (`build-essential flex bison bc libssl-dev libelf-dev libc6-dev python3 cpio gzip kmod`) and the baremetal image tools (`grub-pc-bin grub-efi-amd64-bin grub2-common liblzo2-dev xorriso mtools dosfstools e2fsprogs fdisk util-linux dropbear-bin rt-tests pciutils iproute2 openssh-client qemu-system-x86 ovmf`).
 
 Build the distributable x86_64 installation ISO and verify its checksum list:
 
@@ -31,6 +31,8 @@ Build the distributable x86_64 installation ISO and verify its checksum list:
 JOBS=$(nproc) XTOS_BAREMETAL_BUILD_ROOT="$PWD/.build/baremetal-release" bash scripts/build_baremetal.sh --public
 (cd .build/baremetal-release/images && sha256sum -c SHA256SUMS-public)
 ```
+
+The x86 installer embeds host tools (including GRUB, Dropbear, and filesystem utilities). Its `/usr/share/doc/openxtos/` directory contains the project licenses and notices, a binary/source package inventory, and third-party copyright texts. Release downloads include the matching host-package source archives as `*-x86_64-corresponding-source.tar.gz`; preserve that asset when redistributing the ISO.
 
 The public installer is `.build/baremetal-release/images/xtos-installer-public-x86_64.iso`. Build outputs remain under `.build/`; the public build does not generate or embed a maintenance key. Run the file-backed QEMU installer acceptance test with:
 
@@ -52,7 +54,7 @@ bash scripts/verify_guest_arm64.sh
 
 RISC-V 64 is also supported by the source build; install the RISC-V cross toolchain, `libc6-dev-riscv64-cross`, `qemu-system-misc`, and OpenSBI. The current release's installable-media artifact is x86_64; ARM64 is a boot bundle, not a universal board installer.
 
-`./scripts/check_abi.sh`, `./scripts/verify_source_tree.sh`, and `QEMU_TIMEOUT=300 ./scripts/verify_system.sh` cover ABI, source-tree hygiene, and x86_64 boot verification respectively.
+`XTOS_ABI_SDK_ROOT="$PWD/.build/userspace-source/sdk" ./scripts/check_abi.sh`, `./scripts/verify_source_tree.sh`, and `QEMU_TIMEOUT=300 ./scripts/verify_system.sh` cover ABI, source-tree hygiene, and x86_64 boot verification respectively after `build_system.sh`.
 
 ## Components
 

@@ -8,7 +8,7 @@ Debian/Ubuntu 主机除 Linux/BusyBox 常规编译依赖外，还需安装以下
 
 ```sh
 sudo apt-get install build-essential flex bison bc libssl-dev libelf-dev libc6-dev python3 cpio gzip kmod \
-  grub-pc-bin grub-efi-amd64-bin grub2-common xorriso mtools dosfstools e2fsprogs fdisk util-linux \
+  grub-pc-bin grub-efi-amd64-bin grub2-common liblzo2-dev xorriso mtools dosfstools e2fsprogs fdisk util-linux \
   dropbear-bin rt-tests pciutils iproute2 openssh-client qemu-system-x86 ovmf
 ```
 
@@ -46,4 +46,4 @@ xtos-install /dev/nvme0n1 '完整序列号' 精确字节容量 ERASE-XTOS
 
 示例中的设备路径不是默认安全目标，务必替换为现场读到的实际值。安装器会拒绝可移动设备、分区、已挂载设备、活动 swap、被占用的设备以及身份不匹配的磁盘，并在写入前再次检查。安装完成后关机、拔除 U 盘，再从已安装磁盘启动。
 
-公开镜像的 `/root/.ssh/authorized_keys` 为空，因此不会开放远程 SSH；所有者须在本地控制台配置密钥后再启用远程维护。启动后 `/sys/kernel/realtime` 应为 `1`，`xtos-selftest` 用于检查内核模块和用户态测试。该最小开发系统不含加密磁盘、Secure Boot、生产升级服务或完整账户管理。物理硬件、网络和延迟仍需在目标设备上另行验证。
+公开镜像的 `/root/.ssh/authorized_keys` 为空，因此不会开放远程 SSH；所有者须在本地控制台配置密钥后再启用远程维护。镜像内 `/usr/share/doc/openxtos/` 附有项目许可证、NOTICE、宿主软件包清单及第三方版权声明；正式 Release 同时提供与宿主二进制版本对应的源码归档，分发 ISO 时应一并保留对应源码。启动后 `/sys/kernel/realtime` 应为 `1`，`xtos-selftest` 用于检查内核模块和用户态测试。该最小开发系统不含加密磁盘、Secure Boot、生产升级服务或完整账户管理。物理硬件、网络和延迟仍需在目标设备上另行验证。

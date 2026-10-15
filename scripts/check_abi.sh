@@ -7,7 +7,7 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
-SDK="$ROOT/sdk"
+SDK="${XTOS_ABI_SDK_ROOT:-$ROOT/sdk}"
 
 fail=0
 

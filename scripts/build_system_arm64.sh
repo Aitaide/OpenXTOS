@@ -292,6 +292,10 @@ EOF
 # Create /init symlink
 ln -sf sbin/init "$ROOTFS/init"
 
+# Stage 6: Include target static runtime provenance and component notices.
+python3 "$ROOT/scripts/record_static_runtime.py" aarch64-linux-gnu-gcc "$BUILD_ROOT/host-files-arm64.txt"
+python3 "$ROOT/scripts/collect_distribution_notices.py" "$ROOT" "$ROOTFS" "$BUILD_ROOT/host-files-arm64.txt" 'arm64 bundle'
+
 # Build initramfs (reproducible: fixed mtimes, sorted entries, stable
 # ownership and gzip header). Requires scripts/reproducible_env.sh for the
 # SOURCE_DATE_EPOCH default; falls back to the HEAD commit time.

@@ -19,7 +19,9 @@ jobs:
       - name: Install build and verification dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y build-essential flex bison bc libssl-dev libelf-dev libc6-dev python3 cpio gzip kmod grub-pc-bin grub-efi-amd64-bin grub2-common xorriso mtools dosfstools e2fsprogs fdisk util-linux dropbear-bin rt-tests pciutils iproute2 openssh-client qemu-system-x86 ovmf
+          sudo apt-get install -y build-essential flex bison bc libssl-dev libelf-dev libc6-dev liblzo2-dev python3 cpio gzip kmod grub-pc-bin grub-efi-amd64-bin grub2-common xorriso mtools dosfstools e2fsprogs fdisk util-linux dropbear-bin rt-tests pciutils iproute2 openssh-client qemu-system-x86 ovmf dpkg-dev
+          sudo python3 scripts/enable_deb_src.py /etc/apt/sources.list.d/ubuntu.sources
+          sudo apt-get update
       - name: Build distributable installer
         run: XTOS_BAREMETAL_BUILD_ROOT="$GITHUB_WORKSPACE/.build/baremetal-release" JOBS=2 bash scripts/build_baremetal.sh --public
       - name: Verify installer checksums and BIOS/UEFI install path
@@ -34,10 +36,20 @@ jobs:
         run: |
           mkdir -p dist
           cp .build/baremetal-release/images/xtos-installer-public-x86_64.iso "dist/openxtos-${GITHUB_REF_NAME}-x86_64-installer.iso"
+          cp .build/baremetal-release/rootfs/usr/share/doc/openxtos/HOST_PACKAGES.tsv dist/
+          cp .build/baremetal-release/rootfs/usr/share/doc/openxtos/SOURCE_PACKAGES.tsv dist/
+          cp -a .build/baremetal-release/rootfs/usr/share/doc/openxtos/third-party-copyright dist/
+          cp -a .build/baremetal-release/rootfs/usr/share/doc/openxtos/third-party-common-licenses dist/
+          mkdir -p dist/project-source
+          git archive --format=tar --prefix="openxtos-${GITHUB_REF_NAME}/" "$GITHUB_REF_NAME" | tar -x -C dist/project-source
+          python3 scripts/fetch_distribution_sources.py dist/SOURCE_PACKAGES.tsv dist/host-sources
+          tar -czf "dist/openxtos-${GITHUB_REF_NAME}-x86_64-corresponding-source.tar.gz" -C dist project-source host-sources HOST_PACKAGES.tsv SOURCE_PACKAGES.tsv third-party-copyright third-party-common-licenses
       - uses: actions/upload-artifact@v4
         with:
           name: openxtos-x86_64-installer
-          path: dist/openxtos-*.iso
+          path: |
+            dist/openxtos-*.iso
+            dist/openxtos-*-corresponding-source.tar.gz
           if-no-files-found: error
           retention-days: 7
 
@@ -51,7 +63,9 @@ jobs:
       - name: Install cross-build and verification dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y build-essential flex bison bc libssl-dev libelf-dev libc6-dev python3 cpio gzip rsync kmod file crossbuild-essential-arm64 libc6-dev-arm64-cross qemu-system-arm
+          sudo apt-get install -y build-essential flex bison bc libssl-dev libelf-dev libc6-dev python3 cpio gzip rsync kmod file crossbuild-essential-arm64 libc6-dev-arm64-cross qemu-system-arm dpkg-dev
+          sudo python3 scripts/enable_deb_src.py /etc/apt/sources.list.d/ubuntu.sources
+          sudo apt-get update
       - name: Build ARM64 system
         run: JOBS=2 bash scripts/build_system_arm64.sh
       - name: Verify ARM64 boot and in-guest tests
@@ -76,7 +90,22 @@ jobs:
 
           This is a QEMU virt boot bundle, not a universal ARM board installer. Physical board use requires the matching firmware, device tree and hardware validation.
           EOF
+          cp .build/rootfs-arm64/usr/share/doc/openxtos/CORRESPONDING-SOURCE.txt dist/arm64/SOURCE-CODE-OFFER.txt
+          cp -a .build/rootfs-arm64/usr/share/doc/openxtos dist/arm64/notices
+          cp LICENSE LICENSE-NOTICE NOTICE TRADEMARKS.md dist/arm64/
+          cp kernel/linux/COPYING kernel/linux/LICENSES/preferred/GPL-2.0 kernel/linux/LICENSES/exceptions/Linux-syscall-note dist/arm64/
+          cp userspace/busybox/LICENSE dist/arm64/busybox-LICENSE
           tar -czf "$GITHUB_WORKSPACE/dist/openxtos-${GITHUB_REF_NAME}-arm64.tar.gz" -C dist arm64
+      - name: Package ARM64 corresponding source
+        run: |
+          mkdir -p dist/arm64-source/project-source
+          git archive --format=tar --prefix="openxtos-${GITHUB_REF_NAME}/" "$GITHUB_REF_NAME" | tar -x -C dist/arm64-source/project-source
+          cp .build/rootfs-arm64/usr/share/doc/openxtos/HOST_PACKAGES.tsv dist/arm64-source/
+          cp .build/rootfs-arm64/usr/share/doc/openxtos/SOURCE_PACKAGES.tsv dist/arm64-source/
+          cp -a .build/rootfs-arm64/usr/share/doc/openxtos/third-party-copyright dist/arm64-source/
+          cp -a .build/rootfs-arm64/usr/share/doc/openxtos/third-party-common-licenses dist/arm64-source/
+          python3 scripts/fetch_distribution_sources.py dist/arm64-source/SOURCE_PACKAGES.tsv dist/arm64-source/runtime-sources
+          tar -czf "dist/openxtos-${GITHUB_REF_NAME}-arm64-corresponding-source.tar.gz" -C dist/arm64-source project-source runtime-sources HOST_PACKAGES.tsv SOURCE_PACKAGES.tsv third-party-copyright third-party-common-licenses
       - uses: actions/upload-artifact@v4
         with:
           name: openxtos-arm64
