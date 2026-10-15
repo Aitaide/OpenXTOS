@@ -42,7 +42,7 @@ jobs:
           - arch: riscv64
             script: ./scripts/build_system_riscv64.sh
             verify: ./scripts/verify_system_riscv64.sh
-            packages: gcc-riscv64-linux-gnu qemu-system-misc opensbi
+            packages: gcc-riscv64-linux-gnu libc6-dev-riscv64-cross qemu-system-misc opensbi
     steps:
       - uses: actions/checkout@v4
       - name: Install cross toolchain and QEMU

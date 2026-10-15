@@ -76,7 +76,7 @@ jobs:
 
           This is a QEMU virt boot bundle, not a universal ARM board installer. Physical board use requires the matching firmware, device tree and hardware validation.
           EOF
-          tar -C dist -czf "dist/openxtos-${GITHUB_REF_NAME}-arm64.tar.gz" arm64
+          tar -czf "$GITHUB_WORKSPACE/dist/openxtos-${GITHUB_REF_NAME}-arm64.tar.gz" -C dist arm64
       - uses: actions/upload-artifact@v4
         with:
           name: openxtos-arm64
