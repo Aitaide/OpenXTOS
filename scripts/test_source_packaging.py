@@ -6,11 +6,34 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from unittest import mock
 
 SCRIPTS = Path(__file__).resolve().parent
 
 
 class SourcePackagingTests(unittest.TestCase):
+    def test_historical_ubuntu_source_is_exact_and_checksum_verified(self):
+        import hashlib
+        sys.path.insert(0, str(SCRIPTS))
+        import fetch_distribution_sources as fetcher
+        with tempfile.TemporaryDirectory(prefix="openxtos-history-test-") as temp:
+            output = Path(temp)
+            payload = b"unit test archive content"
+            digest = hashlib.sha256(payload).hexdigest()
+            descriptor = f"Source: sample\nVersion: 1:2.0-3\nChecksums-Sha256:\n {digest} {len(payload)} sample_2.0.orig.tar.xz\n"
+
+            def download(url, destination):
+                self.assertTrue(url.startswith("https://api.launchpad.net/1.0/ubuntu/+archive/primary/+files/"))
+                destination.write_bytes(descriptor.encode() if url.endswith(".dsc") else payload)
+
+            with mock.patch.object(fetcher, "download", side_effect=download, create=True):
+                self.assertTrue(hasattr(fetcher, "fetch_ubuntu_source"), "historical source fetch not implemented")
+                dsc = fetcher.fetch_ubuntu_source("sample", "1:2.0-3", output)
+            self.assertEqual(dsc.name, "sample_2.0-3.dsc")
+            (output / "sample_2.0.orig.tar.xz").write_bytes(b"x" * len(payload))
+            with self.assertRaisesRegex(SystemExit, "checksum mismatch"):
+                fetcher.validate_source("sample", "1:2.0-3", dsc)
+
     def test_arm_offer_identifies_static_libc_source_asset(self):
         sys.path.insert(0, str(SCRIPTS))
         from install_project_notices import install
