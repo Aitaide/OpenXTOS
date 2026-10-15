@@ -1,6 +1,10 @@
-# OpenXTOS version.
+# XTOS version. Single source of truth for release tooling (SBOM generator,
+# release packaging, release notes). The SDK libraries carry their own ABI
+# versions in sdk/<lib>/include/xtos/<lib>_version.h — independent from this
+# project version.
 #
 # Format: MAJOR.MINOR.PATCH[-PRERELEASE]
-#   0.x marks pre-1.0 development releases.
-XTOS_VERSION=0.9.0
-XTOS_RELEASE_DATE=2026-10-02
+#   1.0.0-beta marks the first feature-complete beta.
+XTOS_VERSION=1.0.0-beta.1
+XTOS_RELEASE_NAME="Beta 1"
+XTOS_RELEASE_DATE=2026-10-14

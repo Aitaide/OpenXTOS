@@ -16,6 +16,11 @@ jobs:
         run: |
           . ./scripts/reproducible_env.sh
           JOBS=2 ./scripts/build_system.sh
+      - name: Build SDK shared libraries for ABI checks
+        run: |
+          for lib in libxtos-rt libxtos-signal libxtos-bci; do
+            make -C "sdk/$lib" clean all
+          done
       - name: Verify ABI metadata
         run: ./scripts/check_abi.sh
       - name: Boot and self-test in QEMU

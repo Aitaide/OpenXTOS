@@ -1,132 +1,79 @@
-# OpenXTOS
+# OpenXTOS 1.0.0-beta.1
 
-Real-time operating system research platform for brain-computer-interface
-(BCI) and deterministic signal-processing workloads, built on Linux 6.6.0
-with the PREEMPT_RT patch (rt15).
+OpenXTOS is an installable real-time operating system based on Linux 6.6.0 with PREEMPT_RT rt15, XTOS kernel components, BusyBox, and the XTOS SDK. The x86_64 release is a BIOS/UEFI USB installer, not only a QEMU test image. ARM64 boot artifacts are published separately; board support depends on its device tree, firmware, and drivers.
 
-OpenXTOS ships a complete, buildable system: a PREEMPT_RT Linux kernel with
-in-tree XTOS components (a scheduler helper and a BCI device framework),
-a static BusyBox userland, and an Apache-2.0 user-space SDK for real-time
-and signal-processing work. It boots and self-tests under QEMU on x86_64,
-ARM64 (AArch64), and RISC-V 64.
+## Release downloads
 
-## What's inside
+The source tag triggers a CI release workflow. Once its x86_64 installer and ARM64 bundle builds pass, GitHub Releases hosts the prerelease assets and a checksum list. Asset names include the `v` prefix used by the Git tag.
 
-| Directory | Contents |
-|-----------|----------|
-| `kernel/` | Vendored Linux 6.6.0 source with PREEMPT_RT rt15 applied, plus the XTOS integration patch (`kernel/patches/`) and the XTOS kernel config fragment (`kernel/xtos_defconfig`) |
-| `userspace/` | Vendored BusyBox 1.37.0 source (unmodified) |
-| `sdk/` | `libxtos-rt` (scheduling helpers + SPSC ring queue), `libxtos-signal` (FFT, notch, bandpass, SSVEP, P300 feature extraction), `libxtos-bci` (device session API) — all Apache-2.0 |
-| `system/` | Rootfs skeleton, BusyBox defconfig, boot init, in-guest self-test |
-| `tools/` | EEG CSV pipeline, signal benchmark, EEG replay validator |
-| `examples/` | BCI session example (`bci_test.c`) |
-| `scripts/` | Build, verify, and cross-compile automation for all three architectures |
+## Install x86_64
 
-XTOS kernel components (in the integration patch):
-- **Scheduler helper** (`kernel/sched/xtos_sched.c`): opt-in O(1) priority
-  queue usable by integration layers without replacing Linux's main
-  scheduler class.
-- **BCI framework** (`drivers/xtos/bci/`): char-device BCI core, ring buffer,
-  and an OpenBCI Cyton serdev driver (24-bit ADC, packet reassembly).
-- **UAPI** (`include/uapi/linux/xtos_bci.h`): integer-only ioctl ABI.
+Write the ISO to a USB drive with a raw-image writer (Rufus in DD mode, balenaEtcher, or equivalent), boot the target in BIOS or UEFI mode, and use the local VGA or serial console. The installer does not write a disk automatically.
 
-## Requirements
+Before installation, identify the exact whole disk, its serial, and byte capacity. The installer refuses removable media, partitions, mounted disks, active swap, holders, and mismatched identity. Installation irreversibly erases the selected disk and requires all of these values plus the exact `ERASE-XTOS` confirmation:
 
-- Linux host with GCC, make, flex, bison, bc, libssl-dev, libelf-dev,
-  cpio, gzip, rsync, python3
-- QEMU for verification (`qemu-system-x86`, `qemu-system-arm`,
-  `qemu-system-riscv64`; OpenSBI for RISC-V)
-- Cross toolchains for non-x86 builds:
-  `crossbuild-essential-arm64`, `gcc-riscv64-linux-gnu`
-- ~10 GB free disk; the build does not download any source — Linux and
-  BusyBox are vendored in this repository.
-
-## Build and run (x86_64)
-
-```bash
-JOBS=$(nproc) ./scripts/build_system.sh          # kernel + BusyBox + SDK + initramfs
-QEMU_TIMEOUT=180 ./scripts/verify_system.sh     # boots under QEMU, runs in-guest self-test
-./scripts/run_system.sh                          # interactive BusyBox shell instead
+```sh
+lsblk -o NAME,MODEL,SERIAL,SIZE,TYPE,MOUNTPOINTS
+blockdev --getsize64 /dev/nvme0n1
+cat /proc/cmdline
+xtos-install /dev/nvme0n1 'EXACT-SERIAL' EXACT-BYTES ERASE-XTOS
 ```
 
-## Cross-architecture (QEMU-verified)
+Replace the example path, serial, and capacity with values read from the target. Do not copy the example values literally. After installation, remove the USB and boot the installed disk. Public images ship with an empty root `authorized_keys`; remote SSH is not enabled until the owner provisions access. See `system/baremetal/README.zh-CN.md` for the full procedure and safety checks.
 
-```bash
-JOBS=$(nproc) ./scripts/build_system_arm64.sh      && ./scripts/verify_system_arm64.sh
-JOBS=$(nproc) ./scripts/build_system_riscv64.sh   && ./scripts/verify_system_riscv64.sh
+## Build from source
+
+Linux, BusyBox, SDK, and integration sources are included in the repository. A Debian/Ubuntu x86_64 host needs the kernel build tools (`build-essential flex bison bc libssl-dev libelf-dev libc6-dev python3 cpio gzip kmod`) and the baremetal image tools (`grub-pc-bin grub-efi-amd64-bin grub2-common xorriso mtools dosfstools e2fsprogs fdisk util-linux dropbear-bin rt-tests pciutils iproute2 openssh-client qemu-system-x86 ovmf`).
+
+Build the distributable x86_64 installation ISO and verify its checksum list:
+
+```sh
+JOBS=$(nproc) XTOS_BAREMETAL_BUILD_ROOT="$PWD/.build/baremetal-release" bash scripts/build_baremetal.sh --public
+(cd .build/baremetal-release/images && sha256sum -c SHA256SUMS-public)
 ```
 
-Both builders merge `kernel/xtos_defconfig` (PREEMPT_RT, XTOS_SCHED,
-XTOS_BCI, HZ_1000) and produce a kernel image plus initramfs; the
-`verify_guest_*` scripts boot the image and run the in-guest module-load
-and SDK test suite.
+The public installer is `.build/baremetal-release/images/xtos-installer-public-x86_64.iso`. Build outputs remain under `.build/`; the public build does not generate or embed a maintenance key. Run the file-backed QEMU installer acceptance test with:
 
-## Reproducible builds
-
-```bash
-. ./scripts/reproducible_env.sh
-JOBS=$(nproc) ./scripts/build_system.sh
+```sh
+XTOS_BAREMETAL_BUILD_ROOT="$PWD/.build/baremetal-release" \
+XTOS_INSTALLER_ISO="$PWD/.build/baremetal-release/images/xtos-installer-public-x86_64.iso" \
+  QEMU_TIMEOUT=900 python3 scripts/verify_baremetal.py
 ```
 
-Pins `SOURCE_DATE_EPOCH` (default: HEAD commit time), kernel build
-user/host/version, archive mtimes, and gzip headers. Clean rebuilds from
-the same commit produce byte-identical kernel and initramfs artifacts.
+This exercises virtual BIOS/UEFI install, boot, and persistence only; it is not evidence of physical hardware compatibility or latency.
 
-## SDK overview
+For ARM64, install `crossbuild-essential-arm64`, `libc6-dev-arm64-cross`, and `qemu-system-arm`, then build and verify:
 
-```c
-#include <xtos/rt.h>        /* scheduler helpers */
-#include <xtos/spsc.h>      /* lock-free SPSC sample queue */
-#include <xtos/signal.h>    /* FFT, notch, bandpass, SSVEP, P300 */
-#include <xtos/bci.h>       /* BCI device sessions (ioctl wrappers) */
+```sh
+JOBS=$(nproc) bash scripts/build_system_arm64.sh
+QEMU_TIMEOUT=300 bash scripts/verify_system_arm64.sh
+bash scripts/verify_guest_arm64.sh
 ```
 
-Each library carries an ABI version header
-(`include/xtos/<lib>_version.h`); shared objects follow
-`libxtos-*.so.MAJOR.MINOR` with SONAME `libxtos-*.so.MAJOR`.
-`scripts/check_abi.sh` verifies the two stay in sync.
+RISC-V 64 is also supported by the source build; install the RISC-V cross toolchain, `libc6-dev-riscv64-cross`, `qemu-system-misc`, and OpenSBI. The current release's installable-media artifact is x86_64; ARM64 is a boot bundle, not a universal board installer.
 
-## Scope and limitations
+`./scripts/check_abi.sh`, `./scripts/verify_source_tree.sh`, and `QEMU_TIMEOUT=300 ./scripts/verify_system.sh` cover ABI, source-tree hygiene, and x86_64 boot verification respectively.
 
-- QEMU validation confirms boot, module load, and user-space test
-  execution. It is **not** evidence of real-hardware latency.
-- Real OpenBCI hardware bring-up, AR/VR input, and medical-grade safety
-  claims are out of scope for this repository.
-- The XTOS scheduler helper is an auxiliary layer; it does not replace
-  Linux's scheduler.
+## Components
 
-## Licensing
+- `kernel/` — Linux 6.6.0, PREEMPT_RT rt15, and the XTOS integration patch.
+- `userspace/` — BusyBox 1.37.0 source.
+- `sdk/` — `libxtos-rt`, `libxtos-signal`, and `libxtos-bci`.
+- `system/` — root filesystem, boot configuration, and installer.
+- `tools/`, `examples/`, `scripts/` — signal tools, examples, builds, and verification.
 
-- XTOS user-space SDK, tools, examples, scripts, and system files:
-  **Apache-2.0** (see `LICENSE`).
-- Vendored Linux 6.6.0 (`kernel/linux/`): GPL-2.0 (see
-  `kernel/linux/COPYING`). The PREEMPT_RT patch and the XTOS kernel
-  integration patch (`kernel/patches/`) are GPL-2.0.
-- Vendored BusyBox 1.37.0 (`userspace/busybox/`): GPL-2.0.
+The XTOS scheduler helper is an optional integration layer; it does not replace Linux's scheduler. BCI device operation requires compatible hardware. QEMU verifies software boot paths, not real-time worst-case guarantees, hardware support, medical safety, or device behavior.
 
-The Apache-2.0 SDK communicates with GPL-2.0 kernel components through
-the UAPI boundary (ioctl/syscall), not by linking; see `LICENSE-NOTICE`.
+## Licensing and attribution
 
-## Attribution and brand use
+XTOS user-space SDK, tools, examples, scripts and system files use Apache-2.0 (see `LICENSE`); Linux, PREEMPT_RT changes and BusyBox carry their own GPL-2.0 component licenses (see `LICENSE-NOTICE` and the bundled component license files).
 
-Commercial use remains permitted under the applicable component licenses.
-Preserve their required copyright, license, attribution and modification
-notices, and meet GPL corresponding-source obligations when distributing
-covered binaries. See [NOTICE](NOTICE) for project attribution information
-and [TRADEMARKS.md](TRADEMARKS.md) for the bilingual brand guide.
+Commercial use remains permitted under the applicable component licenses. Preserve required copyright, license, attribution and modification notices, and meet GPL corresponding-source obligations when distributing covered binaries. See [NOTICE](NOTICE) for project attribution information and [TRADEMARKS.md](TRADEMARKS.md) for the bilingual brand guide.
 
-Clear attribution of the actual upstream version, integrated components,
-modifications and https://xtos.cn is recommended in an About, system-information
-or open-source notices screen and accompanying documentation. This is not
-an additional software-license condition. Logo/co-branding permission is
-separate; attribution does not imply official certification or endorsement.
+Clear attribution of the actual upstream version, integrated components, modifications and https://xtos.cn is recommended in an About, system-information or open-source notices screen and accompanying documentation. This is not an additional software-license condition. Logo/co-branding permission is separate; attribution does not imply official certification or endorsement.
 
-Source distributions include these files at the repository root. Include
-the applicable notices and license texts with downstream artifacts; a logo
-or website link is not a substitute for GPL or Apache compliance.
+Include applicable notices and license texts with downstream artifacts; a logo or website link is not a substitute for GPL or Apache compliance.
 
 ## Upstream
 
-This repository is the open-source distribution of XTOS. It contains the
-complete buildable system source; internal development history, plans,
-and test infrastructure live in the private development tree.
+OpenXTOS is the public source distribution of XTOS. Its buildable Linux and BusyBox sources, SDK, and installer scripts are included here; private development plans, internal test infrastructure, and hardware-maintenance materials are not part of this repository.

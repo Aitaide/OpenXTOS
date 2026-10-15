@@ -1,0 +1,26 @@
+#!/bin/sh
+export PATH=/usr/sbin:/usr/bin:/sbin:/bin
+mount -t proc proc /proc
+mount -t sysfs sysfs /sys
+mount -t devtmpfs devtmpfs /dev
+mkdir -p /dev/pts /run /tmp
+mount -t devpts devpts /dev/pts
+exec </dev/console >/dev/console 2>&1
+ROOT_UUID=
+for ARG in $(cat /proc/cmdline); do case "$ARG" in xtos.root=*) ROOT_UUID=${ARG#xtos.root=};; esac; done
+if [ -n "$ROOT_UUID" ]; then
+    mkdir -p /newroot
+    COUNT=0
+    while [ "$COUNT" -lt 30 ]; do
+        DEVICE=$(blkid -U "$ROOT_UUID" 2>/dev/null)
+        [ -n "$DEVICE" ] && mount -t ext4 "$DEVICE" /newroot && break
+        COUNT=$((COUNT+1)); sleep 1
+    done
+    if mountpoint -q /newroot; then
+        for DIR in dev proc sys; do mount --move /$DIR /newroot/$DIR; done
+        exec switch_root /newroot /sbin/xtos-start
+    fi
+    echo 'XTOS_ROOT=FAIL'
+fi
+case " $(cat /proc/cmdline) " in *' xtos.installer=1 '*) echo 'XTOS installer: no automatic disk writes';; *) echo 'Recovery mode: installation disabled';; esac
+exec /sbin/xtos-start

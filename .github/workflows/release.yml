@@ -1,0 +1,112 @@
+name: OpenXTOS release artifacts
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write
+
+jobs:
+  x86_64-installer:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 360
+    steps:
+      - uses: actions/checkout@v4
+      - name: Check tag matches source version
+        run: test "v$(sed -n 's/^XTOS_VERSION=//p' VERSION)" = "$GITHUB_REF_NAME"
+      - name: Install build and verification dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential flex bison bc libssl-dev libelf-dev libc6-dev python3 cpio gzip kmod grub-pc-bin grub-efi-amd64-bin grub2-common xorriso mtools dosfstools e2fsprogs fdisk util-linux dropbear-bin rt-tests pciutils iproute2 openssh-client qemu-system-x86 ovmf
+      - name: Build distributable installer
+        run: XTOS_BAREMETAL_BUILD_ROOT="$GITHUB_WORKSPACE/.build/baremetal-release" JOBS=2 bash scripts/build_baremetal.sh --public
+      - name: Verify installer checksums and BIOS/UEFI install path
+        env:
+          XTOS_BAREMETAL_BUILD_ROOT: ${{ github.workspace }}/.build/baremetal-release
+          XTOS_INSTALLER_ISO: ${{ github.workspace }}/.build/baremetal-release/images/xtos-installer-public-x86_64.iso
+          QEMU_TIMEOUT: '900'
+        run: |
+          (cd .build/baremetal-release/images && sha256sum -c SHA256SUMS-public)
+          python3 scripts/verify_baremetal.py
+      - name: Stage installer asset
+        run: |
+          mkdir -p dist
+          cp .build/baremetal-release/images/xtos-installer-public-x86_64.iso "dist/openxtos-${GITHUB_REF_NAME}-x86_64-installer.iso"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: openxtos-x86_64-installer
+          path: dist/openxtos-*.iso
+          if-no-files-found: error
+          retention-days: 7
+
+  arm64:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 180
+    steps:
+      - uses: actions/checkout@v4
+      - name: Check tag matches source version
+        run: test "v$(sed -n 's/^XTOS_VERSION=//p' VERSION)" = "$GITHUB_REF_NAME"
+      - name: Install cross-build and verification dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential flex bison bc libssl-dev libelf-dev libc6-dev python3 cpio gzip rsync kmod file crossbuild-essential-arm64 libc6-dev-arm64-cross qemu-system-arm
+      - name: Build ARM64 system
+        run: JOBS=2 bash scripts/build_system_arm64.sh
+      - name: Verify ARM64 boot and in-guest tests
+        run: |
+          QEMU_TIMEOUT=300 bash scripts/verify_system_arm64.sh
+          bash scripts/verify_guest_arm64.sh
+      - name: Package ARM64 boot bundle
+        run: |
+          mkdir -p dist/arm64/dtbs
+          cp .build/kernel-install-arm64/Image dist/arm64/
+          cp .build/initramfs-arm64.cpio.gz dist/arm64/
+          cp .build/kernel-build-arm64/.config dist/arm64/kernel.config
+          cp -a .build/kernel-install-arm64/dtbs/. dist/arm64/dtbs/
+          cat > dist/arm64/README.txt <<'EOF'
+          OpenXTOS ARM64 boot bundle
+
+          Contents: Linux Image, XTOS initramfs, device trees and resolved kernel configuration.
+          QEMU virt example from the parent directory:
+            qemu-system-aarch64 -machine virt -cpu cortex-a57 -m 2G -smp 2 \
+              -kernel arm64/Image -initrd arm64/initramfs-arm64.cpio.gz \
+              -append 'console=ttyAMA0 panic=1' -nographic
+
+          This is a QEMU virt boot bundle, not a universal ARM board installer. Physical board use requires the matching firmware, device tree and hardware validation.
+          EOF
+          tar -C dist -czf "dist/openxtos-${GITHUB_REF_NAME}-arm64.tar.gz" arm64
+      - uses: actions/upload-artifact@v4
+        with:
+          name: openxtos-arm64
+          path: dist/openxtos-*.tar.gz
+          if-no-files-found: error
+          retention-days: 7
+
+  github-release:
+    needs: [x86_64-installer, arm64]
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Download installer artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: openxtos-x86_64-installer
+          path: dist
+      - name: Download ARM64 bundle
+        uses: actions/download-artifact@v4
+        with:
+          name: openxtos-arm64
+          path: dist
+      - name: Create release checksum list
+        run: (cd dist && sha256sum openxtos-* > SHA256SUMS.txt)
+      - name: Publish prerelease and assets
+        uses: softprops/action-gh-release@v2
+        with:
+          name: OpenXTOS ${{ github.ref_name }}
+          prerelease: true
+          generate_release_notes: true
+          files: |
+            dist/openxtos-*.iso
+            dist/openxtos-*.tar.gz
+            dist/SHA256SUMS.txt

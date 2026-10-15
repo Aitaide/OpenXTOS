@@ -12,8 +12,8 @@ Source repository: https://github.com/Aitaide/OpenXTOS
 
 Current public release baseline
 --------------------------------
-OpenXTOS version: 0.9.0
-Source commit: dd313955ad57542bcd2af8827157d1bbd0cf5e83
+OpenXTOS version: 1.0.0-beta.1
+Source tag: v1.0.0-beta.1
 
 Component notices
 -----------------
@@ -38,8 +38,8 @@ The attribution should identify:
 
 Suggested wording:
 
-  Based on OpenXTOS 0.9.0 (source commit
-  dd313955ad57542bcd2af8827157d1bbd0cf5e83).
+  Based on OpenXTOS 1.0.0-beta.1 (source tag
+  v1.0.0-beta.1).
   Project: https://xtos.cn
   Distributed by: [downstream distributor].
   Modifications: [brief description or "none"]

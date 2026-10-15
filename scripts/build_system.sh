@@ -47,6 +47,12 @@ make -C "$STAGING/sdk/libxtos-signal" test_signal CFLAGS='-std=c11 -O2 -Wall -We
     "$STAGING/examples/bci_test.c" "$STAGING/sdk/libxtos-bci/libxtos-bci.a" -o "$STAGING/examples/bci_test"
 cp -a "$ROOT/system/rootfs/." "$ROOTFS/"
 mkdir -p "$ROOTFS"/{bin,sbin,dev,etc,proc,sys,tmp,run,root,usr/bin,usr/include/xtos,usr/lib,usr/libexec/xtos,usr/share/xtos/fixtures}
+release="$(make -s -C "$KERNEL_DIR" O="$KERNEL_OUTPUT" ARCH=x86 kernelrelease)"
+# Optional XTOS_* metadata is passed literally; replace the staged legacy identity.
+python3 "$ROOT/scripts/gen_system_identity.py" --output-dir "$ROOTFS/etc" \
+    --image-type "${XTOS_IMAGE_TYPE:-core}" --arch x86_64 --kernel-release "$release" \
+    --build-id "${XTOS_BUILD_ID:-unknown}" --source-state "${XTOS_SOURCE_STATE:-unknown}" \
+    --hardware-profile "${XTOS_HARDWARE_PROFILE:-unknown}"
 install -m 0755 "$BB_OUTPUT/busybox" "$ROOTFS/bin/busybox"
 while IFS= read -r applet; do
     [[ "$applet" == busybox ]] || ln -sf busybox "$ROOTFS/bin/$applet"
@@ -64,7 +70,6 @@ done
 install -m 0755 "$STAGING/sdk/libxtos-signal/test_signal" "$ROOTFS/usr/libexec/xtos/"
 install -m 0644 "$ROOT/tools/xtos-eeg-pipeline/fixtures/valid.csv" "$ROOTFS/usr/share/xtos/fixtures/"
 make -C "$KERNEL_DIR" O="$KERNEL_OUTPUT" ARCH=x86 INSTALL_MOD_PATH="$ROOTFS" modules_install
-release="$(make -s -C "$KERNEL_DIR" O="$KERNEL_OUTPUT" ARCH=x86 kernelrelease)"
 rm -f "$ROOTFS/lib/modules/$release/build" "$ROOTFS/lib/modules/$release/source"
 depmod -b "$ROOTFS" "$release"
 chmod 0755 "$ROOTFS/init" "$ROOTFS/usr/bin/xtos-selftest"

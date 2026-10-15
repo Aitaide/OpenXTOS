@@ -1,0 +1,24 @@
+#!/bin/sh
+export PATH=/usr/sbin:/usr/bin:/sbin:/bin
+mkdir -p /run /tmp /dev/pts /dev/shm /etc/dropbear
+mountpoint -q /dev/pts || mount -t devpts devpts /dev/pts
+mountpoint -q /dev/shm || mount -t tmpfs -o mode=1777 tmpfs /dev/shm
+chmod 1777 /tmp
+ln -sf /proc/mounts /etc/mtab
+printf '\nXTOS baremetal system\nkernel='; uname -r
+printf 'realtime='; cat /sys/kernel/realtime
+if [ -s /root/.ssh/authorized_keys ]; then
+    chmod 700 /root/.ssh; chmod 600 /root/.ssh/authorized_keys
+    [ -s /etc/dropbear/dropbear_ed25519_host_key ] || dropbearkey -t ed25519 -f /etc/dropbear/dropbear_ed25519_host_key >/dev/null 2>&1
+    dropbear -s -g -j -k -r /etc/dropbear/dropbear_ed25519_host_key
+fi
+ip link set lo up
+for NET in /sys/class/net/*; do
+    IFACE=${NET##*/}; [ "$IFACE" = lo ] && continue
+    ip link set "$IFACE" up
+    udhcpc -b -n -q -t 3 -i "$IFACE" -s /etc/udhcpc.script &
+done
+echo 'XTOS_READY=1'
+# Both physical VGA and serial consoles remain available.
+setsid sh -c 'exec sh </dev/tty1 >/dev/tty1 2>&1' &
+while true; do setsid sh -c 'exec sh </dev/ttyS0 >/dev/ttyS0 2>&1'; sleep 1; done
