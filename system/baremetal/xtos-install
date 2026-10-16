@@ -75,7 +75,10 @@ menuentry 'XTOS persistent system' {
 }
 EOF
 grub-install --target=i386-pc --boot-directory=/mnt/xtos/boot "$DISK"
-grub-install --target=x86_64-efi --efi-directory=/mnt/xtos/boot/efi --boot-directory=/mnt/xtos/boot --no-nvram --removable
+# Generate a loader for this disk instead of Ubuntu's prebuilt signed image,
+# whose embedded prefix may still search for the Ubuntu installation medium.
+# Secure Boot is not supported by the current unsigned XTOS kernel.
+grub-install --target=x86_64-efi --efi-directory=/mnt/xtos/boot/efi --boot-directory=/mnt/xtos/boot --no-nvram --removable --no-uefi-secure-boot
 sync
 umount /mnt/xtos/boot/efi
 umount /mnt/xtos

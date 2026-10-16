@@ -12,6 +12,17 @@ SCRIPTS = Path(__file__).resolve().parent
 
 
 class SourcePackagingTests(unittest.TestCase):
+    def test_efi_installer_generates_project_loader_not_distro_image(self):
+        import shlex
+        installer = (SCRIPTS.parent / "system/baremetal/xtos-install").read_text()
+        commands = [shlex.split(line) for line in installer.splitlines()
+                    if line.startswith("grub-install ")]
+        efi = next(command for command in commands if "--target=x86_64-efi" in command)
+        self.assertIn("--no-uefi-secure-boot", efi,
+                      "do not copy Ubuntu's prebuilt EFI image with installation-media searches")
+        self.assertIn("--no-nvram", efi)
+        self.assertIn("--removable", efi)
+
     def test_historical_ubuntu_source_is_exact_and_checksum_verified(self):
         import hashlib
         sys.path.insert(0, str(SCRIPTS))
