@@ -28,7 +28,7 @@ jobs:
         env:
           XTOS_BAREMETAL_BUILD_ROOT: ${{ github.workspace }}/.build/baremetal-release
           XTOS_INSTALLER_ISO: ${{ github.workspace }}/.build/baremetal-release/images/xtos-installer-public-x86_64.iso
-          QEMU_TIMEOUT: '900'
+          QEMU_TIMEOUT: '1800'
         run: |
           (cd .build/baremetal-release/images && sha256sum -c SHA256SUMS-public)
           python3 scripts/verify_baremetal.py

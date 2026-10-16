@@ -1,4 +1,4 @@
-# OpenXTOS 1.0.0-beta.2
+# OpenXTOS 1.0.0-beta.3
 
 OpenXTOS is an installable real-time operating system based on Linux 6.6.0 with PREEMPT_RT rt15, XTOS kernel components, BusyBox, and the XTOS SDK. The x86_64 release is a BIOS/UEFI USB installer, not only a QEMU test image. ARM64 boot artifacts are published separately; board support depends on its device tree, firmware, and drivers.
 
