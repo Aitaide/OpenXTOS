@@ -12,8 +12,8 @@ Source repository: https://github.com/Aitaide/OpenXTOS
 
 Current public release baseline
 --------------------------------
-OpenXTOS version: 1.0.0-beta.3
-Source tag: v1.0.0-beta.3
+OpenXTOS version: 1.0.0-beta.4
+Source tag: v1.0.0-beta.4
 
 Component notices
 -----------------
@@ -38,8 +38,8 @@ The attribution should identify:
 
 Suggested wording:
 
-  Based on OpenXTOS 1.0.0-beta.3 (source tag
-  v1.0.0-beta.3).
+  Based on OpenXTOS 1.0.0-beta.4 (source tag
+  v1.0.0-beta.4).
   Project: https://xtos.cn
   Distributed by: [downstream distributor].
   Modifications: [brief description or "none"]

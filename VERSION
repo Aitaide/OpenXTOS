@@ -5,6 +5,6 @@
 #
 # Format: MAJOR.MINOR.PATCH[-PRERELEASE]
 #   1.0.0-beta marks the first feature-complete beta.
-XTOS_VERSION=1.0.0-beta.3
-XTOS_RELEASE_NAME="Beta 3"
+XTOS_VERSION=1.0.0-beta.4
+XTOS_RELEASE_NAME="Beta 4"
 XTOS_RELEASE_DATE=2026-10-16
