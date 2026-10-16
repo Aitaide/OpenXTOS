@@ -1,6 +1,7 @@
 /* pkg: XTOS native package inventory + integrity verification (C, static).
  * Reads /usr/share/xtos/userspace-manifest.json. Read-only queries plus
- * sha256 verification of installed files against the manifest.
+ * sha256 verification of installed files against the manifest, and xpkg
+ * application package install/remove/list/verify/info (pkg app ...).
  * Build: gcc -O2 -Wall -Wextra -Werror -static -o pkg pkg.c
  */
 #define _GNU_SOURCE
@@ -308,6 +309,396 @@ static int load_manifest(void) {
     return npkgs > 0 ? 0 : -1;
 }
 
+/* ---- xpkg application packages (pkg app ...) ----
+ * xpkg v1: tar.gz with payload/ + xpkg/{manifest.json,SHA256SUMS}.
+ * Security model: listing-first validation (no traversal, no shadow prefixes),
+ * post-extract type scan (regular files only, nlink==1, no setuid), then
+ * full sha256 verification before anything is moved into place. */
+#define APP_ROOT_DEFAULT "/opt/xtos-apps"
+#define APP_REGISTRY "registry.json"
+#define APP_NAME_MAX 64
+#define APP_VER_MAX 64
+#define APP_PATH_MAX 1024
+#define APP_MAX_ENTRIES 65536
+#define APP_TAR_LIST_MAX (16 * 1024 * 1024)
+#define APP_MANIFEST_MAX (1024 * 1024)
+#define APP_REGISTRY_MAX 256
+
+#include <dirent.h>
+#include <sys/file.h>
+#include <sys/wait.h>
+#include <time.h>
+
+struct app_entry {
+    char path[APP_PATH_MAX];
+    char sha256[72];
+    long size;
+};
+
+struct app_meta {
+    char name[APP_NAME_MAX + 1];
+    char version[APP_VER_MAX + 1];
+    char architecture[32];
+    char summary[256];
+    char license[64];
+    char vendor[128];
+    char xtos_min_version[64];
+};
+
+struct app_reg {
+    char name[APP_NAME_MAX + 1];
+    char version[APP_VER_MAX + 1];
+    char xpkg_sha256[72];
+    char installed_utc[24];
+    long files;
+    long bytes;
+};
+
+static int app_copy(char *out, size_t n, const char *s) {
+    size_t len = strlen(s);
+    if (!len || len + 1 > n) return -1;
+    memcpy(out, s, len + 1);
+    return 0;
+}
+
+static int app_join2(char *out, size_t n, const char *a, const char *b) {
+    size_t la = strlen(a), lb = strlen(b);
+    if (!la || !lb || la + lb + 2 > n) return -1;
+    memcpy(out, a, la);
+    out[la] = '/';
+    memcpy(out + la + 1, b, lb + 1);
+    return 0;
+}
+
+static int app_join3(char *out, size_t n, const char *a, const char *b, const char *c) {
+    size_t la = strlen(a), lb = strlen(b), lc = strlen(c);
+    if (!la || !lb || !lc || la + lb + lc + 3 > n) return -1;
+    memcpy(out, a, la);
+    out[la] = '/';
+    memcpy(out + la + 1, b, lb);
+    out[la + lb + 1] = '/';
+    memcpy(out + la + lb + 2, c, lc + 1);
+    return 0;
+}
+
+static const char *app_root(char *buf, size_t n) {
+    const char *env = getenv("XTOS_APP_ROOT");
+    if (env && env[0] == '/' && app_copy(buf, n, env) == 0) return buf;
+    if (app_copy(buf, n, APP_ROOT_DEFAULT) != 0) buf[0] = '\0';
+    return buf;
+}
+
+static int app_token_name(const char *s) {
+    size_t len = strlen(s);
+    if (!len || len > APP_NAME_MAX) return 0;
+    if (!(islower((unsigned char)s[0]) || isdigit((unsigned char)s[0]))) return 0;
+    for (size_t i = 0; i < len; i++)
+        if (!(islower((unsigned char)s[i]) || isdigit((unsigned char)s[i]) || s[i] == '-')) return 0;
+    return 1;
+}
+
+static int app_token_version(const char *s) {
+    size_t len = strlen(s);
+    if (!len || len > APP_VER_MAX) return 0;
+    for (size_t i = 0; i < len; i++) {
+        char c = s[i];
+        if (!(isalnum((unsigned char)c) || c == '.' || c == '+' || c == '~' || c == '-')) return 0;
+    }
+    return 1;
+}
+
+/* Archive member names: only payload/ or xpkg/ roots, sane components, bounded. */
+static int app_member_ok(const char *name) {
+    size_t len = strlen(name);
+    if (!len || len >= APP_PATH_MAX) return 0;
+    if (name[0] == '/') return 0;
+    if (!(strncmp(name, "payload/", 8) == 0 || strncmp(name, "xpkg/", 5) == 0)) return 0;
+    if (name[len - 1] == '/') len--; /* directory member */
+    const char *p = name;
+    while (p < name + len) {
+        const char *slash = memchr(p, '/', (size_t)(name + len - p));
+        size_t clen = slash ? (size_t)(slash - p) : (size_t)(name + len - p);
+        if (clen == 0 || clen >= 256) return 0;
+        if (p[0] == '.' && (clen == 1 || (clen == 2 && p[1] == '.'))) return 0;
+        for (size_t i = 0; i < clen; i++)
+            if ((unsigned char)p[i] < 32) return 0;
+        p += clen + (slash ? 1 : 0);
+    }
+    return 1;
+}
+
+static int app_find_tar(char *out, size_t n) {
+    const char *path_env = getenv("PATH");
+    if (!path_env) return -1;
+    const char *p = path_env;
+    while (*p) {
+        const char *colon = strchr(p, ':');
+        size_t plen = colon ? (size_t)(colon - p) : strlen(p);
+        if (plen && plen + 6 < n) {
+            memcpy(out, p, plen);
+            memcpy(out + plen, "/tar", 5);
+            if (access(out, X_OK) == 0) return 0;
+        }
+        if (!colon) break;
+        p = colon + 1;
+    }
+    return -1;
+}
+
+static int app_run_tar(char *const argv[], char **capture, size_t *capture_len) {
+    int link[2] = {-1, -1};
+    if (capture && pipe(link) < 0) return -1;
+    pid_t pid = fork();
+    if (pid < 0) { if (capture) { close(link[0]); close(link[1]); } return -1; }
+    if (pid == 0) {
+        if (capture) { dup2(link[1], STDOUT_FILENO); close(link[0]); close(link[1]); }
+        char pathbuf[8192];
+        const char *orig_path = getenv("PATH");
+        if (!orig_path || strlen(orig_path) + 6 > sizeof(pathbuf)) orig_path = "/usr/bin:/bin";
+        snprintf(pathbuf, sizeof(pathbuf), "PATH=%s", orig_path);
+        char *envp[3] = {pathbuf, "LC_ALL=C", NULL};
+        execve(argv[0], argv, envp);
+        _exit(127);
+    }
+    if (capture) {
+        close(link[1]);
+        size_t cap = 1 << 20, used = 0;
+        char *buf = malloc(cap);
+        if (!buf) { close(link[0]); return -1; }
+        ssize_t r;
+        while ((r = read(link[0], buf + used, cap - used)) > 0) {
+            used += (size_t)r;
+            if (used == cap) {
+                if (cap >= APP_TAR_LIST_MAX) { free(buf); close(link[0]); return -1; }
+                cap *= 2;
+                char *grown = realloc(buf, cap);
+                if (!grown) { free(buf); close(link[0]); return -1; }
+                buf = grown;
+            }
+        }
+        close(link[0]);
+        if (r < 0) { free(buf); return -1; }
+        *capture = buf;
+        *capture_len = used;
+    }
+    int status = 0;
+    if (waitpid(pid, &status, 0) < 0) return -1;
+    return (WIFEXITED(status) && WEXITSTATUS(status) == 0) ? 0 : -1;
+}
+
+struct app_anc {
+    const char *s;
+    size_t len;
+};
+
+static int app_cmp_anc(const void *a, const void *b) {
+    const struct app_anc *x = a, *y = b;
+    size_t m = x->len < y->len ? x->len : y->len;
+    int c = memcmp(x->s, y->s, m);
+    if (c) return c;
+    return x->len < y->len ? -1 : (x->len > y->len ? 1 : 0);
+}
+
+static int app_anc_contains(const struct app_anc *sorted, int n, const char *name) {
+    size_t nlen = strlen(name);
+    int lo = 0, hi = n - 1;
+    while (lo <= hi) {
+        int mid = (lo + hi) / 2;
+        size_t m = nlen < sorted[mid].len ? nlen : sorted[mid].len;
+        int c = memcmp(name, sorted[mid].s, m);
+        if (!c) {
+            if (nlen == sorted[mid].len) return 1;
+            c = nlen < sorted[mid].len ? -1 : 1;
+        }
+        if (c < 0) hi = mid - 1; else lo = mid + 1;
+    }
+    return 0;
+}
+
+/* Listing validation: every name sane; no entry may double as a directory
+ * prefix (blocks symlink/hardlink shadows used for extraction escapes). */
+static int app_listing_validate(const char *list, size_t len) {
+    if (!len || len > APP_TAR_LIST_MAX) return -1;
+    char *pool = malloc(len + 1);
+    if (!pool) return -1;
+    memcpy(pool, list, len);
+    pool[len] = '\0';
+    char **names = calloc(APP_MAX_ENTRIES + 1, sizeof(char *));
+    struct app_anc *anc = malloc(256 * sizeof(struct app_anc));
+    int n_anc = 0, cap_anc = 256, count = 0, bad = 1;
+    if (!names || !anc) goto out;
+    bad = 0;
+    char *cursor = pool;
+    while (cursor < pool + len && !bad) {
+        char *nl = strchr(cursor, '\n');
+        if (nl) *nl = '\0';
+        if (*cursor) {
+            if (!app_member_ok(cursor) || count >= APP_MAX_ENTRIES) { bad = 1; break; }
+            names[count++] = cursor;
+            for (char *s = strchr(cursor, '/'); s; s = strchr(s + 1, '/')) {
+                if (n_anc >= cap_anc) {
+                    if (cap_anc >= 4 * APP_MAX_ENTRIES) { bad = 1; break; }
+                    cap_anc *= 2;
+                    struct app_anc *grown = realloc(anc, (size_t)cap_anc * sizeof(struct app_anc));
+                    if (!grown) { bad = 1; break; }
+                    anc = grown;
+                }
+                anc[n_anc].s = cursor;
+                anc[n_anc].len = (size_t)(s - cursor);
+                n_anc++;
+            }
+        }
+        if (!nl) break;
+        cursor = nl + 1;
+    }
+    if (!bad && count == 0) bad = 1;
+    if (!bad) {
+        qsort(anc, (size_t)n_anc, sizeof(struct app_anc), app_cmp_anc);
+        for (int i = 0; i < count; i++)
+            if (app_anc_contains(anc, n_anc, names[i])) { bad = 1; break; }
+    }
+out:
+    free(pool);
+    free(names);
+    free(anc);
+    return bad ? -1 : 0;
+}
+
+static int app_cmp_entries(const void *a, const void *b) {
+    return strcmp(((const struct app_entry *)a)->path, ((const struct app_entry *)b)->path);
+}
+
+/* Post-extract scan: regular files only, single link, no special mode bits. */
+static int app_scan_tree(const char *rootdir, const char *rel,
+                          struct app_entry **out, int *count, int *cap, int depth) {
+    if (depth > 64) return -1;
+    char full[8192];
+    if (*rel ? app_join2(full, sizeof(full), rootdir, rel) < 0
+             : app_copy(full, sizeof(full), rootdir) < 0) return -1;
+    DIR *dir = opendir(full);
+    if (!dir) return -1;
+    struct dirent *de;
+    int rc = 0;
+    while ((de = readdir(dir))) {
+        if (strcmp(de->d_name, ".") == 0 || strcmp(de->d_name, "..") == 0) continue;
+        char child[APP_PATH_MAX];
+        if (*rel ? app_join2(child, sizeof(child), rel, de->d_name) < 0
+                 : app_copy(child, sizeof(child), de->d_name) < 0) { rc = -1; break; }
+        char childfull[8192];
+        if (app_join2(childfull, sizeof(childfull), full, de->d_name) < 0) { rc = -1; break; }
+        struct stat st;
+        if (lstat(childfull, &st) < 0) { rc = -1; break; }
+        if (S_ISDIR(st.st_mode)) {
+            if (app_scan_tree(rootdir, child, out, count, cap, depth + 1) < 0) { rc = -1; break; }
+        } else if (S_ISREG(st.st_mode)) {
+            if (st.st_nlink != 1 || (st.st_mode & 07000)) { rc = -1; break; }
+            if (*count >= APP_MAX_ENTRIES) { rc = -1; break; }
+            if (*count >= *cap) {
+                int newcap = *cap ? *cap * 2 : 64;
+                struct app_entry *grown = realloc(*out, (size_t)newcap * sizeof(struct app_entry));
+                if (!grown) { rc = -1; break; }
+                *out = grown;
+                *cap = newcap;
+            }
+            if (app_copy((*out)[*count].path, APP_PATH_MAX, child) < 0) { rc = -1; break; }
+            (*out)[*count].sha256[0] = '\0';
+            (*out)[*count].size = (long)st.st_size;
+            (*count)++;
+        } else {
+            rc = -1; /* symlink, fifo, socket, device: forbidden */
+            break;
+        }
+    }
+    closedir(dir);
+    return rc;
+}
+
+static int app_hex64(const char *s) {
+    for (int i = 0; i < 64; i++)
+        if (!isxdigit((unsigned char)s[i])) return 0;
+    return 1;
+}
+
+/* Parse xpkg/SHA256SUMS: "<64 hex>  <path>" (sha256sum compatible). */
+static int app_parse_sums(const char *path, struct app_entry **out, int *count, int *cap) {
+    FILE *f = fopen(path, "r");
+    if (!f) return -1;
+    char line[APP_PATH_MAX + 128];
+    int rc = 0;
+    while (fgets(line, sizeof(line), f)) {
+        line[strcspn(line, "\n")] = '\0';
+        if (line[64] != ' ' || line[65] != ' ' || !app_hex64(line)) { rc = -1; break; }
+        const char *p = line + 66;
+        if (strncmp(p, "payload/", 8) != 0 || !app_member_ok(p)) { rc = -1; break; }
+        if (*count >= *cap) {
+            int newcap = *cap ? *cap * 2 : 64;
+            struct app_entry *grown = realloc(*out, (size_t)newcap * sizeof(struct app_entry));
+            if (!grown) { rc = -1; break; }
+            *out = grown;
+            *cap = newcap;
+        }
+        memcpy((*out)[*count].sha256, line, 64);
+        (*out)[*count].sha256[64] = '\0';
+        if (app_copy((*out)[*count].path, APP_PATH_MAX, p) < 0) { rc = -1; break; }
+        (*out)[*count].size = -1;
+        (*count)++;
+    }
+    fclose(f);
+    if (rc == 0 && *count == 0) rc = -1;
+    return rc;
+}
+
+/* Parse xpkg/manifest.json (pretty-printed, one key per line, as produced by
+ * the xpkg tooling and enforced by the publish gate). */
+static int app_parse_manifest(const char *path, struct app_meta *meta,
+                              struct app_entry **out, int *count, int *cap) {
+    FILE *f = fopen(path, "r");
+    if (!f) return -1;
+    char line[LINE_BUF];
+    int in_files = 0;
+    struct app_entry *cfile = NULL;
+    int rc = 0;
+    memset(meta, 0, sizeof(*meta));
+    while (fgets(line, sizeof(line), f)) {
+        if (strstr(line, "\"files\"")) { in_files = 1; cfile = NULL; continue; }
+        if (in_files) {
+            if (strstr(line, "\"path\"")) {
+                if (*count >= *cap) {
+                    int newcap = *cap ? *cap * 2 : 64;
+                    struct app_entry *grown = realloc(*out, (size_t)newcap * sizeof(struct app_entry));
+                    if (!grown) { rc = -1; break; }
+                    *out = grown;
+                    *cap = newcap;
+                }
+                cfile = &(*out)[(*count)++];
+                cfile->path[0] = '\0';
+                cfile->sha256[0] = '\0';
+                cfile->size = -1;
+                if (!json_str(line, "path", cfile->path, sizeof(cfile->path))) { rc = -1; break; }
+            } else if (strstr(line, "\"sha256\"") && cfile) {
+                if (!json_str(line, "sha256", cfile->sha256, sizeof(cfile->sha256))) { rc = -1; break; }
+            } else if (strstr(line, "\"size\"") && cfile) {
+                char *p = strchr(line, ':');
+                if (!p) { rc = -1; break; }
+                cfile->size = atol(p + 1);
+            } else if (strstr(line, "]")) {
+                in_files = 0;
+            }
+            continue;
+        }
+        if (!meta->name[0]) json_str(line, "name", meta->name, sizeof(meta->name));
+        if (!meta->version[0]) json_str(line, "version", meta->version, sizeof(meta->version));
+        if (!meta->architecture[0]) json_str(line, "architecture", meta->architecture, sizeof(meta->architecture));
+        if (!meta->summary[0]) json_str(line, "summary", meta->summary, sizeof(meta->summary));
+        if (!meta->license[0]) json_str(line, "license", meta->license, sizeof(meta->license));
+        if (!meta->vendor[0]) json_str(line, "vendor", meta->vendor, sizeof(meta->vendor));
+        if (!meta->xtos_min_version[0]) json_str(line, "xtos_min_version", meta->xtos_min_version, sizeof(meta->xtos_min_version));
+    }
+    fclose(f);
+    if (rc == 0 && (!meta->name[0] || !meta->version[0] || *count == 0)) rc = -1;
+    return rc;
+}
+
 static void usage(void) {
     fprintf(stderr,
         "usage: pkg <command>\n"
@@ -318,6 +709,11 @@ static void usage(void) {
         "  pkg verify --all        verify every package (full integrity check)\n"
         "  pkg size                total installed payload size\n"
         "  pkg summary             count + lock identity\n"
+        "  pkg app install <file.xpkg>  verify and install an xpkg application\n"
+        "  pkg app remove <name>        remove an installed application\n"
+        "  pkg app list                list installed applications\n"
+        "  pkg app verify <name>        re-verify installed application files\n"
+        "  pkg app info <name>          show application manifest details\n"
         "  --json                  machine-readable output\n");
 }
 
@@ -472,11 +868,502 @@ static int cmd_summary(void) {
     return 0;
 }
 
+/* ---- app registry (approot/registry.json, flock on registry.lock) ---- */
+static int app_registry_load(const char *approot, struct app_reg *regs, int max) {
+    char path[8192];
+    if (app_join2(path, sizeof(path), approot, APP_REGISTRY) < 0) return -1;
+    FILE *f = fopen(path, "r");
+    if (!f) return 0;
+    char line[LINE_BUF];
+    int n = 0, in_apps = 0, cur = -1, bad = 0;
+    while (fgets(line, sizeof(line), f)) {
+        if (strstr(line, "\"schema_version\"")) {
+            char *p = strchr(line, ':');
+            if (!p || strtol(p + 1, NULL, 10) != 1) { bad = 1; break; }
+            continue;
+        }
+        if (strstr(line, "\"apps\"")) { in_apps = 1; continue; }
+        if (!in_apps) continue;
+        const char *q1 = strchr(line, '"');
+        const char *q2 = q1 ? strchr(q1 + 1, '"') : NULL;
+        if (q1 && q2 && strstr(line, "{")) {
+            if (n >= max) { bad = 1; break; }
+            size_t len = (size_t)(q2 - q1 - 1);
+            if (!len || len > APP_NAME_MAX) { bad = 1; break; }
+            cur = n++;
+            memcpy(regs[cur].name, q1 + 1, len);
+            regs[cur].name[len] = '\0';
+            regs[cur].version[0] = '\0';
+            regs[cur].xpkg_sha256[0] = '\0';
+            regs[cur].installed_utc[0] = '\0';
+            regs[cur].files = 0;
+            regs[cur].bytes = 0;
+            continue;
+        }
+        if (cur >= 0) {
+            if (strstr(line, "\"version\"")) json_str(line, "version", regs[cur].version, sizeof(regs[cur].version));
+            else if (strstr(line, "\"xpkg_sha256\"")) json_str(line, "xpkg_sha256", regs[cur].xpkg_sha256, sizeof(regs[cur].xpkg_sha256));
+            else if (strstr(line, "\"installed_utc\"")) json_str(line, "installed_utc", regs[cur].installed_utc, sizeof(regs[cur].installed_utc));
+            else if (strstr(line, "\"files\"")) { char *p = strchr(line, ':'); if (p) regs[cur].files = atol(p + 1); }
+            else if (strstr(line, "\"bytes\"")) { char *p = strchr(line, ':'); if (p) regs[cur].bytes = atol(p + 1); }
+            else if (strchr(line, '}')) cur = -1;
+        } else if (strchr(line, '}')) {
+            in_apps = 0;
+        }
+    }
+    fclose(f);
+    if (bad) return -1;
+    for (int i = 0; i < n; i++)
+        if (!regs[i].version[0] || !regs[i].xpkg_sha256[0]) return -1;
+    return n;
+}
+
+static int app_cmp_regs(const void *a, const void *b) {
+    return strcmp(((const struct app_reg *)a)->name, ((const struct app_reg *)b)->name);
+}
+
+static int app_registry_save(const char *approot, struct app_reg *regs, int n) {
+    char path[8192], tmp[8192];
+    if (app_join2(path, sizeof(path), approot, APP_REGISTRY) < 0) return -1;
+    if (app_join2(tmp, sizeof(tmp), approot, APP_REGISTRY ".tmp") < 0) return -1;
+    FILE *f = fopen(tmp, "w");
+    if (!f) return -1;
+    fprintf(f, "{\n  \"schema_version\": 1,\n  \"apps\": {");
+    if (n == 0) {
+        fprintf(f, "}\n");
+    } else {
+        qsort(regs, (size_t)n, sizeof(struct app_reg), app_cmp_regs);
+        for (int i = 0; i < n; i++)
+            fprintf(f, "%s\n    \"%s\": {\n      \"bytes\": %ld,\n      \"files\": %ld,\n      \"installed_utc\": \"%s\",\n      \"version\": \"%s\",\n      \"xpkg_sha256\": \"%s\"\n    }",
+                    i ? "," : "", regs[i].name, regs[i].bytes, regs[i].files,
+                    regs[i].installed_utc, regs[i].version, regs[i].xpkg_sha256);
+        fprintf(f, "\n  }\n");
+    }
+    fprintf(f, "}\n");
+    if (fflush(f) != 0 || ferror(f) || fsync(fileno(f)) != 0) { fclose(f); return -1; }
+    fclose(f);
+    return rename(tmp, path) < 0 ? -1 : 0;
+}
+
+static int app_registry_lock(const char *approot) {
+    char path[8192];
+    if (app_join2(path, sizeof(path), approot, "registry.lock") < 0) return -1;
+    int fd = open(path, O_CREAT | O_RDWR, 0644);
+    if (fd < 0) return -1;
+    if (flock(fd, LOCK_EX) < 0) { close(fd); return -1; }
+    return fd;
+}
+
+static int app_rm_rf(const char *path, int depth) {
+    if (depth > 64) return -1;
+    struct stat st;
+    if (lstat(path, &st) < 0) return errno == ENOENT ? 0 : -1;
+    if (!S_ISDIR(st.st_mode)) return unlink(path) < 0 ? -1 : 0;
+    DIR *dir = opendir(path);
+    if (!dir) return -1;
+    struct dirent *de;
+    int rc = 0;
+    char child[8192];
+    while ((de = readdir(dir))) {
+        if (strcmp(de->d_name, ".") == 0 || strcmp(de->d_name, "..") == 0) continue;
+        if (snprintf(child, sizeof(child), "%s/%s", path, de->d_name) >= (int)sizeof(child)) { rc = -1; break; }
+        if (app_rm_rf(child, depth + 1) < 0) { rc = -1; break; }
+    }
+    closedir(dir);
+    if (rc == 0 && rmdir(path) < 0 && errno != ENOENT) rc = -1;
+    return rc;
+}
+
+static void app_utc_now(char *out, size_t n) {
+    time_t now = time(NULL);
+    struct tm utc;
+    gmtime_r(&now, &utc);
+    strftime(out, n, "%Y-%m-%dT%H:%M:%SZ", &utc);
+}
+
+static int app_find_reg(struct app_reg *regs, int n, const char *name) {
+    for (int i = 0; i < n; i++)
+        if (strcmp(regs[i].name, name) == 0) return i;
+    return -1;
+}
+
+/* ---- app commands ---- */
+static int cmd_app_install(int json, const char *file) {
+    char rootbuf[8192];
+    const char *approot = app_root(rootbuf, sizeof(rootbuf));
+    if (geteuid() != 0 && !getenv("XTOS_APP_ROOT")) {
+        fprintf(stderr, "pkg: app install requires root (or set XTOS_APP_ROOT)\n");
+        return 1;
+    }
+    char tarbin[8192];
+    char stage[8192];
+    struct app_entry *files = NULL, *sums = NULL, *mfiles = NULL;
+    int n_files = 0, cap_files = 0, n_sums = 0, cap_sums = 0, n_mfiles = 0, cap_mfiles = 0;
+    int lockfd = -1;
+    int rc = 1;
+    int staged = 0;
+    struct app_meta meta;
+    memset(&meta, 0, sizeof(meta));
+    struct app_reg regs[APP_REGISTRY_MAX];
+    char xpkg_sha[72];
+    if (access(file, R_OK) != 0) { fprintf(stderr, "pkg: cannot read %s\n", file); return 1; }
+    if (app_find_tar(tarbin, sizeof(tarbin)) < 0) { fprintf(stderr, "pkg: tar not found in PATH\n"); return 1; }
+    if (mkdir(approot, 0755) < 0 && errno != EEXIST) { fprintf(stderr, "pkg: cannot create %s\n", approot); return 1; }
+    if (sha256_file(file, xpkg_sha) < 0) { fprintf(stderr, "pkg: cannot hash %s\n", file); return 1; }
+    if (app_join2(stage, sizeof(stage), approot, ".stage-XXXXXX") < 0) { fprintf(stderr, "pkg: app root path too long\n"); return 1; }
+    if (!mkdtemp(stage)) { fprintf(stderr, "pkg: cannot create staging dir\n"); return 1; }
+    staged = 1;
+    char *list = NULL;
+    size_t list_len = 0;
+    char *listargv[4] = {tarbin, "-tzf", (char *)file, NULL};
+    if (app_run_tar(listargv, &list, &list_len) < 0) {
+        fprintf(stderr, "pkg: cannot list %s\n", file); goto cleanup;
+    }
+    if (app_listing_validate(list, list_len) < 0) {
+        fprintf(stderr, "pkg: archive listing is unsafe (traversal, shadow or non-xpkg member)\n"); goto cleanup;
+    }
+    free(list); list = NULL;
+    char *xargv[6] = {tarbin, "-xzf", (char *)file, "-C", stage, NULL};
+    if (app_run_tar(xargv, NULL, NULL) < 0) {
+        fprintf(stderr, "pkg: extraction failed\n"); goto cleanup;
+    }
+    if (app_scan_tree(stage, "", &files, &n_files, &cap_files, 0) < 0) {
+        fprintf(stderr, "pkg: archive contains forbidden entry types (symlink/hardlink/device/setuid)\n"); goto cleanup;
+    }
+    qsort(files, (size_t)n_files, sizeof(struct app_entry), app_cmp_entries);
+    char metapath[8192];
+    struct stat mst;
+    if (app_join2(metapath, sizeof(metapath), stage, "xpkg/manifest.json") < 0
+        || stat(metapath, &mst) < 0 || mst.st_size > APP_MANIFEST_MAX) {
+        fprintf(stderr, "pkg: xpkg/manifest.json missing or oversized\n"); goto cleanup;
+    }
+    if (app_join2(metapath, sizeof(metapath), stage, "xpkg/SHA256SUMS") < 0
+        || app_parse_sums(metapath, &sums, &n_sums, &cap_sums) < 0) {
+        fprintf(stderr, "pkg: xpkg/SHA256SUMS missing or malformed\n"); goto cleanup;
+    }
+    if (app_join2(metapath, sizeof(metapath), stage, "xpkg/manifest.json") < 0
+        || app_parse_manifest(metapath, &meta, &mfiles, &n_mfiles, &cap_mfiles) < 0) {
+        fprintf(stderr, "pkg: xpkg/manifest.json malformed\n"); goto cleanup;
+    }
+    if (!app_token_name(meta.name) || strcmp(meta.name, "apps") == 0) {
+        fprintf(stderr, "pkg: invalid app name in manifest\n"); goto cleanup;
+    }
+    if (!app_token_version(meta.version)) {
+        fprintf(stderr, "pkg: invalid app version in manifest\n"); goto cleanup;
+    }
+    if (strcmp(meta.architecture, "x86_64") != 0 && strcmp(meta.architecture, "all") != 0) {
+        fprintf(stderr, "pkg: unsupported app architecture '%s'\n", meta.architecture); goto cleanup;
+    }
+    int n_payload = 0;
+    long total_bytes = 0;
+    for (int i = 0; i < n_files; i++) {
+        if (strncmp(files[i].path, "payload/", 8) == 0) { n_payload++; total_bytes += files[i].size; }
+        else if (strcmp(files[i].path, "xpkg/SHA256SUMS") != 0 && strcmp(files[i].path, "xpkg/manifest.json") != 0) {
+            fprintf(stderr, "pkg: unexpected archive member '%s'\n", files[i].path); goto cleanup;
+        }
+    }
+    if (n_payload == 0 || n_payload != n_sums || n_payload != n_mfiles) {
+        fprintf(stderr, "pkg: payload/manifest/sums file sets differ\n"); goto cleanup;
+    }
+    qsort(sums, (size_t)n_sums, sizeof(struct app_entry), app_cmp_entries);
+    qsort(mfiles, (size_t)n_mfiles, sizeof(struct app_entry), app_cmp_entries);
+    int pi = 0;
+    for (int i = 0; i < n_files; i++) {
+        if (strncmp(files[i].path, "payload/", 8) != 0) continue;
+        if (strcmp(files[i].path, sums[pi].path) != 0 || strcmp(files[i].path, mfiles[pi].path) != 0) {
+            fprintf(stderr, "pkg: file list mismatch at '%s'\n", files[i].path); goto cleanup;
+        }
+        if (strcmp(sums[pi].sha256, mfiles[pi].sha256) != 0 || mfiles[pi].size != files[i].size) {
+            fprintf(stderr, "pkg: size/hash mismatch in manifest for '%s'\n", files[i].path); goto cleanup;
+        }
+        char full[8192], hex[65];
+        if (app_join2(full, sizeof(full), stage, files[i].path) < 0
+            || sha256_file(full, hex) < 0 || strcmp(hex, sums[pi].sha256) != 0) {
+            fprintf(stderr, "pkg: payload hash mismatch for '%s'\n", files[i].path); goto cleanup;
+        }
+        pi++;
+    }
+    lockfd = app_registry_lock(approot);
+    if (lockfd < 0) { fprintf(stderr, "pkg: cannot lock app registry\n"); goto cleanup; }
+    int n_regs = app_registry_load(approot, regs, APP_REGISTRY_MAX);
+    if (n_regs < 0) { fprintf(stderr, "pkg: registry is corrupt\n"); goto cleanup; }
+    if (app_find_reg(regs, n_regs, meta.name) >= 0) {
+        fprintf(stderr, "pkg: app '%s' already installed (remove it first)\n", meta.name); goto cleanup;
+    }
+    char namedir[8192], target[8192];
+    if (app_join2(namedir, sizeof(namedir), approot, meta.name) < 0
+        || app_join2(target, sizeof(target), namedir, meta.version) < 0) {
+        fprintf(stderr, "pkg: install path too long\n"); goto cleanup;
+    }
+    struct stat tst;
+    if (stat(target, &tst) == 0) {
+        fprintf(stderr, "pkg: install target already exists: %s\n", target); goto cleanup;
+    }
+    if (mkdir(namedir, 0755) < 0 && errno != EEXIST) {
+        fprintf(stderr, "pkg: cannot create %s\n", namedir); goto cleanup;
+    }
+    if (chmod(stage, 0755) < 0 || rename(stage, target) < 0) {
+        fprintf(stderr, "pkg: cannot activate install\n"); goto cleanup;
+    }
+    staged = 0;
+    struct app_reg *slot = &regs[n_regs++];
+    snprintf(slot->name, sizeof(slot->name), "%s", meta.name);
+    snprintf(slot->version, sizeof(slot->version), "%s", meta.version);
+    snprintf(slot->xpkg_sha256, sizeof(slot->xpkg_sha256), "%s", xpkg_sha);
+    slot->files = n_payload;
+    slot->bytes = total_bytes;
+    app_utc_now(slot->installed_utc, sizeof(slot->installed_utc));
+    if (app_registry_save(approot, regs, n_regs) < 0) {
+        fprintf(stderr, "pkg: cannot update registry\n"); goto cleanup;
+    }
+    flock(lockfd, LOCK_UN); close(lockfd); lockfd = -1;
+    rc = 0;
+    if (json)
+        printf("{\"status\": \"installed\", \"name\": \"%s\", \"version\": \"%s\", \"files\": %d, \"bytes\": %ld, \"xpkg_sha256\": \"%s\", \"path\": \"%s\"}\n",
+               meta.name, meta.version, n_payload, total_bytes, xpkg_sha, target);
+    else {
+        xui_init();
+        printf("%s%s%s XTOS_PKG_APP_INSTALL name=%s version=%s files=%d bytes=%ld status=%s", XUI_LABEL_S, "PKG_APP", XUI_RESET_S,
+               meta.name, meta.version, n_payload, total_bytes, "installed");
+        XUI_OK("\n");
+    }
+cleanup:
+    free(list);
+    free(files); free(sums); free(mfiles);
+    if (lockfd >= 0) { flock(lockfd, LOCK_UN); close(lockfd); }
+    if (staged) app_rm_rf(stage, 0);
+    return rc;
+}
+
+static int cmd_app_remove(int json, const char *name) {
+    char rootbuf[8192];
+    const char *approot = app_root(rootbuf, sizeof(rootbuf));
+    if (geteuid() != 0 && !getenv("XTOS_APP_ROOT")) {
+        fprintf(stderr, "pkg: app remove requires root (or set XTOS_APP_ROOT)\n");
+        return 1;
+    }
+    if (!app_token_name(name)) { fprintf(stderr, "pkg: invalid app name '%s'\n", name); return 2; }
+    int lockfd = app_registry_lock(approot);
+    if (lockfd < 0) { fprintf(stderr, "pkg: cannot lock app registry\n"); return 1; }
+    struct app_reg regs[APP_REGISTRY_MAX];
+    int n = app_registry_load(approot, regs, APP_REGISTRY_MAX);
+    int rc = 1;
+    if (n < 0) { fprintf(stderr, "pkg: registry is corrupt\n"); goto out; }
+    int idx = app_find_reg(regs, n, name);
+    if (idx < 0) { fprintf(stderr, "pkg: app '%s' is not installed\n", name); goto out; }
+    char target[8192], namedir[8192];
+    if (app_join3(target, sizeof(target), approot, name, regs[idx].version) < 0
+        || app_join2(namedir, sizeof(namedir), approot, name) < 0) {
+        fprintf(stderr, "pkg: remove path too long\n"); goto out;
+    }
+    if (app_rm_rf(target, 0) < 0) { fprintf(stderr, "pkg: cannot remove %s\n", target); goto out; }
+    rmdir(namedir); /* best effort: keep other versions if any */
+    for (int i = idx; i < n - 1; i++) regs[i] = regs[i + 1];
+    if (app_registry_save(approot, regs, n - 1) < 0) { fprintf(stderr, "pkg: cannot update registry\n"); goto out; }
+    rc = 0;
+    if (json)
+        printf("{\"status\": \"removed\", \"name\": \"%s\", \"version\": \"%s\"}\n", name, regs[idx].version);
+    else {
+        xui_init();
+        printf("%s%s%s XTOS_PKG_APP_REMOVE name=%s version=%s status=%s", XUI_LABEL_S, "PKG_APP", XUI_RESET_S,
+               name, regs[idx].version, "removed");
+        XUI_OK("\n");
+    }
+out:
+    flock(lockfd, LOCK_UN); close(lockfd);
+    return rc;
+}
+
+static int cmd_app_list(int json) {
+    char rootbuf[8192];
+    const char *approot = app_root(rootbuf, sizeof(rootbuf));
+    struct app_reg regs[APP_REGISTRY_MAX];
+    int n = app_registry_load(approot, regs, APP_REGISTRY_MAX);
+    if (n < 0) { fprintf(stderr, "pkg: registry is corrupt\n"); return 1; }
+    if (!json) {
+        xui_init();
+        printf("%s%-24s %-24s %-8s %12s%s %s\n", XUI_LABEL_S, "APP", "VERSION", "FILES", "BYTES", XUI_RESET_S, "STATUS");
+    } else {
+        printf("[\n");
+    }
+    int printed = 0;
+    for (int i = 0; i < n; i++) {
+        char target[8192];
+        if (app_join3(target, sizeof(target), approot, regs[i].name, regs[i].version) < 0) {
+            fprintf(stderr, "pkg: installed path too long\n");
+            return 1;
+        }
+        const char *status = access(target, F_OK) == 0 ? "installed" : "missing";
+        if (json)
+            printf("%s  {\"name\": \"%s\", \"version\": \"%s\", \"files\": %ld, \"bytes\": %ld, \"status\": \"%s\", \"installed_utc\": \"%s\"}",
+                   printed ? ",\n" : "", regs[i].name, regs[i].version, regs[i].files, regs[i].bytes, status, regs[i].installed_utc);
+        else
+            printf("%-24s %-24s %-8ld %12ld %s\n", regs[i].name, regs[i].version, regs[i].files, regs[i].bytes, status);
+        printed++;
+    }
+    /* report unregistered directories on disk */
+    DIR *dir = opendir(approot);
+    if (dir) {
+        struct dirent *de;
+        while ((de = readdir(dir))) {
+            if (de->d_name[0] == '.' || strcmp(de->d_name, "registry.json") == 0 || strcmp(de->d_name, "registry.lock") == 0) continue;
+            char namedir[8192];
+            if (app_join2(namedir, sizeof(namedir), approot, de->d_name) < 0) continue;
+            struct stat st;
+            if (stat(namedir, &st) != 0 || !S_ISDIR(st.st_mode)) continue;
+            if (app_find_reg(regs, n, de->d_name) >= 0) continue;
+            if (json)
+                printf("%s  {\"name\": \"%s\", \"version\": \"\", \"files\": 0, \"bytes\": 0, \"status\": \"unregistered\", \"installed_utc\": \"\"}",
+                       printed ? ",\n" : "", de->d_name);
+            else
+                printf("%-24s %-24s %-8d %12ld %s\n", de->d_name, "?", 0, 0L, "unregistered");
+            printed++;
+        }
+        closedir(dir);
+    }
+    if (json) printf("\n]\n");
+    return 0;
+}
+
+static int cmd_app_verify(int json, const char *name, const char *version) {
+    char rootbuf[8192];
+    const char *approot = app_root(rootbuf, sizeof(rootbuf));
+    if (!app_token_name(name)) { fprintf(stderr, "pkg: invalid app name '%s'\n", name); return 2; }
+    struct app_reg regs[APP_REGISTRY_MAX];
+    int n = app_registry_load(approot, regs, APP_REGISTRY_MAX);
+    if (n < 0) { fprintf(stderr, "pkg: registry is corrupt\n"); return 1; }
+    int idx = app_find_reg(regs, n, name);
+    char verbuf[APP_VER_MAX + 1];
+    if (!version) {
+        if (idx < 0) { fprintf(stderr, "pkg: app '%s' is not installed\n", name); return 1; }
+        version = regs[idx].version;
+    }
+    snprintf(verbuf, sizeof(verbuf), "%s", version);
+    char target[8192];
+    if (app_join3(target, sizeof(target), approot, name, verbuf) < 0) {
+        fprintf(stderr, "pkg: installed path too long\n");
+        return 1;
+    }
+    char sums_path[8192];
+    if (app_join2(sums_path, sizeof(sums_path), target, "xpkg/SHA256SUMS") < 0) {
+        fprintf(stderr, "pkg: installed app has no readable SHA256SUMS\n");
+        return 1;
+    }
+    struct app_entry *sums = NULL;
+    int n_sums = 0, cap_sums = 0;
+    if (app_parse_sums(sums_path, &sums, &n_sums, &cap_sums) < 0) {
+        fprintf(stderr, "pkg: installed app has no readable SHA256SUMS\n");
+        return 1;
+    }
+    qsort(sums, (size_t)n_sums, sizeof(struct app_entry), app_cmp_entries);
+    int checked = 0, missing = 0, corrupt = 0, extra = 0;
+    struct app_entry *disk = NULL;
+    int n_disk = 0, cap_disk = 0;
+    if (app_scan_tree(target, "payload", &disk, &n_disk, &cap_disk, 0) == 0) {
+        /* scan_tree with rel="payload" yields target-relative "payload/..." paths */
+        qsort(disk, (size_t)n_disk, sizeof(struct app_entry), app_cmp_entries);
+        int si = 0, di = 0;
+        while (si < n_sums || di < n_disk) {
+            int c = si < n_sums && di < n_disk ? strcmp(sums[si].path, disk[di].path) : (si < n_sums ? -1 : 1);
+            if (c == 0) {
+                checked++;
+                char full[8192], hex[65];
+                if (app_join2(full, sizeof(full), target, sums[si].path) < 0
+                    || sha256_file(full, hex) < 0 || strcmp(hex, sums[si].sha256) != 0) { corrupt++; printf("CORRUPT %s\n", sums[si].path); }
+                si++; di++;
+            } else if (c < 0) {
+                missing++; printf("MISSING %s\n", sums[si].path); si++;
+            } else {
+                extra++; printf("EXTRA %s\n", disk[di].path); di++;
+            }
+        }
+    } else {
+        missing = n_sums;
+    }
+    free(sums); free(disk);
+    if (json)
+        printf("{\"name\": \"%s\", \"version\": \"%s\", \"checked\": %d, \"missing\": %d, \"corrupt\": %d, \"extra\": %d, \"ok\": %d}\n",
+               name, verbuf, checked, missing, corrupt, extra, checked - missing - corrupt - extra);
+    else {
+        xui_init();
+        printf("%s%s%s XTOS_PKG_APP_VERIFY checked=%d ok=", XUI_LABEL_S, "PKG_APP", XUI_RESET_S, checked);
+        if (missing + corrupt + extra == 0) XUI_OK("%d", checked - missing - corrupt - extra);
+        else XUI_BAD("%d", checked - missing - corrupt - extra);
+        printf(" missing=%d corrupt=%d extra=%d\n", missing, corrupt, extra);
+    }
+    return (missing + corrupt + extra) > 0 ? 1 : 0;
+}
+
+static int cmd_app_info(int json, const char *name) {
+    char rootbuf[8192];
+    const char *approot = app_root(rootbuf, sizeof(rootbuf));
+    if (!app_token_name(name)) { fprintf(stderr, "pkg: invalid app name '%s'\n", name); return 2; }
+    struct app_reg regs[APP_REGISTRY_MAX];
+    int n = app_registry_load(approot, regs, APP_REGISTRY_MAX);
+    if (n < 0) { fprintf(stderr, "pkg: registry is corrupt\n"); return 1; }
+    int idx = app_find_reg(regs, n, name);
+    if (idx < 0) { fprintf(stderr, "pkg: app '%s' is not installed\n", name); return 1; }
+    char target[8192], metapath[8192];
+    if (app_join3(target, sizeof(target), approot, name, regs[idx].version) < 0
+        || app_join2(metapath, sizeof(metapath), target, "xpkg/manifest.json") < 0) {
+        fprintf(stderr, "pkg: installed path too long\n");
+        return 1;
+    }
+    struct app_meta meta;
+    struct app_entry *mfiles = NULL;
+    int n_mfiles = 0, cap_mfiles = 0;
+    if (app_parse_manifest(metapath, &meta, &mfiles, &n_mfiles, &cap_mfiles) < 0) {
+        fprintf(stderr, "pkg: installed manifest unreadable\n");
+        return 1;
+    }
+    free(mfiles);
+    if (json) {
+        printf("{\"name\": \"%s\", \"version\": \"%s\", \"architecture\": \"%s\", \"license\": \"%s\", \"vendor\": \"%s\", \"xtos_min_version\": \"%s\", \"files\": %ld, \"bytes\": %ld, \"installed_utc\": \"%s\", \"xpkg_sha256\": \"%s\"}\n",
+               meta.name, meta.version, meta.architecture, meta.license, meta.vendor, meta.xtos_min_version,
+               regs[idx].files, regs[idx].bytes, regs[idx].installed_utc, regs[idx].xpkg_sha256);
+    } else {
+        xui_init();
+        XUI_LABEL("App:        "); printf("%s\n", meta.name);
+        XUI_LABEL("Version:    "); printf("%s\n", meta.version);
+        XUI_LABEL("Arch:       "); printf("%s\n", meta.architecture);
+        XUI_LABEL("License:    "); printf("%s\n", meta.license);
+        XUI_LABEL("Vendor:     "); printf("%s\n", meta.vendor);
+        XUI_LABEL("Min XTOS:   "); printf("%s\n", meta.xtos_min_version);
+        XUI_LABEL("Summary:    "); printf("%s\n", meta.summary);
+        XUI_LABEL("Installed:  "); printf("%ld files, %ld bytes\n", regs[idx].files, regs[idx].bytes);
+        XUI_LABEL("Since:      "); XUI_DIM("%s\n", regs[idx].installed_utc);
+        XUI_LABEL("Xpkg sha:   "); XUI_DIM("%s\n", regs[idx].xpkg_sha256);
+    }
+    return 0;
+}
+
+static int cmd_app(int json, int argc, char **argv) {
+    if (argc < 1) {
+        fprintf(stderr,
+            "usage: pkg app <command>\n"
+            "  pkg app install <file.xpkg>   verify and install an application package\n"
+            "  pkg app remove <name>         remove an installed application\n"
+            "  pkg app list                  list installed applications\n"
+            "  pkg app verify <name>         re-verify installed application files\n"
+            "  pkg app info <name>           show application manifest details\n");
+        return 2;
+    }
+    if (strcmp(argv[0], "install") == 0 && argc == 2) return cmd_app_install(json, argv[1]);
+    if (strcmp(argv[0], "remove") == 0 && argc == 2) return cmd_app_remove(json, argv[1]);
+    if (strcmp(argv[0], "list") == 0 && argc == 1) return cmd_app_list(json);
+    if (strcmp(argv[0], "verify") == 0 && (argc == 2 || argc == 3)) return cmd_app_verify(json, argv[1], argc == 3 ? argv[2] : NULL);
+    if (strcmp(argv[0], "info") == 0 && argc == 2) return cmd_app_info(json, argv[1]);
+    fprintf(stderr, "pkg: unknown app command\n");
+    return 2;
+}
+
 int main(int argc, char **argv) {
     int json = 0;
     int argstart = 1;
     if (argc > 1 && strcmp(argv[1], "--json") == 0) { json = 1; argstart = 2; }
     if (argc <= argstart) { usage(); return 2; }
+    if (strcmp(argv[argstart], "app") == 0)
+        return cmd_app(json, argc - argstart - 1, argv + argstart + 1);
     if (load_manifest() < 0) {
         fprintf(stderr, "pkg: cannot read %s\n", MANIFEST_PATH);
         return 1;
