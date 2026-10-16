@@ -1,0 +1,52 @@
+name: Release failure diagnostics
+
+on:
+  push:
+    branches: [main]
+    paths: ['.github/workflows/release-diagnostics.yml']
+  workflow_run:
+    workflows: ['OpenXTOS release artifacts']
+    types: [completed]
+
+permissions:
+  actions: read
+  contents: read
+
+jobs:
+  diagnose:
+    if: github.event_name == 'push' || github.event.workflow_run.conclusion == 'failure'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - name: Expose failed release diagnostics
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          TRIGGER_RUN: ${{ github.event.workflow_run.id }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          run="${TRIGGER_RUN:-}"
+          if [ -z "$run" ]; then
+            run=$(gh run list --workflow release.yml --status failure --limit 1 --json databaseId --jq '.[0].databaseId // empty')
+          fi
+          if [ -z "$run" ]; then
+            echo 'No failed release workflow found.'
+            exit 0
+          fi
+          [[ "$run" =~ ^[0-9]+$ ]]
+          gh run view "$run" --log-failed > release-failure.log
+          python3 - <<'PY'
+          from pathlib import Path
+          text = '\n'.join(Path('release-failure.log').read_text(errors='replace').splitlines()[-100:])
+          print(text)
+          escaped = text.replace('%', '%25').replace('\r', '%0D').replace('\n', '%0A')
+          print('::warning title=Release failure log::' + escaped)
+          PY
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: release-failure-diagnostics
+          path: release-failure.log
+          if-no-files-found: ignore
+          retention-days: 7
