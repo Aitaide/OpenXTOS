@@ -1,0 +1,51 @@
+name: Installer release preflight
+
+on:
+  push:
+    branches: [main]
+    paths: ['.github/workflows/release-preflight.yml', 'scripts/verify_baremetal.py', 'system/baremetal/**']
+
+permissions:
+  contents: read
+
+jobs:
+  ubuntu-installer:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install release dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential flex bison bc libssl-dev libelf-dev libc6-dev liblzo2-dev python3 curl ca-certificates cpio gzip kmod grub-pc-bin grub-efi-amd64-bin grub2-common xorriso mtools dosfstools e2fsprogs fdisk util-linux dropbear-bin rt-tests pciutils iproute2 openssh-client qemu-system-x86 ovmf dpkg-dev
+      - name: Build installer from clean checkout
+        run: XTOS_BAREMETAL_BUILD_ROOT="$GITHUB_WORKSPACE/.build/baremetal-release" JOBS=2 bash scripts/build_baremetal.sh --public
+      - name: Validate exact installer
+        env:
+          XTOS_BAREMETAL_BUILD_ROOT: ${{ github.workspace }}/.build/baremetal-release
+          QEMU_TIMEOUT: '150'
+        run: python3 scripts/verify_baremetal.py
+      - name: Preserve guest diagnostics
+        if: always()
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          root = Path('.build/baremetal-release/evidence')
+          for path in sorted(root.glob('*.log')):
+              lines = path.read_text(errors='replace').splitlines()
+              text = '\n'.join(lines[-60:])[-12000:]
+              if not text:
+                  continue
+              text = text.replace('%', '%25').replace('\r', '%0D').replace('\n', '%0A')
+              print('::warning title=' + path.name + '::' + text)
+          PY
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: installer-preflight-evidence
+          path: |
+            .build/baremetal-release/evidence/*.log
+            .build/baremetal-release/evidence/results.json
+            .build/baremetal-release/images/build-manifest.json
+          if-no-files-found: warn
+          retention-days: 7
