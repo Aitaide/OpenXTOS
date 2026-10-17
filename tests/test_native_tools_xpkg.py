@@ -306,6 +306,88 @@ def main() -> int:
             # registry is authoritative; after removal nothing should remain
             failures.append(f"list shows removed app: {r.stdout!r}")
 
+        # 19. upgrade happy path: install v1 then upgrade to v2 atomically
+        r = run("app", "install", str(good))
+        if r.returncode != 0:
+            failures.append(f"upgrade-prep install failed: {r.stderr!r}")
+        v2 = td / "demo-app-2.0.0.xpkg"
+        v2_payload = {"bin/tool": b"#!/bin/sh\necho v2\n", "share/data.txt": b"v2-data-0123456789"}
+        build_xpkg(v2, version="2.0.0", payload=v2_payload)
+        r = run("app", "upgrade", str(v2))
+        if r.returncode != 0 or "XTOS_PKG_APP_UPGRADE name=demo-app version=2.0.0" not in r.stdout \
+                or "from_version=1.0.0" not in r.stdout:
+            failures.append(f"upgrade failed: rc={r.returncode} out={r.stdout!r} err={r.stderr!r}")
+        else:
+            print("  PASS upgrade")
+            tool = approot / "demo-app/2.0.0/payload/bin/tool"
+            if not tool.is_file() or tool.read_bytes() != v2_payload["bin/tool"]:
+                failures.append("upgraded payload bytes differ")
+            if (approot / "demo-app/1.0.0").exists():
+                failures.append("old version dir still present after upgrade")
+            reg = json.loads((approot / "registry.json").read_text())
+            if reg["apps"]["demo-app"]["version"] != "2.0.0":
+                failures.append(f"registry version not upgraded: {reg}")
+            r = run("app", "verify", "demo-app")
+            if r.returncode != 0 or "corrupt=0" not in r.stdout:
+                failures.append(f"verify after upgrade failed: {r.stdout!r}")
+            else:
+                print("  PASS verify after upgrade")
+
+        # 20. upgrade to the already-installed version refused
+        r = run("app", "upgrade", str(v2))
+        expect_fail(r, "same-version upgrade")
+        if "already at version 2.0.0" not in r.stderr:
+            failures.append(f"same-version upgrade message: {r.stderr!r}")
+        else:
+            print("  PASS same-version upgrade refused")
+
+        # 21. upgrade of a not-installed app refused
+        other = td / "other-app-1.0.0.xpkg"
+        build_xpkg(other, name="other-app", version="1.0.0")
+        r = run("app", "upgrade", str(other))
+        expect_fail(r, "upgrade not installed")
+        if "is not installed" not in r.stderr:
+            failures.append(f"upgrade-not-installed message: {r.stderr!r}")
+        else:
+            print("  PASS upgrade of uninstalled app refused")
+
+        # 22. corrupt upgrade package leaves the current version intact
+        bad3 = td / "demo-app-3.0.0-bad.xpkg"
+        build_xpkg(bad3, version="3.0.0", corrupt_sums=True)
+        r = run("app", "upgrade", str(bad3))
+        expect_fail(r, "corrupt upgrade")
+        reg = json.loads((approot / "registry.json").read_text())
+        if reg["apps"]["demo-app"]["version"] != "2.0.0":
+            failures.append(f"corrupt upgrade changed registry: {reg}")
+        if (approot / "demo-app/3.0.0").exists():
+            failures.append("corrupt upgrade left a new version dir")
+        r = run("app", "verify", "demo-app")
+        if r.returncode != 0:
+            failures.append("current version damaged by failed upgrade")
+        else:
+            print("  PASS corrupt upgrade rejected, current version intact")
+
+        # 23. stale target left by an interrupted upgrade is cleaned up
+        stale = approot / "demo-app/3.0.0"
+        stale.mkdir(parents=True)
+        (stale / "junk").write_bytes(b"stale")
+        v3 = td / "demo-app-3.0.0.xpkg"
+        build_xpkg(v3, version="3.0.0", payload={"bin/tool": b"#!/bin/sh\necho v3\n"})
+        r = run("app", "upgrade", str(v3))
+        if r.returncode != 0:
+            failures.append(f"stale-target upgrade failed: {r.stderr!r}")
+        elif (stale / "junk").exists():
+            failures.append("stale target junk survived upgrade")
+        else:
+            print("  PASS stale target cleaned on upgrade")
+
+        # 24. final state after upgrade section
+        if any(approot.glob(".stage-*")):
+            failures.append("staging dirs left behind after upgrade tests")
+        r = run("app", "list")
+        if "demo-app" not in r.stdout or "3.0.0" not in r.stdout:
+            failures.append(f"final list missing upgraded app: {r.stdout!r}")
+
     if failures:
         print(f"FAIL: {len(failures)}")
         for f in failures:

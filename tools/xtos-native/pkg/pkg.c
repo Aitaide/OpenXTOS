@@ -710,6 +710,7 @@ static void usage(void) {
         "  pkg size                total installed payload size\n"
         "  pkg summary             count + lock identity\n"
         "  pkg app install <file.xpkg>  verify and install an xpkg application\n"
+        "  pkg app upgrade <file.xpkg>  verify and upgrade an installed application\n"
         "  pkg app remove <name>        remove an installed application\n"
         "  pkg app list                list installed applications\n"
         "  pkg app verify <name>        re-verify installed application files\n"
@@ -988,82 +989,84 @@ static int app_find_reg(struct app_reg *regs, int n, const char *name) {
 }
 
 /* ---- app commands ---- */
-static int cmd_app_install(int json, const char *file) {
-    char rootbuf[8192];
-    const char *approot = app_root(rootbuf, sizeof(rootbuf));
-    if (geteuid() != 0 && !getenv("XTOS_APP_ROOT")) {
-        fprintf(stderr, "pkg: app install requires root (or set XTOS_APP_ROOT)\n");
-        return 1;
-    }
+
+/* Shared install/upgrade pipeline: stage and fully verify an xpkg under
+ * approot. On success the CALLER owns the staging directory named in
+ * `stage` (activate it with rename() or remove it with app_rm_rf()).
+ * On failure the staging dir is already removed and `err` explains why. */
+struct app_stage {
+    struct app_meta meta;
+    char xpkg_sha[72];
+    int n_payload;
+    long total_bytes;
+};
+
+static int app_stage_verify(const char *file, const char *approot,
+                            char *stage, size_t stage_n, struct app_stage *st,
+                            char *err, size_t err_n) {
     char tarbin[8192];
-    char stage[8192];
     struct app_entry *files = NULL, *sums = NULL, *mfiles = NULL;
     int n_files = 0, cap_files = 0, n_sums = 0, cap_sums = 0, n_mfiles = 0, cap_mfiles = 0;
-    int lockfd = -1;
-    int rc = 1;
     int staged = 0;
-    struct app_meta meta;
-    memset(&meta, 0, sizeof(meta));
-    struct app_reg regs[APP_REGISTRY_MAX];
-    char xpkg_sha[72];
-    if (access(file, R_OK) != 0) { fprintf(stderr, "pkg: cannot read %s\n", file); return 1; }
-    if (app_find_tar(tarbin, sizeof(tarbin)) < 0) { fprintf(stderr, "pkg: tar not found in PATH\n"); return 1; }
-    if (mkdir(approot, 0755) < 0 && errno != EEXIST) { fprintf(stderr, "pkg: cannot create %s\n", approot); return 1; }
-    if (sha256_file(file, xpkg_sha) < 0) { fprintf(stderr, "pkg: cannot hash %s\n", file); return 1; }
-    if (app_join2(stage, sizeof(stage), approot, ".stage-XXXXXX") < 0) { fprintf(stderr, "pkg: app root path too long\n"); return 1; }
-    if (!mkdtemp(stage)) { fprintf(stderr, "pkg: cannot create staging dir\n"); return 1; }
+    int rc = -1;
+    if (access(file, R_OK) != 0) { snprintf(err, err_n, "pkg: cannot read %s", file); goto out; }
+    if (app_find_tar(tarbin, sizeof(tarbin)) < 0) { snprintf(err, err_n, "pkg: tar not found in PATH"); goto out; }
+    if (mkdir(approot, 0755) < 0 && errno != EEXIST) { snprintf(err, err_n, "pkg: cannot create %s", approot); goto out; }
+    if (sha256_file(file, st->xpkg_sha) < 0) { snprintf(err, err_n, "pkg: cannot hash %s", file); goto out; }
+    if (app_join2(stage, stage_n, approot, ".stage-XXXXXX") < 0) { snprintf(err, err_n, "pkg: app root path too long"); goto out; }
+    if (!mkdtemp(stage)) { snprintf(err, err_n, "pkg: cannot create staging dir"); goto out; }
     staged = 1;
     char *list = NULL;
     size_t list_len = 0;
     char *listargv[4] = {tarbin, "-tzf", (char *)file, NULL};
     if (app_run_tar(listargv, &list, &list_len) < 0) {
-        fprintf(stderr, "pkg: cannot list %s\n", file); goto cleanup;
+        snprintf(err, err_n, "pkg: cannot list %s", file); goto out;
     }
     if (app_listing_validate(list, list_len) < 0) {
-        fprintf(stderr, "pkg: archive listing is unsafe (traversal, shadow or non-xpkg member)\n"); goto cleanup;
+        snprintf(err, err_n, "pkg: archive listing is unsafe (traversal, shadow or non-xpkg member)"); goto out;
     }
     free(list); list = NULL;
     char *xargv[6] = {tarbin, "-xzf", (char *)file, "-C", stage, NULL};
     if (app_run_tar(xargv, NULL, NULL) < 0) {
-        fprintf(stderr, "pkg: extraction failed\n"); goto cleanup;
+        snprintf(err, err_n, "pkg: extraction failed"); goto out;
     }
     if (app_scan_tree(stage, "", &files, &n_files, &cap_files, 0) < 0) {
-        fprintf(stderr, "pkg: archive contains forbidden entry types (symlink/hardlink/device/setuid)\n"); goto cleanup;
+        snprintf(err, err_n, "pkg: archive contains forbidden entry types (symlink/hardlink/device/setuid)"); goto out;
     }
     qsort(files, (size_t)n_files, sizeof(struct app_entry), app_cmp_entries);
     char metapath[8192];
     struct stat mst;
     if (app_join2(metapath, sizeof(metapath), stage, "xpkg/manifest.json") < 0
         || stat(metapath, &mst) < 0 || mst.st_size > APP_MANIFEST_MAX) {
-        fprintf(stderr, "pkg: xpkg/manifest.json missing or oversized\n"); goto cleanup;
+        snprintf(err, err_n, "pkg: xpkg/manifest.json missing or oversized"); goto out;
     }
     if (app_join2(metapath, sizeof(metapath), stage, "xpkg/SHA256SUMS") < 0
         || app_parse_sums(metapath, &sums, &n_sums, &cap_sums) < 0) {
-        fprintf(stderr, "pkg: xpkg/SHA256SUMS missing or malformed\n"); goto cleanup;
+        snprintf(err, err_n, "pkg: xpkg/SHA256SUMS missing or malformed"); goto out;
     }
     if (app_join2(metapath, sizeof(metapath), stage, "xpkg/manifest.json") < 0
-        || app_parse_manifest(metapath, &meta, &mfiles, &n_mfiles, &cap_mfiles) < 0) {
-        fprintf(stderr, "pkg: xpkg/manifest.json malformed\n"); goto cleanup;
+        || app_parse_manifest(metapath, &st->meta, &mfiles, &n_mfiles, &cap_mfiles) < 0) {
+        snprintf(err, err_n, "pkg: xpkg/manifest.json malformed"); goto out;
     }
-    if (!app_token_name(meta.name) || strcmp(meta.name, "apps") == 0) {
-        fprintf(stderr, "pkg: invalid app name in manifest\n"); goto cleanup;
+    if (!app_token_name(st->meta.name) || strcmp(st->meta.name, "apps") == 0) {
+        snprintf(err, err_n, "pkg: invalid app name in manifest"); goto out;
     }
-    if (!app_token_version(meta.version)) {
-        fprintf(stderr, "pkg: invalid app version in manifest\n"); goto cleanup;
+    if (!app_token_version(st->meta.version)) {
+        snprintf(err, err_n, "pkg: invalid app version in manifest"); goto out;
     }
-    if (strcmp(meta.architecture, "x86_64") != 0 && strcmp(meta.architecture, "all") != 0) {
-        fprintf(stderr, "pkg: unsupported app architecture '%s'\n", meta.architecture); goto cleanup;
+    if (strcmp(st->meta.architecture, "x86_64") != 0 && strcmp(st->meta.architecture, "all") != 0) {
+        snprintf(err, err_n, "pkg: unsupported app architecture '%s'", st->meta.architecture); goto out;
     }
-    int n_payload = 0;
-    long total_bytes = 0;
+    st->n_payload = 0;
+    st->total_bytes = 0;
     for (int i = 0; i < n_files; i++) {
-        if (strncmp(files[i].path, "payload/", 8) == 0) { n_payload++; total_bytes += files[i].size; }
+        if (strncmp(files[i].path, "payload/", 8) == 0) { st->n_payload++; st->total_bytes += files[i].size; }
         else if (strcmp(files[i].path, "xpkg/SHA256SUMS") != 0 && strcmp(files[i].path, "xpkg/manifest.json") != 0) {
-            fprintf(stderr, "pkg: unexpected archive member '%s'\n", files[i].path); goto cleanup;
+            snprintf(err, err_n, "pkg: unexpected archive member '%s'", files[i].path); goto out;
         }
     }
-    if (n_payload == 0 || n_payload != n_sums || n_payload != n_mfiles) {
-        fprintf(stderr, "pkg: payload/manifest/sums file sets differ\n"); goto cleanup;
+    if (st->n_payload == 0 || st->n_payload != n_sums || st->n_payload != n_mfiles) {
+        snprintf(err, err_n, "pkg: payload/manifest/sums file sets differ"); goto out;
     }
     qsort(sums, (size_t)n_sums, sizeof(struct app_entry), app_cmp_entries);
     qsort(mfiles, (size_t)n_mfiles, sizeof(struct app_entry), app_cmp_entries);
@@ -1071,28 +1074,56 @@ static int cmd_app_install(int json, const char *file) {
     for (int i = 0; i < n_files; i++) {
         if (strncmp(files[i].path, "payload/", 8) != 0) continue;
         if (strcmp(files[i].path, sums[pi].path) != 0 || strcmp(files[i].path, mfiles[pi].path) != 0) {
-            fprintf(stderr, "pkg: file list mismatch at '%s'\n", files[i].path); goto cleanup;
+            snprintf(err, err_n, "pkg: file list mismatch at '%s'", files[i].path); goto out;
         }
         if (strcmp(sums[pi].sha256, mfiles[pi].sha256) != 0 || mfiles[pi].size != files[i].size) {
-            fprintf(stderr, "pkg: size/hash mismatch in manifest for '%s'\n", files[i].path); goto cleanup;
+            snprintf(err, err_n, "pkg: size/hash mismatch in manifest for '%s'", files[i].path); goto out;
         }
         char full[8192], hex[65];
         if (app_join2(full, sizeof(full), stage, files[i].path) < 0
             || sha256_file(full, hex) < 0 || strcmp(hex, sums[pi].sha256) != 0) {
-            fprintf(stderr, "pkg: payload hash mismatch for '%s'\n", files[i].path); goto cleanup;
+            snprintf(err, err_n, "pkg: payload hash mismatch for '%s'", files[i].path); goto out;
         }
         pi++;
     }
+    rc = 0;
+    staged = 0; /* success: caller owns the stage dir */
+out:
+    free(list);
+    free(files); free(sums); free(mfiles);
+    if (staged) app_rm_rf(stage, 0);
+    return rc;
+}
+
+static int cmd_app_install(int json, const char *file) {
+    char rootbuf[8192];
+    const char *approot = app_root(rootbuf, sizeof(rootbuf));
+    if (geteuid() != 0 && !getenv("XTOS_APP_ROOT")) {
+        fprintf(stderr, "pkg: app install requires root (or set XTOS_APP_ROOT)\n");
+        return 1;
+    }
+    char stage[8192], err[4096];
+    struct app_stage st;
+    memset(&st, 0, sizeof(st));
+    struct app_reg regs[APP_REGISTRY_MAX];
+    int lockfd = -1;
+    int rc = 1;
+    int staged = 0;
+    if (app_stage_verify(file, approot, stage, sizeof(stage), &st, err, sizeof(err)) < 0) {
+        fprintf(stderr, "%s\n", err);
+        return 1;
+    }
+    staged = 1;
     lockfd = app_registry_lock(approot);
     if (lockfd < 0) { fprintf(stderr, "pkg: cannot lock app registry\n"); goto cleanup; }
     int n_regs = app_registry_load(approot, regs, APP_REGISTRY_MAX);
     if (n_regs < 0) { fprintf(stderr, "pkg: registry is corrupt\n"); goto cleanup; }
-    if (app_find_reg(regs, n_regs, meta.name) >= 0) {
-        fprintf(stderr, "pkg: app '%s' already installed (remove it first)\n", meta.name); goto cleanup;
+    if (app_find_reg(regs, n_regs, st.meta.name) >= 0) {
+        fprintf(stderr, "pkg: app '%s' already installed (remove it first)\n", st.meta.name); goto cleanup;
     }
     char namedir[8192], target[8192];
-    if (app_join2(namedir, sizeof(namedir), approot, meta.name) < 0
-        || app_join2(target, sizeof(target), namedir, meta.version) < 0) {
+    if (app_join2(namedir, sizeof(namedir), approot, st.meta.name) < 0
+        || app_join2(target, sizeof(target), namedir, st.meta.version) < 0) {
         fprintf(stderr, "pkg: install path too long\n"); goto cleanup;
     }
     struct stat tst;
@@ -1107,11 +1138,11 @@ static int cmd_app_install(int json, const char *file) {
     }
     staged = 0;
     struct app_reg *slot = &regs[n_regs++];
-    snprintf(slot->name, sizeof(slot->name), "%s", meta.name);
-    snprintf(slot->version, sizeof(slot->version), "%s", meta.version);
-    snprintf(slot->xpkg_sha256, sizeof(slot->xpkg_sha256), "%s", xpkg_sha);
-    slot->files = n_payload;
-    slot->bytes = total_bytes;
+    snprintf(slot->name, sizeof(slot->name), "%s", st.meta.name);
+    snprintf(slot->version, sizeof(slot->version), "%s", st.meta.version);
+    snprintf(slot->xpkg_sha256, sizeof(slot->xpkg_sha256), "%s", st.xpkg_sha);
+    slot->files = st.n_payload;
+    slot->bytes = st.total_bytes;
     app_utc_now(slot->installed_utc, sizeof(slot->installed_utc));
     if (app_registry_save(approot, regs, n_regs) < 0) {
         fprintf(stderr, "pkg: cannot update registry\n"); goto cleanup;
@@ -1120,16 +1151,14 @@ static int cmd_app_install(int json, const char *file) {
     rc = 0;
     if (json)
         printf("{\"status\": \"installed\", \"name\": \"%s\", \"version\": \"%s\", \"files\": %d, \"bytes\": %ld, \"xpkg_sha256\": \"%s\", \"path\": \"%s\"}\n",
-               meta.name, meta.version, n_payload, total_bytes, xpkg_sha, target);
+               st.meta.name, st.meta.version, st.n_payload, st.total_bytes, st.xpkg_sha, target);
     else {
         xui_init();
         printf("%s%s%s XTOS_PKG_APP_INSTALL name=%s version=%s files=%d bytes=%ld status=%s", XUI_LABEL_S, "PKG_APP", XUI_RESET_S,
-               meta.name, meta.version, n_payload, total_bytes, "installed");
+               st.meta.name, st.meta.version, st.n_payload, st.total_bytes, "installed");
         XUI_OK("\n");
     }
 cleanup:
-    free(list);
-    free(files); free(sums); free(mfiles);
     if (lockfd >= 0) { flock(lockfd, LOCK_UN); close(lockfd); }
     if (staged) app_rm_rf(stage, 0);
     return rc;
@@ -1171,6 +1200,92 @@ static int cmd_app_remove(int json, const char *name) {
     }
 out:
     flock(lockfd, LOCK_UN); close(lockfd);
+    return rc;
+}
+
+/* Upgrade = install pipeline + atomic version replacement. Ordering keeps
+ * every crash window recoverable: payload rename happens first, the registry
+ * write is the commit point (rolled back by removing the new payload), and
+ * the old payload is dropped only after the commit. A stale target directory
+ * left by an interrupted upgrade is cleaned up on the next attempt. */
+static int cmd_app_upgrade(int json, const char *file) {
+    char rootbuf[8192];
+    const char *approot = app_root(rootbuf, sizeof(rootbuf));
+    if (geteuid() != 0 && !getenv("XTOS_APP_ROOT")) {
+        fprintf(stderr, "pkg: app upgrade requires root (or set XTOS_APP_ROOT)\n");
+        return 1;
+    }
+    char stage[8192], err[4096];
+    struct app_stage st;
+    memset(&st, 0, sizeof(st));
+    struct app_reg regs[APP_REGISTRY_MAX];
+    int lockfd = -1;
+    int rc = 1;
+    int staged = 0;
+    if (app_stage_verify(file, approot, stage, sizeof(stage), &st, err, sizeof(err)) < 0) {
+        fprintf(stderr, "%s\n", err);
+        return 1;
+    }
+    staged = 1;
+    lockfd = app_registry_lock(approot);
+    if (lockfd < 0) { fprintf(stderr, "pkg: cannot lock app registry\n"); goto cleanup; }
+    int n_regs = app_registry_load(approot, regs, APP_REGISTRY_MAX);
+    if (n_regs < 0) { fprintf(stderr, "pkg: registry is corrupt\n"); goto cleanup; }
+    int idx = app_find_reg(regs, n_regs, st.meta.name);
+    if (idx < 0) { fprintf(stderr, "pkg: app '%s' is not installed\n", st.meta.name); goto cleanup; }
+    char oldver[APP_VER_MAX + 1];
+    snprintf(oldver, sizeof(oldver), "%s", regs[idx].version);
+    if (strcmp(st.meta.version, oldver) == 0) {
+        fprintf(stderr, "pkg: app '%s' already at version %s\n", st.meta.name, oldver); goto cleanup;
+    }
+    char namedir[8192], target[8192], oldtarget[8192];
+    if (app_join2(namedir, sizeof(namedir), approot, st.meta.name) < 0
+        || app_join2(target, sizeof(target), namedir, st.meta.version) < 0
+        || app_join2(oldtarget, sizeof(oldtarget), namedir, oldver) < 0) {
+        fprintf(stderr, "pkg: upgrade path too long\n"); goto cleanup;
+    }
+    struct stat tst;
+    if (stat(target, &tst) == 0) {
+        /* not the registered version: leftover of an interrupted upgrade */
+        if (app_rm_rf(target, 0) < 0) {
+            fprintf(stderr, "pkg: cannot clean stale target %s\n", target); goto cleanup;
+        }
+    }
+    if (mkdir(namedir, 0755) < 0 && errno != EEXIST) {
+        fprintf(stderr, "pkg: cannot create %s\n", namedir); goto cleanup;
+    }
+    if (chmod(stage, 0755) < 0 || rename(stage, target) < 0) {
+        fprintf(stderr, "pkg: cannot activate upgrade\n"); goto cleanup;
+    }
+    staged = 0;
+    snprintf(regs[idx].version, sizeof(regs[idx].version), "%s", st.meta.version);
+    snprintf(regs[idx].xpkg_sha256, sizeof(regs[idx].xpkg_sha256), "%s", st.xpkg_sha);
+    regs[idx].files = st.n_payload;
+    regs[idx].bytes = st.total_bytes;
+    app_utc_now(regs[idx].installed_utc, sizeof(regs[idx].installed_utc));
+    if (app_registry_save(approot, regs, n_regs) < 0) {
+        fprintf(stderr, "pkg: cannot update registry\n");
+        /* rollback: the registered old version stays authoritative */
+        app_rm_rf(target, 0);
+        goto cleanup;
+    }
+    /* committed: drop the old payload (best effort) */
+    if (app_rm_rf(oldtarget, 0) < 0)
+        fprintf(stderr, "pkg: warning: old version directory remains at %s\n", oldtarget);
+    flock(lockfd, LOCK_UN); close(lockfd); lockfd = -1;
+    rc = 0;
+    if (json)
+        printf("{\"status\": \"upgraded\", \"name\": \"%s\", \"version\": \"%s\", \"from_version\": \"%s\", \"files\": %d, \"bytes\": %ld, \"xpkg_sha256\": \"%s\", \"path\": \"%s\"}\n",
+               st.meta.name, st.meta.version, oldver, st.n_payload, st.total_bytes, st.xpkg_sha, target);
+    else {
+        xui_init();
+        printf("%s%s%s XTOS_PKG_APP_UPGRADE name=%s version=%s from_version=%s files=%d bytes=%ld status=%s", XUI_LABEL_S, "PKG_APP", XUI_RESET_S,
+               st.meta.name, st.meta.version, oldver, st.n_payload, st.total_bytes, "upgraded");
+        XUI_OK("\n");
+    }
+cleanup:
+    if (lockfd >= 0) { flock(lockfd, LOCK_UN); close(lockfd); }
+    if (staged) app_rm_rf(stage, 0);
     return rc;
 }
 
@@ -1342,6 +1457,7 @@ static int cmd_app(int json, int argc, char **argv) {
         fprintf(stderr,
             "usage: pkg app <command>\n"
             "  pkg app install <file.xpkg>   verify and install an application package\n"
+            "  pkg app upgrade <file.xpkg>   verify and upgrade an installed application\n"
             "  pkg app remove <name>         remove an installed application\n"
             "  pkg app list                  list installed applications\n"
             "  pkg app verify <name>         re-verify installed application files\n"
@@ -1349,6 +1465,7 @@ static int cmd_app(int json, int argc, char **argv) {
         return 2;
     }
     if (strcmp(argv[0], "install") == 0 && argc == 2) return cmd_app_install(json, argv[1]);
+    if (strcmp(argv[0], "upgrade") == 0 && argc == 2) return cmd_app_upgrade(json, argv[1]);
     if (strcmp(argv[0], "remove") == 0 && argc == 2) return cmd_app_remove(json, argv[1]);
     if (strcmp(argv[0], "list") == 0 && argc == 1) return cmd_app_list(json);
     if (strcmp(argv[0], "verify") == 0 && (argc == 2 || argc == 3)) return cmd_app_verify(json, argv[1], argc == 3 ? argv[2] : NULL);
