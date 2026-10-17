@@ -26,7 +26,8 @@ def sha(data):
 
 def build_xpkg(path, *, name="demo-app", version="1.0.0", arch="x86_64",
                payload=None, omit_sums=False, corrupt_sums=False,
-               skip_in_sums=(), extra_raw=(), manifest_override=None):
+               skip_in_sums=(), extra_raw=(), manifest_override=None,
+               tar_format=None, compresslevel=None):
     payload = payload if payload is not None else {
         "bin/tool": b"#!/bin/sh\necho hello\n",
         "share/data.txt": b"0123456789abcdef",
@@ -47,7 +48,12 @@ def build_xpkg(path, *, name="demo-app", version="1.0.0", arch="x86_64",
         sums_lines = [f"{'0' * 64}  payload/{rel}" if rel == "share/data.txt" else f"{sha(data)}  payload/{rel}"
                       for rel, data in sorted(payload.items())]
     sums_bytes = ("\n".join(sums_lines) + "\n").encode()
-    with tarfile.open(path, "w:gz") as tar:
+    open_kwargs = {}
+    if tar_format is not None:
+        open_kwargs["format"] = tar_format
+    if compresslevel is not None:
+        open_kwargs["compresslevel"] = compresslevel
+    with tarfile.open(path, "w:gz", **open_kwargs) as tar:
         def add_dir(arcname):
             info = tarfile.TarInfo(arcname)
             info.type = tarfile.DIRTYPE
@@ -387,6 +393,75 @@ def main() -> int:
         r = run("app", "list")
         if "demo-app" not in r.stdout or "3.0.0" not in r.stdout:
             failures.append(f"final list missing upgraded app: {r.stdout!r}")
+
+        # 25. PAX long-name member (>100 chars) via the native reader
+        long_key = ("d" * 90) + "/" + ("e" * 40) + ".txt"
+        long_bytes = b"deep pax payload\n"
+        paxpkg = td / "long-pax.xpkg"
+        build_xpkg(paxpkg, version="1.0.0", payload={long_key: long_bytes},
+                   tar_format=tarfile.PAX_FORMAT)
+        r = run("app", "upgrade", str(paxpkg))
+        if r.returncode != 0:
+            failures.append(f"pax long-name install failed: rc={r.returncode} err={r.stderr!r}")
+        else:
+            f = approot / "demo-app/1.0.0/payload" / long_key
+            if not f.is_file() or f.read_bytes() != long_bytes:
+                failures.append("pax long-name payload bytes differ")
+            else:
+                print("  PASS pax long-name member")
+
+        # 26. GNU long-name member ('L' meta) via the native reader
+        gnupkg = td / "long-gnu.xpkg"
+        build_xpkg(gnupkg, version="1.0.1", payload={long_key: long_bytes},
+                   tar_format=tarfile.GNU_FORMAT)
+        r = run("app", "upgrade", str(gnupkg))
+        if r.returncode != 0:
+            failures.append(f"gnu long-name install failed: rc={r.returncode} err={r.stderr!r}")
+        else:
+            f = approot / "demo-app/1.0.1/payload" / long_key
+            if not f.is_file() or f.read_bytes() != long_bytes:
+                failures.append("gnu long-name payload bytes differ")
+            else:
+                print("  PASS gnu long-name member")
+
+        # 27. stored deflate blocks (compresslevel=0)
+        storedpkg = td / "stored.xpkg"
+        build_xpkg(storedpkg, version="1.0.2",
+                   payload={"bin/tool": b"#!/bin/sh\necho stored\n"}, compresslevel=0)
+        r = run("app", "upgrade", str(storedpkg))
+        if r.returncode != 0:
+            failures.append(f"stored-block install failed: {r.stderr!r}")
+        else:
+            print("  PASS stored-block member")
+
+        # 28. corrupted compressed stream is rejected (native CRC check)
+        raw = bytearray(good.read_bytes())
+        raw[len(raw) // 2] ^= 0xff
+        corruptgz = td / "corrupt-gz.xpkg"
+        corruptgz.write_bytes(bytes(raw))
+        expect_fail(run("app", "upgrade", str(corruptgz)), "corrupt gzip stream")
+        print("  PASS corrupt gzip stream rejected")
+
+        # 29. large compressible member spans the output-buffer compaction
+        big_data = ("\n".join(f"row {i:06d} of compressible text" for i in range(20000))).encode()
+        bigpkg = td / "big.xpkg"
+        build_xpkg(bigpkg, version="1.0.3", payload={"share/big.txt": big_data})
+        r = run("app", "upgrade", str(bigpkg))
+        if r.returncode != 0:
+            failures.append(f"large member install failed: {r.stderr!r}")
+        else:
+            f = approot / "demo-app/1.0.3/payload/share/big.txt"
+            if not f.is_file() or f.read_bytes() != big_data:
+                failures.append("large member bytes differ")
+            else:
+                print("  PASS large member")
+
+        # 30. final state after native-reader section
+        if any(approot.glob(".stage-*")) or any(approot.glob(".spool-*")):
+            failures.append("staging/spool leftovers after native-reader tests")
+        r = run("app", "verify", "demo-app")
+        if r.returncode != 0 or "corrupt=0" not in r.stdout:
+            failures.append(f"final verify failed: {r.stdout!r}")
 
     if failures:
         print(f"FAIL: {len(failures)}")

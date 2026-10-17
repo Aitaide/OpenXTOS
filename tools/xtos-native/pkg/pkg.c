@@ -16,6 +16,8 @@
 #include <sys/stat.h>
 #include <sys/types.h>
 #include "xtos_ui.h"
+#include "xtos_gzip.h"
+#include "xtos_ustar.h"
 
 /* Minimal SHA-256 (public-domain style implementation) */
 typedef struct { uint32_t state[8]; uint64_t bitlen; uint8_t data[64]; uint32_t datalen; } sha256_ctx;
@@ -425,65 +427,6 @@ static int app_member_ok(const char *name) {
         p += clen + (slash ? 1 : 0);
     }
     return 1;
-}
-
-static int app_find_tar(char *out, size_t n) {
-    const char *path_env = getenv("PATH");
-    if (!path_env) return -1;
-    const char *p = path_env;
-    while (*p) {
-        const char *colon = strchr(p, ':');
-        size_t plen = colon ? (size_t)(colon - p) : strlen(p);
-        if (plen && plen + 6 < n) {
-            memcpy(out, p, plen);
-            memcpy(out + plen, "/tar", 5);
-            if (access(out, X_OK) == 0) return 0;
-        }
-        if (!colon) break;
-        p = colon + 1;
-    }
-    return -1;
-}
-
-static int app_run_tar(char *const argv[], char **capture, size_t *capture_len) {
-    int link[2] = {-1, -1};
-    if (capture && pipe(link) < 0) return -1;
-    pid_t pid = fork();
-    if (pid < 0) { if (capture) { close(link[0]); close(link[1]); } return -1; }
-    if (pid == 0) {
-        if (capture) { dup2(link[1], STDOUT_FILENO); close(link[0]); close(link[1]); }
-        char pathbuf[8192];
-        const char *orig_path = getenv("PATH");
-        if (!orig_path || strlen(orig_path) + 6 > sizeof(pathbuf)) orig_path = "/usr/bin:/bin";
-        snprintf(pathbuf, sizeof(pathbuf), "PATH=%s", orig_path);
-        char *envp[3] = {pathbuf, "LC_ALL=C", NULL};
-        execve(argv[0], argv, envp);
-        _exit(127);
-    }
-    if (capture) {
-        close(link[1]);
-        size_t cap = 1 << 20, used = 0;
-        char *buf = malloc(cap);
-        if (!buf) { close(link[0]); return -1; }
-        ssize_t r;
-        while ((r = read(link[0], buf + used, cap - used)) > 0) {
-            used += (size_t)r;
-            if (used == cap) {
-                if (cap >= APP_TAR_LIST_MAX) { free(buf); close(link[0]); return -1; }
-                cap *= 2;
-                char *grown = realloc(buf, cap);
-                if (!grown) { free(buf); close(link[0]); return -1; }
-                buf = grown;
-            }
-        }
-        close(link[0]);
-        if (r < 0) { free(buf); return -1; }
-        *capture = buf;
-        *capture_len = used;
-    }
-    int status = 0;
-    if (waitpid(pid, &status, 0) < 0) return -1;
-    return (WIFEXITED(status) && WEXITSTATUS(status) == 0) ? 0 : -1;
 }
 
 struct app_anc {
@@ -1004,32 +947,58 @@ struct app_stage {
 static int app_stage_verify(const char *file, const char *approot,
                             char *stage, size_t stage_n, struct app_stage *st,
                             char *err, size_t err_n) {
-    char tarbin[8192];
     struct app_entry *files = NULL, *sums = NULL, *mfiles = NULL;
     int n_files = 0, cap_files = 0, n_sums = 0, cap_sums = 0, n_mfiles = 0, cap_mfiles = 0;
     int staged = 0;
     int rc = -1;
+    char spool[8192];
+    char *list = NULL;
+    size_t list_len = 0;
+    spool[0] = '\0';
     if (access(file, R_OK) != 0) { snprintf(err, err_n, "pkg: cannot read %s", file); goto out; }
-    if (app_find_tar(tarbin, sizeof(tarbin)) < 0) { snprintf(err, err_n, "pkg: tar not found in PATH"); goto out; }
     if (mkdir(approot, 0755) < 0 && errno != EEXIST) { snprintf(err, err_n, "pkg: cannot create %s", approot); goto out; }
     if (sha256_file(file, st->xpkg_sha) < 0) { snprintf(err, err_n, "pkg: cannot hash %s", file); goto out; }
     if (app_join2(stage, stage_n, approot, ".stage-XXXXXX") < 0) { snprintf(err, err_n, "pkg: app root path too long"); goto out; }
     if (!mkdtemp(stage)) { snprintf(err, err_n, "pkg: cannot create staging dir"); goto out; }
     staged = 1;
-    char *list = NULL;
-    size_t list_len = 0;
-    char *listargv[4] = {tarbin, "-tzf", (char *)file, NULL};
-    if (app_run_tar(listargv, &list, &list_len) < 0) {
+    /* Native decompress: gzip member(s) verified (CRC32/ISIZE) to a spool
+     * tar inside the app root. No external binary is executed. */
+    if (app_join2(spool, sizeof(spool), approot, ".spool-XXXXXX") < 0) {
+        snprintf(err, err_n, "pkg: app root path too long"); goto out;
+    }
+    {
+        int sfd = mkstemp(spool);
+        if (sfd < 0) { snprintf(err, err_n, "pkg: cannot create spool file"); goto out; }
+        FILE *xin = fopen(file, "rb");
+        FILE *xout = NULL;
+        if (xin) xout = fdopen(sfd, "wb");
+        if (!xin || !xout) {
+            if (xout) fclose(xout); else close(sfd);
+            if (xin) fclose(xin);
+            snprintf(err, err_n, "pkg: cannot list %s", file); goto out;
+        }
+        int gok = xz_gzip_to_file(xin, xout);
+        int cok = fclose(xout);
+        fclose(xin);
+        if (gok < 0 || cok != 0) {
+            snprintf(err, err_n, "pkg: cannot list %s", file); goto out;
+        }
+    }
+    char *list2 = NULL;
+    if (xtar_list(spool, &list2, &list_len, APP_MAX_ENTRIES, APP_TAR_LIST_MAX) < 0) {
+        free(list2);
         snprintf(err, err_n, "pkg: cannot list %s", file); goto out;
     }
+    list = list2;
     if (app_listing_validate(list, list_len) < 0) {
         snprintf(err, err_n, "pkg: archive listing is unsafe (traversal, shadow or non-xpkg member)"); goto out;
     }
     free(list); list = NULL;
-    char *xargv[6] = {tarbin, "-xzf", (char *)file, "-C", stage, NULL};
-    if (app_run_tar(xargv, NULL, NULL) < 0) {
+    if (xtar_extract(spool, stage) < 0) {
         snprintf(err, err_n, "pkg: extraction failed"); goto out;
     }
+    unlink(spool);
+    spool[0] = '\0';
     if (app_scan_tree(stage, "", &files, &n_files, &cap_files, 0) < 0) {
         snprintf(err, err_n, "pkg: archive contains forbidden entry types (symlink/hardlink/device/setuid)"); goto out;
     }
@@ -1091,6 +1060,7 @@ static int app_stage_verify(const char *file, const char *approot,
 out:
     free(list);
     free(files); free(sums); free(mfiles);
+    if (spool[0]) unlink(spool);
     if (staged) app_rm_rf(stage, 0);
     return rc;
 }

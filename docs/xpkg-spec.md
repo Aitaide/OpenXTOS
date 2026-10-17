@@ -27,9 +27,26 @@ publishing gate):
   no setuid/setgid/sticky bits.
 - No member may double as a directory prefix of another member (blocks
   extraction escapes through symlink/hardlink shadows).
+- Duplicate member names are rejected (tar would silently overwrite).
 - `xpkg/SHA256SUMS` and the manifest `files` array must describe exactly the
   extracted payload set: same paths, same sizes, same sha256.
 - Directory members must be listed (tar-compatible listing validation).
+
+### Native reader (no external tar binary)
+
+`pkg` unpacks xpkg archives with its own reader (`tools/xtos-native/common/`
+`xtos_gzip.h` + `xtos_ustar.h`); no `tar` process is ever executed. The
+reader accepts: POSIX ustar headers (name + prefix), GNU long-name/long-link
+meta members (`L`/`K`), PAX per-file extended headers (`x`: `path=`, `size=`)
+and PAX global headers (`g`, parsed and deliberately ignored — the listing
+validator stays the audit authority). It verifies the gzip magic/CM/flags,
+all DEFLATE block types (stored/fixed/dynamic), per-member CRC32 and ISIZE,
+and accepts concatenated members plus zero padding. It rejects links and
+devices, base-256 size encodings (>8 GiB members), bad header checksums,
+oversized or malformed meta members, and any absolute/traversal/dirty name
+before a single byte is written. The full listing is audited (the same
+`tar -t`-style list validation as before) before extraction into the
+staging directory.
 
 ## manifest.json
 
@@ -69,6 +86,7 @@ provided by the signed repository index that lists admitted packages.
 
 ```
 pkg app install <file.xpkg>   verify + install (refuses existing app/version)
+pkg app upgrade <file.xpkg>   verify + upgrade an installed application
 pkg app remove <name>         remove installed app + registry entry
 pkg app list                  registry + on-disk reconciliation
 pkg app verify <name>         re-hash installed payload against SHA256SUMS
@@ -77,6 +95,14 @@ pkg app info <name>           manifest details + install record
 
 `--json` output is supported for every command. Piped output stays plain
 ASCII (shared `xtos_ui.h` styling rules).
+
+`upgrade` replaces an installed application with a new version atomically:
+the new payload is staged and fully verified first, then activated by
+`rename()`, and the registry write is the commit point — a failure there
+rolls the payload back and leaves the old version authoritative. Old payload
+directories are dropped only after the commit. A stale target directory left
+by an interrupted upgrade is cleaned up by the next attempt. Upgrading to
+the already-installed version is refused.
 
 ## Gate-only policy
 
