@@ -101,6 +101,16 @@ update download --dest DIR   download artifacts for this architecture, verified
 update compare <a> <b>        semver-style compare including prerelease ordering
 ```
 
+Transport is fully native: no `curl` process is ever executed. The tool
+speaks HTTP/1.1 directly and TLS 1.2/1.3 through the vendored mbedTLS
+(`tools/xtos-native/vendor/mbedtls/`, Apache-2.0, built by
+`scripts/build_mbedtls.sh` into a static archive) with server certificates
+verified against a pinned CA bundle at `/usr/share/xtos/update-ca-bundle.pem`
+(`system/packages/update-ca-bundle.pem`: ISRG X1/X2, GTS R1/R4, DigiCert
+Global G1/G2, GlobalSign R1), override with `XTOS_UPDATE_CA_BUNDLE`. TLS
+failures only block the fetch and move on to the next mirror; content trust
+always comes from the pinned ed25519 key, never from the TLS layer.
+
 Mirror selection is by probing, not geo-IP: `XTOS_UPDATE_MIRRORS` defaults to
 `https://packages.xtos.cn https://packages.xtos.si` and mirrors are tried in
 order; a broken mirror is skipped and both carry identical signed content, so

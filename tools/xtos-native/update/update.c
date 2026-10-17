@@ -16,25 +16,40 @@
  * Exit codes: 0 up-to-date / success, 1 update available / mismatch,
  * 2 error (unreachable, bad signature, bad hash).
  *
- * Build: gcc -O2 -Wall -Wextra -Werror -static \
- *   -I tools/xtos-native/common -I tools/xtos-native/vendor/monocypher \
- *   -o update update.c \
- *   tools/xtos-native/vendor/monocypher/monocypher.c \
- *   tools/xtos-native/vendor/monocypher/monocypher-ed25519.c
+ * Build: scripts/build_mbedtls.sh (once), then
+ *   gcc -O2 -Wall -Wextra -Werror -static \
+ *     -DMBEDTLS_CONFIG_FILE='"xtos_mbedtls_config.h"' \
+ *     -I tools/xtos-native/common -I tools/xtos-native/vendor/monocypher \
+ *     -I tools/xtos-native/vendor/mbedtls/include \
+ *     -I tools/xtos-native/vendor/mbedtls \
+ *     -o update update.c \
+ *     tools/xtos-native/vendor/monocypher/monocypher.c \
+ *     tools/xtos-native/vendor/monocypher/monocypher-ed25519.c \
+ *     .build/mbedtls/libmbedtls_xtos.a
  */
 #define _GNU_SOURCE
 #include <ctype.h>
 #include <errno.h>
 #include <fcntl.h>
+#include <netdb.h>
+#include <poll.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <strings.h>
+#include <sys/socket.h>
 #include <sys/stat.h>
 #include <sys/utsname.h>
 #include <sys/wait.h>
+#include <time.h>
 #include <unistd.h>
 #include "xtos_ui.h"
 #include "xtos_ed25519.h"
+#include <mbedtls/entropy.h>
+#include <mbedtls/hmac_drbg.h>
+#include <mbedtls/md.h>
+#include <mbedtls/ssl.h>
+#include <mbedtls/x509_crt.h>
 
 #define LINE_BUF 65536
 #define URL_MAX 2048
@@ -42,6 +57,7 @@
 #define VER_MAX_LEN 64
 #define ART_MAX 64
 #define MIRROR_MAX 8
+#define XTOS_CA_BUNDLE_DEFAULT "/usr/share/xtos/update-ca-bundle.pem"
 
 struct artifact {
     char name[NAME_MAX_LEN];
@@ -197,38 +213,362 @@ static int env_or(const char *name, char *out, size_t n, const char *fallback) {
     return 0;
 }
 
-static int find_in_path(char *out, size_t n, const char *tool) {
-    const char *path = getenv("PATH");
-    if (!path) return -1;
-    const char *p = path;
-    while (*p) {
-        const char *colon = strchr(p, ':');
-        size_t plen = colon ? (size_t)(colon - p) : strlen(p);
-        if (plen && plen + strlen(tool) + 2 < n) {
-            memcpy(out, p, plen);
-            out[plen] = '/';
-            strcpy(out + plen + 1, tool);
-            if (access(out, X_OK) == 0) return 0;
-        }
-        if (!colon) break;
-        p = colon + 1;
+/* ---- native HTTP(S) transport (vendored mbedTLS; no curl binary) ---- */
+#include <mbedtls/net_sockets.h> /* MBEDTLS_ERR_NET_* codes for the BIO callbacks */
+static uint64_t now_ms(void) {
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return (uint64_t)ts.tv_sec * 1000u + (uint64_t)ts.tv_nsec / 1000000u;
+}
+
+struct url_parts {
+    char scheme[8];
+    char host[256];
+    int port;
+    char path[URL_MAX];
+};
+
+static int parse_url(const char *url, struct url_parts *u) {
+    memset(u, 0, sizeof(*u));
+    const char *sp = strstr(url, "://");
+    if (!sp) return -1;
+    size_t slen = (size_t)(sp - url);
+    if (slen == 0 || slen >= sizeof(u->scheme)) return -1;
+    memcpy(u->scheme, url, slen);
+    u->scheme[slen] = '\0';
+    const char *hp = sp + 3;
+    const char *slash = strchr(hp, '/');
+    if (!slash) return -1;
+    size_t hlen = (size_t)(slash - hp);
+    if (!hlen || hlen >= sizeof(u->host)) return -1;
+    const char *colon = memchr(hp, ':', hlen);
+    if (colon) {
+        size_t hn = (size_t)(colon - hp);
+        if (!hn || hn >= sizeof(u->host)) return -1;
+        memcpy(u->host, hp, hn);
+        u->host[hn] = '\0';
+        long p = strtol(colon + 1, NULL, 10);
+        if (p <= 0 || p > 65535) return -1;
+        u->port = (int)p;
+    } else {
+        memcpy(u->host, hp, hlen);
+        u->host[hlen] = '\0';
+        u->port = strcmp(u->scheme, "https") == 0 ? 443 : 80;
     }
+    if (strlen(slash) >= sizeof(u->path)) return -1;
+    strcpy(u->path, slash); /* always starts with '/' */
+    return 0;
+}
+
+static int tcp_connect(const char *host, int port, uint64_t deadline) {
+    char portstr[8];
+    snprintf(portstr, sizeof(portstr), "%d", port);
+    struct addrinfo hints, *res = NULL, *rp;
+    memset(&hints, 0, sizeof(hints));
+    hints.ai_family = AF_UNSPEC;
+    hints.ai_socktype = SOCK_STREAM;
+    if (getaddrinfo(host, portstr, &hints, &res) != 0 || !res) return -1;
+    int fd = -1;
+    for (rp = res; rp; rp = rp->ai_next) {
+        fd = socket(rp->ai_family, rp->ai_socktype, rp->ai_protocol);
+        if (fd < 0) continue;
+        int fl = fcntl(fd, F_GETFL, 0);
+        if (fl >= 0) fcntl(fd, F_SETFL, fl | O_NONBLOCK);
+        if (connect(fd, rp->ai_addr, rp->ai_addrlen) == 0) break;
+        if (errno != EINPROGRESS) { close(fd); fd = -1; continue; }
+        int64_t wait = (int64_t)(deadline - now_ms());
+        struct pollfd pfd = { .fd = fd, .events = POLLOUT };
+        if (wait <= 0 || poll(&pfd, 1, (int)wait) != 1) { close(fd); fd = -1; continue; }
+        int err = 0;
+        socklen_t el = sizeof(err);
+        if (getsockopt(fd, SOL_SOCKET, SO_ERROR, &err, &el) != 0 || err != 0) { close(fd); fd = -1; continue; }
+        break;
+    }
+    freeaddrinfo(res);
+    return fd;
+}
+
+/* TLS machinery, lazily initialized from the pinned CA bundle. */
+static mbedtls_entropy_context g_ts_entropy;
+static mbedtls_hmac_drbg_context g_ts_drbg;
+static mbedtls_ssl_config g_ts_conf;
+static mbedtls_x509_crt g_ts_cacerts;
+static int g_ts_ready;
+
+static int tls_setup(void) {
+    if (g_ts_ready) return 0;
+    int rc;
+    mbedtls_entropy_init(&g_ts_entropy);
+    mbedtls_hmac_drbg_init(&g_ts_drbg);
+    mbedtls_x509_crt_init(&g_ts_cacerts);
+    mbedtls_ssl_config_init(&g_ts_conf);
+    const char *pers = "xtos-update";
+    if ((rc = mbedtls_hmac_drbg_seed(&g_ts_drbg, mbedtls_md_info_from_type(MBEDTLS_MD_SHA256),
+                                     mbedtls_entropy_func, &g_ts_entropy,
+                                     (const unsigned char *)pers, strlen(pers))) != 0) goto fail;
+    char bundle[4096];
+    if (env_or("XTOS_UPDATE_CA_BUNDLE", bundle, sizeof(bundle), XTOS_CA_BUNDLE_DEFAULT) < 0) goto fail;
+    if ((rc = mbedtls_x509_crt_parse_file(&g_ts_cacerts, bundle)) < 0) goto fail;
+    if ((rc = mbedtls_ssl_config_defaults(&g_ts_conf, MBEDTLS_SSL_IS_CLIENT,
+                                          MBEDTLS_SSL_TRANSPORT_STREAM,
+                                          MBEDTLS_SSL_PRESET_DEFAULT)) != 0) goto fail;
+    mbedtls_ssl_conf_authmode(&g_ts_conf, MBEDTLS_SSL_VERIFY_REQUIRED);
+    mbedtls_ssl_conf_ca_chain(&g_ts_conf, &g_ts_cacerts, NULL);
+    mbedtls_ssl_conf_rng(&g_ts_conf, mbedtls_hmac_drbg_random, &g_ts_drbg);
+    g_ts_ready = 1;
+    return 0;
+fail:
     return -1;
 }
 
-static int run_capture_exit(char *const argv[], char *devnull_or_null) {
-    (void)devnull_or_null;
-    pid_t pid = fork();
-    if (pid < 0) return -1;
-    if (pid == 0) {
-        int null = open("/dev/null", O_WRONLY);
-        if (null >= 0) { dup2(null, STDOUT_FILENO); dup2(null, STDERR_FILENO); close(null); }
-        execvp(argv[0], argv);
-        _exit(127);
+static int tls_send_cb(void *ctx, const unsigned char *buf, size_t len) {
+    int fd = *(int *)ctx;
+    ssize_t w = write(fd, buf, len);
+    if (w >= 0) return (int)w;
+    if (errno == EAGAIN || errno == EWOULDBLOCK) return MBEDTLS_ERR_SSL_WANT_WRITE;
+    return MBEDTLS_ERR_NET_SEND_FAILED;
+}
+
+static int tls_recv_cb(void *ctx, unsigned char *buf, size_t len) {
+    int fd = *(int *)ctx;
+    ssize_t r = read(fd, buf, len);
+    if (r > 0) return (int)r;
+    if (r == 0) return MBEDTLS_ERR_SSL_CONN_EOF;
+    if (errno == EAGAIN || errno == EWOULDBLOCK) return MBEDTLS_ERR_SSL_WANT_READ;
+    return MBEDTLS_ERR_NET_RECV_FAILED;
+}
+
+/* Buffered response reader over a plain or TLS socket. */
+struct http_reader {
+    int fd;
+    mbedtls_ssl_context *ssl;
+    uint64_t deadline;
+    unsigned char buf[16384];
+    size_t len, pos;
+};
+
+/* 0: data available, 1: EOF, -1: error/timeout */
+static int rd_fill(struct http_reader *r) {
+    if (r->pos < r->len) return 0;
+    for (;;) {
+        int64_t wait = (int64_t)(r->deadline - now_ms());
+        if (wait <= 0) return -1;
+        if (r->ssl) {
+            int m = mbedtls_ssl_read(r->ssl, r->buf, sizeof(r->buf));
+            if (m == MBEDTLS_ERR_SSL_WANT_READ || m == MBEDTLS_ERR_SSL_WANT_WRITE) {
+                struct pollfd pfd = { .fd = r->fd,
+                                      .events = (m == MBEDTLS_ERR_SSL_WANT_READ ? POLLIN : POLLOUT) };
+                if (poll(&pfd, 1, (int)wait) <= 0) return -1;
+                continue;
+            }
+            if (m == MBEDTLS_ERR_SSL_PEER_CLOSE_NOTIFY) return 1;
+            if (m < 0) return -1;
+            r->len = (size_t)m;
+        } else {
+            ssize_t m = read(r->fd, r->buf, sizeof(r->buf));
+            if (m == 0) return 1;
+            if (m < 0 && (errno == EAGAIN || errno == EWOULDBLOCK)) {
+                struct pollfd pfd = { .fd = r->fd, .events = POLLIN };
+                if (poll(&pfd, 1, (int)wait) <= 0) return -1;
+                continue;
+            }
+            if (m < 0) return -1;
+            r->len = (size_t)m;
+        }
+        r->pos = 0;
+        return 0;
     }
-    int status = 0;
-    if (waitpid(pid, &status, 0) < 0) return -1;
-    return (WIFEXITED(status) && WEXITSTATUS(status) == 0) ? 0 : -1;
+}
+
+static int rd_byte(struct http_reader *r) {
+    if (rd_fill(r) != 0) return -1;
+    return r->buf[r->pos++];
+}
+
+/* Read one CRLF/LF-terminated line (without the terminator). */
+static int rd_line(struct http_reader *r, char *out, size_t n) {
+    size_t used = 0;
+    for (;;) {
+        int c = rd_byte(r);
+        if (c < 0) return -1;
+        if (c == '\n') break;
+        if (used + 1 < n) out[used++] = (char)c;
+    }
+    if (used && out[used - 1] == '\r') used--;
+    out[used] = '\0';
+    return 0;
+}
+
+static int rd_exact(struct http_reader *r, FILE *dest, size_t n) {
+    while (n) {
+        int rc = rd_fill(r);
+        if (rc != 0) return -1;
+        size_t take = r->len - r->pos;
+        if (take > n) take = n;
+        if (fwrite(r->buf + r->pos, 1, take, dest) != take) return -1;
+        r->pos += take;
+        n -= take;
+    }
+    return 0;
+}
+
+static int rd_until_eof(struct http_reader *r, FILE *dest) {
+    for (;;) {
+        int rc = rd_fill(r);
+        if (rc == 1) return 0;
+        if (rc != 0) return -1;
+        if (fwrite(r->buf + r->pos, 1, r->len - r->pos, dest) != r->len - r->pos) return -1;
+        r->pos = r->len;
+    }
+}
+
+static int tls_handshake(mbedtls_ssl_context *ssl, struct http_reader *r) {
+    for (;;) {
+        int rc = mbedtls_ssl_handshake(ssl);
+        if (rc == 0) break;
+        if (rc == MBEDTLS_ERR_SSL_WANT_READ || rc == MBEDTLS_ERR_SSL_WANT_WRITE) {
+            int64_t wait = (int64_t)(r->deadline - now_ms());
+            struct pollfd pfd = { .fd = r->fd,
+                                  .events = (rc == MBEDTLS_ERR_SSL_WANT_READ ? POLLIN : POLLOUT) };
+            if (wait <= 0 || poll(&pfd, 1, (int)wait) != 1) return -1;
+            continue;
+        }
+        return -1;
+    }
+    return mbedtls_ssl_get_verify_result(ssl) == 0 ? 0 : -1;
+}
+
+static int http_fetch(struct url_parts *u, FILE *dest, uint64_t deadline) {
+    int fd = tcp_connect(u->host, u->port, deadline);
+    if (fd < 0) return -1;
+    mbedtls_ssl_context ssl;
+    int use_tls = strcmp(u->scheme, "https") == 0;
+    if (use_tls) {
+        if (tls_setup() < 0) { close(fd); return -1; }
+        mbedtls_ssl_init(&ssl);
+        if (mbedtls_ssl_setup(&ssl, &g_ts_conf) != 0 ||
+            mbedtls_ssl_set_hostname(&ssl, u->host) != 0) {
+            mbedtls_ssl_free(&ssl);
+            close(fd);
+            return -1;
+        }
+        mbedtls_ssl_set_bio(&ssl, &fd, tls_send_cb, tls_recv_cb, NULL);
+    }
+    struct http_reader r;
+    memset(&r, 0, sizeof(r));
+    r.fd = fd;
+    r.ssl = use_tls ? &ssl : NULL;
+    r.deadline = deadline;
+    int rc = -1;
+    do {
+        if (use_tls && tls_handshake(&ssl, &r) < 0) break;
+        char req[URL_MAX + 512];
+        int rl = snprintf(req, sizeof(req),
+                          "GET %s HTTP/1.1\r\nHost: %s\r\nUser-Agent: xtos-update/1.0\r\n"
+                          "Accept: */*\r\nConnection: close\r\n\r\n",
+                          u->path, u->host);
+        if (rl < 0 || (size_t)rl >= sizeof(req)) break;
+        /* write the request */
+        {
+            const unsigned char *p = (const unsigned char *)req;
+            size_t left = (size_t)rl;
+            int ok = 1;
+            while (left && ok) {
+                int64_t wait = (int64_t)(deadline - now_ms());
+                if (wait <= 0) { ok = 0; break; }
+                ssize_t w;
+                if (use_tls) {
+                    int m = mbedtls_ssl_write(&ssl, p, left);
+                    if (m == MBEDTLS_ERR_SSL_WANT_WRITE || m == MBEDTLS_ERR_SSL_WANT_READ) {
+                        struct pollfd pfd = { .fd = fd,
+                                              .events = (m == MBEDTLS_ERR_SSL_WANT_WRITE ? POLLOUT : POLLIN) };
+                        if (poll(&pfd, 1, (int)wait) <= 0) ok = 0;
+                        continue;
+                    }
+                    if (m <= 0) { ok = 0; break; }
+                    w = m;
+                } else {
+                    w = write(fd, p, left);
+                    if (w < 0 && (errno == EAGAIN || errno == EWOULDBLOCK)) {
+                        struct pollfd pfd = { .fd = fd, .events = POLLOUT };
+                        if (poll(&pfd, 1, (int)wait) <= 0) ok = 0;
+                        continue;
+                    }
+                    if (w <= 0) { ok = 0; break; }
+                }
+                p += w;
+                left -= (size_t)w;
+            }
+            if (!ok) break;
+        }
+        /* status line must be 200 (HTTP/1.0 or HTTP/1.1) */
+        char line[2048];
+        if (rd_line(&r, line, sizeof(line)) < 0) break;
+        if (strncmp(line, "HTTP/1.", 7) != 0) break;
+        long status = strtol(line + 7 + 1, NULL, 10); /* skip "HTTP/1." */
+        if ((line[7] != '0' && line[7] != '1') || status != 200) break;
+        /* headers */
+        long long content_length = -1;
+        int chunked = 0;
+        int bad = 0;
+        for (;;) {
+            if (rd_line(&r, line, sizeof(line)) < 0) { bad = 1; break; }
+            if (line[0] == '\0') break;
+            if (strncasecmp(line, "content-length:", 15) == 0)
+                content_length = strtoll(line + 15, NULL, 10);
+            else if (strncasecmp(line, "transfer-encoding:", 18) == 0 &&
+                     strstr(line, "chunked"))
+                chunked = 1;
+        }
+        if (bad) break;
+        /* body */
+        if (chunked) {
+            for (;;) {
+                if (rd_line(&r, line, sizeof(line)) < 0) { bad = 1; break; }
+                char *semi = strchr(line, ';');
+                if (semi) *semi = '\0';
+                unsigned long long clen = strtoull(line, NULL, 16);
+                if (clen == 0) {
+                    /* trailers until an empty line */
+                    for (;;) {
+                        if (rd_line(&r, line, sizeof(line)) < 0) { bad = 1; break; }
+                        if (line[0] == '\0') break;
+                    }
+                    break;
+                }
+                if (rd_exact(&r, dest, (size_t)clen) < 0) { bad = 1; break; }
+                /* consume the chunk-terminating CRLF */
+                if (rd_byte(&r) < 0 || rd_byte(&r) < 0) { bad = 1; break; }
+            }
+        } else if (content_length >= 0) {
+            if (rd_exact(&r, dest, (size_t)content_length) < 0) break;
+        } else {
+            if (rd_until_eof(&r, dest) < 0) break;
+        }
+        if (!bad) rc = 0;
+    } while (0);
+    if (use_tls) mbedtls_ssl_free(&ssl);
+    close(fd);
+    return rc;
+}
+
+static int fetch_url(const char *url, const char *dest, const char *tmpdir) {
+    struct url_parts u;
+    if (parse_url(url, &u) < 0) return -1;
+    if (strcmp(u.scheme, "http") != 0 && strcmp(u.scheme, "https") != 0) return -1;
+    char tpath[4096];
+    if (snprintf(tpath, sizeof(tpath), "%s/fetch-XXXXXX", tmpdir) >= (int)sizeof(tpath)) return -1;
+    int fd = mkstemp(tpath);
+    if (fd < 0) return -1;
+    close(fd);
+    FILE *out = fopen(tpath, "wb");
+    if (!out) { unlink(tpath); return -1; }
+    uint64_t deadline = now_ms() + (uint64_t)(g_timeout > 0 ? g_timeout : 30) * 1000u;
+    int rc = http_fetch(&u, out, deadline);
+    if (fclose(out) != 0) rc = -1;
+    if (rc == 0 && rename(tpath, dest) == 0) return 0;
+    unlink(tpath);
+    return -1;
 }
 
 /* ---- version compare: MAJOR.MINOR.PATCH[-prerelease] ----
@@ -329,27 +669,6 @@ static void local_arch(char *out, size_t n) {
 }
 
 /* ---- index fetch + verify ---- */
-static int fetch_url(const char *url, const char *dest, const char *tmpdir) {
-    char curl[4096];
-    if (find_in_path(curl, sizeof(curl), "curl") < 0) return -1;
-    char tpath[4096];
-    if (snprintf(tpath, sizeof(tpath), "%s/fetch-XXXXXX", tmpdir) >= (int)sizeof(tpath)) return -1;
-    int fd = mkstemp(tpath);
-    if (fd < 0) return -1;
-    close(fd);
-    char timeoutstr[16];
-    snprintf(timeoutstr, sizeof(timeoutstr), "%d", g_timeout);
-    char *argv[10] = {curl, "-fsS", "--max-time", timeoutstr, "-o", tpath, "--", (char *)url, NULL};
-    if (strncmp(url, "http://", 7) != 0 && strncmp(url, "https://", 8) != 0) { unlink(tpath); return -1; }
-    int rc = run_capture_exit(argv, NULL);
-    if (rc == 0) {
-        if (rename(tpath, dest) < 0) { unlink(tpath); return -1; }
-        return 0;
-    }
-    unlink(tpath);
-    return -1;
-}
-
 static int verify_index_sig(const char *index_path, const char *sig_path) {
     /* Native ed25519 check against the pinned key (vendored Monocypher).
      * No openssl binary is executed. */
@@ -593,6 +912,9 @@ int main(int argc, char **argv) {
         char arch[32];
         local_arch(arch, sizeof(arch));
         char part[4096], final[4096];
+        char dlbuf[4096];
+        if (snprintf(dlbuf, sizeof(dlbuf), "%s/.dl-XXXXXX", destdir) >= (int)sizeof(dlbuf)) { return 2; }
+        if (!mkdtemp(dlbuf)) { fprintf(stderr, "update: cannot create download staging dir\n"); return 2; }
         int done = 0;
         for (int i = 0; i < latest.narts; i++) {
             struct artifact *a = &latest.arts[i];
@@ -602,13 +924,7 @@ int main(int argc, char **argv) {
             }
             if (snprintf(final, sizeof(final), "%s/%s", destdir, a->name) >= (int)sizeof(final)) continue;
             if (snprintf(part, sizeof(part), "%s.part", final) >= (int)sizeof(part)) continue;
-            char curl[4096];
-            if (find_in_path(curl, sizeof(curl), "curl") < 0) { fprintf(stderr, "update: curl not found\n"); return 2; }
-            char timeoutstr[16];
-            long big = 3600;
-            snprintf(timeoutstr, sizeof(timeoutstr), "%ld", big);
-            char *argv2[10] = {curl, "-fsS", "--max-time", timeoutstr, "-o", part, "--", a->url, NULL};
-            if (run_capture_exit(argv2, NULL) < 0) { unlink(part); fprintf(stderr, "update: download failed: %s\n", a->name); return 2; }
+            if (fetch_url(a->url, part, dlbuf) < 0) { unlink(part); fprintf(stderr, "update: download failed: %s\n", a->name); rmdir(dlbuf); return 2; }
             if (a->sha256[0]) {
                 char hex[65];
                 struct stat st;
@@ -616,19 +932,22 @@ int main(int argc, char **argv) {
                     unlink(part);
                     fprintf(stderr, "update: hash mismatch: %s\n", a->name);
                     if (json) printf("{\"error\": \"hash mismatch\"}\n");
+                    rmdir(dlbuf);
                     return 2;
                 }
                 if (a->size > 0 && stat(part, &st) == 0 && (long)st.st_size != a->size) {
                     unlink(part);
                     fprintf(stderr, "update: size mismatch: %s\n", a->name);
                     if (json) printf("{\"error\": \"size mismatch\"}\n");
+                    rmdir(dlbuf);
                     return 2;
                 }
             }
-            if (rename(part, final) < 0) { unlink(part); return 2; }
+            if (rename(part, final) < 0) { unlink(part); rmdir(dlbuf); return 2; }
             if (!json) printf("%s\n", final);
             done++;
         }
+        rmdir(dlbuf);
         if (json) printf("{\"downloaded\": %d, \"dest\": \"%s\", \"mirror\": \"%s\"}\n", done, destdir, used_url);
         return done > 0 ? 0 : 2;
     }

@@ -91,6 +91,8 @@ def build_native_tools(stage):
     """Compile XTOS-native C tools as static binaries into the staging rootfs."""
     include=ROOT/'tools'/'xtos-native'/'common'
     vendor=ROOT/'tools'/'xtos-native'/'vendor'/'monocypher'
+    mbvendor=ROOT/'tools'/'xtos-native'/'vendor'/'mbedtls'
+    mbdefines=['-DMBEDTLS_CONFIG_FILE="xtos_mbedtls_config.h"','-I',str(mbvendor)]
     for name,target in NATIVE_TOOLS.items():
         directory=ROOT/'tools'/'xtos-native'/name
         source=directory/(name+'.c')
@@ -100,9 +102,12 @@ def build_native_tools(stage):
         sources=[source]
         includes=['-I',str(include)]
         if name=='update':
-            # update links the vendored Monocypher ed25519 verifier.
-            sources+=[vendor/'monocypher.c',vendor/'monocypher-ed25519.c']
-            includes+=['-I',str(vendor)]
+            # update links the vendored Monocypher verifier and the vendored
+            # mbedTLS transport (built once into .build/mbedtls).
+            run(['bash',str(ROOT/'scripts'/'build_mbedtls.sh')])
+            sources+=[vendor/'monocypher.c',vendor/'monocypher-ed25519.c',
+                      ROOT/'.build'/'mbedtls'/'libmbedtls_xtos.a']
+            includes+=['-I',str(vendor),'-I',str(mbvendor/'include'),*mbdefines]
         run([os.environ.get('CC','gcc'),'-O2','-Wall','-Wextra','-Werror','-static',
              *includes,'-o',str(output),*[str(s) for s in sources]])
         output.chmod(0o755)
@@ -254,6 +259,7 @@ def build(args):
         write(runtime,'usr/share/xtos/pkg-overrides.txt','/etc/issue\n/etc/sudoers\n',0o644)
         # Pinned source-signature key for `update` (default XTOS_UPDATE_PUBKEY path).
         shutil.copy2(ROOT/'system/packages/repo-public.pem',runtime/'usr/share/xtos/repo-public.pem')
+        shutil.copy2(ROOT/'system/packages/update-ca-bundle.pem',runtime/'usr/share/xtos/update-ca-bundle.pem')
         write(runtime,'etc/nsswitch.conf','passwd: files\ngroup: files\nshadow: files\nhosts: files dns\nnetworks: files\n')
         write(runtime,'etc/hostname','xtos-live\n')
         write(runtime,'etc/hosts','127.0.0.1 localhost xtos-live\n::1 localhost\n')

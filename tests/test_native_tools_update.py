@@ -10,6 +10,7 @@ import json
 import os
 import signal
 import socket
+import ssl
 import subprocess
 import sys
 import tempfile
@@ -40,6 +41,18 @@ class QuietHandler(SimpleHTTPRequestHandler):
 def serve(directory):
     handler = lambda *a, **kw: QuietHandler(*a, directory=str(directory), **kw)
     server = ThreadingHTTPServer(('127.0.0.1', 0), handler)
+    port = server.server_address[1]
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    return server, port
+
+
+def serve_tls(directory, certfile, keyfile):
+    handler = lambda *a, **kw: QuietHandler(*a, directory=str(directory), **kw)
+    server = ThreadingHTTPServer(('127.0.0.1', 0), handler)
+    context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+    context.load_cert_chain(certfile, keyfile)
+    server.socket = context.wrap_socket(server.socket, server_side=True)
     port = server.server_address[1]
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
@@ -77,18 +90,48 @@ class UpdateToolTests(unittest.TestCase):
         subprocess.run(['openssl', 'pkey', '-in', str(KEY), '-pubout', '-out', str(pub)], check=True)
         cls.pub = pub
         BUILD = cls.base / 'update'
+        subprocess.run(['bash', str(ROOT / 'scripts' / 'build_mbedtls.sh')], check=True)
+        mb = ROOT / 'tools' / 'xtos-native' / 'vendor' / 'mbedtls'
         subprocess.run(['gcc', '-O2', '-Wall', '-Wextra', '-Werror', '-static',
+                        '-DMBEDTLS_CONFIG_FILE="xtos_mbedtls_config.h"',
                         '-I', str(ROOT / 'tools' / 'xtos-native' / 'common'),
                         '-I', str(ROOT / 'tools' / 'xtos-native' / 'vendor' / 'monocypher'),
+                        '-I', str(mb / 'include'), '-I', str(mb),
                         '-o', str(BUILD), str(SRC),
                         str(ROOT / 'tools' / 'xtos-native' / 'vendor' / 'monocypher' / 'monocypher.c'),
-                        str(ROOT / 'tools' / 'xtos-native' / 'vendor' / 'monocypher' / 'monocypher-ed25519.c')],
+                        str(ROOT / 'tools' / 'xtos-native' / 'vendor' / 'monocypher' / 'monocypher-ed25519.c'),
+                        str(ROOT / '.build' / 'mbedtls' / 'libmbedtls_xtos.a')],
                        check=True)
         cls.mirror = cls.base / 'mirror'
         (cls.mirror / 'pool').mkdir(parents=True)
         cls.local_release = cls.base / 'xtos-release'
         cls.server, cls.port = serve(cls.mirror)
         cls.mirror_url = f'http://127.0.0.1:{cls.port}'
+        # local TLS fixture: self-signed CA + leaf for "localhost"
+        tls_dir = cls.base / 'tls'
+        tls_dir.mkdir()
+        ca_key = tls_dir / 'ca.key'
+        cls.ca_pem = tls_dir / 'ca.pem'
+        subprocess.run(['openssl', 'req', '-x509', '-newkey', 'rsa:2048', '-nodes',
+                        '-keyout', str(ca_key), '-out', str(cls.ca_pem),
+                        '-subj', '/CN=XTOS test CA', '-days', '2'], check=True, capture_output=True)
+        leaf_key = tls_dir / 'leaf.key'
+        leaf_csr = tls_dir / 'leaf.csr'
+        subprocess.run(['openssl', 'req', '-newkey', 'rsa:2048', '-nodes',
+                        '-keyout', str(leaf_key), '-out', str(leaf_csr),
+                        '-subj', '/CN=localhost'], check=True, capture_output=True)
+        leaf_pem = tls_dir / 'leaf.pem'
+        ext = tls_dir / 'leaf.ext'
+        ext.write_text('subjectAltName=DNS:localhost,IP:127.0.0.1\n')
+        subprocess.run(['openssl', 'x509', '-req', '-in', str(leaf_csr), '-CA', str(cls.ca_pem),
+                        '-CAkey', str(ca_key), '-CAcreateserial', '-out', str(leaf_pem),
+                        '-days', '2', '-extfile', str(ext)], check=True, capture_output=True)
+        cls.other_ca_pem = tls_dir / 'other-ca.pem'
+        subprocess.run(['openssl', 'req', '-x509', '-newkey', 'rsa:2048', '-nodes',
+                        '-keyout', str(tls_dir / 'other-ca.key'), '-out', str(cls.other_ca_pem),
+                        '-subj', '/CN=Other CA', '-days', '2'], check=True, capture_output=True)
+        cls.tls_server, cls.tls_port = serve_tls(cls.mirror, str(leaf_pem), str(leaf_key))
+        cls.tls_url = f'https://localhost:{cls.tls_port}'
 
     @classmethod
     def tearDownClass(cls):
@@ -229,6 +272,42 @@ class UpdateToolTests(unittest.TestCase):
         data = json.loads(r.stdout)
         self.assertEqual([a['name'] for a in data['artifacts']], ['x86.iso'])
         self.assertEqual(data['arch'], 'x86_64')
+
+    def test_12_https_fetch_and_download(self):
+        # native mbedTLS transport: index check and artifact download over TLS
+        (self.mirror / 'over-tls.iso').write_bytes(b'tls-bytes')
+        write_index(self.mirror, version='1.4.0', key=KEY, artifacts=[
+            {'name': 'over-tls.iso', 'arch': 'x86_64', 'kind': 'installer-iso',
+             'size': len(b'tls-bytes'), 'sha256': hashlib.sha256(b'tls-bytes').hexdigest(),
+             'url': f'{self.tls_url}/over-tls.iso'},
+        ])
+        r = self.run_update('check', installed='1.2.0',
+                            env_extra={'XTOS_UPDATE_MIRRORS': self.tls_url,
+                                       'XTOS_UPDATE_CA_BUNDLE': str(self.ca_pem)})
+        self.assertEqual(r.returncode, 1, r.stdout + r.stderr)
+        self.assertIn('Signature: verified', r.stdout)
+        self.assertIn('1.4.0', r.stdout)
+        dest = self.base / 'dest-tls'
+        r = self.run_update('download', '--dest', str(dest), installed='1.2.0',
+                            env_extra={'XTOS_UPDATE_MIRRORS': self.tls_url,
+                                       'XTOS_UPDATE_CA_BUNDLE': str(self.ca_pem)})
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertEqual((dest / 'over-tls.iso').read_bytes(), b'tls-bytes')
+
+    def test_13_https_wrong_ca_unreachable(self):
+        write_index(self.mirror, version='1.4.0', key=KEY)
+        r = self.run_update('check', installed='1.2.0',
+                            env_extra={'XTOS_UPDATE_MIRRORS': self.tls_url,
+                                       'XTOS_UPDATE_CA_BUNDLE': str(self.other_ca_pem)})
+        self.assertEqual(r.returncode, 2)
+        self.assertIn('unreachable', r.stdout + r.stderr)
+        # and a hostname that does not match the certificate must fail too
+        # (127.0.0.1 IS in the fixture SAN; 127.0.0.2 is not)
+        r = self.run_update('check', installed='1.2.0',
+                            env_extra={'XTOS_UPDATE_MIRRORS': f'https://127.0.0.2:{self.tls_port}',
+                                       'XTOS_UPDATE_CA_BUNDLE': str(self.ca_pem)})
+        self.assertEqual(r.returncode, 2)
+        write_index(self.mirror, version='1.2.0', key=KEY)
 
 
 if __name__ == '__main__':
