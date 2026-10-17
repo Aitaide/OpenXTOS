@@ -105,7 +105,22 @@ Mirror selection is by probing, not geo-IP: `XTOS_UPDATE_MIRRORS` defaults to
 `https://packages.xtos.cn https://packages.xtos.si` and mirrors are tried in
 order; a broken mirror is skipped and both carry identical signed content, so
 the network path never affects security. Signature verification uses the
-pinned key at `/usr/share/xtos/repo-public.pem` (override `XTOS_UPDATE_PUBKEY`).
+pinned key at `/usr/share/xtos/repo-public.pem` (override `XTOS_UPDATE_PUBKEY`):
+
+## Signature verification (native, no external crypto binary)
+
+`update` verifies the release index with a statically linked ed25519 check
+backed by vendored Monocypher (`tools/xtos-native/vendor/monocypher/`,
+BSD-2-Clause OR CC0-1.0). No `openssl` process is executed on the device at
+runtime; `openssl pkeyutl -rawin` remains the OFFLINE signing tool for
+release publishing, and the two are byte-compatible (RFC 8032 PureEdDSA,
+64-byte detached signatures over the raw index bytes — every test fixture
+is signed by openssl and verified by Monocypher, and vice versa via
+`openssl pkeyutl -verify` on the host).
+
+The pinned key file is the PEM SubjectPublicKeyInfo published on the mirrors
+(`/usr/share/xtos/repo-public.pem` in images); a raw 32-byte key file is also
+accepted. `XTOS_UPDATE_PUBKEY` overrides the path for testing.
 `XTOS_UPDATE_OFFLINE_INDEX` checks against a local index without network.
 Installed version comes from `/etc/xtos-release` (XTOS_VERSION=).
 

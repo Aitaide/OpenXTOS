@@ -79,7 +79,11 @@ class UpdateToolTests(unittest.TestCase):
         BUILD = cls.base / 'update'
         subprocess.run(['gcc', '-O2', '-Wall', '-Wextra', '-Werror', '-static',
                         '-I', str(ROOT / 'tools' / 'xtos-native' / 'common'),
-                        '-o', str(BUILD), str(SRC)], check=True)
+                        '-I', str(ROOT / 'tools' / 'xtos-native' / 'vendor' / 'monocypher'),
+                        '-o', str(BUILD), str(SRC),
+                        str(ROOT / 'tools' / 'xtos-native' / 'vendor' / 'monocypher' / 'monocypher.c'),
+                        str(ROOT / 'tools' / 'xtos-native' / 'vendor' / 'monocypher' / 'monocypher-ed25519.c')],
+                       check=True)
         cls.mirror = cls.base / 'mirror'
         (cls.mirror / 'pool').mkdir(parents=True)
         cls.local_release = cls.base / 'xtos-release'

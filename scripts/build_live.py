@@ -90,14 +90,21 @@ def pack_initramfs(stage, output, epoch):
 def build_native_tools(stage):
     """Compile XTOS-native C tools as static binaries into the staging rootfs."""
     include=ROOT/'tools'/'xtos-native'/'common'
+    vendor=ROOT/'tools'/'xtos-native'/'vendor'/'monocypher'
     for name,target in NATIVE_TOOLS.items():
         directory=ROOT/'tools'/'xtos-native'/name
         source=directory/(name+'.c')
         if not source.is_file():raise ValueError('native C tool source missing: '+name)
         output=stage/target
         output.parent.mkdir(parents=True,exist_ok=True)
+        sources=[source]
+        includes=['-I',str(include)]
+        if name=='update':
+            # update links the vendored Monocypher ed25519 verifier.
+            sources+=[vendor/'monocypher.c',vendor/'monocypher-ed25519.c']
+            includes+=['-I',str(vendor)]
         run([os.environ.get('CC','gcc'),'-O2','-Wall','-Wextra','-Werror','-static',
-             '-I',str(include),'-o',str(output),str(source)])
+             *includes,'-o',str(output),*[str(s) for s in sources]])
         output.chmod(0o755)
 
 

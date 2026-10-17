@@ -16,7 +16,11 @@
  * Exit codes: 0 up-to-date / success, 1 update available / mismatch,
  * 2 error (unreachable, bad signature, bad hash).
  *
- * Build: gcc -O2 -Wall -Wextra -Werror -static -o update update.c
+ * Build: gcc -O2 -Wall -Wextra -Werror -static \
+ *   -I tools/xtos-native/common -I tools/xtos-native/vendor/monocypher \
+ *   -o update update.c \
+ *   tools/xtos-native/vendor/monocypher/monocypher.c \
+ *   tools/xtos-native/vendor/monocypher/monocypher-ed25519.c
  */
 #define _GNU_SOURCE
 #include <ctype.h>
@@ -30,6 +34,7 @@
 #include <sys/wait.h>
 #include <unistd.h>
 #include "xtos_ui.h"
+#include "xtos_ed25519.h"
 
 #define LINE_BUF 65536
 #define URL_MAX 2048
@@ -346,11 +351,9 @@ static int fetch_url(const char *url, const char *dest, const char *tmpdir) {
 }
 
 static int verify_index_sig(const char *index_path, const char *sig_path) {
-    char openssl[4096];
-    if (find_in_path(openssl, sizeof(openssl), "openssl") < 0) return -1;
-    char *argv[12] = {openssl, "pkeyutl", "-verify", "-pubin", "-inkey", g_pubkey,
-                      "-rawin", "-in", (char *)index_path, "-sigfile", (char *)sig_path, NULL};
-    return run_capture_exit(argv, NULL);
+    /* Native ed25519 check against the pinned key (vendored Monocypher).
+     * No openssl binary is executed. */
+    return xed25519_verify_file(g_pubkey, index_path, sig_path);
 }
 
 static int parse_index(const char *path, struct index_latest *latest) {
