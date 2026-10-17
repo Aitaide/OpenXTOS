@@ -20,7 +20,7 @@ from userspace_root import open_owned_root
 
 REQUIRED_CONFIG=['CONFIG_PREEMPT_RT=y','CONFIG_SQUASHFS=y','CONFIG_SQUASHFS_ZLIB=y','CONFIG_OVERLAY_FS=y','CONFIG_BLK_DEV_LOOP=y','CONFIG_ISO9660_FS=y','CONFIG_USB_STORAGE=y','CONFIG_DEVTMPFS=y']
 RUNTIME_FILES={'xtos-start':'sbin/xtos-start','xtos-dhcp':'usr/libexec/xtos/xtos-dhcp','xtos-ssh':'usr/libexec/xtos/xtos-ssh','xtos-console':'usr/libexec/xtos/xtos-console'}
-NATIVE_TOOLS={'info':'usr/bin/info','net':'usr/bin/net','hw':'usr/bin/hw','clock':'usr/bin/clock','pkg':'usr/bin/pkg','fw':'usr/bin/fw','rt':'usr/bin/rt','persist':'usr/bin/persist','events':'usr/bin/events'}
+NATIVE_TOOLS={'info':'usr/bin/info','net':'usr/bin/net','hw':'usr/bin/hw','clock':'usr/bin/clock','pkg':'usr/bin/pkg','fw':'usr/bin/fw','rt':'usr/bin/rt','persist':'usr/bin/persist','events':'usr/bin/events','update':'usr/bin/update'}
 
 
 def run(command, **kwargs):
@@ -245,6 +245,8 @@ def build(args):
         write(runtime,'etc/sudoers','Defaults env_reset\nroot ALL=(ALL:ALL) ALL\n',0o440)
         # Record build-intentional replacements so `pkg verify` can attribute them
         write(runtime,'usr/share/xtos/pkg-overrides.txt','/etc/issue\n/etc/sudoers\n',0o644)
+        # Pinned source-signature key for `update` (default XTOS_UPDATE_PUBKEY path).
+        shutil.copy2(ROOT/'system/packages/repo-public.pem',runtime/'usr/share/xtos/repo-public.pem')
         write(runtime,'etc/nsswitch.conf','passwd: files\ngroup: files\nshadow: files\nhosts: files dns\nnetworks: files\n')
         write(runtime,'etc/hostname','xtos-live\n')
         write(runtime,'etc/hosts','127.0.0.1 localhost xtos-live\n::1 localhost\n')

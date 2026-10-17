@@ -77,3 +77,41 @@ caps (50,000 files / 2 GiB). Exit 0 + JSON verdict. Tests:
 An app store/market front-end is intentionally NOT part of this layer; a
 website package index can be generated later from signed repository metadata
 once real third-party applications exist.
+
+## 3. Release index and system update check
+
+`scripts/release_index.py` produces the signed release index published at the
+root of every XTOS package source:
+
+```
+release-index.json        canonical JSON: latest version, channel, commit, artifacts
+release-index.json.sig    detached ed25519 signature (same repository key)
+```
+
+The index is the network answer to "what is the latest XTOS". `create` takes a
+spec JSON (validated: version/commit/date format, https-only URLs, per-artifact
+sha256+size except `checksums` entries) and signs with the repository key;
+`verify` checks signature, canonical bytes and schema.
+
+`update` (tools/xtos-native/update, shipped in live images) is the client:
+
+```
+update check                 installed version vs signed index (exit 0 latest, 1 older)
+update download --dest DIR   download artifacts for this architecture, verified
+update compare <a> <b>        semver-style compare including prerelease ordering
+```
+
+Mirror selection is by probing, not geo-IP: `XTOS_UPDATE_MIRRORS` defaults to
+`https://packages.xtos.cn https://packages.xtos.si` and mirrors are tried in
+order; a broken mirror is skipped and both carry identical signed content, so
+the network path never affects security. Signature verification uses the
+pinned key at `/usr/share/xtos/repo-public.pem` (override `XTOS_UPDATE_PUBKEY`).
+`XTOS_UPDATE_OFFLINE_INDEX` checks against a local index without network.
+Installed version comes from `/etc/xtos-release` (XTOS_VERSION=).
+
+Tests: `tests/test_release_index.py` (create/verify/tamper/bad-spec),
+`tests/test_native_tools_update.py` (version ordering, signed check, mirror
+fallback, offline mode, download hash verification). The beta.4 index was
+generated from the verified website release data (artifacts cross-checked
+against GitHub release assets) and end-to-end verified: installed beta.4 →
+up-to-date, installed beta.1 → update available, arm64 filter correct.

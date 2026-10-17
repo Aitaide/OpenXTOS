@@ -25,8 +25,10 @@ python3 "$ROOT/tests/test_native_tools_persist.py"
 python3 "$ROOT/tests/test_native_tools_rt.py"
 python3 "$ROOT/tests/test_native_tools_ui.py"
 python3 "$ROOT/tests/test_native_tools_xpkg.py"
+python3 "$ROOT/tests/test_native_tools_update.py"
 python3 "$ROOT/tests/test_verify_xpkg.py"
 python3 -m unittest discover -s "$ROOT/tests" -p 'test_userspace_repo.py' -v
+python3 -m unittest discover -s "$ROOT/tests" -p 'test_release_index.py' -v
 python3 "$ROOT/tests/test_live_build.py"
 python3 "$ROOT/tests/test_live_runtime.py"
 python3 "$ROOT/tests/test_live_fsck_policy.py"
