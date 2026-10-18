@@ -946,6 +946,24 @@ struct app_stage {
     int third_party_signed; /* --pubkey given and signature verified */
 };
 
+/* mkdir -p semantics for the app root: the tool must not assume /opt (or any
+ * parent of XTOS_APP_ROOT) already exists in the running system. */
+static int app_mkdir_p(const char *path) {
+    char tmp[8192];
+    if (snprintf(tmp, sizeof(tmp), "%s", path) >= (int)sizeof(tmp)) return -1;
+    size_t len = strlen(tmp);
+    if (len == 0 || tmp[len - 1] == '/') tmp[len ? len - 1 : 0] = '\0';
+    for (char *p = tmp + 1; *p; p++) {
+        if (*p == '/') {
+            *p = '\0';
+            if (mkdir(tmp, 0755) < 0 && errno != EEXIST) return -1;
+            *p = '/';
+        }
+    }
+    if (mkdir(tmp, 0755) < 0 && errno != EEXIST) return -1;
+    return 0;
+}
+
 static int app_stage_verify(const char *file, const char *approot,
                             char *stage, size_t stage_n, struct app_stage *st,
                             const char *pubkey, char *err, size_t err_n) {
@@ -958,7 +976,7 @@ static int app_stage_verify(const char *file, const char *approot,
     size_t list_len = 0;
     spool[0] = '\0';
     if (access(file, R_OK) != 0) { snprintf(err, err_n, "pkg: cannot read %s", file); goto out; }
-    if (mkdir(approot, 0755) < 0 && errno != EEXIST) { snprintf(err, err_n, "pkg: cannot create %s", approot); goto out; }
+    if (app_mkdir_p(approot) < 0) { snprintf(err, err_n, "pkg: cannot create %s", approot); goto out; }
     if (sha256_file(file, st->xpkg_sha) < 0) { snprintf(err, err_n, "pkg: cannot hash %s", file); goto out; }
     if (app_join2(stage, stage_n, approot, ".stage-XXXXXX") < 0) { snprintf(err, err_n, "pkg: app root path too long"); goto out; }
     if (!mkdtemp(stage)) { snprintf(err, err_n, "pkg: cannot create staging dir"); goto out; }

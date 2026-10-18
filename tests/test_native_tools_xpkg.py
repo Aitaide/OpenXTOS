@@ -585,6 +585,22 @@ def main() -> int:
         if "1.1.0" not in r.stdout:
             failures.append(f"38 registry did not stay at 1.1.0: {r.stdout!r}")
 
+        # 39. the app root's PARENT may not exist in the running system
+        # (the live image carries no /opt unless the tool creates it):
+        # install must mkdir -p the whole chain, device parity with the
+        # in-guest proof that found this.
+        nested = td / "nested-root" / "deep" / "xtos-apps"  # intentionally NOT created
+        env2 = dict(os.environ)
+        env2["XTOS_APP_ROOT"] = str(nested)
+        r2 = subprocess.run([str(binary), "app", "install", str(signed1)],
+                            capture_output=True, text=True, env=env2, timeout=300)
+        if r2.returncode != 0:
+            failures.append(f"39 install with missing parent dirs failed: {r2.stderr!r}")
+        elif not (nested / "vendor-app" / "1.0.0").is_dir():
+            failures.append("39 nested app tree not created")
+        else:
+            print("  PASS install creates missing app-root parents")
+
     if failures:
         print(f"FAIL: {len(failures)}")
         for f in failures:

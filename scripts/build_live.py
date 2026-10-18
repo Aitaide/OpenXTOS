@@ -268,6 +268,11 @@ def build(args):
         write(runtime,'etc/nsswitch.conf','passwd: files\ngroup: files\nshadow: files\nhosts: files dns\nnetworks: files\n')
         write(runtime,'etc/hostname','xtos-live\n')
         write(runtime,'etc/hosts','127.0.0.1 localhost xtos-live\n::1 localhost\n')
+        # FHS dirs that no locked deb owns; /opt is the parent of /opt/xtos-apps
+        # (the xpkg install root). pkg creates missing parents itself, but the
+        # system tree should still carry the standard directory.
+        for d in ('opt','srv','mnt','media'):
+            (runtime/d).mkdir(exist_ok=True)
         # Resident NTP (xtos-start runs chronyd with this config). QEMU/isolated
         # networks leave the clock honestly unsynchronized; the `clock` tool only
         # claims synchronized when `chronyc tracking` confirms it. Replaces the
