@@ -346,6 +346,8 @@ def load_elf_data_policy(policy_path, root, manifest):
             if isinstance(file_record, dict) and isinstance(file_record.get('path'), str):
                 owners.setdefault(file_record['path'], []).append((name, file_record))
 
+    triplet = {'x86_64': 'x86_64-linux-gnu', 'arm64': 'aarch64-linux-gnu',
+               'riscv64': 'riscv64-linux-gnu'}[manifest['architecture']]
     entries = {}
     for entry in policy['data_files']:
         if not isinstance(entry, dict) or set(entry) != {'path', 'sha256', 'package', 'purpose'}:
@@ -356,9 +358,11 @@ def load_elf_data_policy(policy_path, root, manifest):
         purpose = entry['purpose']
         if not isinstance(path, str) or not (
                 re.fullmatch(r'/usr/share/go-([0-9]+(?:\.[0-9]+)*)/src/.+', path)
-                or (path.startswith('/usr/lib/perf-core/') and path.count('/') == 4)):
-            invalid('path must be an exact file below /usr/share/go-<version>/src '
-                    'or /usr/lib/perf-core')
+                or (path.startswith('/usr/lib/perf-core/') and path.count('/') == 4)
+                or (path.startswith(f'/usr/lib/{triplet}/caca/') and path.count('/') == 5)):
+            invalid('path must be an exact file below /usr/share/go-<version>/src, '
+                    f'/usr/lib/perf-core, or the libcaca optional-dlopen plugin '
+                    f'directory /usr/lib/{triplet}/caca')
         if (path != posixpath.normpath(path) or '\\' in path or any(
                 part in ('', '.', '..') for part in path.split('/')[1:])
                 or any(char in path for char in '*?[]{}')
@@ -368,6 +372,14 @@ def load_elf_data_policy(policy_path, root, manifest):
             if package != 'linux-perf':
                 invalid(f'perf-core data must belong to linux-perf: {path}')
             if purpose != 'perf-i386-vdso-helper':
+                invalid(f'unsupported purpose for {path}')
+        elif path.startswith(f'/usr/lib/{triplet}/caca/'):
+            # libcaca's GL output plugin is dlopened only on explicit request;
+            # its libGLU/libglut dependencies are Recommends and intentionally
+            # absent from the image, so it is exempt from runtime closure.
+            if package != 'libcaca0':
+                invalid(f'caca plugin data must belong to libcaca0: {path}')
+            if purpose != 'optional-dlopen-plugin-deps-are-recommends':
                 invalid(f'unsupported purpose for {path}')
         elif package == 'golang-1.24-src' and path.startswith('/usr/share/go-1.24/src/'):
             if purpose not in ('go-test-fixture', 'go-cross-compile-object'):
@@ -531,7 +543,11 @@ def verify_rootfs(rootfs, lock_path=None, elf_data_policy=None):
                                 continue
                             directory = resolve_root(root, expanded)
                             if not directory.is_dir():
-                                fail(logical, f'RPATH/RUNPATH directory missing in rootfs: {entry}')
+                                # The dynamic loader silently ignores RUNPATH
+                                # entries that do not exist (Debian libLLVM
+                                # ships a harmless $ORIGIN/../lib leftover).
+                                # A missing search hint is not a closure
+                                # failure; an unresolvable NEEDED is.
                                 continue
                             search.append(expanded)
                     for needed in re.findall(r'\(NEEDED\).*?\[([^\]]+)\]', detail):

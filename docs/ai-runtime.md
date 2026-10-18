@@ -24,6 +24,17 @@ networks) runs on this stack as-is: the guest-side proof loaded a
 convolutional ONNX graph (conv-relu-pool-gemm, opset 17) and matched
 host-computed golden outputs to within 2e-06.
 
+Vision INPUT is part of the locked image since lock v5 (517 packages):
+`ffmpeg` (7.1.x) + `v4l-utils` for decode/capture tooling, and the live
+kernel ships the V4L2 camera stack as MODULES (`MEDIA_SUPPORT=m`,
+`VIDEO_DEV=m`, `USB_VIDEO_CLASS=m` behind `MEDIA_CAMERA_SUPPORT=y`) so no
+media code touches the boot path until a camera appears. In-guest chain
+evidence: H.264 decode to pixels, ONNX inference on the decoded frame,
+cross-verified against the control host (maxdiff 4.8e-07); `uvcvideo` and
+friends load on demand. Physical camera capture is a hardware step — QEMU
+has no UVC device model, so the absence of /dev/video* under emulation is
+recorded rather than hidden.
+
 ## LLM inference: llama.cpp as a third-party xpkg
 
 LLM inference is not baked into the image. It installs through the normal
