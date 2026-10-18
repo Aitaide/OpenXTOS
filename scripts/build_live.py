@@ -20,7 +20,7 @@ from userspace_root import open_owned_root
 
 REQUIRED_CONFIG=['CONFIG_PREEMPT_RT=y','CONFIG_SQUASHFS=y','CONFIG_SQUASHFS_ZLIB=y','CONFIG_OVERLAY_FS=y','CONFIG_BLK_DEV_LOOP=y','CONFIG_ISO9660_FS=y','CONFIG_USB_STORAGE=y','CONFIG_DEVTMPFS=y']
 RUNTIME_FILES={'xtos-start':'sbin/xtos-start','xtos-dhcp':'usr/libexec/xtos/xtos-dhcp','xtos-ssh':'usr/libexec/xtos/xtos-ssh','xtos-console':'usr/libexec/xtos/xtos-console'}
-NATIVE_TOOLS={'info':'usr/bin/info','net':'usr/bin/net','hw':'usr/bin/hw','clock':'usr/bin/clock','pkg':'usr/bin/pkg','fw':'usr/bin/fw','rt':'usr/bin/rt','persist':'usr/bin/persist','events':'usr/bin/events','update':'usr/bin/update'}
+NATIVE_TOOLS={'info':'usr/bin/info','net':'usr/bin/net','hw':'usr/bin/hw','clock':'usr/bin/clock','pkg':'usr/bin/pkg','fw':'usr/bin/fw','rt':'usr/bin/rt','persist':'usr/bin/persist','events':'usr/bin/events','update':'usr/bin/update','cgroup':'usr/bin/cgroup'}
 
 
 def run(command, **kwargs):
@@ -252,7 +252,7 @@ def build(args):
         write(runtime,'etc/issue','XTOS Bate \\\\r  \\\\n \\\\l\n\n')
         motd=('\033[1;96m'+logo+'\033[0m'
               '\n \033[1mXTOS Bate Developer Live\033[0m  |  '+live_motd+'\n'
-              ' \033[2mCommands: info, net show, hw, clock, pkg, fw, rt status, events\033[0m\n\n')
+              ' \033[2mCommands: info, net show, hw, clock, pkg, fw, rt status, events, cgroup status\033[0m\n\n')
         write(runtime,'etc/motd',motd)
         write(runtime,'etc/profile','# XTOS system profile\nexport LANG=C.UTF-8 LC_ALL=C.UTF-8\nif [ "$EUID" = 0 ]; then PS1="\\\\[\\\\e[1;32m\\\\]xtos#\\\\[\\\\e[0m\\\\] "; else PS1="\\\\[\\\\e[1;36m\\\\]xtos$\\\\[\\\\e[0m\\\\] "; fi\n[ -f /etc/motd ] && [ -n "${PS1:-}" ] && cat /etc/motd\n')
         home=runtime/'home/xtos';shutil.copytree(runtime/'etc/skel',home,symlinks=True)

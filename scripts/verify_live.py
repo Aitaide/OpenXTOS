@@ -24,8 +24,8 @@ def sha(path):
 
 
 class Guest:
-    def __init__(self,candidate,evidence,key,mode,timeout,extra_drives=()):
-        self.e=evidence;self.mode=mode;self.timeout=timeout;self.key=key
+    def __init__(self,candidate,evidence,key,mode,timeout,extra_drives=(),smp=2):
+        self.e=evidence;self.mode=mode;self.timeout=timeout;self.key=key;smp=int(smp)
         self.data=bytearray();self.process=None;self.sock=None
         self.log=(evidence/(mode+'.serial.log')).open('wb')
         self.err=(evidence/(mode+'.qemu.log')).open('wb')
@@ -38,7 +38,7 @@ class Guest:
             disk.write(b'XTOS_INTERNAL_DISK_MUST_NOT_BE_WRITTEN\n');disk.truncate(32*1024*1024)
             disk.seek(32*1024*1024-32);disk.write(b'XTOS_LAST_BLOCK_DO_NOT_OVERWRITE!')
         self.before=sha(self.disk)
-        args=['qemu-system-x86_64','-machine','q35','-accel','tcg,thread=multi','-cpu','max','-m','3072','-smp','2','-display','none','-monitor','none','-no-reboot',
+        args=['qemu-system-x86_64','-machine','q35','-accel','tcg,thread=multi','-cpu','max','-m','3072','-smp',str(smp),'-display','none','-monitor','none','-no-reboot',
               '-serial',f'unix:{path},server=on,wait=off','-drive',f'file={self.disk},format=raw,if=none,id=sentinel','-device','nvme,drive=sentinel,serial=XTOS-LIVE-INTERNAL-TEST',
               '-netdev',f'user,id=net,hostfwd=tcp:127.0.0.1:{self.port}-:22','-device','virtio-net-pci,netdev=net']
         # optional extra drives: each entry is a list of raw qemu arguments

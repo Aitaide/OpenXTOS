@@ -20,6 +20,18 @@ set -e
 "$BB" syslogd -O /run/log/messages -s 256 -b 2 || echo 'XTOS_LOG syslogd-unavailable'
 "$BB" klogd || echo 'XTOS_LOG klogd-unavailable'
 echo 'XTOS_LOG ring=/run/log/messages size_kb=256 rotations=2 persistence=none'
+# cgroup v2 hierarchy: mounted at boot so cpuset partitions are ready before
+# any workload starts (RT vs AI/inference CPU pinning — see `cgroup status`).
+# The shipped kernel has CPUSETS but not MEMCG; the tool reports that honestly.
+if [ -x /usr/bin/cgroup ]; then
+    if /usr/bin/cgroup init >/run/cgroup-boot.log 2>&1; then
+        echo 'XTOS_CGROUP hierarchy=mounted mode=auto-partition-later'
+    else
+        echo 'XTOS_CGROUP init-failed see=/run/cgroup-boot.log'
+    fi
+else
+    echo 'XTOS_CGROUP missing'
+fi
 "$BB" hostname xtos-live
 /usr/sbin/ip link set lo up
 # Read the RTC for diagnosis only: a present RTC is not proof of synchronized time.
