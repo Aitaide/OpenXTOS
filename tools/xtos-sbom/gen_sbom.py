@@ -318,6 +318,12 @@ def normalize(bom: dict) -> str:
     for prop in trimmed.get("metadata", {}).get("properties", []):
         if prop["name"] == "xtos:generated-by-host":
             prop["value"] = "<stripped>"
+        if prop["name"] == "xtos:git-commit":
+            # Provenance, not content: the generating commit moves with every
+            # commit that carries this file, so comparing it makes the gate
+            # permanently red after any commit. Content freshness is what
+            # the check is for.
+            prop["value"] = "<stripped>"
     return json.dumps(trimmed, indent=2, sort_keys=True)
 
 
