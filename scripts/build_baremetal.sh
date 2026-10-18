@@ -4,9 +4,11 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 B="$ROOT/.build/baremetal"
 export BUILD_ROOT="$B" JOBS="${JOBS:-8}"
-mkdir -p "$B/driver" "$B/images" "$B/keys"
+mkdir -p "$B/driver" "$B/images"
+PUBLIC=0
+if [[ "${1:-}" == "--public" ]]; then PUBLIC=1; else mkdir -p "$B/keys"; fi
 for tool in grub-mkrescue grub-install xorriso dropbear dropbearkey sfdisk mkfs.ext4 mkfs.vfat cyclictest ssh-keygen; do command -v "$tool" >/dev/null; done
-if [ ! -s "$B/keys/maintenance" ]; then ssh-keygen -q -t ed25519 -N '' -f "$B/keys/maintenance" -C xtos-private-maintenance; fi
+if [[ "$PUBLIC" -eq 0 && ! -s "$B/keys/maintenance" ]]; then ssh-keygen -q -t ed25519 -N '' -f "$B/keys/maintenance" -C xtos-private-maintenance; fi
 # Adapt existing builders inside the isolated output directory; source builders stay unchanged.
 python3 - "$ROOT" "$B" <<'PY'
 import sys,pathlib
@@ -29,13 +31,20 @@ s=s.replace('CONFIG_FEATURE_SH_STANDALONE=y','# CONFIG_FEATURE_SH_STANDALONE is 
 (b/'driver/busybox.config').write_text(s)
 PY
 XTOS_IMAGE_TYPE="${XTOS_IMAGE_TYPE:-developer}" "$B/driver/build_system.sh"
-python3 - "$ROOT" "$B" <<'PY'
+# --public: distributable installer without an embedded maintenance key.
+# SSH remains disabled until the installed owner provisions authorized_keys.
+python3 - "$ROOT" "$B" "$PUBLIC" <<'PY'
 import pathlib,sys,subprocess,shutil,re,json,hashlib
 r,b=map(pathlib.Path,sys.argv[1:]); root=b/'rootfs'
 for name,target in [('init','init'),('xtos-start','sbin/xtos-start'),('xtos-install','usr/sbin/xtos-install'),('udhcpc.script','etc/udhcpc.script')]:
  p=root/target;p.parent.mkdir(parents=True,exist_ok=True);shutil.copy2(r/'system/baremetal'/name,p);p.chmod(0o755)
 (root/'root/.ssh').mkdir(parents=True,exist_ok=True)
-shutil.copy2(b/'keys/maintenance.pub',root/'root/.ssh/authorized_keys')
+if sys.argv[3]=='1':
+    # Public image: NO embedded key. Console login + user-supplied keys only;
+    # dropbear simply does not start until the installer sets one up.
+    (root/'root/.ssh/authorized_keys').write_text('')
+else:
+    shutil.copy2(b/'keys/maintenance.pub',root/'root/.ssh/authorized_keys')
 (root/'etc/shells').write_text('/bin/sh\n')
 # Preserve absolute ELF interpreter paths and every shared dependency, including symlink targets.
 def copy(p):
@@ -58,7 +67,7 @@ python3 "$ROOT/scripts/gen_system_identity.py" --output-dir "$B/rootfs/etc" \
     --image-type "${XTOS_IMAGE_TYPE:-developer}" --arch x86_64 --kernel-release "$release" \
     --build-id "${XTOS_BUILD_ID:-unknown}" --source-state "${XTOS_SOURCE_STATE:-unknown}" \
     --hardware-profile "${XTOS_HARDWARE_PROFILE:-unknown}"
-python3 - "$ROOT" "$B" <<'PY'
+python3 - "$ROOT" "$B" "$PUBLIC" <<'PY'
 import pathlib,sys,subprocess,json,hashlib
 r,b=map(pathlib.Path,sys.argv[1:]); root=b/'rootfs'
 files=subprocess.check_output(['git','-C',str(r),'ls-files','-z','--cached','--others','--exclude-standard']).split(b'\0')
@@ -66,7 +75,9 @@ h=hashlib.sha256()
 for f in sorted(x for x in files if x):
  p=r/f.decode()
  if p.is_file(): h.update(f+b'\0'+hashlib.sha256(p.read_bytes()).digest())
-manifest={'git_head':subprocess.check_output(['git','-C',str(r),'rev-parse','HEAD'],text=True).strip(),'tracked_current_source_sha256':h.hexdigest(),'dirty':subprocess.check_output(['git','-C',str(r),'status','--porcelain'],text=True),'kernel_config_sha256':hashlib.sha256((b/'kernel-build/.config').read_bytes()).hexdigest(),'maintenance_public_key_sha256':hashlib.sha256((b/'keys/maintenance.pub').read_bytes()).hexdigest()}
+manifest={'git_head':subprocess.check_output(['git','-C',str(r),'rev-parse','HEAD'],text=True).strip(),'tracked_current_source_sha256':h.hexdigest(),'dirty':subprocess.check_output(['git','-C',str(r),'status','--porcelain'],text=True),'kernel_config_sha256':hashlib.sha256((b/'kernel-build/.config').read_bytes()).hexdigest()}
+if sys.argv[3] != '1':
+    manifest['maintenance_public_key_sha256']=hashlib.sha256((b/'keys/maintenance.pub').read_bytes()).hexdigest()
 # Keep private provenance separate from the generated product identity.
 (root/'etc/xtos-baremetal-build.json').write_text(json.dumps(manifest,indent=2)+'\n')
 (b/'images/build-manifest.json').write_text(json.dumps(manifest,indent=2)+'\n')
@@ -100,6 +111,21 @@ menuentry 'XTOS recovery (installation disabled)' {
  initrd /boot/initramfs.gz
 }
 EOF
+if [[ "$PUBLIC" -eq 1 ]]; then
+    grub-mkrescue -o "$B/images/xtos-installer-public-x86_64.iso" "$B/iso"
+    python3 - "$B" <<'PY'
+import pathlib,sys,json,hashlib
+b=pathlib.Path(sys.argv[1]); p=b/'images/build-manifest.json'
+manifest=json.loads(p.read_text())
+iso=b/'images/xtos-installer-public-x86_64.iso'
+manifest.pop('maintenance_public_key_sha256',None)
+manifest['installer_artifact']={'filename':iso.name,'sha256':hashlib.sha256(iso.read_bytes()).hexdigest(),'bytes':iso.stat().st_size,'variant':'public','ssh':'no embedded key; user provisions keys post-install','hardware_support':'Intel X722 10GBASE-T PCI 8086:37d2; CONFIG_I40E=y'}
+p.write_text(json.dumps(manifest,indent=2)+'\n')
+PY
+    (cd "$B/images"; sha256sum xtos-installer-public-x86_64.iso boot.cpio.gz installer.cpio.gz xtos-bzImage build-manifest.json > SHA256SUMS-public)
+    echo "XTOS_BAREMETAL_BUILD=PASS public-iso=$B/images/xtos-installer-public-x86_64.iso"
+    exit 0
+fi
 grub-mkrescue -o "$B/images/xtos-private-usb.iso" "$B/iso"
 # Distinct hardware-recovery artifact; retain the standard name for existing verifiers.
 cp "$B/images/xtos-private-usb.iso" "$B/images/xtos-private-usb-x722.iso"
