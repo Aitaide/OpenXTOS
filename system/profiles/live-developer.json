@@ -22,6 +22,7 @@
     "dmsetup",
     "dropbear-bin",
     "e2fsprogs",
+    "ffmpeg",
     "firmware-ath9k-htc",
     "firmware-atheros",
     "firmware-iwlwifi",
@@ -40,6 +41,7 @@
     "sudo",
     "trace-cmd",
     "usbutils",
+    "v4l-utils",
     "wpasupplicant"
   ],
   "required_commands": [
@@ -49,6 +51,9 @@
     "chronyd",
     "mksquashfs",
     "cyclictest",
+    "ffmpeg",
+    "ffprobe",
+    "v4l2-ctl",
     "nft",
     "python3 -c \"import numpy\"",
     "python3 -c \"import scipy\"",

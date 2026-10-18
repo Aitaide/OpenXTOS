@@ -90,6 +90,29 @@ GPU interrupts and driver threads are hostile to RT latency. For large-model
 work, call out to a remote inference endpoint; the local CPU handles
 latency-tolerant or offline work.
 
+## Remote inference: the production gateway
+
+Heavy-generation work goes to a remote OpenAI-compatible gateway (New API)
+on the project's own server. Proven in-guest on a really-booted live
+system: TLS egress with real certificate validation (Let's Encrypt,
+default trust store), authenticated `GET /v1/models` against the production
+gateway (Bearer key, catalog parsed), and the gateway rejecting a bad key
+with 401. The same HTTP+Bearer+JSON path carries chat/completions once a
+text model is reachable.
+
+Two deployment gaps live on the GATEWAY side, not in XTOS (recorded so
+nobody mistakes them for system limitations):
+
+1. The gateway currently has no TLS front (plain HTTP on its IP). Put the
+   existing HTTPS nginx in front of it before production use.
+2. Its channel catalog is video-generation only (seedance family); a
+   chat-capable LLM channel is a one-action gateway configuration change.
+   XTOS needs zero changes for either.
+
+Inference-cost honesty: the proof stops at the catalog call. Spending
+quota on an actual generation is a business decision, not an engineering
+milestone — the transport, auth and parsing are identical.
+
 ## Rules for AI workloads on XTOS
 
 1. Inference processes run `SCHED_OTHER`, pinned to their partition.
