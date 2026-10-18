@@ -279,6 +279,9 @@ def build(args):
         # deb-shipped /etc/chrony/chrony.conf — recorded in pkg-overrides.
         write(runtime,'etc/chrony/chrony.conf',
               '# XTOS resident NTP daemon (started by xtos-start).\n'
+              '# user root: the live system is single-user root; the Debian default\n'
+              '# (drop to the chrony user) fails because the runtime dirs are root-owned.\n'
+              'user root\n'
               'driftfile /run/chrony/drift\n'
               'pidfile /run/chrony/chronyd.pid\n'
               'logdir /run/log\n'
