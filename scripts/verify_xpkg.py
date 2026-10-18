@@ -11,8 +11,10 @@ import hashlib
 import io
 import json
 import re
+import subprocess
 import sys
 import tarfile
+import tempfile
 from pathlib import Path
 
 NAME_RE = re.compile(r'^[a-z0-9][a-z0-9-]{0,63}$')
@@ -39,7 +41,7 @@ def member_ok(name):
     return True
 
 
-def verify(path, arch):
+def verify(path, arch, pubkey=None):
     errors, checks = [], []
     xpkg = Path(path)
     if not xpkg.is_file():
@@ -100,6 +102,15 @@ def verify(path, arch):
     if len(manifest_raw) > MAX_MANIFEST:
         errors.append('manifest oversized')
     checks.append('members')
+    # xpkg/ holds metadata only; the device installer rejects anything else.
+    allowed_xpkg = {'xpkg/SHA256SUMS', 'xpkg/manifest.json', 'xpkg/signature.bin'}
+    for name in members:
+        if name.startswith('xpkg/') and name not in allowed_xpkg:
+            errors.append(f'unexpected xpkg member: {name}')
+        if name == 'xpkg/signature.bin' and len(members[name][0]) != 64:
+            errors.append('xpkg/signature.bin must be exactly 64 bytes')
+    if errors:
+        return False, {'errors': errors, 'checks': checks}
     try:
         manifest = json.loads(manifest_raw)
     except json.JSONDecodeError as exc:
@@ -171,6 +182,25 @@ def verify(path, arch):
             elif int.from_bytes(data[18:20], 'little') != machine_want:
                 errors.append(f'ELF machine mismatch in {rel}: want {machine_want:#x}')
     checks.append('elf-policy')
+    # Optional third-party signature: with --pubkey the package must carry a
+    # 64-byte ed25519 signature over the exact manifest bytes.
+    signature_entry = members.get('xpkg/signature.bin')
+    signature = signature_entry[0] if signature_entry is not None else None
+    if pubkey:
+        if signature is None:
+            errors.append('no xpkg/signature.bin in package (use make_xpkg.py --sign)')
+        else:
+            with tempfile.TemporaryDirectory() as td:
+                msg, sig = Path(td) / 'manifest.json', Path(td) / 'signature.bin'
+                msg.write_bytes(manifest_raw)
+                sig.write_bytes(signature)
+                r = subprocess.run(['openssl', 'pkeyutl', '-verify', '-pubin',
+                                    '-inkey', str(pubkey), '-rawin',
+                                    '-in', str(msg), '-sigfile', str(sig)],
+                                   capture_output=True, text=True)
+                if r.returncode != 0:
+                    errors.append('third-party signature verification failed')
+        checks.append('signature')
     verdict = {
         'passed': not errors,
         'xpkg': str(xpkg),
@@ -180,6 +210,8 @@ def verify(path, arch):
         'architecture': manifest.get('architecture'),
         'files': len(sums),
         'bytes': total,
+        'signed': signature is not None,
+        'signature_verified': bool(pubkey) and not any('signature' in e for e in errors),
         'checks': checks,
         'errors': errors,
     }
@@ -190,9 +222,11 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--xpkg', required=True)
     parser.add_argument('--arch', default='x86_64')
+    parser.add_argument('--pubkey', default=None,
+                        help='verify xpkg/signature.bin (ed25519 over the manifest bytes)')
     parser.add_argument('--report')
     args = parser.parse_args()
-    ok, verdict = verify(args.xpkg, args.arch)
+    ok, verdict = verify(args.xpkg, args.arch, args.pubkey)
     if args.report:
         Path(args.report).write_text(json.dumps(verdict, indent=2, sort_keys=True) + '\n')
     print(json.dumps(verdict, indent=2, sort_keys=True))

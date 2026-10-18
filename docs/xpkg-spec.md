@@ -1,11 +1,11 @@
 # xpkg Format Specification (v1)
 
-Status: stable / 2026-10-16
+Status: stable / 2026-10-16; v1.1 third-party signatures added 2026-10-18
 
 xpkg is the XTOS application package format for third-party apps. System base
 packages are NOT xpkg — they stay in the locked deb repository (see
 `docs/package_sources.md`). Applications install into an isolated tree and
-never modify the system closure.
+never modify the system closure. Developer workflow: `docs/xpkg-dev-guide.md`.
 
 ## Archive
 
@@ -15,6 +15,8 @@ never modify the system closure.
 payload/...          application payload (regular files and directories only)
 xpkg/manifest.json   canonical metadata (see below)
 xpkg/SHA256SUMS      "<64 lowercase hex>  payload/<path>" lines, sha256sum format
+xpkg/signature.bin   optional (v1.1): 64-byte detached ed25519 signature
+                     over the exact xpkg/manifest.json bytes
 ```
 
 Rules (enforced by `pkg app install` and by the `scripts/verify_xpkg.py`
@@ -85,13 +87,23 @@ provided by the signed repository index that lists admitted packages.
 ## CLI (pkg app ...)
 
 ```
-pkg app install <file.xpkg>   verify + install (refuses existing app/version)
-pkg app upgrade <file.xpkg>   verify + upgrade an installed application
+pkg app install <file.xpkg> [--pubkey <key>]   verify + install (refuses existing app/version)
+pkg app upgrade <file.xpkg> [--pubkey <key>]   verify + upgrade an installed application
 pkg app remove <name>         remove installed app + registry entry
 pkg app list                  registry + on-disk reconciliation
 pkg app verify <name>         re-hash installed payload against SHA256SUMS
 pkg app info <name>           manifest details + install record
 ```
+
+`--pubkey` (PEM SPKI or raw 32-byte ed25519 key) upgrades the install from
+integrity-only to third-party authenticated: the package must carry
+`xpkg/signature.bin`, a 64-byte detached ed25519 signature over the exact
+manifest bytes. Because the manifest's `files` array pins every payload
+path+size+sha256 and every payload byte is re-hashed before activation,
+vendor key -> manifest -> payload is a complete chain. Without `--pubkey`,
+signature bytes are inert metadata and v1 integrity semantics apply
+unchanged. There is deliberately no key registry or revocation service in
+v1.1: revocation is "stop passing the key" (see docs/xpkg-dev-guide.md).
 
 `--json` output is supported for every command. Piped output stays plain
 ASCII (shared `xtos_ui.h` styling rules).

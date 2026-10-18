@@ -28,8 +28,12 @@ def main() -> int:
 
     with tempfile.TemporaryDirectory() as td:
         binary = Path(td) / "pkg"
-        subprocess.run(["gcc", "-O2", "-Wall", "-Wextra", "-Werror", "-static", "-I", str(ROOT / "tools" / "xtos-native" / "common"),
-                        "-o", str(binary), str(SRC)], check=True)
+        mon = ROOT / "tools" / "xtos-native" / "vendor" / "monocypher"
+        subprocess.run(["gcc", "-O2", "-Wall", "-Wextra", "-Werror", "-static",
+                        "-I", str(ROOT / "tools" / "xtos-native" / "common"),
+                        "-I", str(mon),
+                        "-o", str(binary), str(SRC),
+                        str(mon / "monocypher.c"), str(mon / "monocypher-ed25519.c")], check=True)
         target = rootfs / "usr/bin/.pkg-selftest"
         shutil.copy2(binary, target)
 

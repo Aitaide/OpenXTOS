@@ -18,6 +18,7 @@
 #include "xtos_ui.h"
 #include "xtos_gzip.h"
 #include "xtos_ustar.h"
+#include "xtos_ed25519.h"
 
 /* Minimal SHA-256 (public-domain style implementation) */
 typedef struct { uint32_t state[8]; uint64_t bitlen; uint8_t data[64]; uint32_t datalen; } sha256_ctx;
@@ -942,11 +943,12 @@ struct app_stage {
     char xpkg_sha[72];
     int n_payload;
     long total_bytes;
+    int third_party_signed; /* --pubkey given and signature verified */
 };
 
 static int app_stage_verify(const char *file, const char *approot,
                             char *stage, size_t stage_n, struct app_stage *st,
-                            char *err, size_t err_n) {
+                            const char *pubkey, char *err, size_t err_n) {
     struct app_entry *files = NULL, *sums = NULL, *mfiles = NULL;
     int n_files = 0, cap_files = 0, n_sums = 0, cap_sums = 0, n_mfiles = 0, cap_mfiles = 0;
     int staged = 0;
@@ -1030,7 +1032,8 @@ static int app_stage_verify(const char *file, const char *approot,
     st->total_bytes = 0;
     for (int i = 0; i < n_files; i++) {
         if (strncmp(files[i].path, "payload/", 8) == 0) { st->n_payload++; st->total_bytes += files[i].size; }
-        else if (strcmp(files[i].path, "xpkg/SHA256SUMS") != 0 && strcmp(files[i].path, "xpkg/manifest.json") != 0) {
+        else if (strcmp(files[i].path, "xpkg/SHA256SUMS") != 0 && strcmp(files[i].path, "xpkg/manifest.json") != 0
+                 && strcmp(files[i].path, "xpkg/signature.bin") != 0) {
             snprintf(err, err_n, "pkg: unexpected archive member '%s'", files[i].path); goto out;
         }
     }
@@ -1055,6 +1058,44 @@ static int app_stage_verify(const char *file, const char *approot,
         }
         pi++;
     }
+    /* Optional third-party authentication (--pubkey): the package must carry
+     * a 64-byte detached ed25519 signature over the exact manifest bytes.
+     * The manifest's files array has already been proven to pin every payload
+     * file (path+size+sha256) and every payload byte has been re-hashed, so
+     * key -> manifest -> payload is a complete chain. Signature bytes in the
+     * archive are inert metadata when no key is supplied: v1 trust (integrity
+     * only) is unchanged for unsigned installs. */
+    if (pubkey) {
+        uint8_t pub[32];
+        if (xed25519_load_pub(pubkey, pub) < 0) {
+            snprintf(err, err_n, "pkg: cannot load third-party public key '%s'", pubkey); goto out;
+        }
+        char sigpath[8192];
+        if (app_join2(sigpath, sizeof(sigpath), stage, "xpkg/signature.bin") < 0) {
+            snprintf(err, err_n, "pkg: path too long"); goto out;
+        }
+        FILE *fsig = fopen(sigpath, "rb");
+        if (!fsig) { snprintf(err, err_n, "pkg: package carries no xpkg/signature.bin (unsigned)"); goto out; }
+        uint8_t sig[64];
+        size_t sn = fread(sig, 1, sizeof(sig), fsig);
+        int sextra = fgetc(fsig);
+        fclose(fsig);
+        if (sn != sizeof(sig) || sextra != EOF) {
+            snprintf(err, err_n, "pkg: xpkg/signature.bin must be exactly 64 bytes"); goto out;
+        }
+        FILE *fm = fopen(metapath, "rb");
+        if (!fm) { snprintf(err, err_n, "pkg: cannot re-read manifest for signature check"); goto out; }
+        size_t msz = mst.st_size > 0 ? (size_t)mst.st_size : 1;
+        uint8_t *mbuf = malloc(msz);
+        if (!mbuf) { fclose(fm); snprintf(err, err_n, "pkg: out of memory"); goto out; }
+        size_t mn = fread(mbuf, 1, msz, fm);
+        fclose(fm);
+        if (mn != msz) { free(mbuf); snprintf(err, err_n, "pkg: manifest changed during verification"); goto out; }
+        int vr = crypto_ed25519_check(sig, pub, mbuf, mn);
+        free(mbuf);
+        if (vr != 0) { snprintf(err, err_n, "pkg: third-party signature verification failed"); goto out; }
+        st->third_party_signed = 1;
+    }
     rc = 0;
     staged = 0; /* success: caller owns the stage dir */
 out:
@@ -1065,7 +1106,7 @@ out:
     return rc;
 }
 
-static int cmd_app_install(int json, const char *file) {
+static int cmd_app_install(int json, const char *file, const char *pubkey) {
     char rootbuf[8192];
     const char *approot = app_root(rootbuf, sizeof(rootbuf));
     if (geteuid() != 0 && !getenv("XTOS_APP_ROOT")) {
@@ -1079,7 +1120,7 @@ static int cmd_app_install(int json, const char *file) {
     int lockfd = -1;
     int rc = 1;
     int staged = 0;
-    if (app_stage_verify(file, approot, stage, sizeof(stage), &st, err, sizeof(err)) < 0) {
+    if (app_stage_verify(file, approot, stage, sizeof(stage), &st, pubkey, err, sizeof(err)) < 0) {
         fprintf(stderr, "%s\n", err);
         return 1;
     }
@@ -1120,12 +1161,14 @@ static int cmd_app_install(int json, const char *file) {
     flock(lockfd, LOCK_UN); close(lockfd); lockfd = -1;
     rc = 0;
     if (json)
-        printf("{\"status\": \"installed\", \"name\": \"%s\", \"version\": \"%s\", \"files\": %d, \"bytes\": %ld, \"xpkg_sha256\": \"%s\", \"path\": \"%s\"}\n",
-               st.meta.name, st.meta.version, st.n_payload, st.total_bytes, st.xpkg_sha, target);
+        printf("{\"status\": \"installed\", \"name\": \"%s\", \"version\": \"%s\", \"files\": %d, \"bytes\": %ld, \"xpkg_sha256\": \"%s\", \"third_party_signed\": %s, \"path\": \"%s\"}\n",
+               st.meta.name, st.meta.version, st.n_payload, st.total_bytes, st.xpkg_sha,
+               st.third_party_signed ? "true" : "false", target);
     else {
         xui_init();
         printf("%s%s%s XTOS_PKG_APP_INSTALL name=%s version=%s files=%d bytes=%ld status=%s", XUI_LABEL_S, "PKG_APP", XUI_RESET_S,
                st.meta.name, st.meta.version, st.n_payload, st.total_bytes, "installed");
+        if (st.third_party_signed) printf(" third-party-signature=verified");
         XUI_OK("\n");
     }
 cleanup:
@@ -1178,7 +1221,7 @@ out:
  * write is the commit point (rolled back by removing the new payload), and
  * the old payload is dropped only after the commit. A stale target directory
  * left by an interrupted upgrade is cleaned up on the next attempt. */
-static int cmd_app_upgrade(int json, const char *file) {
+static int cmd_app_upgrade(int json, const char *file, const char *pubkey) {
     char rootbuf[8192];
     const char *approot = app_root(rootbuf, sizeof(rootbuf));
     if (geteuid() != 0 && !getenv("XTOS_APP_ROOT")) {
@@ -1192,7 +1235,7 @@ static int cmd_app_upgrade(int json, const char *file) {
     int lockfd = -1;
     int rc = 1;
     int staged = 0;
-    if (app_stage_verify(file, approot, stage, sizeof(stage), &st, err, sizeof(err)) < 0) {
+    if (app_stage_verify(file, approot, stage, sizeof(stage), &st, pubkey, err, sizeof(err)) < 0) {
         fprintf(stderr, "%s\n", err);
         return 1;
     }
@@ -1245,12 +1288,14 @@ static int cmd_app_upgrade(int json, const char *file) {
     flock(lockfd, LOCK_UN); close(lockfd); lockfd = -1;
     rc = 0;
     if (json)
-        printf("{\"status\": \"upgraded\", \"name\": \"%s\", \"version\": \"%s\", \"from_version\": \"%s\", \"files\": %d, \"bytes\": %ld, \"xpkg_sha256\": \"%s\", \"path\": \"%s\"}\n",
-               st.meta.name, st.meta.version, oldver, st.n_payload, st.total_bytes, st.xpkg_sha, target);
+        printf("{\"status\": \"upgraded\", \"name\": \"%s\", \"version\": \"%s\", \"from_version\": \"%s\", \"files\": %d, \"bytes\": %ld, \"xpkg_sha256\": \"%s\", \"third_party_signed\": %s, \"path\": \"%s\"}\n",
+               st.meta.name, st.meta.version, oldver, st.n_payload, st.total_bytes, st.xpkg_sha,
+               st.third_party_signed ? "true" : "false", target);
     else {
         xui_init();
         printf("%s%s%s XTOS_PKG_APP_UPGRADE name=%s version=%s from_version=%s files=%d bytes=%ld status=%s", XUI_LABEL_S, "PKG_APP", XUI_RESET_S,
                st.meta.name, st.meta.version, oldver, st.n_payload, st.total_bytes, "upgraded");
+        if (st.third_party_signed) printf(" third-party-signature=verified");
         XUI_OK("\n");
     }
 cleanup:
@@ -1426,16 +1471,20 @@ static int cmd_app(int json, int argc, char **argv) {
     if (argc < 1) {
         fprintf(stderr,
             "usage: pkg app <command>\n"
-            "  pkg app install <file.xpkg>   verify and install an application package\n"
-            "  pkg app upgrade <file.xpkg>   verify and upgrade an installed application\n"
+            "  pkg app install <file.xpkg> [--pubkey <key>]  verify and install an application package\n"
+            "    --pubkey: require a valid xpkg/signature.bin (ed25519 over the manifest\n"
+            "              bytes) against this vendor key (PEM SPKI or raw 32 bytes)\n"
+            "  pkg app upgrade <file.xpkg> [--pubkey <key>]  verify and upgrade an installed application\n"
             "  pkg app remove <name>         remove an installed application\n"
             "  pkg app list                  list installed applications\n"
             "  pkg app verify <name>         re-verify installed application files\n"
             "  pkg app info <name>           show application manifest details\n");
         return 2;
     }
-    if (strcmp(argv[0], "install") == 0 && argc == 2) return cmd_app_install(json, argv[1]);
-    if (strcmp(argv[0], "upgrade") == 0 && argc == 2) return cmd_app_upgrade(json, argv[1]);
+    if (strcmp(argv[0], "install") == 0 && (argc == 2 || (argc == 4 && strcmp(argv[2], "--pubkey") == 0)))
+        return cmd_app_install(json, argv[1], argc == 4 ? argv[3] : NULL);
+    if (strcmp(argv[0], "upgrade") == 0 && (argc == 2 || (argc == 4 && strcmp(argv[2], "--pubkey") == 0)))
+        return cmd_app_upgrade(json, argv[1], argc == 4 ? argv[3] : NULL);
     if (strcmp(argv[0], "remove") == 0 && argc == 2) return cmd_app_remove(json, argv[1]);
     if (strcmp(argv[0], "list") == 0 && argc == 1) return cmd_app_list(json);
     if (strcmp(argv[0], "verify") == 0 && (argc == 2 || argc == 3)) return cmd_app_verify(json, argv[1], argc == 3 ? argv[2] : NULL);

@@ -27,7 +27,8 @@ def sha(data):
 def build_xpkg(path, *, name="demo-app", version="1.0.0", arch="x86_64",
                payload=None, omit_sums=False, corrupt_sums=False,
                skip_in_sums=(), extra_raw=(), manifest_override=None,
-               tar_format=None, compresslevel=None):
+               tar_format=None, compresslevel=None, signing_key=None,
+               signature_bytes=None):
     payload = payload if payload is not None else {
         "bin/tool": b"#!/bin/sh\necho hello\n",
         "share/data.txt": b"0123456789abcdef",
@@ -42,6 +43,17 @@ def build_xpkg(path, *, name="demo-app", version="1.0.0", arch="x86_64",
     if manifest_override:
         manifest.update(manifest_override)
     manifest_bytes = json.dumps(manifest, indent=2, sort_keys=True).encode() + b"\n"
+    signature = signature_bytes
+    if signing_key:
+        # ed25519 detached signature over the exact manifest bytes — the same
+        # construction scripts/make_xpkg.py produces and pkg verifies in C.
+        with tempfile.TemporaryDirectory() as sdir:
+            msg = Path(sdir) / "manifest.json"
+            msg.write_bytes(manifest_bytes)
+            sigp = Path(sdir) / "sig.bin"
+            subprocess.run(["openssl", "pkeyutl", "-sign", "-inkey", str(signing_key),
+                            "-rawin", "-in", str(msg), "-out", str(sigp)], check=True)
+            signature = sigp.read_bytes()
     sums_lines = [f"{sha(data)}  payload/{rel}" for rel, data in sorted(payload.items())
                   if rel not in skip_in_sums]
     if corrupt_sums:
@@ -81,6 +93,8 @@ def build_xpkg(path, *, name="demo-app", version="1.0.0", arch="x86_64",
         if not omit_sums:
             add_file("xpkg/SHA256SUMS", sums_bytes)
         add_file("xpkg/manifest.json", manifest_bytes)
+        if signature is not None:
+            add_file("xpkg/signature.bin", signature)
         for info, data in extra_raw:
             tar.addfile(info, io.BytesIO(data) if info.size > 0 else None)
 
@@ -107,7 +121,11 @@ def main() -> int:
         binary = td / "pkg"
         subprocess.run(["gcc", "-O2", "-Wall", "-Wextra", "-Werror", "-static",
                         "-I", str(ROOT / "tools" / "xtos-native" / "common"),
-                        "-o", str(binary), str(SRC)], check=True)
+                        "-I", str(ROOT / "tools" / "xtos-native" / "vendor" / "monocypher"),
+                        "-o", str(binary), str(SRC),
+                        str(ROOT / "tools" / "xtos-native" / "vendor" / "monocypher" / "monocypher.c"),
+                        str(ROOT / "tools" / "xtos-native" / "vendor" / "monocypher" / "monocypher-ed25519.c")],
+                       check=True)
         approot = td / "apps"
         approot.mkdir()
 
@@ -462,6 +480,110 @@ def main() -> int:
         r = run("app", "verify", "demo-app")
         if r.returncode != 0 or "corrupt=0" not in r.stdout:
             failures.append(f"final verify failed: {r.stdout!r}")
+
+        # ---- third-party signatures (v1.1): key -> manifest -> payload ----
+        devkey = td / "dev-ed25519.pem"
+        devpub = td / "dev-pub.pem"
+        otherkey = td / "other-ed25519.pem"
+        otherpub = td / "other-pub.pem"
+        subprocess.run(["openssl", "genpkey", "-algorithm", "ed25519", "-out", str(devkey)],
+                       check=True, capture_output=True)
+        subprocess.run(["openssl", "pkey", "-in", str(devkey), "-pubout", "-out", str(devpub)],
+                       check=True, capture_output=True)
+        subprocess.run(["openssl", "genpkey", "-algorithm", "ed25519", "-out", str(otherkey)],
+                       check=True, capture_output=True)
+        subprocess.run(["openssl", "pkey", "-in", str(otherkey), "-pubout", "-out", str(otherpub)],
+                       check=True, capture_output=True)
+
+        # 31. signed package installs without a key too (signature is inert metadata)
+        signed1 = td / "signed-1.0.0.xpkg"
+        build_xpkg(signed1, name="vendor-app", version="1.0.0", signing_key=devkey)
+        r = run("app", "install", str(signed1))
+        if r.returncode != 0:
+            failures.append(f"31 signed-install-nokey failed: {r.stderr!r}")
+        elif "status=installed" not in r.stdout:
+            failures.append(f"31 signed install without key bad output: {r.stdout!r}")
+        else:
+            r = run("--json", "app", "info", "vendor-app")
+            if '"version": "1.0.0"' not in r.stdout:
+                failures.append(f"31 app info failed after keyless signed install: {r.stdout!r}")
+            else:
+                print("  PASS signed install without key")
+
+        # 32. install with --pubkey verifies and reports it
+        signed2 = td / "signed-2.0.0.xpkg"
+        build_xpkg(signed2, name="vendor-app2", version="2.0.0", signing_key=devkey)
+        r = run("--json", "app", "install", str(signed2), "--pubkey", str(devpub))
+        if r.returncode != 0 or '"third_party_signed": true' not in r.stdout:
+            failures.append(f"32 signed install with key failed: {r.stdout!r} {r.stderr!r}")
+        else:
+            print("  PASS signed install with key")
+
+        # 33. wrong key is refused, nothing left behind (fresh app so existence is meaningful)
+        signed3 = td / "signed-3.0.0.xpkg"
+        build_xpkg(signed3, name="vendor-app7", version="3.0.0", signing_key=devkey)
+        r = run("app", "install", str(signed3), "--pubkey", str(otherpub))
+        expect_fail(r, "33 wrong-key install")
+        if "signature verification failed" not in r.stderr:
+            failures.append(f"33 unexpected refusal text: {r.stderr!r}")
+        if (approot / "vendor-app7").exists():
+            failures.append("33 wrong-key install left an app directory")
+        if any(approot.glob(".stage-*")):
+            failures.append("33 wrong-key install left staging dir")
+
+        # 34. signature over a different manifest must not verify
+        with tempfile.TemporaryDirectory() as sdir:
+            msg = Path(sdir) / "manifest.json"
+            msg.write_bytes(b'{"decoy": true}\n')
+            sigp = Path(sdir) / "sig.bin"
+            subprocess.run(["openssl", "pkeyutl", "-sign", "-inkey", str(devkey),
+                            "-rawin", "-in", str(msg), "-out", str(sigp)], check=True)
+            decoy_sig = sigp.read_bytes()
+        decoy = td / "decoy-signed.xpkg"
+        build_xpkg(decoy, name="vendor-app3", version="1.0.0", signature_bytes=decoy_sig)
+        r = run("app", "install", str(decoy), "--pubkey", str(devpub))
+        expect_fail(r, "34 decoy signature")
+        if "signature verification failed" not in r.stderr:
+            failures.append(f"34 unexpected refusal text: {r.stderr!r}")
+
+        # 35. --pubkey on an unsigned package is refused
+        unsigned = td / "unsigned-1.0.0.xpkg"
+        build_xpkg(unsigned, name="vendor-app4", version="1.0.0")
+        r = run("app", "install", str(unsigned), "--pubkey", str(devpub))
+        expect_fail(r, "35 pubkey on unsigned package")
+        if "no xpkg/signature.bin" not in r.stderr:
+            failures.append(f"35 unexpected refusal text: {r.stderr!r}")
+
+        # 36. malformed signature (63 bytes) is refused
+        short = td / "short-sig.xpkg"
+        build_xpkg(short, name="vendor-app5", version="1.0.0", signature_bytes=b"S" * 63)
+        r = run("app", "install", str(short), "--pubkey", str(devpub))
+        expect_fail(r, "36 short signature")
+        if "exactly 64 bytes" not in r.stderr:
+            failures.append(f"36 unexpected refusal text: {r.stderr!r}")
+
+        # 37. signed upgrade path: install signed 1.0.0 with key, upgrade signed 1.1.0 with key
+        up1 = td / "up-1.0.0.xpkg"
+        build_xpkg(up1, name="vendor-app6", version="1.0.0", signing_key=devkey)
+        r = run("app", "install", str(up1), "--pubkey", str(devpub))
+        if r.returncode != 0:
+            failures.append(f"37 signed base install failed: {r.stderr!r}")
+        up2 = td / "up-1.1.0.xpkg"
+        build_xpkg(up2, name="vendor-app6", version="1.1.0", signing_key=devkey)
+        r = run("app", "upgrade", str(up2), "--pubkey", str(devpub))
+        if r.returncode != 0 or "third-party-signature=verified" not in r.stdout:
+            failures.append(f"37 signed upgrade failed: {r.stdout!r} {r.stderr!r}")
+        else:
+            print("  PASS signed upgrade with key")
+
+        # 38. wrong-key upgrade refused: current version stays authoritative
+        up3 = td / "up-2.0.0.xpkg"
+        build_xpkg(up3, name="vendor-app6", version="2.0.0", signing_key=otherkey)
+        r = run("app", "upgrade", str(up3), "--pubkey", str(devpub))
+        expect_fail(r, "38 wrong-key upgrade")
+        r = run("app", "info", "vendor-app6")
+        if "1.1.0" not in r.stdout:
+            failures.append(f"38 registry did not stay at 1.1.0: {r.stdout!r}")
 
     if failures:
         print(f"FAIL: {len(failures)}")

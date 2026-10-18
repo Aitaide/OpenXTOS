@@ -101,6 +101,11 @@ def build_native_tools(stage):
         output.parent.mkdir(parents=True,exist_ok=True)
         sources=[source]
         includes=['-I',str(include)]
+        if name=='pkg':
+            # pkg verifies third-party xpkg signatures with the vendored
+            # Monocypher ed25519 module (no openssl binary at runtime).
+            sources+=[vendor/'monocypher.c',vendor/'monocypher-ed25519.c']
+            includes+=['-I',str(vendor)]
         if name=='update':
             # update links the vendored Monocypher verifier and the vendored
             # mbedTLS transport (built once into .build/mbedtls).

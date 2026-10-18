@@ -44,11 +44,16 @@ JSON_CMDS = {
 
 def build(tool: str, out: Path) -> None:
     src = ROOT / "tools" / "xtos-native" / tool / (tool + ".c")
-    subprocess.run(
-        ["gcc", "-O2", "-Wall", "-Wextra", "-Werror", "-static",
-         "-I", str(COMMON), "-o", str(out), str(src)],
-        check=True,
-    )
+    cmd = ["gcc", "-O2", "-Wall", "-Wextra", "-Werror", "-static",
+           "-I", str(COMMON)]
+    if tool == "pkg":
+        # pkg links the vendored Monocypher ed25519 verifier (xpkg signatures)
+        mon = ROOT / "tools" / "xtos-native" / "vendor" / "monocypher"
+        cmd += ["-I", str(mon), "-o", str(out), str(src),
+                str(mon / "monocypher.c"), str(mon / "monocypher-ed25519.c")]
+    else:
+        cmd += ["-o", str(out), str(src)]
+    subprocess.run(cmd, check=True)
 
 
 def run_pty(binary: Path, args, term: str, timeout: float = 20.0) -> bytes:

@@ -20,7 +20,15 @@
 
 #define XED_MSG_MAX (4 * 1024 * 1024)
 
-static int xed_b64_val(int c) {
+/* Shared-header hygiene: every static helper is safe to include from any
+ * translation unit (unused-function is an error under the tools' -Werror). */
+#if defined(__GNUC__)
+#define XED_API static __attribute__((unused))
+#else
+#define XED_API static
+#endif
+
+XED_API int xed_b64_val(int c) {
     if (c >= 'A' && c <= 'Z') return c - 'A';
     if (c >= 'a' && c <= 'z') return c - 'a' + 26;
     if (c >= '0' && c <= '9') return c - '0' + 52;
@@ -30,7 +38,7 @@ static int xed_b64_val(int c) {
 }
 
 /* Load a 32-byte ed25519 public key from a PEM SPKI file or a raw file. */
-static int xed25519_load_pub(const char *path, uint8_t out[32]) {
+XED_API int xed25519_load_pub(const char *path, uint8_t out[32]) {
     FILE *f = fopen(path, "rb");
     if (!f) return -1;
     uint8_t buf[8192];
@@ -86,7 +94,7 @@ static int xed25519_load_pub(const char *path, uint8_t out[32]) {
 }
 
 /* Verify a detached 64-byte signature over a whole file. 0 = valid. */
-static int xed25519_verify_file(const char *pubkey_path, const char *msg_path,
+XED_API int xed25519_verify_file(const char *pubkey_path, const char *msg_path,
                                 const char *sig_path) {
     uint8_t pub[32];
     if (xed25519_load_pub(pubkey_path, pub) < 0) return -1;
