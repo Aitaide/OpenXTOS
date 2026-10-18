@@ -19,7 +19,17 @@ done
 BUILD_ROOT="$BUILD_ROOT" OUTPUT_DIR="$KERNEL_OUTPUT" JOBS="$JOBS" "$ROOT/scripts/build_kernel.sh"
 mkdir -p "$BB_OUTPUT" "$IMAGES"
 make -C "$ROOT/userspace/busybox" O="$BB_OUTPUT" KBUILD_DEFCONFIG="$ROOT/system/busybox_defconfig" defconfig
-for setting in CONFIG_STATIC=y CONFIG_BUSYBOX=y CONFIG_ASH=y CONFIG_MODPROBE=y; do
+# Every applet the system/live boot scripts invoke must be present in the
+# defconfig itself — a missing applet only shows up as a boot failure in the
+# guest (the live tree historically relied on a hand-augmented .config that
+# the defconfig never matched). This gate fails the build on any drift.
+for setting in CONFIG_STATIC=y CONFIG_BUSYBOX=y CONFIG_ASH=y CONFIG_MODPROBE=y \
+    CONFIG_SH=y CONFIG_FEATURE_SH_MATH=y CONFIG_FEATURE_SH_MATH_64=y \
+    CONFIG_INIT=y CONFIG_SWITCH_ROOT=y CONFIG_MDEV=y CONFIG_BLKID=y \
+    CONFIG_LOSETUP=y CONFIG_MOUNTPOINT=y CONFIG_HWCLOCK=y CONFIG_UDHCPC=y \
+    CONFIG_SHA256SUM=y CONFIG_STAT=y CONFIG_READLINK=y CONFIG_DD=y \
+    CONFIG_HOSTNAME=y CONFIG_GETTY=y CONFIG_REBOOT=y CONFIG_UMOUNT=y \
+    CONFIG_POWEROFF=y CONFIG_SYSLOGD=y CONFIG_KLOGD=y CONFIG_FEATURE_USE_INITTAB=y; do
     grep -qx "$setting" "$BB_OUTPUT/.config" || { printf 'error: missing BusyBox setting %s\n' "$setting" >&2; exit 1; }
 done
 make -C "$ROOT/userspace/busybox" O="$BB_OUTPUT" -j"$JOBS" CC="$CC"

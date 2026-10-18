@@ -791,9 +791,10 @@ static int write_download_manifest(const char *destdir, struct artifact **got, i
 }
 
 /* Whole-disk device path whitelist: the same canonical forms xtos-install
- * accepts (plus loop devices, which are legitimate test/tool targets). */
+ * accepts, plus virtio disks (VM deployments and QEMU validation targets)
+ * and loop devices (legitimate tool/test targets). */
 static int valid_whole_disk_path(const char *p) {
-    if (strncmp(p, "/dev/sd", 7) == 0) {
+    if (strncmp(p, "/dev/sd", 7) == 0 || strncmp(p, "/dev/vd", 7) == 0) {
         if (!p[7]) return 0;
         for (const char *q = p + 7; *q; q++)
             if (!(*q >= 'a' && *q <= 'z')) return 0;
@@ -1218,7 +1219,7 @@ int main(int argc, char **argv) {
         if (!realpath(to, real)) { fprintf(stderr, "update: cannot resolve %s\n", to); return 2; }
         if (strcmp(real, to) != 0) { fprintf(stderr, "update: refusing alias path %s (use %s)\n", to, real); return 2; }
         if (!valid_whole_disk_path(real)) {
-            fprintf(stderr, "update: refusing %s: target must be a canonical whole disk (/dev/sdX, /dev/nvmeXnY, /dev/loopN)\n", real);
+            fprintf(stderr, "update: refusing %s: target must be a canonical whole disk (/dev/sdX, /dev/vdX, /dev/nvmeXnY, /dev/loopN)\n", real);
             return 2;
         }
         struct stat dst;

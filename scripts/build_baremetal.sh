@@ -2,7 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
-B="$ROOT/.build/baremetal"
+B="${XTOS_BAREMETAL_BUILD_ROOT:-$ROOT/.build/baremetal}"
 export BUILD_ROOT="$B" JOBS="${JOBS:-8}"
 mkdir -p "$B/driver" "$B/images"
 PUBLIC=0
@@ -35,11 +35,11 @@ XTOS_IMAGE_TYPE="${XTOS_IMAGE_TYPE:-developer}" "$B/driver/build_system.sh"
 # SSH remains disabled until the installed owner provisions authorized_keys.
 python3 - "$ROOT" "$B" "$PUBLIC" <<'PY'
 import pathlib,sys,subprocess,shutil,re,json,hashlib
-r,b=map(pathlib.Path,sys.argv[1:]); root=b/'rootfs'
+r,b=map(pathlib.Path,sys.argv[1:3]); root=b/'rootfs'; public=sys.argv[3]
 for name,target in [('init','init'),('xtos-start','sbin/xtos-start'),('xtos-install','usr/sbin/xtos-install'),('udhcpc.script','etc/udhcpc.script')]:
  p=root/target;p.parent.mkdir(parents=True,exist_ok=True);shutil.copy2(r/'system/baremetal'/name,p);p.chmod(0o755)
 (root/'root/.ssh').mkdir(parents=True,exist_ok=True)
-if sys.argv[3]=='1':
+if public=='1':
     # Public image: NO embedded key. Console login + user-supplied keys only;
     # dropbear simply does not start until the installer sets one up.
     (root/'root/.ssh/authorized_keys').write_text('')
@@ -69,14 +69,14 @@ python3 "$ROOT/scripts/gen_system_identity.py" --output-dir "$B/rootfs/etc" \
     --hardware-profile "${XTOS_HARDWARE_PROFILE:-unknown}"
 python3 - "$ROOT" "$B" "$PUBLIC" <<'PY'
 import pathlib,sys,subprocess,json,hashlib
-r,b=map(pathlib.Path,sys.argv[1:]); root=b/'rootfs'
+r,b=map(pathlib.Path,sys.argv[1:3]); root=b/'rootfs'; public=sys.argv[3]
 files=subprocess.check_output(['git','-C',str(r),'ls-files','-z','--cached','--others','--exclude-standard']).split(b'\0')
 h=hashlib.sha256()
 for f in sorted(x for x in files if x):
  p=r/f.decode()
  if p.is_file(): h.update(f+b'\0'+hashlib.sha256(p.read_bytes()).digest())
 manifest={'git_head':subprocess.check_output(['git','-C',str(r),'rev-parse','HEAD'],text=True).strip(),'tracked_current_source_sha256':h.hexdigest(),'dirty':subprocess.check_output(['git','-C',str(r),'status','--porcelain'],text=True),'kernel_config_sha256':hashlib.sha256((b/'kernel-build/.config').read_bytes()).hexdigest()}
-if sys.argv[3] != '1':
+if public != '1':
     manifest['maintenance_public_key_sha256']=hashlib.sha256((b/'keys/maintenance.pub').read_bytes()).hexdigest()
 # Keep private provenance separate from the generated product identity.
 (root/'etc/xtos-baremetal-build.json').write_text(json.dumps(manifest,indent=2)+'\n')

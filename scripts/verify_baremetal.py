@@ -11,7 +11,8 @@ import subprocess
 import time
 
 ROOT = Path(__file__).resolve().parents[1]
-B = ROOT / '.build/baremetal'
+B = Path(os.environ.get('XTOS_BAREMETAL_BUILD_ROOT', str(ROOT / '.build/baremetal')))
+ISO = Path(os.environ['XTOS_INSTALLER_ISO']) if os.environ.get('XTOS_INSTALLER_ISO') else B / 'images/xtos-private-usb.iso'
 E = B / 'evidence'
 E.mkdir(parents=True, exist_ok=True)
 DISK = E / 'test-nvme.raw'
@@ -29,7 +30,7 @@ class Guest:
         if ssh_port is not None:
             args[args.index('-netdev') + 1] = f'user,id=net,hostfwd=tcp:127.0.0.1:{ssh_port}-:22'
         if iso:
-            args += ['-cdrom', str(B / 'images/xtos-private-usb.iso'), '-boot', 'd']
+            args += ['-cdrom', str(ISO), '-boot', 'd']
         if efi:
             shutil.copy2('/usr/share/OVMF/OVMF_VARS_4M.fd', E / (name + '.vars.fd'))
             args += ['-drive', 'if=pflash,format=raw,readonly=on,file=/usr/share/OVMF/OVMF_CODE_4M.fd', '-drive', f'if=pflash,format=raw,file={E / (name + ".vars.fd")}']
@@ -125,7 +126,7 @@ def main():
         guest.command('grep -qw xtos.installer=1 /proc/cmdline && [ -d /sys/firmware/efi ] && [ "$(cat /sys/kernel/realtime)" = 1 ]')
         results.append('uefi_iso_boot=PASS')
         guest.stop(); guest = None
-        report = {'results': results, 'iso_sha256': hashlib.sha256((B / 'images/xtos-private-usb.iso').read_bytes()).hexdigest(), 'disk': str(DISK), 'serial': SERIAL, 'bytes': SIZE, 'scope': 'QEMU TCG only; no physical hardware validation'}
+        report = {'results': results, 'iso_sha256': hashlib.sha256(ISO.read_bytes()).hexdigest(), 'iso': str(ISO), 'disk': str(DISK), 'serial': SERIAL, 'bytes': SIZE, 'scope': 'QEMU TCG only; no physical hardware validation'}
         (E / 'results.json').write_text(json.dumps(report, indent=2) + '\n')
         print(json.dumps(report, indent=2))
     finally:
