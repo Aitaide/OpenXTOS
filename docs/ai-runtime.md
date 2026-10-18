@@ -10,12 +10,14 @@ what is deliberately not done. (Chinese summary at the bottom.)
 
 ## What the live image already contains
 
-The locked 362-package userspace includes a complete CPU inference stack
-with no additions:
+The locked 530-package userspace includes the existing CPU inference stack and
+GPU API runtimes:
 
 - `python3-onnxruntime` 1.21 + `libonnx` — ONNX model execution
 - `numpy`, `scipy`, `pandas`, `matplotlib` — data pipeline
 - OpenBLAS / LAPACK / libgomp — the numeric substrate these need
+- Mesa Vulkan ICDs + `vulkaninfo` (`mesa-vulkan-drivers`, `vulkan-tools`)
+- Mesa Rusticl OpenCL + `clinfo` (`mesa-opencl-icd`, `clinfo`)
 - `cyclictest` (rt-tests) — the RT latency probe
 - Python 3.13 with venv support
 
@@ -93,33 +95,48 @@ Cpus_allowed_list), latency probe running while load is partitioned away,
 and the same load unpinned for comparison. Numbers under QEMU TCG are
 emulation-bound; the meaningful comparison is on physical hardware.
 
-## GPU: in-tree drivers shipped, then optimize for RT
+## GPU: in-tree drivers, userspace APIs, then optimize for RT
 
-GPU acceleration is part of the image, not a roadmap item. The boundary
-is the driver's SOURCE, not GPU-vs-RT:
+GPU support is part of the image, not a roadmap item. The kernel driver is
+only one layer; the locked Live Developer userspace also contains Mesa
+Vulkan ICDs (`mesa-vulkan-drivers`, `vulkan-tools`) and Mesa Rusticl OpenCL
+(`mesa-opencl-icd`, `clinfo`).
 
-- Shipped TODAY (quick-start on any machine): i915 (Intel) and virtio-gpu
-  built into the kernel; amdgpu (AMD, incl. SI/CIK generations) and
-  nouveau (NVIDIA display) as autoloadable modules; the GPU firmware trees
-  (amdgpu/, nvidia/, i915/ GuC/HuC) come from the locked image. At boot,
-  xtos-start scans the hardware's modalias entries and loads exactly the
-  drivers for hardware that is present — modules stay dormant otherwise,
-  so nothing GPU/media runs on the boot path itself.
-- The optimization playbook for RT coexistence: pin GPU IRQs to non-RT
-  cores (irq affinity), keep driver threads SCHED_OTHER inside the AI
-  cgroup partition, place the inference process in the same partition,
-  then A/B cyclictest with the GPU idle vs saturated.
-- NVIDIA's CLOSED out-of-tree stack (nvidia.ko + CUDA userspace) is the
-  hard constraint: hundreds of MB outside the kernel tree break
-  image-based upgrades, closed-source interrupt behavior cannot be
-  audited or pinned. If target hardware demands NVIDIA, that decision
-  gets revisited explicitly with the costs stated — it does not slide in.
+- Intel i915 and virtio-gpu are built in; AMD amdgpu (including SI/CIK) and
+  NVIDIA nouveau are autoloadable modules. Matching AMD, Intel and nouveau
+  firmware comes from the locked image. Boot-time modalias loading is for
+  hardware that is present.
+- `/dev/dri/cardN` is assigned `root:video 0660`; `/dev/dri/renderDN` is
+  `root:render 0660`. The ordinary `xtos` account has supplementary
+  membership in those groups. BusyBox mdev applies these permissions during
+  coldplug and hotplug. Unknown device nodes are not exposed to `xtos`.
+- Start with `hw gpu`, `hw --json gpu`, `vulkaninfo --summary`, and
+  `clinfo --list`. `hw gpu` reports node access and discovered driver/IRQ
+  details; an API ICD listing is not proof of GPU acceleration. A software
+  implementation such as lavapipe is not an accelerated GPU result.
+- Mesa Rusticl OpenCL may require an explicit driver selection such as
+  `RUSTICL_ENABLE=radeonsi clinfo --list`; this is device/provider-specific.
+  Do not export the variable globally or report empty `clinfo` output as
+  usable GPU compute.
+- ONNX Runtime in this image remains CPU-only; no CUDA, ROCm or Vulkan
+  execution provider has been bundled or verified. NVIDIA's proprietary
+  out-of-tree/CUDA stack is not included.
+
+For RT coexistence, inspect topology, `rt --json status`, `hw --json gpu`,
+and cgroup partitions. Use `rt tune --housekeeping CPU-LIST` to choose
+online housekeeping CPUs outside boot-isolated/RT CPUs. It verifies requested
+and effective IRQ affinity and reports non-movable/managed IRQs as skipped or
+failed; it does not guarantee all interrupts moved. IRQ threads inherit IRQ
+affinity on PREEMPT_RT, but ordinary GPU workqueues are not automatically
+placed in an AI cpuset or guaranteed to run as `SCHED_OTHER`. Inspect the
+actual workers on the target system before asserting placement.
 
 In-guest evidence so far: virtio-gpu really probed in QEMU (DRM node +
-driver binding via the built-in driver), amdgpu/nouveau modules load,
-firmware trees present, boot-time autoload marker in the serial log.
-Physical-GPU probe and latency measurement are the acceptance gate on
-real hardware; QEMU cannot prove GPU latency behavior.
+driver binding), amdgpu/nouveau modules load, firmware trees exist, and the
+boot-time driver autoload path runs. Physical GPU API acceleration, hotplug,
+IRQ migration behavior and idle-vs-saturated RT latency remain hardware
+acceptance gates; QEMU cannot prove them.
+
 
 ## Remote inference: the production gateway
 
@@ -163,7 +180,10 @@ XTOS 以实时为本，AI 推理是"受管租户"：镜像自带 ONNX 运行时�
 Python 科学栈（视觉模型即装即用）；LLM 推理引擎走第三方签名 xpkg
 安装，模型权重放持久卷、加载前校验哈希；`cgroup` 原生工具负责
 CPU 分区——实时核与推理核物理分开，推理进程永远普通调度优先级。
-GPU 路线：内核内开源驱动（i915/AMDGPU）做，然后做 RT 共存优化
-（GPU 中断钉非实时核、驱动线程入 AI 分区、实测 A/B）；NVIDIA 闭源
-out-of-tree 栈是唯一硬约束，硬件若强制 NVIDIA 需显式决策。所有
-能力声明以真机实测为准。
+GPU 路线：镜像含 i915、AMDGPU、nouveau 和 virtio-gpu 驱动、固件，
+以及 Mesa Vulkan/OpenCL 与诊断工具；普通 xtos 用户按 video/render
+组权限打开设备。`rt tune --housekeeping CPU-LIST` 可选中断处理核，
+读回 requested/effective affinity；不能把 cgroup 挂载当成 GPU 内核
+线程隔离证明。实卡 API 加速、GPU 推理后端和负载下的 RT 延迟仍需
+分别验收，不能以模块加载或软件 Vulkan 代替。NVIDIA 闭源/CUDA 栈
+不在当前镜像内。

@@ -122,11 +122,28 @@ class BootContractTests(unittest.TestCase):
             self.assertIn(contract, text)
         self.assertNotIn('xtos-ssh &', text)
 
+    def test_live_device_manager_supports_gpu_permissions_and_hotplug(self):
+        config = (ROOT / 'system/busybox_defconfig').read_text()
+        for setting in ['CONFIG_FEATURE_MDEV_CONF=y', 'CONFIG_FEATURE_MDEV_DAEMON=y', 'CONFIG_FEATURE_MDEV_EXEC=y']:
+            self.assertIn(setting, config)
+        rules = LIVE / 'mdev.conf'
+        self.assertTrue(rules.is_file(), 'DRM access rules missing')
+        text = rules.read_text()
+        for rule in ['dri/card[0-9]+ 0:video 0660', 'dri/renderD[0-9]+ 0:render 0660',
+                     'ttyS[0-9]+|ttyUSB[0-9]+|ttyACM[0-9]+ 0:dialout 0660',
+                     'null|zero|full|random|urandom 0:0 0666', 'tty|ptmx 0:5 0666']:
+            self.assertIn(rule, text)
+        startup = (LIVE / 'xtos-start').read_text()
+        self.assertIn('XTOS_DEVICES', startup)
+        self.assertIn('mdev -d', startup)
+        self.assertLess(startup.index('mdev -d'), startup.index('while IFS= read -r ma; do'))
+
     def test_console_drops_to_developer_and_ssh_disables_passwords(self):
         console, ssh = LIVE / 'xtos-console', LIVE / 'xtos-ssh'
         self.assertTrue(console.is_file(), 'missing developer console')
         self.assertTrue(ssh.is_file(), 'missing key-only SSH runtime')
-        self.assertIn('setuidgid xtos /bin/bash --login', console.read_text())
+        self.assertIn('su -l xtos', console.read_text())
+        self.assertNotIn('setuidgid', console.read_text(), 'setuidgid discards supplementary GPU groups')
         text = ssh.read_text()
         self.assertIn('authorized_keys', text)
         self.assertIn('XTOS_SSH_DISABLED', text)

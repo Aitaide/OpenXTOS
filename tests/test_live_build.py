@@ -37,6 +37,41 @@ class LiveBuildTests(unittest.TestCase):
             key=Path(tmp)/'key';key.write_text('-----BEGIN OPENSSH PRIVATE KEY-----\n')
             with self.assertRaises(ValueError):m.validate_public_key(key)
 
+    def test_source_provenance_reports_clean_and_changed_trees(self):
+        import importlib.util
+        spec=importlib.util.spec_from_file_location('live',SCRIPT)
+        assert spec and spec.loader
+        module=importlib.util.module_from_spec(spec);spec.loader.exec_module(module)
+        self.assertTrue(hasattr(module,'source_provenance'), 'builder hardcodes dirty instead of reading source state')
+        with tempfile.TemporaryDirectory() as tmp:
+            repo=Path(tmp)
+            subprocess.run(['git','init','-q',str(repo)],check=True)
+            subprocess.run(['git','-C',str(repo),'config','user.name','XTOS Test'],check=True)
+            subprocess.run(['git','-C',str(repo),'config','user.email','test@example.invalid'],check=True)
+            (repo/'source').write_text('first\n')
+            subprocess.run(['git','-C',str(repo),'add','source'],check=True)
+            subprocess.run(['git','-C',str(repo),'commit','-qm','fixture'],check=True)
+            sha=subprocess.check_output(['git','-C',str(repo),'rev-parse','HEAD'],text=True).strip()
+            self.assertEqual(module.source_provenance(repo), {'source_git_head':sha,'source_state':'clean'})
+            (repo/'source').write_text('modified\n')
+            self.assertEqual(module.source_provenance(repo)['source_state'],'dirty')
+            subprocess.run(['git','-C',str(repo),'checkout','--','source'],check=True)
+            (repo/'new-source').write_text('untracked\n')
+            self.assertEqual(module.source_provenance(repo)['source_state'],'dirty')
+
+    def test_developer_has_graphics_groups_but_not_root_group(self):
+        import importlib.util
+        spec=importlib.util.spec_from_file_location('live',SCRIPT)
+        assert spec and spec.loader
+        module=importlib.util.module_from_spec(spec);spec.loader.exec_module(module)
+        self.assertTrue(hasattr(module, 'account_groups'), 'missing graphics group provisioning')
+        groups={line.split(':')[0]:line.split(':') for line in module.account_groups().splitlines()}
+        for name,gid in [('tty','5'),('dialout','20'),('video','44'),('render','1001')]:
+            self.assertEqual(groups[name][2],gid)
+        for name in ['dialout','video','render']:
+            self.assertIn('xtos',groups[name][3].split(','))
+        self.assertNotIn('xtos',groups['root'][3].split(','))
+
     def test_key_only_accounts_have_no_usable_password_or_locked_key_auth(self):
         import importlib.util
         spec=importlib.util.spec_from_file_location('live',SCRIPT)

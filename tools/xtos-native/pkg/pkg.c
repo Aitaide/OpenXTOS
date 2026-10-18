@@ -11,6 +11,7 @@
 #include <unistd.h>
 #include <ctype.h>
 #include <stdint.h>
+#include <limits.h>
 #include <fcntl.h>
 #include <errno.h>
 #include <sys/stat.h>
@@ -118,7 +119,9 @@ static int sha256_file(const char *path, char *outhex) {
 }
 
 /* ---- Manifest model ---- */
+#ifndef MANIFEST_PATH
 #define MANIFEST_PATH "/usr/share/xtos/userspace-manifest.json"
+#endif
 #define LINE_BUF 65536
 
 struct manifest_file {
@@ -142,7 +145,8 @@ struct manifest_pkg {
 #define FILE_POOL_MAX 262144
 static struct manifest_file file_pool[FILE_POOL_MAX];
 static int pool_used = 0;
-static struct manifest_pkg pkgs[512];
+static struct manifest_pkg *pkgs = NULL;
+static int pkg_capacity = 0;
 static int npkgs = 0;
 static char g_arch[32] = "";
 static char g_lock_sha[128] = "";
@@ -254,11 +258,26 @@ static int load_manifest(void) {
 
         if (strstr(line, "\"files\"")) {
             /* each top-level entry starts with its files array */
-            if (npkgs < 512) {
-                cur = &pkgs[npkgs++];
-                cur->file_start = pool_used;
-                cur->nfiles = 0;
+            if (npkgs == pkg_capacity) {
+                if (pkg_capacity > INT_MAX / 2 ||
+                    (size_t)(pkg_capacity ? pkg_capacity * 2 : 64) > SIZE_MAX / sizeof(*pkgs)) {
+                    fprintf(stderr, "pkg: manifest package capacity exceeded\n");
+                    fclose(f);
+                    return -1;
+                }
+                int new_capacity = pkg_capacity ? pkg_capacity * 2 : 64;
+                struct manifest_pkg *grown = realloc(pkgs, (size_t)new_capacity * sizeof(*pkgs));
+                if (!grown) {
+                    fprintf(stderr, "pkg: cannot allocate manifest packages\n");
+                    fclose(f);
+                    return -1;
+                }
+                pkgs = grown;
+                pkg_capacity = new_capacity;
             }
+            cur = &pkgs[npkgs++];
+            memset(cur, 0, sizeof(*cur));
+            cur->file_start = pool_used;
             in_files = 1; in_pkgmeta = 0; cfile = NULL;
             continue;
         }
@@ -266,14 +285,15 @@ static int load_manifest(void) {
 
         if (in_files) {
             if (strstr(line, "\"path\"") && cur) {
-                if (pool_used < FILE_POOL_MAX) {
-                    cfile = &file_pool[pool_used++];
-                    memset(cfile, 0, sizeof(*cfile));
-                    json_str(line, "path", cfile->path, sizeof(cfile->path));
-                    cur->nfiles++;
-                } else {
-                    cfile = NULL; /* pool full: stop recording this package's files */
+                if (pool_used >= FILE_POOL_MAX) {
+                    fprintf(stderr, "pkg: manifest file capacity exceeded (limit %d)\n", FILE_POOL_MAX);
+                    fclose(f);
+                    return -1;
                 }
+                cfile = &file_pool[pool_used++];
+                memset(cfile, 0, sizeof(*cfile));
+                json_str(line, "path", cfile->path, sizeof(cfile->path));
+                cur->nfiles++;
             } else if (strstr(line, "\"type\"") && cfile) {
                 char t[32] = "";
                 json_str(line, "type", t, sizeof(t));

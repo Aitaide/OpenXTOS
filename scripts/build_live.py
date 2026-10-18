@@ -55,6 +55,33 @@ def account_shadow(key_login):
     return f'root:{marker}:0:0:99999:7:::\nxtos:{marker}:0:0:99999:7:::\n'
 
 
+def account_groups():
+    # render is explicitly allocated by XTOS, not copied from the host's GID.
+    return ('root:x:0:\n'
+            'tty:x:5:\n'
+            'dialout:x:20:xtos\n'
+            'video:x:44:xtos\n'
+            'xtos:x:1000:\n'
+            'render:x:1001:xtos\n')
+
+
+def source_provenance(repo=ROOT):
+    """Bind an image to its exact source revision and actual worktree state."""
+    repo = Path(repo)
+    try:
+        head = subprocess.check_output(
+            ['git', '-C', str(repo), 'rev-parse', 'HEAD'], text=True).strip()
+        status = subprocess.check_output(
+            ['git', '-C', str(repo), 'status', '--porcelain', '--untracked-files=all'],
+            text=True)
+    except (OSError, subprocess.CalledProcessError) as exc:
+        raise ValueError(f'cannot determine source provenance: {exc}') from exc
+    if not re.fullmatch(r'[0-9a-f]{40}|[0-9a-f]{64}', head):
+        raise ValueError('git returned an invalid source revision')
+    return {'source_git_head': head,
+            'source_state': 'dirty' if status.strip() else 'clean'}
+
+
 def write(root, relative, text, mode=0o644):
     target=root/relative
     if target.is_symlink():target.unlink()
@@ -180,6 +207,7 @@ def build(args):
         if not resolve_root(root,path).is_file():raise ValueError('Live package missing: '+path)
     epoch=args.epoch
     if epoch is None:epoch=int(subprocess.check_output(['git','-C',str(ROOT),'log','-1','--pretty=%ct'],text=True).strip())
+    provenance = source_provenance(ROOT)
     output.parent.mkdir(parents=True,exist_ok=True)
     stage=Path(tempfile.mkdtemp(prefix='.'+output.name+'-',dir=output.parent));stage.chmod(0o755)
     try:
@@ -202,7 +230,7 @@ def build(args):
         live_motd = ('optional /home+/root persistence' if persistent_variant else 'no persistence')
         # Base package /etc/os-release is regenerated from honest VERSION/build metadata.
         buildid='live-'+sha(image)[:12]+'-'+manifest['lock_sha256'][:12]
-        run([sys.executable,ROOT/'scripts/gen_system_identity.py','--output-dir',runtime/'etc','--image-type','developer','--arch','x86_64','--kernel-release',release,'--source-state','dirty','--build-id',buildid])
+        run([sys.executable,ROOT/'scripts/gen_system_identity.py','--output-dir',runtime/'etc','--image-type','developer','--arch','x86_64','--kernel-release',release,'--source-state',provenance['source_state'],'--build-id',buildid])
         for name,target in RUNTIME_FILES.items():
             dest=runtime/target;dest.parent.mkdir(parents=True,exist_ok=True);shutil.copy2(ROOT/'system/live'/name,dest);dest.chmod(0o755)
         shutil.copy2(args.busybox,runtime/'usr/libexec/xtos/busybox')
@@ -236,7 +264,8 @@ def build(args):
         elif os.environ.get('XTOS_LSL_REQUIRED')=='1':
             raise ValueError('liblsl required but not built (run tools/lsl/build_lsl.sh)')
         write(runtime,'etc/passwd','root:x:0:0:root:/root:/bin/bash\nxtos:x:1000:1000:XTOS Developer:/home/xtos:/bin/bash\n')
-        write(runtime,'etc/group','root:x:0:\nxtos:x:1000:\n')
+        write(runtime,'etc/group',account_groups())
+        write(runtime,'etc/mdev.conf',(ROOT/'system/live/mdev.conf').read_text())
         write(runtime,'etc/shadow',account_shadow(bool(key)),0o600)
         write(runtime,'etc/shells','/bin/sh\n/bin/bash\n/usr/bin/sh\n/usr/bin/bash\n')
         # UTF-8 block-letter logo; motd colors are interactive-login cosmetics
@@ -261,7 +290,7 @@ def build(args):
             for name in dirs+files:os.chown(Path(current)/name,1000,1000,follow_symlinks=False)
         write(runtime,'etc/sudoers','Defaults env_reset\nroot ALL=(ALL:ALL) ALL\n',0o440)
         # Record build-intentional replacements so `pkg verify` can attribute them
-        write(runtime,'usr/share/xtos/pkg-overrides.txt','/etc/issue\n/etc/sudoers\n/etc/chrony/chrony.conf\n',0o644)
+        write(runtime,'usr/share/xtos/pkg-overrides.txt','/etc/group\n/etc/issue\n/etc/mdev.conf\n/etc/sudoers\n/etc/chrony/chrony.conf\n',0o644)
         # Pinned source-signature key for `update` (default XTOS_UPDATE_PUBKEY path).
         shutil.copy2(ROOT/'system/packages/repo-public.pem',runtime/'usr/share/xtos/repo-public.pem')
         shutil.copy2(ROOT/'system/packages/update-ca-bundle.pem',runtime/'usr/share/xtos/update-ca-bundle.pem')
@@ -324,8 +353,8 @@ def build(args):
         product=images/'xtos-developer-live-x86_64.iso'
         env=dict(os.environ,SOURCE_DATE_EPOCH=str(epoch),LC_ALL='C',TZ='UTC')
         run(['grub-mkrescue','-o',product,iso],env=env)
-        provenance={'schema_version':1,'status':'built-unverified-live-candidate','architecture':'x86_64','kernel_release':release,'kernel_sha256':sha(image),'kernel_config_sha256':sha(kernel/'.config'),'userspace_lock_sha256':manifest['lock_sha256'],'source_git_head':subprocess.check_output(['git','-C',str(ROOT),'rev-parse','HEAD'],text=True).strip(),'source_state':'dirty','authorized_public_key_sha256':hashlib.sha256(key.encode()).hexdigest() if key else None,'rootfs_squashfs_sha256':sha(squash),'initramfs_sha256':sha(iso/'boot/initramfs.gz'),'iso_sha256':sha(product),'iso_bytes':product.stat().st_size,'epoch':epoch,'storage':live_storage,'ssh':'publickey only when provisioned','firewall':'implemented for private QEMU validation; physical policy deployment unverified','secure_boot':'unverified/unsupported','private_key_included':False}
-        write(stage,'images/build-manifest.json',json.dumps(provenance,sort_keys=True,indent=2)+'\n')
+        build_manifest={'schema_version':1,'status':'built-unverified-live-candidate','architecture':'x86_64','kernel_release':release,'kernel_sha256':sha(image),'kernel_config_sha256':sha(kernel/'.config'),'userspace_lock_sha256':manifest['lock_sha256'],'source_git_head':provenance['source_git_head'],'source_state':provenance['source_state'],'authorized_public_key_sha256':hashlib.sha256(key.encode()).hexdigest() if key else None,'rootfs_squashfs_sha256':sha(squash),'initramfs_sha256':sha(iso/'boot/initramfs.gz'),'iso_sha256':sha(product),'iso_bytes':product.stat().st_size,'epoch':epoch,'storage':live_storage,'ssh':'publickey only when provisioned','firewall':'implemented for private QEMU validation; physical policy deployment unverified','secure_boot':'unverified/unsupported','private_key_included':False}
+        write(stage,'images/build-manifest.json',json.dumps(build_manifest,sort_keys=True,indent=2)+'\n')
         write(stage,'images/SHA256SUMS',sha(product)+'  '+product.name+'\n'+sha(images/'build-manifest.json')+'  build-manifest.json\n')
         if output.exists():raise ValueError('output appeared during build')
         os.rename(stage,output)

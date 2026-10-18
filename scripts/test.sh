@@ -23,6 +23,9 @@ python3 -m unittest discover -s "$ROOT/tools/xtos-sbom" -p 'test_sbom.py' -v
 python3 "$ROOT/tools/xtos-sbom/gen_sbom.py" --check
 python3 "$ROOT/tests/test_native_tools_persist.py"
 python3 "$ROOT/tests/test_native_tools_rt.py"
+python3 "$ROOT/tests/test_native_tools_rt_affinity.py"
+python3 "$ROOT/tests/test_native_tools_gpu.py"
+python3 "$ROOT/tests/test_native_tools_pkg_capacity.py"
 python3 "$ROOT/tests/test_native_tools_ui.py"
 python3 "$ROOT/tests/test_native_tools_clock.py"
 python3 "$ROOT/tests/test_native_tools_cgroup.py"
@@ -34,6 +37,9 @@ python3 -m unittest discover -s "$ROOT/tests" -p 'test_userspace_repo.py' -v
 python3 -m unittest discover -s "$ROOT/tests" -p 'test_release_index.py' -v
 python3 "$ROOT/tests/test_live_build.py"
 python3 "$ROOT/tests/test_live_runtime.py"
+python3 "$ROOT/tests/test_live_devices.py"
+python3 "$ROOT/tests/test_verify_live_gpu.py"
+python3 "$ROOT/tests/test_userspace_fetch.py"
 python3 "$ROOT/tests/test_live_fsck_policy.py"
 python3 -m unittest discover -s "$ROOT/tools/xtos-onnx-baseline" -p 'test_onnx_baseline.py' -v
 python3 -m unittest discover -s "$ROOT/tools/xtos-onnx-baseline" -p 'test_torch_onnx_parity.py' -v

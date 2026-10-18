@@ -115,6 +115,20 @@ def main() -> int:
                 failures.append(f"build {tool}: {exc}")
                 print(f"  FAIL build {tool}")
 
+        # A hardware summary must count online CPUs, not sysinfo.procs (the
+        # live process count, which also made pipe parity drift during a build).
+        if "hw" in binaries:
+            import json
+            summary = subprocess.run([str(binaries["hw"]), "--json", "summary"],
+                                     capture_output=True, text=True, check=True)
+            actual = json.loads(summary.stdout)["cpus"]
+            expected = os.sysconf("SC_NPROCESSORS_ONLN")
+            if actual != expected:
+                failures.append(f"hw summary CPU count: got {actual}, expected {expected}")
+                print("  FAIL hw online CPU count")
+            else:
+                print("  PASS hw online CPU count")
+
         # 1. Piped output must contain zero escape codes.
         for tool, arglists in STYLED.items():
             if arglists is None or tool not in binaries:

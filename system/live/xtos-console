@@ -7,4 +7,6 @@ export HOME=/home/xtos USER=xtos LOGNAME=xtos SHELL=/bin/bash
 [ -n "${TERM:-}" ] || export TERM=vt100
 [ -d "$HOME" ] || { echo 'XTOS_CONSOLE_ERROR developer home missing'; exit 1; }
 cd "$HOME" || exit 1
-exec "$BB" setuidgid xtos /bin/bash --login
+# su initializes supplementary groups; the console and SSH must both retain
+# video/render membership. The parent getty is root, so no password is used.
+exec "$BB" su -l xtos

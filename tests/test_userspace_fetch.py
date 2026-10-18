@@ -22,6 +22,15 @@ class FetchTests(unittest.TestCase):
         self.assertEqual(data['defaults']['GOTOOLCHAIN'], 'local')
         self.assertEqual(len(data['requested_packages']), len(set(data['requested_packages'])))
 
+    def test_live_profile_has_gpu_api_providers_and_diagnostics(self):
+        result = subprocess.run([sys.executable, str(SCRIPT), '--profile', 'live-developer', '--arch', 'x86_64', '--describe'], capture_output=True, text=True)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        data = json.loads(result.stdout)
+        for name in ['mesa-vulkan-drivers', 'vulkan-tools', 'mesa-opencl-icd', 'clinfo']:
+            self.assertIn(name, data['requested_packages'])
+        for command in ['vulkaninfo --help', 'clinfo --help']:
+            self.assertIn(command, data['required_commands'])
+
     def test_unsupported_architecture_is_rejected_without_work_dir(self):
         with tempfile.TemporaryDirectory(dir=os.environ.get('TMPDIR')) as tmp:
             work = Path(tmp) / 'download'

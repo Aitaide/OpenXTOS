@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""rt tool tests: status parsing, tune refusal on non-RT kernel, cyclictest guard."""
+"""Read-only rt smoke tests; tune is exercised only by the fixture suite."""
 import subprocess
 import sys
 import tempfile
@@ -42,15 +42,6 @@ def main() -> int:
             failures.append(f"json parse: {e}")
             print("  FAIL status --json")
 
-        # tune refuses non-RT kernel (control host is not RT)
-        r = run("tune")
-        rt_active = "PREEMPT_RT active" in run("status").stdout
-        if rt_active:
-            print("  SKIP tune refusal (this host IS RT)")
-        elif r.returncode == 0 or "refusing" not in r.stderr:
-            failures.append(f"tune should refuse non-RT: rc={r.returncode} {r.stderr!r}")
-        else:
-            print("  PASS tune refuses non-RT kernel")
 
         # unknown command → usage
         r = run("bogus")
