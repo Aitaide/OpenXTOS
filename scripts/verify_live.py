@@ -24,7 +24,7 @@ def sha(path):
 
 
 class Guest:
-    def __init__(self,candidate,evidence,key,mode,timeout,extra_drives=(),smp=2):
+    def __init__(self,candidate,evidence,key,mode,timeout,extra_drives=(),smp=2,extra_qemu=()):
         self.e=evidence;self.mode=mode;self.timeout=timeout;self.key=key;smp=int(smp)
         self.data=bytearray();self.process=None;self.sock=None
         self.log=(evidence/(mode+'.serial.log')).open('wb')
@@ -43,6 +43,8 @@ class Guest:
               '-netdev',f'user,id=net,hostfwd=tcp:127.0.0.1:{self.port}-:22','-device','virtio-net-pci,netdev=net']
         # optional extra drives: each entry is a list of raw qemu arguments
         for spec in extra_drives:args+=list(spec)
+        # optional extra qemu devices: same shape, appended after the base machine
+        for spec in extra_qemu:args+=list(spec)
         iso=candidate/'images/xtos-developer-live-x86_64.iso'
         if mode.endswith('-cd'):args+=['-cdrom',str(iso),'-boot','d']
         else:args+=['-device','qemu-xhci,id=xhci','-drive',f'file={iso},format=raw,if=none,id=usb,readonly=on','-device','usb-storage,drive=usb,removable=on,bootindex=1']

@@ -32,6 +32,20 @@ if [ -x /usr/bin/cgroup ]; then
 else
     echo 'XTOS_CGROUP missing'
 fi
+# Cold-plug module autoload: scan the hardware's own modalias entries and
+# load the matching drivers — GPU (amdgpu/nouveau; i915/virtio-gpu are
+# built-in), USB cameras (uvcvideo), NICs, and anything else present.
+# Modules stay dormant when their hardware is absent: nothing GPU/media
+# runs on the boot path itself, and driver threads land as SCHED_OTHER
+# inside the cgroup hierarchy from the first ms of boot.
+modloaded=0
+for ma in $("$BB" find /sys/devices -name modalias -type f 2>/dev/null); do
+    modalias=$("$BB" cat "$ma")
+    if modprobe -b -q "$modalias" 2>/dev/null; then
+        modloaded=$((modloaded + 1))
+    fi
+done
+echo "XTOS_MODULES modalias=auto-loaded count=$modloaded policy=present-hardware-only"
 "$BB" hostname xtos-live
 /usr/sbin/ip link set lo up
 # Read the RTC for diagnosis only: a present RTC is not proof of synchronized time.

@@ -93,28 +93,33 @@ Cpus_allowed_list), latency probe running while load is partitioned away,
 and the same load unpinned for comparison. Numbers under QEMU TCG are
 emulation-bound; the meaningful comparison is on physical hardware.
 
-## GPU: in-tree drivers yes, then optimize for RT
+## GPU: in-tree drivers shipped, then optimize for RT
 
-GPU acceleration IS part of the roadmap. The boundary is the driver's
-SOURCE, not GPU-vs-RT:
+GPU acceleration is part of the image, not a roadmap item. The boundary
+is the driver's SOURCE, not GPU-vs-RT:
 
-- In-tree open drivers (i915, AMDGPU, Nouveau) are kernel components:
-  image-based upgrade integrity is preserved, and their interrupt
-  handlers and kernel threads are MANAGEABLE for RT. The optimization
-  playbook: pin GPU IRQs to non-RT cores (irq affinity), keep driver
-  threads SCHED_OTHER inside the AI cgroup partition, place the inference
-  process in the same partition, then A/B cyclictest with the GPU idle vs
-  saturated. That is the "GPU + RT coexistence" work.
+- Shipped TODAY (quick-start on any machine): i915 (Intel) and virtio-gpu
+  built into the kernel; amdgpu (AMD, incl. SI/CIK generations) and
+  nouveau (NVIDIA display) as autoloadable modules; the GPU firmware trees
+  (amdgpu/, nvidia/, i915/ GuC/HuC) come from the locked image. At boot,
+  xtos-start scans the hardware's modalias entries and loads exactly the
+  drivers for hardware that is present — modules stay dormant otherwise,
+  so nothing GPU/media runs on the boot path itself.
+- The optimization playbook for RT coexistence: pin GPU IRQs to non-RT
+  cores (irq affinity), keep driver threads SCHED_OTHER inside the AI
+  cgroup partition, place the inference process in the same partition,
+  then A/B cyclictest with the GPU idle vs saturated.
 - NVIDIA's CLOSED out-of-tree stack (nvidia.ko + CUDA userspace) is the
   hard constraint: hundreds of MB outside the kernel tree break
   image-based upgrades, closed-source interrupt behavior cannot be
   audited or pinned. If target hardware demands NVIDIA, that decision
   gets revisited explicitly with the costs stated — it does not slide in.
 
-Which path the hardware forces depends on the GPU present on the target
-machines (Intel iGPU → i915; AMD → AMGPU; NVIDIA dGPU → the hard row).
-Physical-hardware measurement (IRQ pinning, cyclictest A/B under GPU load)
-is the acceptance gate; QEMU cannot prove GPU latency behavior.
+In-guest evidence so far: virtio-gpu really probed in QEMU (DRM node +
+driver binding via the built-in driver), amdgpu/nouveau modules load,
+firmware trees present, boot-time autoload marker in the serial log.
+Physical-GPU probe and latency measurement are the acceptance gate on
+real hardware; QEMU cannot prove GPU latency behavior.
 
 ## Remote inference: the production gateway
 
