@@ -93,13 +93,28 @@ Cpus_allowed_list), latency probe running while load is partitioned away,
 and the same load unpinned for comparison. Numbers under QEMU TCG are
 emulation-bound; the meaningful comparison is on physical hardware.
 
-## GPU: deliberately not supported
+## GPU: in-tree drivers yes, then optimize for RT
 
-No NVIDIA/AMD kernel driver, no CUDA stack. Reasons: the out-of-tree GPU
-modules break image-based upgrade integrity and add GBs to the image;
-GPU interrupts and driver threads are hostile to RT latency. For large-model
-work, call out to a remote inference endpoint; the local CPU handles
-latency-tolerant or offline work.
+GPU acceleration IS part of the roadmap. The boundary is the driver's
+SOURCE, not GPU-vs-RT:
+
+- In-tree open drivers (i915, AMDGPU, Nouveau) are kernel components:
+  image-based upgrade integrity is preserved, and their interrupt
+  handlers and kernel threads are MANAGEABLE for RT. The optimization
+  playbook: pin GPU IRQs to non-RT cores (irq affinity), keep driver
+  threads SCHED_OTHER inside the AI cgroup partition, place the inference
+  process in the same partition, then A/B cyclictest with the GPU idle vs
+  saturated. That is the "GPU + RT coexistence" work.
+- NVIDIA's CLOSED out-of-tree stack (nvidia.ko + CUDA userspace) is the
+  hard constraint: hundreds of MB outside the kernel tree break
+  image-based upgrades, closed-source interrupt behavior cannot be
+  audited or pinned. If target hardware demands NVIDIA, that decision
+  gets revisited explicitly with the costs stated — it does not slide in.
+
+Which path the hardware forces depends on the GPU present on the target
+machines (Intel iGPU → i915; AMD → AMGPU; NVIDIA dGPU → the hard row).
+Physical-hardware measurement (IRQ pinning, cyclictest A/B under GPU load)
+is the acceptance gate; QEMU cannot prove GPU latency behavior.
 
 ## Remote inference: the production gateway
 
@@ -143,5 +158,7 @@ XTOS 以实时为本，AI 推理是"受管租户"：镜像自带 ONNX 运行时�
 Python 科学栈（视觉模型即装即用）；LLM 推理引擎走第三方签名 xpkg
 安装，模型权重放持久卷、加载前校验哈希；`cgroup` 原生工具负责
 CPU 分区——实时核与推理核物理分开，推理进程永远普通调度优先级。
-GPU 路线明确不做（驱动体量与中断延迟都伤实时性），大模型算力走
-远端推理接口。所有能力声明以 guest 内实测为准。
+GPU 路线：内核内开源驱动（i915/AMDGPU）做，然后做 RT 共存优化
+（GPU 中断钉非实时核、驱动线程入 AI 分区、实测 A/B）；NVIDIA 闭源
+out-of-tree 栈是唯一硬约束，硬件若强制 NVIDIA 需显式决策。所有
+能力声明以真机实测为准。
