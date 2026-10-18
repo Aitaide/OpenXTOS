@@ -261,13 +261,27 @@ def build(args):
             for name in dirs+files:os.chown(Path(current)/name,1000,1000,follow_symlinks=False)
         write(runtime,'etc/sudoers','Defaults env_reset\nroot ALL=(ALL:ALL) ALL\n',0o440)
         # Record build-intentional replacements so `pkg verify` can attribute them
-        write(runtime,'usr/share/xtos/pkg-overrides.txt','/etc/issue\n/etc/sudoers\n',0o644)
+        write(runtime,'usr/share/xtos/pkg-overrides.txt','/etc/issue\n/etc/sudoers\n/etc/chrony/chrony.conf\n',0o644)
         # Pinned source-signature key for `update` (default XTOS_UPDATE_PUBKEY path).
         shutil.copy2(ROOT/'system/packages/repo-public.pem',runtime/'usr/share/xtos/repo-public.pem')
         shutil.copy2(ROOT/'system/packages/update-ca-bundle.pem',runtime/'usr/share/xtos/update-ca-bundle.pem')
         write(runtime,'etc/nsswitch.conf','passwd: files\ngroup: files\nshadow: files\nhosts: files dns\nnetworks: files\n')
         write(runtime,'etc/hostname','xtos-live\n')
         write(runtime,'etc/hosts','127.0.0.1 localhost xtos-live\n::1 localhost\n')
+        # Resident NTP (xtos-start runs chronyd with this config). QEMU/isolated
+        # networks leave the clock honestly unsynchronized; the `clock` tool only
+        # claims synchronized when `chronyc tracking` confirms it. Replaces the
+        # deb-shipped /etc/chrony/chrony.conf — recorded in pkg-overrides.
+        write(runtime,'etc/chrony/chrony.conf',
+              '# XTOS resident NTP daemon (started by xtos-start).\n'
+              'driftfile /run/chrony/drift\n'
+              'pidfile /run/chrony/chronyd.pid\n'
+              'logdir /run/log\n'
+              'server ntp.aliyun.com iburst\n'
+              'server time.cloudflare.com iburst\n'
+              'server cn.pool.ntp.org iburst\n'
+              'makestep 1.0 3\n'
+              'rtcsync\n')
         sshline=''
         if key:
             for base,uid in [('root',0),('home/xtos',1000)]:

@@ -24,7 +24,7 @@ def sha(path):
 
 
 class Guest:
-    def __init__(self,candidate,evidence,key,mode,timeout):
+    def __init__(self,candidate,evidence,key,mode,timeout,extra_drives=()):
         self.e=evidence;self.mode=mode;self.timeout=timeout;self.key=key
         self.data=bytearray();self.process=None;self.sock=None
         self.log=(evidence/(mode+'.serial.log')).open('wb')
@@ -41,6 +41,8 @@ class Guest:
         args=['qemu-system-x86_64','-machine','q35','-accel','tcg,thread=multi','-cpu','max','-m','3072','-smp','2','-display','none','-monitor','none','-no-reboot',
               '-serial',f'unix:{path},server=on,wait=off','-drive',f'file={self.disk},format=raw,if=none,id=sentinel','-device','nvme,drive=sentinel,serial=XTOS-LIVE-INTERNAL-TEST',
               '-netdev',f'user,id=net,hostfwd=tcp:127.0.0.1:{self.port}-:22','-device','virtio-net-pci,netdev=net']
+        # optional extra drives: each entry is a list of raw qemu arguments
+        for spec in extra_drives:args+=list(spec)
         iso=candidate/'images/xtos-developer-live-x86_64.iso'
         if mode.endswith('-cd'):args+=['-cdrom',str(iso),'-boot','d']
         else:args+=['-device','qemu-xhci,id=xhci','-drive',f'file={iso},format=raw,if=none,id=usb,readonly=on','-device','usb-storage,drive=usb,removable=on,bootindex=1']
@@ -122,8 +124,9 @@ def validate_mode(candidate,evidence,key,mode,timeout):
         offers=[line.split('Authentications that can continue:',1)[1].strip() for line in denied.stderr.splitlines() if 'Authentications that can continue:' in line]
         if not offers or any(o!='publickey' for o in offers):raise RuntimeError('server offered authentication other than publickey')
         rows['authentication_offers']=offers
-        rows['clock_not_claimed_synchronized']=json.loads(g.ssh('xtos','clock status --json').stdout)['synchronized'] is False
-        if not rows['clock_not_claimed_synchronized']:raise RuntimeError('clock falsely marked synchronized')
+        clock=json.loads(g.ssh('xtos','clock status --json').stdout)
+        if clock['synchronized'] and clock.get('source')!='chronyd-resident':raise RuntimeError('clock claims synchronization without resident chronyd tracking')
+        rows['clock_status']=clock
         rows['host_key_trusted_via_serial']=True
         # Prove medium is read-only and default write state is RAM.
         r=g.ssh('root','set -e; if touch /run/live-media/LIVE_MUST_BE_READONLY 2>/run/readonly-error; then exit 1; fi; test -s /run/readonly-error; echo LIVE_READONLY=PASS')

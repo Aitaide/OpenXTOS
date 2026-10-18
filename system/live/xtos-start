@@ -12,6 +12,14 @@ set -e
 "$BB" mountpoint -q /dev/pts || "$BB" mount -t devpts -o mode=0620,gid=5 devpts /dev/pts
 "$BB" mountpoint -q /dev/shm || "$BB" mount -t tmpfs -o mode=1777,nosuid,nodev,size=25% tmpfs /dev/shm
 "$BB" chmod 1777 /tmp
+# RAM ring-buffer logging: kernel + user messages land in /run/log/messages
+# (256 KiB x 2 rotations). The log is deliberately ephemeral — the root
+# overlay is tmpfs, so a boot is a fresh log. Persistence volumes are not
+# written by the logger.
+"$BB" mkdir -p /run/log /run/chrony
+"$BB" syslogd -O /run/log/messages -s 256 -b 2 || echo 'XTOS_LOG syslogd-unavailable'
+"$BB" klogd || echo 'XTOS_LOG klogd-unavailable'
+echo 'XTOS_LOG ring=/run/log/messages size_kb=256 rotations=2 persistence=none'
 "$BB" hostname xtos-live
 /usr/sbin/ip link set lo up
 # Read the RTC for diagnosis only: a present RTC is not proof of synchronized time.
@@ -41,4 +49,13 @@ for path in /sys/class/net/*; do
     # Bound initial negotiation; XTOS_READY says startup completed, not that DHCP succeeded.
     "$BB" udhcpc -n -q -t 3 -T 3 -i "$interface" -s /usr/libexec/xtos/xtos-dhcp &
 done
+# Resident NTP daemon: continuous synchronization whenever the network
+# allows it. `clock status` reports synchronized=true only when chronyc
+# confirms tracking; `clock sync` defers to the daemon while it runs.
+# Isolated/QEMU networks simply leave the clock honestly unsynchronized.
+if [ -x /usr/sbin/chronyd ]; then
+    /usr/sbin/chronyd && echo 'XTOS_NTP daemon=chronyd mode=resident conf=/etc/chrony/chrony.conf' || echo 'XTOS_NTP chronyd-start-failed'
+else
+    echo 'XTOS_NTP chronyd-missing'
+fi
 echo "XTOS_READY mode=live persistence=$PERSIST clock=see-status network=see-XTOS_DHCP"

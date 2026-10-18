@@ -69,9 +69,11 @@ python3 scripts/verify_live.py \
 
 - QEMU TCG 验证，非物理硬件部署；H3C 服务器与现有 U 盘未改动
 - Secure Boot 未验证、不支持
-- 防火墙尚未实现（T13–T16），此候选仅限私有测试环境
-- U 盘介质启动时不可拔出（rootfs 按需从介质读取）；未实现 copy-to-RAM 模式
-- locale 警告（C.UTF-8 未生成 locale 数据）待后续处理，不影响功能
+- 原生防火墙已实现（fw：netlink 原生 enable/disable/status + nft CLI 规则面，QEMU 6.6 实测）；物理机策略部署未验证
+- copy-to-RAM 已实现：`xtos.toram=1` 启动时把 squashfs 复制进内存并释放介质（init 校验哈希后才 umount）；默认（非 toram）U 盘介质仍不可拔出
+- locale 已修：镜像内置 localedef 编译的 C.utf8，bash/setlocale 警告已消除
+- 系统日志：busybox syslogd/klogd RAM 环形缓冲（/run/log/messages，256KiB×2 轮转，tmpfs 随每次启动清空；不写持久卷）
+- 常驻时钟：xtos-start 启动 chronyd 守护（/etc/chrony/chrony.conf）；`clock status` 仅在 chronyc tracking 证实追踪时才报 synchronized=true，一次性 sync 只记历史不冒充连续同步；`clock sync` 在守护运行时明确让位
 - 上下键历史和品牌验证仅在 bios-cd 模式做了串口实测；其他三种模式走相同的 console 代码路径
 - 独立规格审查由主会话直接执行（子代理提供方余额耗尽），全量回归通过
 

@@ -24,6 +24,7 @@ python3 "$ROOT/tools/xtos-sbom/gen_sbom.py" --check
 python3 "$ROOT/tests/test_native_tools_persist.py"
 python3 "$ROOT/tests/test_native_tools_rt.py"
 python3 "$ROOT/tests/test_native_tools_ui.py"
+python3 "$ROOT/tests/test_native_tools_clock.py"
 python3 "$ROOT/tests/test_native_tools_xpkg.py"
 python3 "$ROOT/tests/test_native_tools_update.py"
 python3 "$ROOT/tests/test_verify_xpkg.py"

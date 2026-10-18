@@ -17,6 +17,11 @@
 
 #define CHRONYD_PATH "/usr/sbin/chronyd"
 #define STATE_PATH   "/run/clock.json"
+/* Resident NTP (xtos-start launches chronyd with /etc/chrony/chrony.conf).
+ * The pidfile path and chronyc path are overridable so tests can point the
+ * tool at fixture files and stubs, like the persist tool does. */
+#define CHRONY_PIDFILE_DEFAULT "/run/chrony/chronyd.pid"
+#define CHRONYC_PATH_DEFAULT   "/usr/bin/chronyc"
 #define MAX_SERVER_LEN 254
 #define MAX_TIMEOUT 30
 
@@ -39,6 +44,76 @@ static void write_state(const char *server, const char *result, const char *erro
     if (error) fprintf(f, ", \"error\": \"%s\"", error);
     fprintf(f, ", \"elapsed_seconds\": %.3f}\n", elapsed);
     fclose(f);
+}
+
+static void pidfile_path(char *out, size_t n) {
+    const char *env = getenv("XTOS_CLOCK_PIDFILE");
+    if (env && env[0]) snprintf(out, n, "%s", env);
+    else snprintf(out, n, "%s", CHRONY_PIDFILE_DEFAULT);
+}
+
+static void chronyc_path(char *out, size_t n) {
+    const char *env = getenv("XTOS_CHRONYC_PATH");
+    if (env && env[0]) snprintf(out, n, "%s", env);
+    else snprintf(out, n, "%s", CHRONYC_PATH_DEFAULT);
+}
+
+/* pid of the resident chronyd, or -1 when it is not running. The pid must
+ * point at a live /proc entry; a stale pidfile is treated as "not running". */
+static long resident_pid(void) {
+    char path[4096];
+    pidfile_path(path, sizeof(path));
+    FILE *f = fopen(path, "r");
+    if (!f) return -1;
+    long pid = -1;
+    if (fscanf(f, "%ld", &pid) != 1) pid = -1;
+    fclose(f);
+    if (pid <= 0) return -1;
+    char proc[64];
+    snprintf(proc, sizeof(proc), "/proc/%ld", pid);
+    struct stat st;
+    if (stat(proc, &st) < 0) return -1;
+    return pid;
+}
+
+/* Run a fixed-argv helper capturing its stdout (no shell anywhere). */
+static int run_capture(const char *path, char *const argv[], char *out, size_t out_n) {
+    int pfd[2];
+    if (pipe(pfd) < 0) return -1;
+    pid_t pid = fork();
+    if (pid == 0) {
+        close(pfd[0]);
+        dup2(pfd[1], STDOUT_FILENO);
+        close(pfd[1]);
+        execv(path, argv);
+        _exit(127);
+    }
+    if (pid < 0) { close(pfd[0]); close(pfd[1]); return -1; }
+    close(pfd[1]);
+    size_t n = 0;
+    ssize_t r;
+    while (n + 1 < out_n && (r = read(pfd[0], out + n, out_n - 1 - n)) > 0) n += (size_t)r;
+    close(pfd[0]);
+    int status = 0;
+    waitpid(pid, &status, 0);
+    out[n] = '\0';
+    return WIFEXITED(status) ? WEXITSTATUS(status) : -1;
+}
+
+/* True only when the resident daemon is actively tracking a source.
+ * `chronyc tracking` prints a "System time" table row when locked; anything
+ * else (501 Not synchronised, 506 Cannot talk, missing binary, ...) means
+ * no continuous synchronization — the tool never claims otherwise. */
+static int resident_tracking(int *tracking) {
+    *tracking = 0;
+    char exe[4096];
+    chronyc_path(exe, sizeof(exe));
+    if (access(exe, X_OK) != 0) return 0;
+    char buf[4096];
+    char *argv[] = {(char *)"chronyc", (char *)"tracking", NULL};
+    if (run_capture(exe, argv, buf, sizeof(buf)) < 0) return 0;
+    if (strstr(buf, "System time") && !strstr(buf, "Not synchronised")) *tracking = 1;
+    return 0;
 }
 
 static int do_status(int json) {
@@ -72,23 +147,36 @@ static int do_status(int json) {
     }
 
     int has_success = strcmp(last_result, "success") == 0;
+    /* Honest synchronization claim: only the resident chronyd daemon tracking
+     * a live source counts. A successful one-shot set is reported as history,
+     * never as "synchronized" — a single step is not continuous sync. */
+    long rpid = resident_pid();
+    int tracking = 0;
+    if (rpid > 0) resident_tracking(&tracking);
+    int synced = (rpid > 0 && tracking);
+    const char *source = rpid > 0 ? "chronyd-resident" : (has_success ? "chronyd-one-shot" : "unsynchronized");
     if (json) {
-        printf("{\"utc\": \"%s\", \"synchronized\": false, \"source\": \"%s\",",
-               utc, has_success ? "chronyd-one-shot" : "unsynchronized");
-        if (last_server[0]) printf(" \"last_server\": \"%s\",", last_server);
-        if (last_result[0]) printf(" \"last_result\": \"%s\",", last_result);
-        printf(" \"warning\": \"Wall time is unverified; use monotonic time for elapsed durations.\"}\n");
+        printf("{\"utc\": \"%s\", \"synchronized\": %s, \"source\": \"%s\"",
+               utc, synced ? "true" : "false", source);
+        if (rpid > 0) printf(", \"resident_pid\": %ld", rpid);
+        if (last_server[0]) printf(", \"last_server\": \"%s\"", last_server);
+        if (last_result[0]) printf(", \"last_result\": \"%s\"", last_result);
+        if (!synced)
+            printf(", \"warning\": \"Wall time is unverified; use monotonic time for elapsed durations.\"");
+        printf("}\n");
     } else {
         xui_init();
         printf("%s%s%s", XUI_LABEL_S, "XTOS_CLOCK", XUI_RESET_S);
         printf(" utc=%s synchronized=", utc);
-        if (has_success) XUI_OK("true");
+        if (synced) XUI_OK("true");
         else XUI_WARN("false");
-        printf(" source=%s", has_success ? "chronyd-one-shot" : "unsynchronized");
+        printf(" source=%s", source);
+        if (rpid > 0) printf(" resident_pid=%ld", rpid);
         if (last_server[0]) printf(" last_server=%s", last_server);
         if (last_result[0]) printf(" last_result=%s", last_result);
         printf("\n");
-        XUI_WARN("  warning: Wall time is unverified; use monotonic time for elapsed durations.\n");
+        if (!synced)
+            XUI_WARN("  warning: Wall time is unverified; use monotonic time for elapsed durations.\n");
     }
     return 0;
 }
@@ -101,6 +189,14 @@ static int do_sync(const char *server, int timeout) {
     if (timeout < 1 || timeout > MAX_TIMEOUT) {
         fprintf(stderr, "XTOS_CLOCK_ERROR timeout must be 1..%d seconds\n", MAX_TIMEOUT);
         return 1;
+    }
+    long rpid = resident_pid();
+    if (rpid > 0) {
+        /* The resident daemon owns synchronization; a second chronyd instance
+         * would fight it. Report honestly instead of failing mysteriously. */
+        printf("XTOS_CLOCK_SYNC {\"result\": \"resident-chronyd-active\", \"resident_pid\": %ld, "
+               "\"note\": \"continuous synchronization in progress; see clock status\"}\n", rpid);
+        return 0;
     }
     if (access(CHRONYD_PATH, X_OK) != 0) {
         fprintf(stderr, "XTOS_CLOCK_ERROR chronyd not available at %s\n", CHRONYD_PATH);
@@ -174,8 +270,9 @@ static int do_sync(const char *server, int timeout) {
 static void usage(void) {
     fprintf(stderr,
         "usage: clock <command>\n"
-        "  clock status [--json]     report wall time and last sync attempt\n"
-        "  clock sync <server>       one-shot NTP sync (root only)\n"
+        "  clock status [--json]     report wall time and sync state\n"
+        "  clock sync <server>       one-shot NTP sync (root only); refused\n"
+        "                             while the resident chronyd is running\n"
         "    --timeout <seconds>          1-30 seconds (default 15)\n");
 }
 
