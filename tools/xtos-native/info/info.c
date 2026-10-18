@@ -275,6 +275,10 @@ static void list_interfaces(int json, int *first) {
         }
         if (!found && nifaces < 16) {
             strncpy(names[nifaces], ifa->ifa_name, IFNAMSIZ - 1);
+            /* strncpy does NOT terminate a 15-char name (docker bridges are
+             * exactly br-+12hex=15); the missing NUL leaks an uninitialized
+             * stack byte into the JSON and runs into the next slot */
+            names[nifaces][IFNAMSIZ - 1] = '\0';
             nifaces++;
         }
     }

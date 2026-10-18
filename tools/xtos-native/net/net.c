@@ -210,8 +210,13 @@ static int show_interfaces(const char *specific, int json) {
         int found = 0;
         for (int i = 0; i < nifaces; i++)
             if (strcmp(names[i], ifa->ifa_name) == 0) { found = 1; break; }
-        if (!found && nifaces < 16)
-            strncpy(names[nifaces++], ifa->ifa_name, IFNAMSIZ - 1);
+        if (!found && nifaces < 16) {
+            strncpy(names[nifaces], ifa->ifa_name, IFNAMSIZ - 1);
+            /* strncpy does NOT terminate a 15-char name; without the NUL an
+             * uninitialized stack byte leaks into output (same as info.c) */
+            names[nifaces][IFNAMSIZ - 1] = '\0';
+            nifaces++;
+        }
     }
 
     if (!json) printf("%s%s%s\n", XUI_LABEL_S, "NAME       STATE   MTU    SPEED     ADDRESSES", XUI_RESET_S);

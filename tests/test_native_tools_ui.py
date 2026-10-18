@@ -132,7 +132,17 @@ def main() -> int:
         #    output of every styled command must equal its plain rendering.
         #    (Build a second copy with XTOS_UI_FORCE_PLAIN semantics by running
         #    with TERM unset on a pipe — identical contract, keeps the guard
-        #    self-contained without pinning volatile system values.)
+        #    self-contained.) Memory-available and Uptime are live host state
+        #    and change between the two invocations by design: mask their
+        #    digits so the gate tests TERM-independence, not wall-clock drift.
+        import re as _re
+        def stable_form(out: bytes) -> bytes:
+            lines = []
+            for ln in out.splitlines():
+                if ln.startswith(b"Memory:") or ln.startswith(b"Uptime:"):
+                    ln = _re.sub(rb"[0-9]+", b"#", ln)
+                lines.append(ln)
+            return b"\n".join(lines)
         for tool, arglists in STYLED.items():
             if arglists is None or tool not in binaries:
                 continue
@@ -142,7 +152,7 @@ def main() -> int:
                 b = subprocess.run([str(binaries[tool]), *args],
                                    capture_output=True, timeout=60,
                                    env={**os.environ, "TERM": ""})
-                if a.stdout != b.stdout:
+                if stable_form(a.stdout) != stable_form(b.stdout):
                     failures.append(f"{tool} {args}: piped output not stable")
                     print(f"  FAIL pipe-stable {tool} {args}")
                 else:
