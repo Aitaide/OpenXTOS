@@ -29,14 +29,17 @@
  */
 #define _GNU_SOURCE
 #include <ctype.h>
+#include <dirent.h>
 #include <errno.h>
 #include <fcntl.h>
+#include <linux/fs.h>
 #include <netdb.h>
 #include <poll.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <strings.h>
+#include <sys/ioctl.h>
 #include <sys/socket.h>
 #include <sys/stat.h>
 #include <sys/utsname.h>
@@ -173,6 +176,31 @@ static int sha256_file(const char *path, char *outhex) {
         sha256_update(&ctx, buf, (size_t)n);
     close(fd);
     if (n < 0) return -1;
+    unsigned char hash[32];
+    sha256_final(&ctx, hash);
+    for (int i = 0; i < 32; i++)
+        sprintf(outhex + i*2, "%02x", hash[i]);
+    outhex[64] = '\0';
+    return 0;
+}
+
+/* Hash the first `limit` bytes of `path` (used for read-back verification of a
+ * device that was just written: only the image extent belongs to the image). */
+static int sha256_prefix(const char *path, long long limit, char *outhex) {
+    int fd = open(path, O_RDONLY);
+    if (fd < 0) return -1;
+    sha256_ctx ctx; sha256_init(&ctx);
+    unsigned char buf[65536];
+    long long total = 0;
+    ssize_t n;
+    while (total < limit && (n = read(fd, buf, sizeof(buf))) > 0) {
+        size_t take = (size_t)n;
+        if ((long long)take > limit - total) take = (size_t)(limit - total);
+        sha256_update(&ctx, buf, take);
+        total += (long long)take;
+    }
+    close(fd);
+    if (n < 0 || total != limit) return -1;
     unsigned char hash[32];
     sha256_final(&ctx, hash);
     for (int i = 0; i < 32; i++)
@@ -675,7 +703,7 @@ static int verify_index_sig(const char *index_path, const char *sig_path) {
     return xed25519_verify_file(g_pubkey, index_path, sig_path);
 }
 
-static int parse_index(const char *path, struct index_latest *latest) {
+static int parse_index(const char *path, struct index_latest *latest, const char *expect_kind) {
     FILE *f = fopen(path, "r");
     if (!f) return -1;
     char line[LINE_BUF];
@@ -691,7 +719,7 @@ static int parse_index(const char *path, struct index_latest *latest) {
         }
         if (!kind_ok && strstr(line, "\"kind\"")) {
             char v[64];
-            if (!json_str(line, "kind", v, sizeof(v)) || strcmp(v, "xtos-release-index") != 0) { rc = -1; break; }
+            if (!json_str(line, "kind", v, sizeof(v)) || strcmp(v, expect_kind) != 0) { rc = -1; break; }
             kind_ok = 1;
             continue;
         }
@@ -719,7 +747,7 @@ static int parse_index(const char *path, struct index_latest *latest) {
                 else if (strstr(line, "\"name\"")) { if (!json_str(line, "name", cur->name, sizeof(cur->name))) { rc = -1; break; } }
                 else if (strstr(line, "\"sha256\"")) { if (!json_str(line, "sha256", cur->sha256, sizeof(cur->sha256))) { rc = -1; break; } }
                 else if (strstr(line, "\"url\"")) { if (!json_str(line, "url", cur->url, sizeof(cur->url))) { rc = -1; break; } }
-                else if (strstr(line, "\"size\"")) { char *p = strchr(line, ':'); if (!p) { rc = -1; break; } cur->size = atol(p + 1); }
+                else if (strstr(line, "\"size\"")) { char *p = strstr(line, "\"size\""); p = strchr(p, ':'); if (!p) { rc = -1; break; } cur->size = atol(p + 1); }
                 continue;
             }
         }
@@ -731,6 +759,184 @@ static int parse_index(const char *path, struct index_latest *latest) {
     }
     fclose(f);
     if (rc == 0 && (!schema_ok || !kind_ok || !latest->version[0])) rc = -1;
+    return rc;
+}
+
+/* ---- update apply: turn a verified download into bootable media ---- */
+
+/* Written by `update download` next to the artifacts; consumed by `apply`.
+ * Atomic (tmp+rename), overwrites any previous manifest from older runs. */
+static int write_download_manifest(const char *destdir, struct artifact **got, int ngot,
+                                   const char *version, const char *channel, const char *arch) {
+    char final[4096], tmp[4096];
+    if (snprintf(final, sizeof(final), "%s/download-manifest.json", destdir) >= (int)sizeof(final)) return -1;
+    if (snprintf(tmp, sizeof(tmp), "%s.download-manifest.tmp", destdir) >= (int)sizeof(tmp)) return -1;
+    FILE *f = fopen(tmp, "w");
+    if (!f) return -1;
+    fprintf(f, "{\n  \"schema_version\": 1,\n  \"kind\": \"xtos-download-manifest\",\n  \"version\": \"%s\",\n"
+              "  \"channel\": \"%s\",\n  \"arch\": \"%s\",\n  \"artifacts\": [\n", version, channel, arch);
+    for (int i = 0; i < ngot; i++) {
+        struct artifact *a = got[i];
+        /* One key per line: the device-side parser is line-based (same layout
+         * as the signed release index), and "size" must be anchored so a
+         * single-line object can never make it read the wrong colon. */
+        fprintf(f, "    {\n      \"arch\": \"%s\",\n      \"kind\": \"%s\",\n      \"name\": \"%s\",\n"
+                  "      \"sha256\": \"%s\",\n      \"size\": %ld,\n      \"url\": \"%s\"\n    }%s\n",
+                a->arch, a->kind, a->name, a->sha256, a->size, a->url, i + 1 < ngot ? "," : "");
+    }
+    fprintf(f, "  ]\n}\n");
+    if (fclose(f) != 0) { unlink(tmp); return -1; }
+    if (rename(tmp, final) < 0) { unlink(tmp); return -1; }
+    return 0;
+}
+
+/* Whole-disk device path whitelist: the same canonical forms xtos-install
+ * accepts (plus loop devices, which are legitimate test/tool targets). */
+static int valid_whole_disk_path(const char *p) {
+    if (strncmp(p, "/dev/sd", 7) == 0) {
+        if (!p[7]) return 0;
+        for (const char *q = p + 7; *q; q++)
+            if (!(*q >= 'a' && *q <= 'z')) return 0;
+        return 1;
+    }
+    if (strncmp(p, "/dev/nvme", 9) == 0) {
+        const char *q = p + 9;
+        if (!isdigit((unsigned char)*q)) return 0;
+        while (isdigit((unsigned char)*q)) q++;
+        if (*q != 'n') return 0;
+        q++;
+        if (!isdigit((unsigned char)*q)) return 0;
+        while (isdigit((unsigned char)*q)) q++;
+        return *q == '\0';
+    }
+    if (strncmp(p, "/dev/loop", 9) == 0) {
+        if (!p[9]) return 0;
+        for (const char *q = p + 9; *q; q++)
+            if (!isdigit((unsigned char)*q)) return 0;
+        return 1;
+    }
+    return 0;
+}
+
+/* Collect major:minor of the device and every partition of it. Prefix match
+ * plus digit/'p'+digit continuation avoids sdX/sdXX false matches. */
+static int collect_target_devs(const char *devpath, int (*devs)[2], int max) {
+    const char *slash = strrchr(devpath, '/');
+    const char *name = slash ? slash + 1 : devpath;
+    size_t plen = strlen(name);
+    DIR *d = opendir("/sys/class/block");
+    if (!d) return -1;
+    int n = 0;
+    struct dirent *e;
+    while ((e = readdir(d))) {
+        if (strncmp(e->d_name, name, plen) != 0) continue;
+        if (strlen(e->d_name) > plen) {
+            char c1 = e->d_name[plen];
+            if (!(isdigit((unsigned char)c1) ||
+                  (c1 == 'p' && isdigit((unsigned char)e->d_name[plen + 1]))))
+                continue;
+        }
+        char devfile[600], buf[64];
+        snprintf(devfile, sizeof(devfile), "/sys/class/block/%s/dev", e->d_name);
+        FILE *f = fopen(devfile, "r");
+        if (!f) continue;
+        int maj, min;
+        if (fgets(buf, sizeof(buf), f) && sscanf(buf, "%d:%d", &maj, &min) == 2 && n < max) {
+            devs[n][0] = maj;
+            devs[n][1] = min;
+            n++;
+        }
+        fclose(f);
+    }
+    closedir(d);
+    return n;
+}
+
+/* Refusal reasons for a prospective write target. Returns 0 (allowed) or 1
+ * with a human reason. Covers: unknown device, partition targets, mounted
+ * device or partitions (the running Live medium is mounted — this check is
+ * what refuses re-burning the stick the session is running from), active
+ * swap on the device. With xtos.toram=1 the medium is released at boot, so
+ * apply --to that same stick becomes the intended self-upgrade path. */
+static int target_refusal_reason(const char *devpath, char *why, size_t whyn) {
+    int devs[128][2];
+    int ndevs = collect_target_devs(devpath, devs, 128);
+    if (ndevs <= 0) { snprintf(why, whyn, "no such block device in /sys/class/block"); return 1; }
+    char pfile[600];
+    const char *name = strrchr(devpath, '/') + 1;
+    snprintf(pfile, sizeof(pfile), "/sys/class/block/%s/partition", name);
+    struct stat st;
+    if (stat(pfile, &st) == 0) { snprintf(why, whyn, "target is a partition, not a whole disk"); return 1; }
+    FILE *f = fopen("/proc/self/mountinfo", "r");
+    if (f) {
+        char line[8192];
+        while (fgets(line, sizeof(line), f)) {
+            /* field 3 is the major:minor of the mounted filesystem device */
+            char *tok = NULL, *devtok = NULL;
+            int pos = 0;
+            for (tok = strtok(line, " "); tok && pos < 3; tok = strtok(NULL, " "), pos++)
+                if (pos == 2) { devtok = tok; break; }
+            if (!devtok) continue;
+            int maj, min;
+            if (sscanf(devtok, "%d:%d", &maj, &min) == 2) {
+                for (int i = 0; i < ndevs; i++) {
+                    if (devs[i][0] == maj && devs[i][1] == min) {
+                        fclose(f);
+                        snprintf(why, whyn, "device or one of its partitions is mounted "
+                                           "(this also protects the running Live medium)");
+                        return 1;
+                    }
+                }
+            }
+        }
+        fclose(f);
+    }
+    f = fopen("/proc/swaps", "r");
+    if (f) {
+        char real[4096], line[1024];
+        if (realpath(devpath, real)) {
+            while (fgets(line, sizeof(line), f)) {
+                char spath[1024] = "", sreal[4096];
+                if (sscanf(line, "%1023s", spath) != 1 || strncmp(spath, "Filename", 8) == 0) continue;
+                if (realpath(spath, sreal) && strcmp(sreal, real) == 0) {
+                    fclose(f);
+                    snprintf(why, whyn, "device is in active use as swap");
+                    return 1;
+                }
+            }
+        }
+        fclose(f);
+    }
+    return 0;
+}
+
+/* Stream the image to the device (4 MiB chunks, short-write safe) and sync. */
+static int copy_iso_to_device(const char *iso, const char *dev, long long size) {
+    int in = open(iso, O_RDONLY);
+    if (in < 0) return -1;
+    int out = open(dev, O_WRONLY);
+    if (out < 0) { close(in); return -1; }
+    static char buf[4 * 1024 * 1024];
+    long long total = 0;
+    int rc = 0;
+    while (total < size) {
+        size_t want = (size_t)(size - total);
+        if (want > sizeof(buf)) want = sizeof(buf);
+        ssize_t r = read(in, buf, want);
+        if (r <= 0) { rc = -1; break; }
+        ssize_t off = 0;
+        while (off < r) {
+            ssize_t w = write(out, buf + off, (size_t)(r - off));
+            if (w < 0) { rc = -1; break; }
+            off += w;
+        }
+        if (rc) break;
+        total += r;
+    }
+    if (rc == 0 && total != size) rc = -1;
+    if (rc == 0 && fdatasync(out) < 0) rc = -1;
+    close(in);
+    close(out);
     return rc;
 }
 
@@ -780,6 +986,9 @@ static void usage(void) {
         "usage: update <command> [args]\n"
         "  update check                 compare installed XTOS with the signed release index\n"
         "  update download [--dest DIR] download artifacts for this architecture (verified)\n"
+        "  update apply --from DIR --to DEV --confirm ERASE-XTOS\n"
+        "                               write the verified installer image to a spare whole disk\n"
+        "                               (bootable upgrade medium; refuses mounted/running media)\n"
         "  update compare <a> <b>       compare two versions (prints older/equal/newer)\n"
         "Environment: XTOS_UPDATE_MIRRORS (space-separated), XTOS_UPDATE_PUBKEY,\n"
         "  XTOS_UPDATE_LOCAL_RELEASE (default /etc/xtos-release), XTOS_UPDATE_TIMEOUT_SEC,\n"
@@ -834,7 +1043,7 @@ int main(int argc, char **argv) {
             return 2;
         }
         struct index_latest latest;
-        if (parse_index(index_path, &latest) < 0) {
+        if (parse_index(index_path, &latest, "xtos-release-index") < 0) {
             fprintf(stderr, "update: index malformed\n");
             if (json) printf("{\"error\": \"malformed index\"}\n");
             if (fetched) { unlink(index_path); unlink(sig_path); }
@@ -900,7 +1109,7 @@ int main(int argc, char **argv) {
             return 2;
         }
         struct index_latest latest;
-        if (parse_index(index_path, &latest) < 0) {
+        if (parse_index(index_path, &latest, "xtos-release-index") < 0) {
             fprintf(stderr, "update: index malformed\n");
             if (fetched) { unlink(index_path); unlink(sig_path); }
             rmdir(tmpdir);
@@ -913,6 +1122,7 @@ int main(int argc, char **argv) {
         local_arch(arch, sizeof(arch));
         char part[4096], final[4096];
         char dlbuf[4096];
+        struct artifact *got[ART_MAX];
         if (snprintf(dlbuf, sizeof(dlbuf), "%s/.dl-XXXXXX", destdir) >= (int)sizeof(dlbuf)) { return 2; }
         if (!mkdtemp(dlbuf)) { fprintf(stderr, "update: cannot create download staging dir\n"); return 2; }
         int done = 0;
@@ -945,11 +1155,120 @@ int main(int argc, char **argv) {
             }
             if (rename(part, final) < 0) { unlink(part); rmdir(dlbuf); return 2; }
             if (!json) printf("%s\n", final);
+            got[done] = a;
             done++;
         }
         rmdir(dlbuf);
+        if (done > 0 && write_download_manifest(destdir, got, done, latest.version, latest.channel, arch) < 0) {
+            fprintf(stderr, "update: cannot write download-manifest.json in %s\n", destdir);
+            return 2;
+        }
         if (json) printf("{\"downloaded\": %d, \"dest\": \"%s\", \"mirror\": \"%s\"}\n", done, destdir, used_url);
         return done > 0 ? 0 : 2;
+    }
+
+    if (strcmp(cmd, "apply") == 0 && argc == argstart + 7) {
+        const char *from = NULL, *to = NULL, *token = NULL;
+        for (int i = argstart + 1; i < argc; i += 2) {
+            if (strcmp(argv[i], "--from") == 0) from = argv[i + 1];
+            else if (strcmp(argv[i], "--to") == 0) to = argv[i + 1];
+            else if (strcmp(argv[i], "--confirm") == 0) token = argv[i + 1];
+            else { usage(); return 2; }
+        }
+        if (!from || !to || !token || strcmp(token, "ERASE-XTOS") != 0) {
+            fprintf(stderr, "update: refusing: --confirm must be exactly ERASE-XTOS\n");
+            return 2;
+        }
+        /* 1. The download manifest is the unit apply consumes. */
+        char manifest[4096];
+        if (snprintf(manifest, sizeof(manifest), "%s/download-manifest.json", from) >= (int)sizeof(manifest)) return 2;
+        struct index_latest dl;
+        if (parse_index(manifest, &dl, "xtos-download-manifest") < 0) {
+            fprintf(stderr, "update: %s is not a download manifest; run `update download --dest %s` first\n",
+                    manifest, from);
+            return 2;
+        }
+        /* 2. Re-verify every artifact against the manifest before any device is opened. */
+        struct artifact *iso = NULL;
+        for (int i = 0; i < dl.narts; i++) {
+            struct artifact *a = &dl.arts[i];
+            char path[4096];
+            struct stat st;
+            if (snprintf(path, sizeof(path), "%s/%s", from, a->name) >= (int)sizeof(path)) return 2;
+            if (stat(path, &st) < 0) { fprintf(stderr, "update: missing artifact %s\n", a->name); return 2; }
+            if (a->sha256[0]) {
+                char hex[65];
+                if (sha256_file(path, hex) < 0 || strcmp(hex, a->sha256) != 0) {
+                    fprintf(stderr, "update: corrupt artifact (hash mismatch): %s\n", a->name);
+                    return 2;
+                }
+            }
+            if (a->size > 0 && (long long)st.st_size != a->size) {
+                fprintf(stderr, "update: artifact size mismatch: %s\n", a->name);
+                return 2;
+            }
+            if (strcmp(a->kind, "installer-iso") == 0) iso = a;
+        }
+        if (!iso || iso->size <= 0 || !iso->sha256[0]) {
+            fprintf(stderr, "update: no installer-iso artifact (with size and sha256) in %s\n", manifest);
+            return 2;
+        }
+        /* 3. Target safety: canonical whole-disk path, not mounted, not swap. */
+        char real[4096];
+        if (!realpath(to, real)) { fprintf(stderr, "update: cannot resolve %s\n", to); return 2; }
+        if (strcmp(real, to) != 0) { fprintf(stderr, "update: refusing alias path %s (use %s)\n", to, real); return 2; }
+        if (!valid_whole_disk_path(real)) {
+            fprintf(stderr, "update: refusing %s: target must be a canonical whole disk (/dev/sdX, /dev/nvmeXnY, /dev/loopN)\n", real);
+            return 2;
+        }
+        struct stat dst;
+        if (stat(real, &dst) < 0 || !S_ISBLK(dst.st_mode)) {
+            fprintf(stderr, "update: refusing %s: not a block device\n", real);
+            return 2;
+        }
+        char why[512];
+        if (target_refusal_reason(real, why, sizeof(why))) {
+            fprintf(stderr, "update: refusing %s: %s\n", real, why);
+            return 2;
+        }
+        int tfd = open(real, O_RDONLY);
+        unsigned long long cap = 0;
+        if (tfd < 0 || ioctl(tfd, BLKGETSIZE64, &cap) < 0) {
+            if (tfd >= 0) close(tfd);
+            fprintf(stderr, "update: cannot determine the size of %s\n", real);
+            return 2;
+        }
+        close(tfd);
+        if (cap < (unsigned long long)iso->size) {
+            fprintf(stderr, "update: refusing: %s (%llu bytes) is smaller than the image (%ld bytes)\n",
+                    real, cap, iso->size);
+            return 2;
+        }
+        /* 4. Write, then verify by reading back exactly the image extent. */
+        char ipath[4096];
+        if (snprintf(ipath, sizeof(ipath), "%s/%s", from, iso->name) >= (int)sizeof(ipath)) return 2;
+        if (copy_iso_to_device(ipath, real, iso->size) < 0) {
+            fprintf(stderr, "update: write to %s failed\n", real);
+            return 2;
+        }
+        char hex[65];
+        if (sha256_prefix(real, iso->size, hex) < 0 || strcmp(hex, iso->sha256) != 0) {
+            fprintf(stderr, "update: read-back verification failed on %s\n", real);
+            return 2;
+        }
+        if (json) {
+            printf("{\"applied\": true, \"version\": \"%s\", \"target\": \"%s\", \"bytes\": %ld, \"sha256\": \"%s\"}\n",
+                   dl.version, real, iso->size, iso->sha256);
+        } else {
+            xui_init();
+            XUI_LABEL("Applied:  ");
+            printf("%s installer -> %s (%ld bytes)\n", dl.version, real, iso->size);
+            XUI_LABEL("Verify:   ");
+            printf("read-back sha256 match (%s)\n", iso->sha256);
+            XUI_DIM("Reboot from this medium to run the new version.\n"
+                    "Labeled XTOS-PERSIST volumes are not touched by apply.\n");
+        }
+        return 0;
     }
 
     usage();

@@ -98,8 +98,28 @@ sha256+size except `checksums` entries) and signs with the repository key;
 ```
 update check                 installed version vs signed index (exit 0 latest, 1 older)
 update download --dest DIR   download artifacts for this architecture, verified
+update apply --from DIR --to DEV --confirm ERASE-XTOS
+                             write the verified installer image to a spare whole
+                             disk: a bootable upgrade medium, read-back verified
 update compare <a> <b>        semver-style compare including prerelease ordering
 ```
+
+`download` writes a `download-manifest.json` (name/sha256/size per artifact)
+next to the files; `apply` consumes exactly that unit — it re-verifies every
+artifact hash before opening any device, refuses anything but a canonical
+whole-disk path (/dev/sdX, /dev/nvmeXnY, /dev/loopN), refuses mounted
+targets or partitions (which is also what protects the running Live
+medium), refuses active swap, requires the exact ERASE-XTOS confirmation
+token, checks the device is at least image-sized, then streams the image
+4 MiB at a time and verifies the written medium by hashing the image extent
+back. This is the honest upgrade loop for an image-based system: the boot
+medium is an immutable ISO9660 volume, so "applying" a release means
+creating the next boot medium; persistence volumes (XTOS-PERSIST) are
+touched by nothing here. Booted with `xtos.toram=1` the running medium is
+released at boot, so `apply --to` the same stick becomes a self-upgrade.
+In-place rootfs replacement on installed disks is deliberately not claimed
+— installed systems upgrade by booting the new medium and re-running the
+installer.
 
 Transport is fully native: no `curl` process is ever executed. The tool
 speaks HTTP/1.1 directly and TLS 1.2/1.3 through the vendored mbedTLS

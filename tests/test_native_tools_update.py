@@ -8,6 +8,7 @@ fixture; no network, no installed XTOS image required.
 import hashlib
 import json
 import os
+import shutil
 import signal
 import socket
 import ssl
@@ -307,6 +308,192 @@ class UpdateToolTests(unittest.TestCase):
                             env_extra={'XTOS_UPDATE_MIRRORS': f'https://127.0.0.2:{self.tls_port}',
                                        'XTOS_UPDATE_CA_BUNDLE': str(self.ca_pem)})
         self.assertEqual(r.returncode, 2)
+        write_index(self.mirror, version='1.2.0', key=KEY)
+
+    # ---- update apply ----
+
+    def make_download(self, iso_bytes, name='mini.iso', version='1.4.0', size=None):
+        """Fixture: publish an installer-iso artifact and download it into a fresh dir."""
+        (self.mirror / name).write_bytes(iso_bytes)
+        write_index(self.mirror, version=version, key=KEY, artifacts=[
+            {'name': name, 'arch': 'x86_64', 'kind': 'installer-iso',
+             'size': size if size is not None else len(iso_bytes),
+             'sha256': hashlib.sha256(iso_bytes).hexdigest(),
+             'url': f'{self.mirror_url}/{name}'},
+        ])
+        dest = self.base / f'dest-apply-{version.replace(".", "_")}-{name}'
+        r = self.run_update('download', '--dest', str(dest), installed='1.2.0')
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        return dest
+
+    def test_14_download_writes_manifest(self):
+        iso = bytes(range(256)) * 4096  # exactly 1 MiB, deterministic
+        dest = self.make_download(iso)
+        manifest = dest / 'download-manifest.json'
+        self.assertTrue(manifest.is_file())
+        data = json.loads(manifest.read_text())
+        self.assertEqual(data['kind'], 'xtos-download-manifest')
+        self.assertEqual(data['version'], '1.4.0')
+        self.assertEqual(data['arch'], 'x86_64')
+        self.assertEqual(len(data['artifacts']), 1)
+        art = data['artifacts'][0]
+        self.assertEqual(art['name'], 'mini.iso')
+        self.assertEqual(art['kind'], 'installer-iso')
+        self.assertEqual(art['sha256'], hashlib.sha256(iso).hexdigest())
+        self.assertEqual(art['size'], len(iso))
+        # no temp leftovers from the atomic manifest write
+        leftovers = [p.name for p in dest.iterdir() if p.name.startswith('.dl') or 'tmp' in p.name]
+        self.assertEqual(leftovers, [])
+        write_index(self.mirror, version='1.2.0', key=KEY)
+
+    def test_15_apply_argument_gates(self):
+        iso = b'GATE-ISO' * 64
+        dest = self.make_download(iso)
+        loop = ''  # gates fire before any device access
+        bad = [
+            (['apply', '--from', str(dest)], 'usage:'),                 # too few args -> usage
+            (['apply', '--from', str(dest), '--to', '/dev/loop0',
+              '--confirm', 'ERASE-XTOS-EXTRA'], 'refusing'),           # wrong token
+            (['apply', '--from', str(dest / 'nonexistent'), '--to', '/dev/loop0',
+              '--confirm', 'ERASE-XTOS'], 'not a download manifest'),   # no manifest dir
+            (['apply', '--from', str(self.base), '--to', '/dev/loop0',
+              '--confirm', 'ERASE-XTOS'], 'not a download manifest'),    # dir without a manifest
+        ]
+        for args, expect in bad:
+            r = self.run_update(*args, installed=None)
+            self.assertEqual(r.returncode, 2, f'{args}: {r.stdout}{r.stderr}')
+            self.assertIn(expect, (r.stdout + r.stderr).lower())
+        # a release index must not be accepted as a download manifest
+        write_index(self.mirror, version='1.5.0', key=KEY)
+        idx_dir = self.base / 'plain-index'
+        idx_dir.mkdir()
+        shutil.copy(self.mirror / 'release-index.json', idx_dir / 'download-manifest.json')
+        r = self.run_update('apply', '--from', str(idx_dir), '--to', '/dev/loop0',
+                            '--confirm', 'ERASE-XTOS', installed=None)
+        self.assertEqual(r.returncode, 2)
+        self.assertIn('download manifest', r.stdout + r.stderr)
+        write_index(self.mirror, version='1.2.0', key=KEY)
+
+    def test_15b_apply_rejects_corrupt_artifact(self):
+        iso = b'CORRUPT-ME' * 1024
+        dest = self.make_download(iso)
+        target = dest / 'mini.iso'
+        data = bytearray(target.read_bytes())
+        data[7] ^= 0x55
+        target.write_bytes(bytes(data))
+        r = self.run_update('apply', '--from', str(dest), '--to', '/dev/loop0',
+                            '--confirm', 'ERASE-XTOS', installed=None)
+        self.assertEqual(r.returncode, 2)
+        self.assertIn('corrupt artifact', r.stdout + r.stderr)
+        self.assertIn('hash mismatch', r.stdout + r.stderr)
+        write_index(self.mirror, version='1.2.0', key=KEY)
+
+    def loop_targets(self):
+        """Root-only: yields (device, backing_file) loop pairs, or skips."""
+        if os.geteuid() != 0:
+            self.skipTest('apply loop tests need root')
+        if not Path('/sbin/losetup').is_file() and not Path('/usr/sbin/losetup').is_file():
+            self.skipTest('losetup not available')
+        def make(mib):
+            backing = self.base / f'loop-{mib}m.img'
+            backing.write_bytes(b'\0' * (mib * 1024 * 1024))
+            out = subprocess.run(['losetup', '-f', '--show', str(backing)],
+                                 capture_output=True, text=True)
+            self.assertEqual(out.returncode, 0, out.stderr)
+            return out.stdout.strip(), backing
+        yield make
+
+    def test_16_apply_writes_and_verifies_loop_device(self):
+        iso = bytes(range(256)) * (5 * 4096)  # 5 MiB: exercises the multi-chunk copy path
+        dest = self.make_download(iso)
+        expected = hashlib.sha256(iso).hexdigest()
+        for make in self.loop_targets():
+            dev, backing = make(8)
+            try:
+                r = self.run_update('apply', '--from', str(dest), '--to', dev,
+                                    '--confirm', 'ERASE-XTOS', installed=None)
+                self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+                self.assertIn('Applied:', r.stdout)
+                self.assertIn(dev, r.stdout)
+                self.assertIn(expected[:16], r.stdout)
+                self.assertIn('read-back sha256 match', r.stdout)
+                blob = backing.read_bytes()
+                # the image extent must match exactly; the rest of the medium stays untouched
+                self.assertEqual(hashlib.sha256(blob[:len(iso)]).hexdigest(), expected)
+                self.assertEqual(blob[len(iso):], b'\0' * (8 * 1024 * 1024 - len(iso)))
+            finally:
+                subprocess.run(['losetup', '-d', dev], capture_output=True)
+        write_index(self.mirror, version='1.2.0', key=KEY)
+
+    def test_17_apply_safety_refusals(self):
+        iso = bytes(range(256)) * 4096  # 1 MiB
+        dest = self.make_download(iso)
+        for make in self.loop_targets():
+            # (a) target smaller than the image: 512 KiB loop vs 1 MiB image
+            back_small = self.base / 'loop-small.img'
+            back_small.write_bytes(b'\0' * (512 * 1024))
+            out = subprocess.run(['losetup', '-f', '--show', str(back_small)],
+                                 capture_output=True, text=True)
+            self.assertEqual(out.returncode, 0, out.stderr)
+            dev_small = out.stdout.strip()
+            try:
+                r = self.run_update('apply', '--from', str(dest), '--to', dev_small,
+                                    '--confirm', 'ERASE-XTOS', installed=None)
+                self.assertEqual(r.returncode, 2)
+                self.assertIn('smaller than the image', r.stdout + r.stderr)
+                # backing file untouched: still all zeros
+                self.assertEqual(hashlib.sha256(back_small.read_bytes()).hexdigest(),
+                                 hashlib.sha256(b'\0' * (512 * 1024)).hexdigest())
+            finally:
+                subprocess.run(['losetup', '-d', dev_small], capture_output=True)
+            # (b) mounted target: 8 MiB ext4 on a loop, mounted read-only
+            dev_mount, back_mount = make(8)
+            mnt = self.base / 'loop-mount'
+            mnt.mkdir(exist_ok=True)
+            mk = subprocess.run(['mkfs.ext4', '-F', '-q', '-O', '^orphan_file,^metadata_csum_seed', dev_mount],
+                                capture_output=True, text=True)
+            if mk.returncode != 0:
+                subprocess.run(['losetup', '-d', dev_mount], capture_output=True)
+                self.skipTest(f'mkfs.ext4 unavailable: {mk.stderr.strip()}')
+            subprocess.run(['mount', '-o', 'ro', dev_mount, str(mnt)], check=True)
+            try:
+                r = self.run_update('apply', '--from', str(dest), '--to', dev_mount,
+                                    '--confirm', 'ERASE-XTOS', installed=None)
+                self.assertEqual(r.returncode, 2)
+                self.assertIn('mounted', r.stdout + r.stderr)
+                # the mounted filesystem must be untouched by the refusal
+                fsck = subprocess.run(['fsck.ext4', '-n', dev_mount], capture_output=True)
+                self.assertEqual(fsck.returncode, 0, fsck.stdout + fsck.stderr)
+            finally:
+                subprocess.run(['umount', str(mnt)], capture_output=True)
+                subprocess.run(['losetup', '-d', dev_mount], capture_output=True)
+            # (c) alias path refusal: /dev/disk-style symlink must be rejected
+            dev_alias, back_alias = make(8)
+            alias = self.base / 'alias-dev'
+            alias.symlink_to(dev_alias)
+            try:
+                r = self.run_update('apply', '--from', str(dest), '--to', str(alias),
+                                    '--confirm', 'ERASE-XTOS', installed=None)
+                self.assertEqual(r.returncode, 2)
+                self.assertIn('alias path', r.stdout + r.stderr)
+                # backing file untouched: still all zeros
+                self.assertEqual(hashlib.sha256(back_alias.read_bytes()).hexdigest(),
+                                 hashlib.sha256(b'\0' * (8 * 1024 * 1024)).hexdigest())
+            finally:
+                alias.unlink()
+                subprocess.run(['losetup', '-d', dev_alias], capture_output=True)
+        # (d) non-device targets: a plain regular file hits the canonical-path gate
+        fake = self.base / 'not-a-device'
+        fake.write_bytes(b'\0' * 4096)
+        r = self.run_update('apply', '--from', str(dest), '--to', str(fake),
+                            '--confirm', 'ERASE-XTOS', installed=None)
+        self.assertEqual(r.returncode, 2)
+        self.assertIn('canonical whole disk', r.stdout + r.stderr)
+        # and a canonical-pattern path that does not exist fails at resolution
+        r = self.run_update('apply', '--from', str(dest), '--to', '/dev/loop999999',
+                            '--confirm', 'ERASE-XTOS', installed=None)
+        self.assertEqual(r.returncode, 2)
+        self.assertIn('cannot resolve', r.stdout + r.stderr)
         write_index(self.mirror, version='1.2.0', key=KEY)
 
 
