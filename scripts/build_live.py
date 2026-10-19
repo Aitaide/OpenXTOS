@@ -82,6 +82,23 @@ def source_provenance(repo=ROOT):
             'source_state': 'dirty' if status.strip() else 'clean'}
 
 
+def validate_source_provenance(provenance, expected_source=None, require_clean=False):
+    if expected_source is not None:
+        if not re.fullmatch(r'[0-9a-f]{40}|[0-9a-f]{64}', expected_source):
+            raise ValueError('expected source must be a complete Git SHA')
+        if provenance['source_git_head'] != expected_source:
+            raise ValueError('source does not match expected commit')
+    if require_clean and provenance['source_state'] != 'clean':
+        raise ValueError('release build requires clean source')
+
+
+def verify_source_unchanged(initial, repo=ROOT):
+    current = source_provenance(repo)
+    if current != initial or (initial['source_state'] == 'clean' and current['source_state'] != 'clean'):
+        raise ValueError('source changed while building candidate')
+    return current
+
+
 def write(root, relative, text, mode=0o644):
     target=root/relative
     if target.is_symlink():target.unlink()
@@ -208,6 +225,7 @@ def build(args):
     epoch=args.epoch
     if epoch is None:epoch=int(subprocess.check_output(['git','-C',str(ROOT),'log','-1','--pretty=%ct'],text=True).strip())
     provenance = source_provenance(ROOT)
+    validate_source_provenance(provenance, args.expected_source, args.require_clean)
     output.parent.mkdir(parents=True,exist_ok=True)
     stage=Path(tempfile.mkdtemp(prefix='.'+output.name+'-',dir=output.parent));stage.chmod(0o755)
     try:
@@ -354,9 +372,11 @@ def build(args):
         env=dict(os.environ,SOURCE_DATE_EPOCH=str(epoch),LC_ALL='C',TZ='UTC')
         run(['grub-mkrescue','-o',product,iso],env=env)
         build_manifest={'schema_version':1,'status':'built-unverified-live-candidate','architecture':'x86_64','kernel_release':release,'kernel_sha256':sha(image),'kernel_config_sha256':sha(kernel/'.config'),'userspace_lock_sha256':manifest['lock_sha256'],'source_git_head':provenance['source_git_head'],'source_state':provenance['source_state'],'authorized_public_key_sha256':hashlib.sha256(key.encode()).hexdigest() if key else None,'rootfs_squashfs_sha256':sha(squash),'initramfs_sha256':sha(iso/'boot/initramfs.gz'),'iso_sha256':sha(product),'iso_bytes':product.stat().st_size,'epoch':epoch,'storage':live_storage,'ssh':'publickey only when provisioned','firewall':'implemented for private QEMU validation; physical policy deployment unverified','secure_boot':'unverified/unsupported','private_key_included':False}
+        shutil.copy2(kernel/'.config', images/'kernel.config')
         write(stage,'images/build-manifest.json',json.dumps(build_manifest,sort_keys=True,indent=2)+'\n')
         write(stage,'images/SHA256SUMS',sha(product)+'  '+product.name+'\n'+sha(images/'build-manifest.json')+'  build-manifest.json\n')
         if output.exists():raise ValueError('output appeared during build')
+        verify_source_unchanged(provenance, ROOT)
         os.rename(stage,output)
         print(json.dumps({'status':'built','output':str(output),'iso':str(output/'images'/product.name),'kernel_release':release}))
     finally:
@@ -372,6 +392,8 @@ def main():
     p.add_argument('--kernel-extra',default='',help='extra kernel cmdline for test/persistence variants')
     p.add_argument('--authorized-key',type=Path,help='explicit public key only; never a private key')
     p.add_argument('--epoch',type=int)
+    p.add_argument('--require-clean',action='store_true',help='reject uncommitted or untracked source')
+    p.add_argument('--expected-source',help='require this complete source commit SHA')
     args=p.parse_args()
     try:build(args)
     except (ValueError,OSError,subprocess.CalledProcessError) as exc:p.error(str(exc))

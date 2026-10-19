@@ -59,6 +59,41 @@ class LiveBuildTests(unittest.TestCase):
             (repo/'new-source').write_text('untracked\n')
             self.assertEqual(module.source_provenance(repo)['source_state'],'dirty')
 
+    def test_frozen_source_rejects_mutation_before_candidate_publication(self):
+        import importlib.util
+        spec=importlib.util.spec_from_file_location('live',SCRIPT)
+        module=importlib.util.module_from_spec(spec);spec.loader.exec_module(module)
+        self.assertTrue(hasattr(module,'verify_source_unchanged'),
+                        'builder does not recheck frozen source before publishing')
+        with tempfile.TemporaryDirectory() as tmp:
+            repo=Path(tmp)
+            subprocess.run(['git','init','-q',str(repo)],check=True)
+            subprocess.run(['git','-C',str(repo),'config','user.name','XTOS Test'],check=True)
+            subprocess.run(['git','-C',str(repo),'config','user.email','test@example.invalid'],check=True)
+            (repo/'source').write_text('frozen\n')
+            subprocess.run(['git','-C',str(repo),'add','source'],check=True)
+            subprocess.run(['git','-C',str(repo),'commit','-qm','fixture'],check=True)
+            initial=module.source_provenance(repo)
+            self.assertEqual(module.verify_source_unchanged(initial,repo),initial)
+            (repo/'new-source').write_text('untracked\n')
+            with self.assertRaises(ValueError):module.verify_source_unchanged(initial,repo)
+            (repo/'new-source').unlink()
+            (repo/'source').write_text('changed while building\n')
+            with self.assertRaises(ValueError):module.verify_source_unchanged(initial,repo)
+
+    def test_strict_build_preflight_rejects_dirty_or_wrong_source(self):
+        import importlib.util
+        spec=importlib.util.spec_from_file_location('live',SCRIPT)
+        module=importlib.util.module_from_spec(spec);spec.loader.exec_module(module)
+        self.assertTrue(hasattr(module,'validate_source_provenance'),
+                        'release builder has no strict provenance gate')
+        clean={'source_git_head':'a'*40,'source_state':'clean'}
+        module.validate_source_provenance(clean,expected_source='a'*40,require_clean=True)
+        for invalid,expected in [(dict(clean,source_state='dirty'),'a'*40),
+                                 (clean,'b'*40),(clean,'main')]:
+            with self.subTest(invalid=invalid,expected=expected),self.assertRaises(ValueError):
+                module.validate_source_provenance(invalid,expected_source=expected,require_clean=True)
+
     def test_developer_has_graphics_groups_but_not_root_group(self):
         import importlib.util
         spec=importlib.util.spec_from_file_location('live',SCRIPT)

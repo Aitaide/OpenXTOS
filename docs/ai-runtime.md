@@ -39,6 +39,57 @@ recorded rather than hidden.
 
 - AI control-host tests live in an isolated Python 3.11 CPU-only environment. The lock file `tools/xtos-onnx-baseline/requirements-ai.lock` pins NumPy, ONNX, ONNX Runtime, PyTorch CPU, TensorFlow CPU, Keras and protobuf with hashes. Provision with `uv venv --python 3.11 .build/ai-acceptance/venv` then `uv pip sync --python .build/ai-acceptance/venv/bin/python --require-hashes tools/xtos-onnx-baseline/requirements-ai.lock`. Use an AVX-capable host for native framework execution, or run `XTOS_AI_PYTHON=scripts/ai-python-qemu.sh bash scripts/test.sh` when the host CPU lacks AVX/AVX2. QEMU functional parity is not a performance benchmark. The strict AI entry rejects missing suites, failures and any skipped tests, and writes `.build/ai-acceptance/results.json`; without `XTOS_AI_PYTHON`, the default full suite retains its optional-dependency degradation path.
 - `tests/test_ai_acceptance.py` verifies that the strict AI gate rejects missing suites, failures and unittest skips. `scripts/test_ai.py` records test results, runtime/package versions and source provenance. `tf_export.py` keeps TensorFlow/Keras converter chatter on stderr so stdout remains a single machine-readable JSON document.
+
+## Strict acceptance and source identity
+
+Development tests may run from a changed checkout. Release acceptance is stricter:
+commit reviewed source, use a detached clean worktree, and run both commands with
+that worktree's complete `HEAD` SHA:
+
+```sh
+SHA=$(git rev-parse HEAD)
+.build/ai-acceptance/venv/bin/python scripts/test_ai.py \
+  --require-clean --expected-source "$SHA" \
+  --report .build/ai-acceptance/results.json
+python3 scripts/verify_ai_acceptance.py \
+  --report .build/ai-acceptance/results.json --expected-source "$SHA"
+```
+
+On a control host without the required CPU instructions, replace the first
+Python command with `scripts/ai-python-qemu.sh`; keep the verifier on the host.
+This tests CPU functionality under emulation, not physical latency.
+
+The report records start/end source snapshots (including nonignored untracked
+source), model and dependency-lock hashes, selected suite and runner-source
+hashes, actual executed test IDs, per-suite counts and the seven direct package
+versions. The verifier derives the expected test inventory from the current
+suite source without importing frameworks. It rejects missing, duplicate or
+skipped tests, changed inputs, stale/dirty source, wrong test roots and versions
+that differ from `requirements-ai.lock`. It also compares input bytes with the
+committed Git objects, not only `git status`.
+
+The `ai-acceptance` CI job installs the hash lock into its own Python 3.11 venv,
+runs the strict runner and verifier for the exact checkout SHA, and retains
+actual report/log files even on failure. This is consistency verification of
+trusted runner output, not a cryptographic signature of reports or evidence of
+task accuracy, GPU acceleration or hardware safety.
+
+For a Live claim, AI source acceptance alone is insufficient. Build with
+`build_live.py --require-clean --expected-source "$SHA"` and all documented
+input arguments, boot the exact candidate using `verify_live.py`, then run:
+
+```sh
+python3 scripts/verify_live_acceptance.py \
+  --candidate .build/live/<new-candidate> \
+  --evidence .build/live/<four-mode-evidence> \
+  --expected-source "$SHA" --report .build/live/<acceptance-report>.json
+```
+
+The complete Live acceptance requires BIOS/UEFI × CD/USB evidence. It checks
+both staged files and the kernel/initramfs/rootfs actually embedded in the ISO.
+A previous candidate's report cannot validate a new ISO or a newer source SHA.
+Physical GPU/BCI/camera, sustained load and Secure Boot remain separate gates.
+
 ## LLM inference: llama.cpp as a third-party xpkg
 
 LLM inference is not baked into the image. It installs through the normal

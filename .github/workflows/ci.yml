@@ -11,6 +11,16 @@ jobs:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 2
+      - name: Install source verification tools
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y xorriso python3-yaml
+      - name: Verify CI acceptance contracts
+        run: |
+          set -euo pipefail
+          python3 tests/test_ci_ai.py -v
+          python3 tests/test_ci_live.py -v
       - name: Verify source tree
         run: ./scripts/verify_source_tree.sh
       - name: Run user-space tests (incl. fuzz check)
@@ -21,6 +31,76 @@ jobs:
         run: python3 tools/xtos-sbom/gen_sbom.py --check
       - name: Check project whitespace
         run: git diff --check HEAD^ HEAD -- README.md CONTRIBUTING.md .gitignore .gitattributes .github scripts sdk tools tests system docs/system_build.md docs/signal_processing_benchmark.md docs/signal_processing_baseline.md docs/onnx_runtime_cpu_baseline.md docs/torch_onnx_export_parity.md plans/XTOS_Next_Development_Plan_Rev2.md examples/bci_test.c
+  ai-acceptance:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    defaults:
+      run:
+        shell: bash
+    env:
+      PYTHONDONTWRITEBYTECODE: '1'
+      PYTHONNOUSERSITE: '1'
+      TF_CPP_MIN_LOG_LEVEL: '2'
+      OMP_NUM_THREADS: '1'
+      OPENBLAS_NUM_THREADS: '1'
+      MKL_NUM_THREADS: '1'
+      NUMEXPR_NUM_THREADS: '1'
+      VECLIB_MAXIMUM_THREADS: '1'
+      TF_NUM_INTRAOP_THREADS: '1'
+      TF_NUM_INTEROP_THREADS: '1'
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.sha }}
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Require clean checkout at the exact CI SHA
+        id: source-before
+        run: |
+          set -euo pipefail
+          mkdir -p .build/ai-acceptance
+          git status --porcelain --untracked-files=all | tee .build/ai-acceptance/source-before.log
+          test ! -s .build/ai-acceptance/source-before.log
+          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+      - name: Install hash-locked AI dependencies in an isolated venv
+        id: install-ai
+        run: |
+          set -euo pipefail
+          mkdir -p .build/ai-acceptance
+          python3 -m venv .build/ai-acceptance/venv 2>&1 | tee .build/ai-acceptance/install.log
+          .build/ai-acceptance/venv/bin/python -m pip install --require-hashes -r tools/xtos-onnx-baseline/requirements-ai.lock 2>&1 | tee -a .build/ai-acceptance/install.log
+      - name: Run strict AI acceptance for the clean CI SHA
+        id: run-ai
+        run: |
+          set -euo pipefail
+          .build/ai-acceptance/venv/bin/python scripts/test_ai.py --require-clean --expected-source "$GITHUB_SHA" --report .build/ai-acceptance/results.json 2>&1 | tee .build/ai-acceptance/strict-run.log
+      - name: Verify AI report provenance and complete locked results
+        id: verify-ai
+        if: always()
+        run: |
+          set -euo pipefail
+          .build/ai-acceptance/venv/bin/python scripts/verify_ai_acceptance.py --report .build/ai-acceptance/results.json --expected-source "$GITHUB_SHA" 2>&1 | tee .build/ai-acceptance/verify-report.log
+      - name: Require source to remain clean at the exact CI SHA
+        id: source-after
+        if: always()
+        run: |
+          set -euo pipefail
+          mkdir -p .build/ai-acceptance
+          git status --porcelain --untracked-files=all | tee .build/ai-acceptance/source-after.log
+          test ! -s .build/ai-acceptance/source-after.log
+          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+      - name: Upload strict AI report and actual execution logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ai-acceptance-${{ github.sha }}
+          path: |
+            .build/ai-acceptance/results.json
+            .build/ai-acceptance/*.log
+          if-no-files-found: error
+          include-hidden-files: true
+          retention-days: 14
   system:
     runs-on: ubuntu-latest
     timeout-minutes: 90

@@ -36,12 +36,14 @@ python3 "$ROOT/tests/test_make_xpkg.py"
 python3 -m unittest discover -s "$ROOT/tests" -p 'test_userspace_repo.py' -v
 python3 -m unittest discover -s "$ROOT/tests" -p 'test_release_index.py' -v
 python3 "$ROOT/tests/test_live_build.py"
+python3 "$ROOT/tests/test_live_acceptance.py"
 python3 "$ROOT/tests/test_live_runtime.py"
 python3 "$ROOT/tests/test_live_devices.py"
 python3 "$ROOT/tests/test_verify_live_gpu.py"
 python3 "$ROOT/tests/test_userspace_fetch.py"
 python3 "$ROOT/tests/test_live_fsck_policy.py"
 python3 "$ROOT/tests/test_ai_acceptance.py"
+python3 "$ROOT/tests/test_ai_provenance.py"
 if [[ -n "${XTOS_AI_PYTHON:-}" ]]; then
     "$XTOS_AI_PYTHON" "$ROOT/scripts/test_ai.py"
 else
