@@ -37,6 +37,8 @@ friends load on demand. Physical camera capture is a hardware step — QEMU
 has no UVC device model, so the absence of /dev/video* under emulation is
 recorded rather than hidden.
 
+- AI control-host tests live in an isolated Python 3.11 CPU-only environment. The lock file `tools/xtos-onnx-baseline/requirements-ai.lock` pins NumPy, ONNX, ONNX Runtime, PyTorch CPU, TensorFlow CPU, Keras and protobuf with hashes. Provision with `uv venv --python 3.11 .build/ai-acceptance/venv` then `uv pip sync --python .build/ai-acceptance/venv/bin/python --require-hashes tools/xtos-onnx-baseline/requirements-ai.lock`. Use an AVX-capable host for native framework execution, or run `XTOS_AI_PYTHON=scripts/ai-python-qemu.sh bash scripts/test.sh` when the host CPU lacks AVX/AVX2. QEMU functional parity is not a performance benchmark. The strict AI entry rejects missing suites, failures and any skipped tests, and writes `.build/ai-acceptance/results.json`; without `XTOS_AI_PYTHON`, the default full suite retains its optional-dependency degradation path.
+- `tests/test_ai_acceptance.py` verifies that the strict AI gate rejects missing suites, failures and unittest skips. `scripts/test_ai.py` records test results, runtime/package versions and source provenance. `tf_export.py` keeps TensorFlow/Keras converter chatter on stderr so stdout remains a single machine-readable JSON document.
 ## LLM inference: llama.cpp as a third-party xpkg
 
 LLM inference is not baked into the image. It installs through the normal

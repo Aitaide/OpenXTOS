@@ -41,7 +41,12 @@ python3 "$ROOT/tests/test_live_devices.py"
 python3 "$ROOT/tests/test_verify_live_gpu.py"
 python3 "$ROOT/tests/test_userspace_fetch.py"
 python3 "$ROOT/tests/test_live_fsck_policy.py"
-python3 -m unittest discover -s "$ROOT/tools/xtos-onnx-baseline" -p 'test_onnx_baseline.py' -v
-python3 -m unittest discover -s "$ROOT/tools/xtos-onnx-baseline" -p 'test_torch_onnx_parity.py' -v
-python3 -m unittest discover -s "$ROOT/tools/xtos-onnx-baseline" -p 'test_tf_onnx_parity.py' -v
+python3 "$ROOT/tests/test_ai_acceptance.py"
+if [[ -n "${XTOS_AI_PYTHON:-}" ]]; then
+    "$XTOS_AI_PYTHON" "$ROOT/scripts/test_ai.py"
+else
+    python3 -m unittest discover -s "$ROOT/tools/xtos-onnx-baseline" -p 'test_onnx_baseline.py' -v
+    python3 -m unittest discover -s "$ROOT/tools/xtos-onnx-baseline" -p 'test_torch_onnx_parity.py' -v
+    python3 -m unittest discover -s "$ROOT/tools/xtos-onnx-baseline" -p 'test_tf_onnx_parity.py' -v
+fi
 printf 'user_space_tests=pass\n'

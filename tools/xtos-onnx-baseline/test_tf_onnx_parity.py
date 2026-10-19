@@ -15,6 +15,36 @@ ROOT = Path(__file__).resolve().parents[2]
 TF_EXPORT = ROOT / "tools" / "xtos-onnx-baseline" / "tf_export.py"
 
 
+def runtime_environment(env: dict[str, str]) -> dict[str, str]:
+    """Expose isolated framework roots before the dynamic loader starts."""
+    python_paths: list[str] = []
+    library_paths: list[str] = []
+    for variable in ("XTOS_TF_ROOT", "XTOS_ONNX_ROOT"):
+        value = env.get(variable)
+        if not value:
+            continue
+        root = Path(value)
+        candidates = [root]
+        for pattern in ("usr/lib/python*/dist-packages", "usr/lib/python*/site-packages",
+                        "lib/python*/dist-packages", "lib/python*/site-packages"):
+            candidates.extend(root.glob(pattern))
+        python_paths.extend(str(path) for path in candidates if path.is_dir())
+        libraries = [
+            root / "usr/lib/x86_64-linux-gnu", root / "usr/lib",
+            root / "lib/x86_64-linux-gnu", root / "lib", root / "onnxruntime/capi",
+        ]
+        library_paths.extend(str(path) for path in libraries if path.is_dir())
+    if python_paths:
+        existing = env.get("PYTHONPATH", "")
+        env["PYTHONPATH"] = ":".join(python_paths + ([existing] if existing else []))
+    if library_paths:
+        existing = env.get("LD_LIBRARY_PATH", "")
+        env["LD_LIBRARY_PATH"] = ":".join(library_paths + ([existing] if existing else []))
+    env["PYTHONNOUSERSITE"] = "1"
+    env["PYTHONDONTWRITEBYTECODE"] = "1"
+    return env
+
+
 class TFOnnxParityTests(unittest.TestCase):
     def setUp(self) -> None:
         self.maxDiff = None
@@ -25,6 +55,7 @@ class TFOnnxParityTests(unittest.TestCase):
         env["XTOS_TF_DISABLE"] = "1"
         env["PYTHONNOUSERSITE"] = "1"
         env["PYTHONDONTWRITEBYTECODE"] = "1"
+        env = runtime_environment(env)
         result = subprocess.run(
             [sys.executable, str(TF_EXPORT), "--probe-only"],
             env=env,
@@ -53,13 +84,14 @@ class TFOnnxParityTests(unittest.TestCase):
             env["XTOS_TF_ROOT"] = tf_root
         if onnx_root:
             env["XTOS_ONNX_ROOT"] = onnx_root
+        env = runtime_environment(env)
 
         result = subprocess.run(
             [sys.executable, str(TF_EXPORT)],
             env=env,
             capture_output=True,
             text=True,
-            timeout=60,
+            timeout=300,
         )
 
         # If dependencies unavailable, must return unverified

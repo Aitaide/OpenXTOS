@@ -1,0 +1,8 @@
+# CPU-only, x86_64 developer acceptance; Python 3.11.
+numpy==1.26.4
+onnx==1.17.0
+onnxruntime==1.23.2
+torch==2.7.1+cpu
+tensorflow-cpu==2.19.1
+keras==3.9.2
+protobuf==5.29.5

@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+from contextlib import redirect_stdout
 import json
 import os
 import platform
@@ -16,6 +17,49 @@ from typing import Any
 
 ROOT = Path(__file__).resolve().parents[2]
 DEFAULT_OUTPUT = ROOT / ".build" / "benchmarks" / "tf_classifier.tflite"
+
+
+def configure_dependency_environment() -> None:
+    """Add isolated TensorFlow/ONNX roots to import and loader paths."""
+    python_paths = []
+    library_paths = []
+    roots = []
+    for variable in ("XTOS_TF_ROOT", "XTOS_ONNX_ROOT"):
+        value = os.environ.get(variable)
+        if value:
+            roots.append(Path(value))
+    for root in roots:
+        python_candidates = [
+            root / "usr/lib/python3/dist-packages",
+            root / "usr/lib/python3/site-packages",
+            root / "lib/python3/dist-packages",
+            root / "lib/python3/site-packages",
+            root,
+        ]
+        for pattern in ("usr/lib/python*/dist-packages", "usr/lib/python*/site-packages",
+                        "lib/python*/dist-packages", "lib/python*/site-packages"):
+            python_candidates.extend(root.glob(pattern))
+        for candidate in python_candidates:
+            if candidate.is_dir():
+                python_paths.append(str(candidate))
+        for candidate in (
+            root / "usr/lib/x86_64-linux-gnu",
+            root / "usr/lib",
+            root / "lib/x86_64-linux-gnu",
+            root / "lib",
+            root / "onnxruntime/capi",
+        ):
+            if candidate.is_dir():
+                library_paths.append(str(candidate))
+    if python_paths:
+        existing = os.environ.get("PYTHONPATH", "")
+        os.environ["PYTHONPATH"] = ":".join(python_paths + ([existing] if existing else []))
+        for path in reversed(python_paths):
+            if path not in sys.path:
+                sys.path.insert(0, path)
+    if library_paths:
+        existing = os.environ.get("LD_LIBRARY_PATH", "")
+        os.environ["LD_LIBRARY_PATH"] = ":".join(library_paths + ([existing] if existing else []))
 
 
 def json_output(document: dict[str, Any]) -> None:
@@ -38,7 +82,8 @@ def load_dependencies() -> tuple[Any, Any, Any] | None:
     """Load TensorFlow, NumPy, and ONNX Runtime."""
     if os.environ.get("XTOS_TF_DISABLE") == "1":
         return None
-    
+    configure_dependency_environment()
+
     try:
         import numpy as np
         import onnxruntime as ort
@@ -78,7 +123,9 @@ def convert_to_tflite(model: Any, tf: Any, output_path: Path) -> int:
     """Convert TensorFlow model to TFLite format."""
     converter = tf.lite.TFLiteConverter.from_keras_model(model)
     converter.optimizations = []  # No quantization
-    tflite_model = converter.convert()
+    # Keras prints its SavedModel summary; preserve it on stderr, not in JSON.
+    with redirect_stdout(sys.stderr):
+        tflite_model = converter.convert()
     
     output_path.parent.mkdir(parents=True, exist_ok=True)
     with open(output_path, "wb") as f:

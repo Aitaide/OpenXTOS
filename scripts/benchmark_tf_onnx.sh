@@ -77,15 +77,35 @@ export LD_LIBRARY_PATH
 export PYTHONNOUSERSITE=1
 export PYTHONDONTWRITEBYTECODE=1
 
+PYTHON="${XTOS_AI_PYTHON:-python3}"
+
 # Run benchmark
-if ! python3 "$TF_EXPORT" --output "$OUTPUT_DIR/tf_classifier.tflite" >"$OUTPUT_FILE" 2>/dev/null; then
+if ! "$PYTHON" "$TF_EXPORT" --output "$OUTPUT_DIR/tf_classifier.tflite" >"$OUTPUT_FILE" 2>/dev/null; then
     echo "TensorFlow/TFLite parity benchmark failed" >&2
     exit 1
 fi
 
 # Validate output
-if ! python3 -c "import json; doc=json.load(open('$OUTPUT_FILE')); assert doc['schema']=='xtos-tf-onnx-parity-v1'" 2>/dev/null; then
-    echo "Invalid benchmark output schema" >&2
+if ! python3 - "$OUTPUT_FILE" <<'PY'
+import json
+import sys
+from pathlib import Path
+path = Path(sys.argv[1])
+doc = json.loads(path.read_text())
+if doc.get("schema") != "xtos-tf-onnx-parity-v1":
+    raise SystemExit("Invalid benchmark output schema")
+if doc.get("status") != "ok" or doc.get("safe_action") != "action_allowed":
+    raise SystemExit(
+        f"TensorFlow/TFLite parity unverified or failed: "
+        f"status={doc.get('status')} safe_action={doc.get('safe_action')}"
+    )
+if doc.get("execution_provider") != "CPUExecutionProvider":
+    raise SystemExit("TensorFlow/TFLite parity did not use CPUExecutionProvider")
+if doc.get("max_abs_error", float("inf")) > 1e-5:
+    raise SystemExit(f"TensorFlow/TFLite output error too large: {doc['max_abs_error']}")
+PY
+then
+    echo "Invalid or unverified benchmark output" >&2
     exit 1
 fi
 
