@@ -12,12 +12,12 @@ against the pinned public key, and compares against /etc/xtos-release.
 
 Spec format (build input, plain JSON):
 {
-  "version": "1.0.0-beta.4",
-  "release_name": "Beta 4",
-  "channel": "prerelease",
-  "published": "2026-10-16",
+  "version": "1.0.1",
+  "release_name": "Stable 1",
+  "channel": "stable",
+  "published": "2026-10-23",
   "commit": "<40-hex>",
-  "notes_url": "https://github.com/Aitaide/OpenXTOS/releases/tag/v1.0.0-beta.4",
+  "notes_url": "https://github.com/Aitaide/OpenXTOS/releases/tag/v1.0.1",
   "artifacts": [
     {"name": "...", "arch": "x86_64|arm64|all", "kind": "installer-iso|boot-bundle|source|checksums",
      "size": <bytes>, "sha256": "<64-hex>", "url": "https://..."}

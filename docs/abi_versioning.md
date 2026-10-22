@@ -12,8 +12,8 @@
 ```c
 #define XTOS_RT_VERSION_MAJOR 1
 #define XTOS_RT_VERSION_MINOR 0
-#define XTOS_RT_VERSION_PATCH 0
-#define XTOS_RT_VERSION_STRING "1.0.0"
+#define XTOS_RT_VERSION_PATCH 1
+#define XTOS_RT_VERSION_STRING "1.0.1"
 ```
 
 ## 语义
@@ -24,7 +24,7 @@
 | MINOR | 仅新增符号/新增结构体字段（向后兼容） |
 | PATCH | 行为修复、性能变更，不影响 ABI |
 
-基线 **1.0.0**（2026-10-02）。BCI 库的整型化 UAPI（阻抗 `uint32_t[32]` kOhm、量程 `uint32_t` mV；ioctl 编号不变）记为 major 1 的起点，头文件中有注释说明。
+基线 **1.0.1**（2026-10-23；1.0.0 基线始于 2026-10-02）。BCI 库的整型化 UAPI（阻抗 `uint32_t[32]` kOhm、量程 `uint32_t` mV；ioctl 编号不变）记为 major 1 的起点，头文件中有注释说明。
 
 ## 文件名约定
 

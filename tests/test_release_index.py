@@ -13,9 +13,9 @@ SCRIPT = ROOT / 'scripts' / 'release_index.py'
 
 def good_spec():
     return {
-        'version': '1.0.0-beta.4', 'release_name': 'Beta 4', 'channel': 'prerelease',
-        'published': '2026-10-16', 'commit': 'a' * 40,
-        'notes_url': 'https://github.com/Aitaide/OpenXTOS/releases/tag/v1.0.0-beta.4',
+        'version': '1.0.1', 'release_name': 'Stable 1', 'channel': 'stable',
+        'published': '2026-10-23', 'commit': 'a' * 40,
+        'notes_url': 'https://github.com/Aitaide/OpenXTOS/releases/tag/v1.0.1',
         'artifacts': [
             {'name': 'iso', 'arch': 'x86_64', 'kind': 'installer-iso', 'size': 10,
              'sha256': 'b' * 64, 'url': 'https://example.com/iso'},
@@ -54,7 +54,7 @@ class ReleaseIndexTests(unittest.TestCase):
         r = self.run_script('verify', '--index', str(out), '--public-key', str(self.pub))
         self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
         verdict = json.loads(r.stdout)
-        self.assertEqual(verdict['version'], '1.0.0-beta.4')
+        self.assertEqual(verdict['version'], '1.0.1')
 
     def test_verify_rejects_resign_attempt(self):
         out = self.base / 'idx2' / 'release-index.json'

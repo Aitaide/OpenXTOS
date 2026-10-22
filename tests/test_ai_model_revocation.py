@@ -181,7 +181,7 @@ class RevocationTests(unittest.TestCase):
             self.assertEqual(result["reason"], "policy_unavailable", result)
             self.assertEqual(created, [])
             health = service.dispatch({"id": "h", "op": "health"})
-            self.assertEqual(health["service_runtime_version"], "1.1.0")
+            self.assertEqual(health["service_runtime_version"], "1.0.1")
             self.assertEqual(health["trust"]["mode"], "production")
         finally:
             service.close()

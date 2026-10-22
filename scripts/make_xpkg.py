@@ -144,7 +144,7 @@ def main() -> int:
     p.add_argument('--summary', required=True, help='one-line description')
     p.add_argument('--vendor', required=True, help='vendor name')
     p.add_argument('--license', dest='license_', default='Proprietary', help='SPDX id or license name')
-    p.add_argument('--min-version', default='1.0.0-beta.4', help='minimum XTOS release')
+    p.add_argument('--min-version', default='1.0.1', help='minimum XTOS release')
     p.add_argument('--sign', type=Path, default=None,
                    help='ed25519 private key (PEM): adds xpkg/signature.bin over the manifest bytes')
     args = p.parse_args()

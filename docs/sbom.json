@@ -1,10 +1,10 @@
 {
   "bomFormat": "CycloneDX",
   "specVersion": "1.5",
-  "serialNumber": "urn:uuid:dfe15bd7d36345c401eb6a9a028f155aa8d1",
+  "serialNumber": "urn:uuid:fabc575927a73201054a1d64eb3b32dc05be",
   "version": 1,
   "metadata": {
-    "timestamp": "2026-10-22T23:09:00.135238+00:00",
+    "timestamp": "2026-10-22T23:32:47.948064+00:00",
     "component": {
       "type": "application",
       "bom-ref": "xtos-component-xtos-system",
@@ -30,7 +30,7 @@
     "properties": [
       {
         "name": "xtos:git-commit",
-        "value": "0222466c9e405f6c3df63c99d475fd8d8812b988"
+        "value": "60c985e7e2e109e613c5b4858dc498b60af169b0"
       },
       {
         "name": "xtos:kernel-release",
@@ -134,7 +134,7 @@
       "type": "library",
       "bom-ref": "xtos-component-xtos-linux-integration",
       "name": "xtos-linux-integration",
-      "version": "1.0.0",
+      "version": "1.0.1",
       "licenses": [
         {
           "license": {
@@ -144,7 +144,7 @@
       ],
       "description": "XTOS kernel integration patch: scheduler helper, BCI core, BCI buffer, OpenBCI Cyton serdev driver, UAPI headers",
       "scope": "required",
-      "purl": "pkg:generic/xtos-linux-integration@1.0.0",
+      "purl": "pkg:generic/xtos-linux-integration@1.0.1",
       "properties": [
         {
           "name": "xtos:source-path",
@@ -200,7 +200,7 @@
       "type": "library",
       "bom-ref": "xtos-component-libxtos-rt",
       "name": "libxtos-rt",
-      "version": "1.0.0",
+      "version": "1.0.1",
       "licenses": [
         {
           "license": {
@@ -210,7 +210,7 @@
       ],
       "description": "XTOS real-time runtime library (scheduling helpers, SPSC ring queue)",
       "scope": "required",
-      "purl": "pkg:generic/libxtos-rt@1.0.0",
+      "purl": "pkg:generic/libxtos-rt@1.0.1",
       "properties": [
         {
           "name": "xtos:source-path",
@@ -232,7 +232,7 @@
       "type": "library",
       "bom-ref": "xtos-component-libxtos-signal",
       "name": "libxtos-signal",
-      "version": "1.0.0",
+      "version": "1.0.1",
       "licenses": [
         {
           "license": {
@@ -242,7 +242,7 @@
       ],
       "description": "XTOS deterministic signal processing library (FFT, notch, bandpass, SSVEP, P300)",
       "scope": "required",
-      "purl": "pkg:generic/libxtos-signal@1.0.0",
+      "purl": "pkg:generic/libxtos-signal@1.0.1",
       "properties": [
         {
           "name": "xtos:source-path",
@@ -260,7 +260,7 @@
       "type": "library",
       "bom-ref": "xtos-component-libxtos-bci",
       "name": "libxtos-bci",
-      "version": "1.0.0",
+      "version": "1.0.1",
       "licenses": [
         {
           "license": {
@@ -270,7 +270,7 @@
       ],
       "description": "XTOS BCI session library (device open, ioctl wrappers, impedance/stat APIs)",
       "scope": "required",
-      "purl": "pkg:generic/libxtos-bci@1.0.0",
+      "purl": "pkg:generic/libxtos-bci@1.0.1",
       "properties": [
         {
           "name": "xtos:source-path",
@@ -288,7 +288,7 @@
       "type": "library",
       "bom-ref": "xtos-component-xtos-eeg-pipeline",
       "name": "xtos-eeg-pipeline",
-      "version": "1.0.0",
+      "version": "1.0.1",
       "licenses": [
         {
           "license": {
@@ -298,7 +298,7 @@
       ],
       "description": "Virtual EEG CSV pipeline tool (parse, SPSC, bandpass, latency stats)",
       "scope": "required",
-      "purl": "pkg:generic/xtos-eeg-pipeline@1.0.0",
+      "purl": "pkg:generic/xtos-eeg-pipeline@1.0.1",
       "properties": [
         {
           "name": "xtos:source-path",
@@ -316,7 +316,7 @@
       "type": "library",
       "bom-ref": "xtos-component-xtos-signal-benchmark",
       "name": "xtos-signal-benchmark",
-      "version": "1.0.0",
+      "version": "1.0.1",
       "licenses": [
         {
           "license": {
@@ -326,7 +326,7 @@
       ],
       "description": "Fixed-input signal processing benchmark tool",
       "scope": "required",
-      "purl": "pkg:generic/xtos-signal-benchmark@1.0.0",
+      "purl": "pkg:generic/xtos-signal-benchmark@1.0.1",
       "properties": [
         {
           "name": "xtos:source-path",
@@ -344,7 +344,7 @@
       "type": "library",
       "bom-ref": "xtos-component-xtos-eeg-replay",
       "name": "xtos-eeg-replay",
-      "version": "1.0.0",
+      "version": "1.0.1",
       "licenses": [
         {
           "license": {
@@ -354,7 +354,7 @@
       ],
       "description": "Virtual EEG replay CSV validator (Python)",
       "scope": "required",
-      "purl": "pkg:generic/xtos-eeg-replay@1.0.0",
+      "purl": "pkg:generic/xtos-eeg-replay@1.0.1",
       "properties": [
         {
           "name": "xtos:source-path",
@@ -372,7 +372,7 @@
       "type": "library",
       "bom-ref": "xtos-component-xtos-fuzz",
       "name": "xtos-fuzz",
-      "version": "1.0.0",
+      "version": "1.0.1",
       "licenses": [
         {
           "license": {
@@ -382,7 +382,7 @@
       ],
       "description": "Fuzz harnesses and corpus generator (development tooling)",
       "scope": "excluded",
-      "purl": "pkg:generic/xtos-fuzz@1.0.0",
+      "purl": "pkg:generic/xtos-fuzz@1.0.1",
       "properties": [
         {
           "name": "xtos:source-path",
@@ -404,7 +404,7 @@
       "type": "library",
       "bom-ref": "xtos-component-xtos-onnx-baseline",
       "name": "xtos-onnx-baseline",
-      "version": "1.0.0",
+      "version": "1.0.1",
       "licenses": [
         {
           "license": {
@@ -414,7 +414,7 @@
       ],
       "description": "Optional ONNX/PyTorch/TensorFlow inference parity baselines (isolated envs, not shipped)",
       "scope": "excluded",
-      "purl": "pkg:generic/xtos-onnx-baseline@1.0.0",
+      "purl": "pkg:generic/xtos-onnx-baseline@1.0.1",
       "properties": [
         {
           "name": "xtos:source-path",

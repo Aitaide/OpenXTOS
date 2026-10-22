@@ -66,7 +66,7 @@ COMPONENTS = [
     },
     {
         "name": "xtos-linux-integration",
-        "version": "1.0.0",
+        "version": "1.0.1",
         "license": LICENSE_GPL2,
         "description": ("XTOS kernel integration patch: scheduler helper, BCI core, "
                         "BCI buffer, OpenBCI Cyton serdev driver, UAPI headers"),
@@ -87,7 +87,7 @@ COMPONENTS = [
     },
     {
         "name": "libxtos-rt",
-        "version": "1.0.0",
+        "version": "1.0.1",
         "license": LICENSE_APACHE,
         "description": "XTOS real-time runtime library (scheduling helpers, SPSC ring queue)",
         "scope": "required",
@@ -96,7 +96,7 @@ COMPONENTS = [
     },
     {
         "name": "libxtos-signal",
-        "version": "1.0.0",
+        "version": "1.0.1",
         "license": LICENSE_APACHE,
         "description": "XTOS deterministic signal processing library (FFT, notch, bandpass, SSVEP, P300)",
         "scope": "required",
@@ -105,7 +105,7 @@ COMPONENTS = [
     },
     {
         "name": "libxtos-bci",
-        "version": "1.0.0",
+        "version": "1.0.1",
         "license": LICENSE_APACHE,
         "description": "XTOS BCI session library (device open, ioctl wrappers, impedance/stat APIs)",
         "scope": "required",
@@ -114,7 +114,7 @@ COMPONENTS = [
     },
     {
         "name": "xtos-eeg-pipeline",
-        "version": "1.0.0",
+        "version": "1.0.1",
         "license": LICENSE_APACHE,
         "description": "Virtual EEG CSV pipeline tool (parse, SPSC, bandpass, latency stats)",
         "scope": "required",
@@ -123,7 +123,7 @@ COMPONENTS = [
     },
     {
         "name": "xtos-signal-benchmark",
-        "version": "1.0.0",
+        "version": "1.0.1",
         "license": LICENSE_APACHE,
         "description": "Fixed-input signal processing benchmark tool",
         "scope": "required",
@@ -132,7 +132,7 @@ COMPONENTS = [
     },
     {
         "name": "xtos-eeg-replay",
-        "version": "1.0.0",
+        "version": "1.0.1",
         "license": LICENSE_APACHE,
         "description": "Virtual EEG replay CSV validator (Python)",
         "scope": "required",
@@ -141,7 +141,7 @@ COMPONENTS = [
     },
     {
         "name": "xtos-fuzz",
-        "version": "1.0.0",
+        "version": "1.0.1",
         "license": LICENSE_APACHE,
         "description": "Fuzz harnesses and corpus generator (development tooling)",
         "scope": "excluded",
@@ -150,7 +150,7 @@ COMPONENTS = [
     },
     {
         "name": "xtos-onnx-baseline",
-        "version": "1.0.0",
+        "version": "1.0.1",
         "license": LICENSE_APACHE,
         "description": "Optional ONNX/PyTorch/TensorFlow inference parity baselines (isolated envs, not shipped)",
         "scope": "excluded",

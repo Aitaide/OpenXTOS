@@ -14,10 +14,10 @@
 |------|------|--------|------|
 | linux | 6.6.0 (-rt15 应用后) | GPL-2.0 WITH Linux-syscall-note | kernel/linux（vendored，hash 锚定 Makefile/COPYING） |
 | preempt-rt | 6.6-rt15 | GPL-2.0-only | kernel/patches/preempt-rt-6.6-rt15.patch |
-| xtos-linux-integration | 1.0.0 | GPL-2.0-only | kernel/patches/xtos-linux-6.6.patch（调度辅助 + BCI 驱动 + UAPI） |
+| xtos-linux-integration | 1.0.1 | GPL-2.0-only | kernel/patches/xtos-linux-6.6.patch（调度辅助 + BCI 驱动 + UAPI） |
 | busybox | 1.37.0 | GPL-2.0-only | userspace/busybox（上游 archive SHA-256 记录在案） |
-| libxtos-rt / libxtos-signal / libxtos-bci | 1.0.0 | Apache-2.0 | sdk/（源文件 SHA-256） |
-| xtos-eeg-pipeline / xtos-signal-benchmark / xtos-eeg-replay | 1.0.0 | Apache-2.0 | tools/ |
+| libxtos-rt / libxtos-signal / libxtos-bci | 1.0.1 | Apache-2.0 | sdk/（源文件 SHA-256） |
+| xtos-eeg-pipeline / xtos-signal-benchmark / xtos-eeg-replay | 1.0.1 | Apache-2.0 | tools/ |
 
 **excluded（记录在案但不随系统交付，7 项）：**
 - xtos-fuzz（开发期 fuzz 工具）

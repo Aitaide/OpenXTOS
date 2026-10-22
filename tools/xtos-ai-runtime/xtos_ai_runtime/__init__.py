@@ -1,6 +1,6 @@
 """Public exports for the XTOS AI runtime protocol."""
 
-RUNTIME_VERSION = "1.1.0"
+RUNTIME_VERSION = "1.0.1"
 
 from .protocol import (
     ManifestError,

@@ -62,7 +62,7 @@ def main():
         files_meta = [{'path': 'payload/bin/tool', 'sha256': sha(payload['bin/tool']), 'size': 8}]
         manifest = {'schema_version': 1, 'name': 'demo-app', 'version': '1.0.0',
                     'architecture': 'x86_64', 'summary': 'x', 'license': 'MIT',
-                    'vendor': 't', 'xtos_min_version': '1.0.0-beta.4', 'files': files_meta}
+                    'vendor': 't', 'xtos_min_version': '1.0.1', 'files': files_meta}
         with tarfile.open(noncanon, 'w:gz') as tar:
             for arc, mode in (('payload/', 0o755), ('payload/bin/', 0o755), ('xpkg/', 0o755)):
                 info = tarfile.TarInfo(arc)
