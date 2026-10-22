@@ -87,17 +87,22 @@ P0 只有在以下全部满足后完成：
 
 ### P1.2 真实数据闭环
 
-组件：
-- `tools/xtos-eeg-pipeline/`
-- `tools/xtos-eeg-replay/`
-- LSL/V4L2/BCI 输入适配器
-- `sdk/libxtos-bci/`
+现有能力与缺口：
+- `tools/xtos-eeg-pipeline/pipeline.c` 只接受 `xtos-eeg-v1` 的 CSV：2 通道、250 Hz、nanovolt；内部可构造含时间戳/序号的帧并带通，但质量 flags 当前为 0。采样间隔异常会标 degraded，却仍可能继续输出帧，不能直接当质量门禁。
+- `tools/xtos-eeg-replay/replay.py` 是文件回放校验，不是实时采集；现有 LSL outlet/inlet 回环为合成 1 通道、100 Hz 数据，与 pipeline 契约不同，不能标作 EEG。
+- `sdk/libxtos-bci/src/session.c` 把 int32 原始值除以 1000 转为 float；在核实驱动原始物理单位、样本顺序、通道/时间戳来源之前，不把它接到 nV pipeline，也不从 FIFO fixture 推断真实设备协议。
+- `tools/xtos-onnx-baseline` 固定 ONNX fixture 要求 `[1,4]` 输入，现无经过验证的 EEG 特征映射；不得把测试模型的成功分类写成真实 EEG 识别。
 
-验收：
-- 输入帧包含 timestamp、sequence、channel count、sample rate、unit、quality flags。
-- 真实输入→质量门禁→预处理→模型→结果/原因完整链路。
-- 丢帧、乱序、设备断连、缓冲区满、模型不可用、输出低置信度均有固定降级语义。
-- 真实 OpenBCI 和 USB camera 是硬件任务，不用 fixture 冒充。
+首个软件纵切先用清楚标记的 fixture / 本机 LSL 回环验证传输和安全边界，绝不宣称真实采集：
+1. 定义帧契约：`timestamp_ns`、单调 `sequence`、`channel_count`、`sample_rate_hz`、`unit`、`quality_flags`、`source_kind`。fixture 使用 `source_kind=fixture`；LSL 必须验证 stream channel count/rate/unit 元数据，不匹配则拒绝，不做猜测换算。
+2. RED 测试覆盖缺字段/错单位、乱序/丢帧、间隔超差、低质量和设备断连；GREEN 质量门禁对无效帧 fail-closed，统计计数保留拒绝原因，禁止送入推理。
+3. 先打通 fixture → 带通预处理 → P1.1 Unix-socket client 的无执行 smoke。直到 `[1,4]` 特征映射经模型契约定义并有确定性测试，fixture 推理结果都强制标记 `no_action`；不把 `action_allowed` 当作 BCI 决策。
+4. 传输层增加有限队列、背压、请求 ID/序列关联、deadline/cancel；模型不可用、超时、损坏输出、响应错配均返回 `no_action`。
+5. LSL/CSV 软件回环通过后，再单独实现 USB/BCI 输入适配器；必须先由真实设备协议证据确认采样格式、单位和时间戳来源。
+
+每个纵切最多触碰 3 个 pipeline 代码/构建文件，先写红测，再最小实现；不得改 P1.1 服务协议文件。计划测试优先扩展 `tools/xtos-eeg-pipeline/test_pipeline.py` 并用 `make -C tools/xtos-eeg-pipeline test` 验证。
+
+物理验收：当前控制机未发现 `/dev/ttyUSB*`、`/dev/ttyACM*`、`/dev/video*` 或 `/dev/serial/by-id/*`，且 `/sys/class/video4linux` 不存在。真实 OpenBCI、USB camera 的普通用户权限、通道/单位/采样率、帧丢失、热拔插恢复和端到端延迟均保持未验证；LSL localhost 回环及 fixture 不得冒充硬件闭环。
 
 ### P1.3 资源隔离与可取消执行
 

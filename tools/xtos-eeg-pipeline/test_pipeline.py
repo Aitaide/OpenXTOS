@@ -30,6 +30,99 @@ class PipelineTests(unittest.TestCase):
         self.assertEqual(summary["timestamp_anomalies"], 0)
         self.assertEqual(summary["rejected_full"], 0)
 
+    def test_strict_quality_accepts_valid_fixture(self):
+        result = subprocess.run(
+            [str(TOOL), "--input", str(FIXTURES / "valid.csv"), "--strict-quality"],
+            capture_output=True, text=True, timeout=10,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        summary = json.loads(result.stdout)
+        self.assertEqual(summary["status"], "ok")
+        self.assertEqual(summary["frames_in"], 4)
+        self.assertEqual(summary["frames_out"], 4)
+        self.assertEqual(summary["quality_rejected"], 0)
+
+    def test_strict_bandpass_emits_only_valid_prefix(self):
+        with tempfile.TemporaryDirectory() as directory:
+            output = Path(directory) / "filtered.csv"
+            result = subprocess.run(
+                [str(TOOL), "--input", str(FIXTURES / "bad_interval.csv"),
+                 "--strict-quality", "--bandpass", "5", "40",
+                 "--dump-filtered", str(output)],
+                capture_output=True, text=True, timeout=10,
+            )
+            self.assertEqual(result.returncode, 3, result.stderr)
+            summary = json.loads(result.stdout)
+            self.assertEqual(summary["status"], "degraded")
+            self.assertEqual(summary["frames_in"], 2)
+            self.assertEqual(summary["frames_out"], 2)
+            self.assertEqual(summary["quality_rejected"], 1)
+            rows = output.read_text().splitlines()
+            self.assertEqual(rows[0], "# xtos-filtered-v1,channels=2,sample_rate_hz=250,unit=nanovolt")
+            self.assertEqual([int(row.split(",")[0]) for row in rows[1:]],
+                             [1_000_000_000, 1_004_000_000])
+            for row in rows[1:]:
+                self.assertTrue(all(math.isfinite(float(value))
+                                    for value in row.split(",")[1:]))
+
+    def test_strict_interval_tolerance_boundaries(self):
+        cases = [(3_960_000, 0), (4_040_000, 0),
+                 (3_959_999, 3), (4_040_001, 3)]
+        with tempfile.TemporaryDirectory() as directory:
+            source = Path(directory) / "boundary.csv"
+            for interval_ns, expected_exit in cases:
+                with self.subTest(interval_ns=interval_ns):
+                    source.write_text(
+                        "# xtos-eeg-v1,channels=2,sample_rate_hz=250,unit=nanovolt\n"
+                        "1000000000,10,-10\n"
+                        f"{1_000_000_000 + interval_ns},11,-11\n"
+                    )
+                    result = subprocess.run(
+                        [str(TOOL), "--input", str(source), "--strict-quality"],
+                        capture_output=True, text=True, timeout=10,
+                    )
+                    self.assertEqual(result.returncode, expected_exit, result.stderr)
+                    summary = json.loads(result.stdout)
+                    rejected = int(expected_exit != 0)
+                    self.assertEqual(summary["quality_rejected"], rejected)
+                    self.assertEqual(summary["interval_anomalies"], rejected)
+                    self.assertEqual(summary["frames_in"], 2 - rejected)
+                    self.assertEqual(summary["frames_out"], 2 - rejected)
+                    self.assertEqual(summary["status"], "degraded" if rejected else "ok")
+
+    def test_non_strict_bandpass_preserves_degraded_exit_code(self):
+        with tempfile.TemporaryDirectory() as directory:
+            output = Path(directory) / "filtered.csv"
+            result = subprocess.run(
+                [str(TOOL), "--input", str(FIXTURES / "bad_interval.csv"),
+                 "--bandpass", "5", "40", "--dump-filtered", str(output)],
+                capture_output=True, text=True, timeout=10,
+            )
+            self.assertEqual(result.returncode, 3, result.stderr)
+            summary = json.loads(result.stdout)
+            self.assertEqual(summary["status"], "degraded")
+            self.assertEqual(summary["interval_anomalies"], 1)
+            self.assertEqual(summary["frames_in"], 4)
+            self.assertEqual(summary["frames_out"], 4)
+            self.assertEqual(summary["quality_rejected"], 0)
+            self.assertEqual(len(output.read_text().splitlines()), 5)
+
+    def test_zero_timestamp_rejection_is_marked_degraded(self):
+        with tempfile.TemporaryDirectory() as directory:
+            source = Path(directory) / "zero.csv"
+            source.write_text(
+                "# xtos-eeg-v1,channels=2,sample_rate_hz=250,unit=nanovolt\n"
+                "0,10,-10\n"
+            )
+            result = subprocess.run([str(TOOL), "--input", str(source)],
+                                    capture_output=True, text=True, timeout=10)
+            self.assertEqual(result.returncode, 3, result.stderr)
+            summary = json.loads(result.stdout)
+            self.assertEqual(summary["status"], "degraded")
+            self.assertEqual(summary["frames_in"], 0)
+            self.assertEqual(summary["frames_out"], 0)
+            self.assertEqual(summary["rejected_full"], 0)
+
     def test_interval_anomaly_is_degraded(self):
         result = self.run_pipeline("bad_interval.csv")
         self.assertEqual(result.returncode, 3)
@@ -38,6 +131,19 @@ class PipelineTests(unittest.TestCase):
         self.assertEqual(summary["frames_in"], 4)
         self.assertEqual(summary["frames_out"], 4)
         self.assertEqual(summary["interval_anomalies"], 1)
+
+    def test_strict_quality_rejects_interval_anomaly_before_output(self):
+        result = subprocess.run(
+            [str(TOOL), "--input", str(FIXTURES / "bad_interval.csv"), "--strict-quality"],
+            capture_output=True, text=True, timeout=10,
+        )
+        self.assertEqual(result.returncode, 3, result.stderr)
+        summary = json.loads(result.stdout)
+        self.assertEqual(summary["status"], "degraded")
+        self.assertEqual(summary["interval_anomalies"], 1)
+        self.assertEqual(summary["quality_rejected"], 1)
+        self.assertEqual(summary["frames_out"], 2)
+        self.assertIn("strict quality gate rejected frame", result.stderr)
 
     def test_timestamp_order_is_rejected(self):
         result = self.run_pipeline("bad_order.csv")

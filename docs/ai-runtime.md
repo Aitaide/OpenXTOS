@@ -90,6 +90,43 @@ both staged files and the kernel/initramfs/rootfs actually embedded in the ISO.
 A previous candidate's report cannot validate a new ISO or a newer source SHA.
 Physical GPU/BCI/camera, sustained load and Secure Boot remain separate gates.
 
+## Local unified inference service (P1.1)
+
+The first unified runtime is a local-only, fail-closed control plane:
+
+- `tools/xtos-ai-runtime/xtos_ai_runtime/protocol.py` accepts only an exact
+  manifest schema, a root-contained regular ONNX file, a matching SHA-256,
+  `CPUExecutionProvider`, bounded float32 rank-2 tensors and explicit thread
+  counts. The digest binds bytes to metadata; it is not a publisher signature.
+- `worker.py` starts ONNX Runtime only in a separate process group. It validates
+  provider and tensor metadata, performs a smoke inference, rejects any runtime
+  diagnostics, and terminates/reaps the child on deadline or cancellation.
+- `server.py` exposes JSON-lines over an exclusive `AF_UNIX` socket only. It
+  supports `list`, `load`, `reload`, `unload`, `health`, `infer` and `cancel`.
+  A staged worker is health-checked before the active pointer changes; failed
+  staging leaves the old worker active. The registry is bounded to four models,
+  and inference is bounded to one active plus one queued request; excess work
+  returns `busy` and `safe_action=no_action`.
+- `client.py` checks request size, finite JSON, response schema, request ID,
+  and the success/no-action contract. `python -m xtos_ai_runtime` runs the
+  service when the package directory is on `PYTHONPATH`.
+
+Example control-host smoke test (the locked AI Python must be selected
+explicitly):
+
+```sh
+export PYTHONPATH="$PWD/tools/xtos-ai-runtime"
+export XTOS_TEST_AI_PYTHON="$PWD/.build/p0-clean-864fd92c2/scripts/ai-python-qemu.sh"
+python3 -m unittest tests.test_ai_runtime tests.test_ai_service tests.test_ai_client -v
+python3 -m unittest tests.test_ai_service_real tests.test_ai_worker -v
+```
+
+The first command is fixture/control-plane evidence; the second runs the fixed
+ONNX model through the locked runtime and is CPU functional evidence, not GPU,
+real-time worst-case, domain-accuracy, medical-safety or physical-device
+acceptance. The service is not yet an agent/action executor: every rejected,
+invalid, unavailable, timeout or cancelled path returns `no_action`.
+
 ## LLM inference: llama.cpp as a third-party xpkg
 
 LLM inference is not baked into the image. It installs through the normal

@@ -1,0 +1,21 @@
+{
+  "name": "fixed-classifier",
+  "version": "1.0.0",
+  "model_path": "tools/xtos-onnx-baseline/fixtures/fixed_classifier.onnx",
+  "sha256": "6e6226cf772934a3f7a398ecb55ffd290503497d91803ff499a7aa28bf90a113",
+  "provider": "CPUExecutionProvider",
+  "threads": {
+    "intra_op": 1,
+    "inter_op": 1
+  },
+  "input": {
+    "name": "input",
+    "dtype": "float32",
+    "shape": [1, 4]
+  },
+  "output": {
+    "name": "probabilities",
+    "dtype": "float32",
+    "shape": [1, 3]
+  }
+}

@@ -17,10 +17,16 @@ ROOT=Path(__file__).resolve().parents[1]
 sys.path.insert(0,str(ROOT/'scripts'))
 from userspace import resolve_root, verify_rootfs
 from userspace_root import open_owned_root
+from live_ai import install_runtime, validate_runtime
 
 REQUIRED_CONFIG=['CONFIG_PREEMPT_RT=y','CONFIG_SQUASHFS=y','CONFIG_SQUASHFS_ZLIB=y','CONFIG_OVERLAY_FS=y','CONFIG_BLK_DEV_LOOP=y','CONFIG_ISO9660_FS=y','CONFIG_USB_STORAGE=y','CONFIG_DEVTMPFS=y']
+REQUIRED_CONFIG += ['CONFIG_SECURITY=y','CONFIG_SECURITY_LANDLOCK=y','CONFIG_SECCOMP=y',
+                    'CONFIG_SECCOMP_FILTER=y','CONFIG_SECURITYFS=y','CONFIG_NAMESPACES=y',
+                    'CONFIG_UTS_NS=y','CONFIG_IPC_NS=y','CONFIG_PID_NS=y','CONFIG_NET_NS=y','CONFIG_USER_NS=y']
 RUNTIME_FILES={'xtos-start':'sbin/xtos-start','xtos-dhcp':'usr/libexec/xtos/xtos-dhcp','xtos-ssh':'usr/libexec/xtos/xtos-ssh','xtos-console':'usr/libexec/xtos/xtos-console'}
 NATIVE_TOOLS={'info':'usr/bin/info','net':'usr/bin/net','hw':'usr/bin/hw','clock':'usr/bin/clock','pkg':'usr/bin/pkg','fw':'usr/bin/fw','rt':'usr/bin/rt','persist':'usr/bin/persist','events':'usr/bin/events','update':'usr/bin/update','cgroup':'usr/bin/cgroup'}
+NATIVE_TOOLS['runner']='usr/libexec/xtos/runner'
+NATIVE_TOOLS['modelverify']='usr/libexec/xtos/modelverify'
 
 
 def run(command, **kwargs):
@@ -48,11 +54,17 @@ def validate_public_key(path):
     return fields[0]+' '+fields[1]+'\n'
 
 
+def account_passwd():
+    return ('root:x:0:0:root:/root:/bin/bash\n'
+            'xtos:x:1000:1000:XTOS Developer:/home/xtos:/bin/bash\n'
+            'runner:x:62000:62000:Confined action runner:/nonexistent:/usr/sbin/nologin\n')
+
+
 def account_shadow(key_login):
     # NP is an invalid crypt hash, not a password. Dropbear rejects '!' accounts
     # before public-key auth; its -s flag rejects every password method regardless.
     marker = 'NP' if key_login else '!'
-    return f'root:{marker}:0:0:99999:7:::\nxtos:{marker}:0:0:99999:7:::\n'
+    return f'root:{marker}:0:0:99999:7:::\nxtos:{marker}:0:0:99999:7:::\nrunner:!:0:0:99999:7:::\n'
 
 
 def account_groups():
@@ -62,7 +74,8 @@ def account_groups():
             'dialout:x:20:xtos\n'
             'video:x:44:xtos\n'
             'xtos:x:1000:\n'
-            'render:x:1001:xtos\n')
+            'render:x:1001:xtos\n'
+            'runner:x:62000:\n')
 
 
 def source_provenance(repo=ROOT):
@@ -131,6 +144,11 @@ def pack_initramfs(stage, output, epoch):
         if code or gzip.returncode:raise ValueError('initramfs packing failed: '+error.decode(errors='replace'))
 
 
+def native_identity_flags(name):
+    # No runtime uid/gid override or shared nobody identity in production.
+    return ['-DXTOS_RUNNER_UID=62000','-DXTOS_RUNNER_GID=62000'] if name == 'runner' else []
+
+
 def build_native_tools(stage):
     """Compile XTOS-native C tools as static binaries into the staging rootfs."""
     include=ROOT/'tools'/'xtos-native'/'common'
@@ -145,9 +163,9 @@ def build_native_tools(stage):
         output.parent.mkdir(parents=True,exist_ok=True)
         sources=[source]
         includes=['-I',str(include)]
-        if name=='pkg':
-            # pkg verifies third-party xpkg signatures with the vendored
-            # Monocypher ed25519 module (no openssl binary at runtime).
+        if name in ('pkg','modelverify'):
+            # Both helpers verify Ed25519 with vendored Monocypher; runtime uses
+            # no openssl process or host-dependent shared crypto library.
             sources+=[vendor/'monocypher.c',vendor/'monocypher-ed25519.c']
             includes+=['-I',str(vendor)]
         if name=='update':
@@ -158,7 +176,7 @@ def build_native_tools(stage):
                       ROOT/'.build'/'mbedtls'/'libmbedtls_xtos.a']
             includes+=['-I',str(vendor),'-I',str(mbvendor/'include'),*mbdefines]
         run([os.environ.get('CC','gcc'),'-O2','-Wall','-Wextra','-Werror','-static',
-             *includes,'-o',str(output),*[str(s) for s in sources]])
+             *includes,*native_identity_flags(name),'-o',str(output),*[str(s) for s in sources]])
         output.chmod(0o755)
 
 
@@ -193,7 +211,29 @@ def install_sdk(stage, work):
     shutil.copy2(ROOT/'system/rootfs/usr/bin/xtos-selftest',stage/'usr/bin/xtos-selftest')
 
 
+def grub_config(kernel_extra=''):
+    """Validate plain kernel arguments and render the complete GRUB config."""
+    if not isinstance(kernel_extra,str):
+        raise ValueError('kernel-extra must be a string of plain kernel arguments')
+    if not re.fullmatch(r'[A-Za-z0-9._+,:=/@ -]*',kernel_extra):
+        raise ValueError('kernel-extra allows only safe ASCII kernel arguments separated by ordinary spaces')
+    tokens=kernel_extra.split(' ')
+    if any(token.startswith('lsm=') for token in tokens if token):
+        raise ValueError('kernel-extra lsm= is forbidden because it overrides resolved CONFIG_LSM')
+    cmdline='console=tty0 console=ttyS0,115200 xtos.live=1'
+    if kernel_extra:
+        cmdline+=' '+kernel_extra
+    newline=chr(10)
+    return (newline.join([
+        'set timeout=3','set default=0','serial --unit=0 --speed=115200',
+        'terminal_input console serial','terminal_output console serial',
+        'menuentry "XTOS Bate Developer Live (RAM writes, no installation)" {',
+        ' linux /boot/bzImage '+cmdline,' initrd /boot/initramfs.gz','}'
+    ])+newline)
+
+
 def build(args):
+    grub=grub_config(getattr(args,'kernel_extra',''))
     output=args.output_dir.absolute()
     if os.path.lexists(output):raise ValueError('output already exists; use a fresh directory')
     permitted=(ROOT/'.build/live').resolve()
@@ -201,12 +241,22 @@ def build(args):
     if not ((output.is_relative_to(permitted) and output!=permitted) or (output.is_relative_to(scratch) and output!=scratch)):
         raise ValueError('output must be a fresh .build/live/ or scratch child')
     if output.parent.resolve()!=output.parent:raise ValueError('symlinked output parent')
+    ai_root=getattr(args,'ai_runtime_root',None)
+    ai_descriptor=getattr(args,'ai_runtime_descriptor',None)
+    if (ai_root is None)!=(ai_descriptor is None):
+        raise ValueError('ai-runtime-root and ai-runtime-descriptor must be selected together')
+    ai_lock=sha(ROOT/'tools/xtos-onnx-baseline/requirements-ai.lock') if ai_root else None
+    if ai_root:
+        validate_runtime(ai_root,ai_descriptor,ai_lock)
     root=args.userspace_root.absolute();fd,manifest=open_owned_root(root);os.close(fd)
     if manifest['architecture']!='x86_64':raise ValueError('Live builder currently supports x86_64 only')
     kernel=args.kernel_build.absolute()
     config=(kernel/'.config').read_text()
     for setting in REQUIRED_CONFIG:
         if setting not in config.splitlines():raise ValueError('Live kernel missing '+setting)
+    lsm_values=[line[len('CONFIG_LSM='):] for line in config.splitlines() if line.startswith('CONFIG_LSM=')]
+    if len(lsm_values)!=1 or not re.fullmatch(r'"[^"\\\r\n]*"',lsm_values[0]) or 'landlock' not in lsm_values[0][1:-1].split(','):
+        raise ValueError('Live kernel CONFIG_LSM must enable exact landlock entry')
     release=(kernel/'include/config/kernel.release').read_text().strip()
     if not re.fullmatch(r'[A-Za-z0-9._+-]+',release):raise ValueError('unsafe kernel release')
     image=kernel/'arch/x86/boot/bzImage'
@@ -241,7 +291,7 @@ def build(args):
         if stray:raise ValueError('device/socket nodes in userspace root: '+', '.join(stray[:5]))
         shutil.copytree(root,runtime,symlinks=True)
         run([sys.executable,ROOT/'scripts/configure_userspace.py','--rootfs',runtime])
-        persistent_variant = bool(args.kernel_extra and 'xtos.persist=' in args.kernel_extra)
+        persistent_variant = 'xtos.persist=' in grub
         live_storage = ('read-only Live medium plus optional labeled ext4 persistence for /home and /root; '
                         'tmpfs overlay elsewhere' if persistent_variant else
                         'read-only Live medium plus nonpersistent tmpfs overlay')
@@ -257,6 +307,7 @@ def build(args):
         run(['depmod','-b',runtime,release])
         build_native_tools(runtime)
         install_sdk(runtime,stage)
+        ai_runtime=install_runtime(runtime,ai_root,ai_descriptor,ROOT,ai_lock) if ai_root else None
         # liblsl (Lab Streaming Layer) from the pinned upstream build; the lock
         # covers the .so hash (see tools/lsl/build_lsl.sh + tests/test_lsl_build.py).
         lsl_dir=Path(os.environ.get('XTOS_LSL_DIR',ROOT/'.build/userspace/live-developer-lsl'))
@@ -281,7 +332,7 @@ def build(args):
             shutil.copy2(ROOT/'scripts/guest_lsl_pair.cpp',runtime/'usr/share/xtos/lsl-pair.cpp')
         elif os.environ.get('XTOS_LSL_REQUIRED')=='1':
             raise ValueError('liblsl required but not built (run tools/lsl/build_lsl.sh)')
-        write(runtime,'etc/passwd','root:x:0:0:root:/root:/bin/bash\nxtos:x:1000:1000:XTOS Developer:/home/xtos:/bin/bash\n')
+        write(runtime,'etc/passwd',account_passwd())
         write(runtime,'etc/group',account_groups())
         write(runtime,'etc/mdev.conf',(ROOT/'system/live/mdev.conf').read_text())
         write(runtime,'etc/shadow',account_shadow(bool(key)),0o600)
@@ -365,13 +416,13 @@ def build(args):
         (early/'newroot').mkdir()
         pack_initramfs(early,iso/'boot/initramfs.gz',epoch)
         shutil.copy2(image,iso/'boot/bzImage')
-        grub='set timeout=3\nset default=0\nserial --unit=0 --speed=115200\nterminal_input console serial\nterminal_output console serial\nmenuentry "XTOS Bate Developer Live (RAM writes, no installation)" {\n linux /boot/bzImage console=tty0 console=ttyS0,115200 xtos.live=1'+((' '+args.kernel_extra) if args.kernel_extra else '')+'\n initrd /boot/initramfs.gz\n}\n'
         write(iso,'boot/grub/grub.cfg',grub)
         images=stage/'images';images.mkdir()
         product=images/'xtos-developer-live-x86_64.iso'
         env=dict(os.environ,SOURCE_DATE_EPOCH=str(epoch),LC_ALL='C',TZ='UTC')
         run(['grub-mkrescue','-o',product,iso],env=env)
         build_manifest={'schema_version':1,'status':'built-unverified-live-candidate','architecture':'x86_64','kernel_release':release,'kernel_sha256':sha(image),'kernel_config_sha256':sha(kernel/'.config'),'userspace_lock_sha256':manifest['lock_sha256'],'source_git_head':provenance['source_git_head'],'source_state':provenance['source_state'],'authorized_public_key_sha256':hashlib.sha256(key.encode()).hexdigest() if key else None,'rootfs_squashfs_sha256':sha(squash),'initramfs_sha256':sha(iso/'boot/initramfs.gz'),'iso_sha256':sha(product),'iso_bytes':product.stat().st_size,'epoch':epoch,'storage':live_storage,'ssh':'publickey only when provisioned','firewall':'implemented for private QEMU validation; physical policy deployment unverified','secure_boot':'unverified/unsupported','private_key_included':False}
+        build_manifest['ai_runtime']=ai_runtime
         shutil.copy2(kernel/'.config', images/'kernel.config')
         write(stage,'images/build-manifest.json',json.dumps(build_manifest,sort_keys=True,indent=2)+'\n')
         write(stage,'images/SHA256SUMS',sha(product)+'  '+product.name+'\n'+sha(images/'build-manifest.json')+'  build-manifest.json\n')
@@ -389,11 +440,13 @@ def main():
     p.add_argument('--kernel-build',type=Path,required=True)
     p.add_argument('--busybox',type=Path,required=True)
     p.add_argument('--output-dir',type=Path,required=True)
-    p.add_argument('--kernel-extra',default='',help='extra kernel cmdline for test/persistence variants')
+    p.add_argument('--kernel-extra',default='',help='plain ASCII kernel args separated by ordinary spaces; safe characters A-Z a-z 0-9 . _ + , : = / @ - only; no lsm= overrides or GRUB quoting/expansion')
     p.add_argument('--authorized-key',type=Path,help='explicit public key only; never a private key')
     p.add_argument('--epoch',type=int)
     p.add_argument('--require-clean',action='store_true',help='reject uncommitted or untracked source')
     p.add_argument('--expected-source',help='require this complete source commit SHA')
+    p.add_argument('--ai-runtime-root',type=Path,help='verified private CPU runtime root from provision_ai_runtime.py')
+    p.add_argument('--ai-runtime-descriptor',type=Path,help='exact descriptor bound by the private runtime manifest')
     args=p.parse_args()
     try:build(args)
     except (ValueError,OSError,subprocess.CalledProcessError) as exc:p.error(str(exc))
