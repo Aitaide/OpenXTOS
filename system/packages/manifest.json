@@ -1,0 +1,13 @@
+{
+  "schema_version": 1,
+  "purpose": "Target userspace package and reproducibility contract",
+  "architecture_mapping": {"x86_64": "amd64", "arm64": "arm64", "riscv64": "riscv64"},
+  "available_profiles": ["core", "developer"],
+  "locked_artifacts": {"developer/x86_64": "locks/x86_64.json"},
+  "acquisition": "Signed Debian InRelease / Packages; verify SHA256 and size before locking",
+  "assembly": "Offline .deb payload extraction only; no maintainer scripts, no host installation",
+  "mandatory_validation": ["archive SHA256", "package control identity", "target architecture", "ELF interpreter and DT_NEEDED paths within rootfs", "runtime command checks"],
+  "limitations": ["T04 produces a userspace layer, not a bootable image", "Cross-architecture profiles remain unverified", "ELF path checks do not replace symbol-version or real XTOS guest validation", "Runtime needs deterministic XTOS provisioning of alternatives, CA store and accounts"],
+  "license_records": "Retain each package's /usr/share/doc/<name>/copyright and source URL",
+  "runtime_defaults": {"LANG": "C.UTF-8", "LC_ALL": "C.UTF-8", "GOTOOLCHAIN": "local"}
+}

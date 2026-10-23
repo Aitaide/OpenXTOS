@@ -1,0 +1,12 @@
+#!/bin/sh
+# Called by BusyBox getty -n -l: controlling terminal is already allocated.
+BB=/usr/libexec/xtos/busybox
+export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+export LANG=C.UTF-8 LC_ALL=C.UTF-8 GOTOOLCHAIN=local GOROOT=/usr/lib/go
+export HOME=/home/xtos USER=xtos LOGNAME=xtos SHELL=/bin/bash
+[ -n "${TERM:-}" ] || export TERM=vt100
+[ -d "$HOME" ] || { echo 'XTOS_CONSOLE_ERROR developer home missing'; exit 1; }
+cd "$HOME" || exit 1
+# su initializes supplementary groups; the console and SSH must both retain
+# video/render membership. The parent getty is root, so no password is used.
+exec "$BB" su -l xtos

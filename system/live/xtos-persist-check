@@ -1,0 +1,33 @@
+#!/bin/sh
+# Early-boot check for an already identified, marked, UNMOUNTED persistence fs.
+# Use the locked SquashFS loader/libraries; never borrow host libraries.
+BB=/bin/busybox
+[ "$#" -eq 2 ] || { echo 'usage: xtos-persist-check DEVICE LOWER_ROOT' >&2; exit 2; }
+DEVICE=$1
+LOWER=$2
+LOG=/run/persist-fsck.log
+E2FSCK=$LOWER/usr/sbin/e2fsck
+LD=$LOWER/lib64/ld-linux-x86-64.so.2
+LIBS=$LOWER/lib/x86_64-linux-gnu:$LOWER/usr/lib/x86_64-linux-gnu:$LOWER/usr/lib
+if [ ! -x "$E2FSCK" ] || [ ! -x "$LD" ]; then
+    echo 'e2fsck or its locked loader is missing' >"$LOG"
+    RC=127
+else
+    # -p fixes only errors e2fsck considers safe. Bound boot-time work and retain
+    # the actual output, including journal recovery and manual-repair guidance.
+    "$BB" timeout -s TERM -k 5 120 "$LD" --library-path "$LIBS" "$E2FSCK" -p "$DEVICE" >"$LOG" 2>&1
+    RC=$?
+fi
+case "$RC" in
+    0|1)
+        echo "XTOS_PERSIST_FSCK device=$DEVICE rc=$RC action=accept log=$LOG"
+        exit 0
+        ;;
+    *)
+        # e2fsck is a bitmask: 2 requests reboot; 4+ are uncorrected/operational
+        # errors. Accept only 0 (clean) or 1 (corrected), never 2 or 3.
+        echo "XTOS_PERSIST_FSCK device=$DEVICE rc=$RC action=refuse log=$LOG"
+        "$BB" cat "$LOG"
+        exit 1
+        ;;
+esac

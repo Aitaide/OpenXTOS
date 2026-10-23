@@ -30,6 +30,25 @@ Applies to the XTOS-authored user-space material:
   - userspace/busybox/ is the unmodified BusyBox 1.37.0 release source
     (GPL-2.0; see userspace/busybox/LICENSE).
 
+4. Vendored third-party crypto sources (new in 1.0.1)
+-----------------------------------------------------
+  - tools/xtos-native/vendor/mbedtls: upstream Mbed TLS source under
+    Apache-2.0 (see tools/xtos-native/vendor/mbedtls/LICENSE). Used only to
+    build the project's native tools; not linked by the Apache-2.0 SDK.
+  - tools/xtos-native/vendor/monocypher: upstream Monocypher + optional
+    Ed25519, dual-licensed BSD-2-Clause / CC0-1.0 at the user's choice
+    (see tools/xtos-native/vendor/monocypher/LICENCE.md).
+
+5. AI runtime binary closure (not distributed in this tree)
+-----------------------------------------------------------
+  - tools/xtos-ai-runtime is project source (Apache-2.0). The private
+    inference runtime binaries (CPython, ONNX Runtime and the 9-package
+    lock closure) are NOT part of this source repository; they are
+    assembled at build time by scripts/assemble_ai_runtime.py and
+    scripts/provision_ai_runtime.py from the version- and hash-pinned
+    inputs recorded in system/packages/ai-runtime-x86_64.json, under
+    their upstream licenses (Python: PSF; onnxruntime: MIT).
+
 Why the combination works
 --------------------------
 The Apache-2.0 user-space SDK does not link against the GPL-2.0 kernel

@@ -1,0 +1,12 @@
+{
+  "schema_version": 1,
+  "name": "core",
+  "description": "XTOS command-line runtime and diagnostics",
+  "package_format": "deb",
+  "repository_suite": "trixie",
+  "architectures": ["x86_64"],
+  "requested_packages": ["libc6", "coreutils", "bash", "dash", "ncurses-base", "ncurses-term", "vim-tiny", "wget", "ca-certificates", "openssl", "tar", "gzip", "xz-utils", "bzip2", "zip", "unzip", "findutils", "grep", "sed", "less", "file", "iproute2", "iputils-ping", "netbase", "kmod", "pciutils", "usbutils", "ethtool", "procps"],
+  "required_commands": ["sh", "vi", "wget", "tar", "gzip", "xz", "bzip2", "unzip", "sha256sum", "ip", "date"],
+  "defaults": {"LANG": "C.UTF-8", "LC_ALL": "C.UTF-8"},
+  "runtime_layer": "userspace-only; XTOS kernel and init are integrated separately"
+}

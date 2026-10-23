@@ -80,3 +80,28 @@ __pycache__/
 !userspace/busybox/testsuite/*.zip
 !userspace/busybox/examples/bootfloppy/etc/init.d/
 !userspace/busybox/examples/bootfloppy/etc/init.d/rcS
+/test_arm_final
+/test_riscv_final
+tools/xtos-fuzz/fuzz_csv_parse
+tools/xtos-fuzz/fuzz_openbci_packet
+tools/xtos-fuzz/corpus/
+tools/xtos-fuzz/corpus-check/
+tests/scheduler/test_priority_queue
+# Logs and generated evidence
+/docs/*_output.txt
+/docs/*_test_output.txt
+/tests/results/
+# Historical reports and work logs
+*_COMPLETE.md
+*_REPORT.md
+*_SUMMARY.md
+*_RESULTS.txt
+TASK_*.txt
+VERIFICATION_*.txt
+PROJECT_*.md
+setup_*.md
+cyclictest_*.md
+# Stray downloaded packages (userspace fetches keep them under .build/)
+/*.deb
+# Python bytecode caches
+*.pyc

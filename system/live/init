@@ -1,0 +1,273 @@
+#!/bin/sh
+# Initramfs-only entrypoint. The boot medium stays mounted for the whole session.
+BB=/bin/busybox
+export PATH=/bin:/sbin
+
+fail() {
+    echo "XTOS_LIVE_ERROR $*" >/dev/console
+    echo 'Recovery root shell; no automatic installation or disk writes.' >/dev/console
+    while :; do "$BB" sh </dev/console >/dev/console 2>&1; done
+}
+
+"$BB" mkdir -p /dev /proc /sys /run /newroot
+"$BB" mount -t devtmpfs devtmpfs /dev || fail 'devtmpfs mount failed'
+"$BB" mount -t proc proc /proc || fail 'proc mount failed'
+"$BB" mount -t sysfs sysfs /sys || fail 'sysfs mount failed'
+case " $("$BB" cat /proc/cmdline) " in
+    *' xtos.live=1 '*) ;;
+    *) fail 'xtos.live=1 is required' ;;
+esac
+"$BB" mount -t tmpfs -o mode=0755,size=32M tmpfs /run || fail 'run tmpfs mount failed'
+"$BB" mkdir -p /run/live-media /run/live-lower /run/live-rw
+
+eligible() {
+    node=$1
+    # sysfs ancestry, never a guessed device-name or an explicit host disk override.
+    real=$("$BB" readlink -f "$node") || return 1
+    parent=${real%/*}
+    removable=
+    if [ -r "$node/removable" ]; then
+        removable=$("$BB" cat "$node/removable")
+    elif [ -f "$node/partition" ] && [ -r "$parent/removable" ]; then
+        removable=$("$BB" cat "$parent/removable")
+    fi
+    [ "$removable" = 1 ] && return 0
+    [ -r "$node/device/type" ] && [ "$("$BB" cat "$node/device/type")" = 5 ]
+}
+
+scan() {
+    matches=0
+    selected=
+    "$BB" mdev -s || fail 'device discovery failed'
+    for node in /sys/class/block/*; do
+        [ -e "$node" ] || continue
+        eligible "$node" || continue
+        name=${node##*/}
+        [ -b "/dev/$name" ] || continue
+        "$BB" mount -t iso9660 -o ro,nodev,nosuid "/dev/$name" /run/live-media 2>/dev/null || continue
+        if [ -f /run/live-media/live/XTOS_LIVE_ID ] &&
+           [ "$("$BB" cat /run/live-media/live/XTOS_LIVE_ID)" = 'XTOS-LIVE-DEVELOPER-1' ] &&
+           [ -f /run/live-media/live/rootfs.squashfs ] &&
+           [ -f /run/live-media/live/rootfs.sha256 ]; then
+            matches=$((matches + 1))
+            selected="/dev/$name"
+        fi
+        "$BB" umount /run/live-media || fail 'cannot release probed media'
+    done
+}
+
+elapsed=0
+settled=0
+while [ "$elapsed" -lt 30 ]; do
+    scan
+    [ "$matches" -le 1 ] || fail 'ambiguous matching Live media; remove duplicate images'
+    if [ "$matches" -eq 1 ]; then
+        [ "$settled" -eq 1 ] && break
+        settled=1
+    else
+        settled=0
+    fi
+    "$BB" sleep 1
+    elapsed=$((elapsed + 1))
+done
+[ "$matches" -eq 1 ] || fail 'no eligible Live medium found within 30 seconds'
+"$BB" mount -t iso9660 -o ro,nodev,nosuid "$selected" /run/live-media || fail 'Live medium mount failed'
+[ "$("$BB" cat /run/live-media/live/XTOS_LIVE_ID)" = 'XTOS-LIVE-DEVELOPER-1' ] || fail 'Live marker changed'
+manifest=$("$BB" cat /run/live-media/live/rootfs.sha256) || fail 'checksum manifest missing'
+digest=${manifest%% *}
+case "$digest" in *[!0-9a-fA-F]*|'') fail 'invalid checksum manifest' ;; esac
+[ "${#digest}" -eq 64 ] && [ "$manifest" = "$digest  rootfs.squashfs" ] || fail 'checksum manifest must name only rootfs.squashfs'
+(cd /run/live-media/live && "$BB" sha256sum -c rootfs.sha256) || fail 'rootfs checksum mismatch'
+# xtos.toram=1: copy the SquashFS into RAM, verify it, then release the medium.
+# After this the boot USB/CD can be removed; the session runs from memory.
+TORAM=0
+case " $("$BB" cat /proc/cmdline) " in
+    *' xtos.toram=1 '*) TORAM=1 ;;
+esac
+if [ "$TORAM" -eq 1 ]; then
+    RAMCOPY=/run/live-rootfs.squashfs
+    "$BB" dd if=/run/live-media/live/rootfs.squashfs of="$RAMCOPY" bs=4M 2>/dev/null || fail 'toram copy failed'
+    # The copy is trusted only if it matches the signed-by-build checksum that
+    # the on-medium manifest already carries.
+    (cd /run && got=$("$BB" sha256sum live-rootfs.squashfs) &&
+     [ "$got" = "$digest  live-rootfs.squashfs" ]) || fail 'toram copy checksum mismatch'
+    "$BB" umount /run/live-media || fail 'cannot release Live medium after toram copy'
+    echo "XTOS_LIVE_TORAM copied=1 media_released=1 size=$("$BB" stat -c %s "$RAMCOPY")"
+    LOWER_SOURCE=$RAMCOPY
+else
+    LOWER_SOURCE=/run/live-media/live/rootfs.squashfs
+fi
+# Optional opt-in persistence: xtos.persist=<partition-label>
+PERSIST_LABEL=
+CMDLINE=$(cat /proc/cmdline)
+case " $CMDLINE " in
+    *' xtos.persist='*) PERSIST_LABEL=${CMDLINE##* xtos.persist=} ;;
+esac
+[ -z "$PERSIST_LABEL" ] || PERSIST_LABEL=${PERSIST_LABEL%% *}
+case "$PERSIST_LABEL" in *[!A-Za-z0-9._-]*) fail 'invalid xtos.persist label' ;; esac
+# Mount the SquashFS lower layer now (read-only): the persistence checks below
+# run e2fsck/cryptsetup from the locked image through its own loader.
+loop=$("$BB" losetup -f) || fail 'no free loop device'
+"$BB" losetup -r "$loop" "$LOWER_SOURCE" || fail 'read-only loop association failed'
+"$BB" mount -t squashfs -o ro,nodev "$loop" /run/live-lower || fail 'read-only SquashFS mount failed'
+PERSIST_DEV=
+PERSIST_MODE=0
+# A LUKS-encrypted persistence volume carries no readable ext4 superblock, so
+# unlock it before the labeled ext4 probe when xtos.luks=1 is requested. Only a
+# LUKS header labeled exactly like the persistence label is considered: any
+# other encrypted disk on the machine must never be touched. cryptsetup runs
+# from the locked SquashFS through its own loader/libraries (same pattern as
+# xtos-persist-check); the passphrase is typed on the console, never stored and
+# never passed as argv.
+case " $CMDLINE " in
+    *' xtos.luks=1 '*) LUKS_REQUESTED=1 ;;
+    *) LUKS_REQUESTED=0 ;;
+esac
+if [ "$LUKS_REQUESTED" -eq 1 ] && [ -n "$PERSIST_LABEL" ]; then
+    CRYPTSETUP=/run/live-lower/usr/sbin/cryptsetup
+    CS_LD=/run/live-lower/lib64/ld-linux-x86-64.so.2
+    CS_LIBS=/run/live-lower/lib/x86_64-linux-gnu:/run/live-lower/usr/lib/x86_64-linux-gnu:/run/live-lower/usr/lib
+    if [ ! -x "$CRYPTSETUP" ] || [ ! -x "$CS_LD" ]; then
+        fail 'cryptsetup or its locked loader missing from image (needs a live lock with cryptsetup-bin)'
+    fi
+    LUKS_WAITED=0
+    LUKS_TARGET=
+    LUKS_MAGIC=$(printf 'LUKS\xba\xbe')
+    while :; do
+        for node in /sys/class/block/*; do
+            [ -e "$node" ] || continue
+            name=${node##*/}
+            [ -b "/dev/$name" ] || continue
+            # BusyBox blkid does not know crypto_LUKS; check the on-disk magic
+            # directly (LUKS1 and LUKS2 share the "LUKS\xba\xbe" preamble).
+            header=$("$BB" dd if="/dev/$name" bs=1 count=6 2>/dev/null)
+            [ "$header" = "$LUKS_MAGIC" ] || continue
+            [ -n "$LUKS_TARGET" ] && [ "$LUKS_TARGET" != "/dev/$name" ] && fail 'multiple LUKS devices found; connect only the persistence disk'
+            LUKS_TARGET="/dev/$name"
+        done
+        [ -n "$LUKS_TARGET" ] && break
+        [ "$LUKS_WAITED" -ge 15 ] && break
+        "$BB" sleep 1
+        LUKS_WAITED=$((LUKS_WAITED + 1))
+        "$BB" mdev -s 2>/dev/null
+    done
+    if [ -z "$LUKS_TARGET" ]; then
+        echo "XTOS_LIVE_LUKS status=not-found after ${LUKS_WAITED}s; continuing without unlock" >/dev/console
+    else
+        echo "XTOS_LIVE_LUKS_UNLOCK device=$LUKS_TARGET (passphrase required)" >/dev/console
+        LUKS_NAME=xtos-luks-persist
+        LUKS_TRIES=0
+        LUKS_OK=0
+        while [ "$LUKS_TRIES" -lt 3 ]; do
+            # --tries 1: this loop owns the retry accounting and the console
+            # message per failed attempt. --disable-locks: the initramfs has no
+            # udev and no /run/cryptsetup locking directory; without this the
+            # unlock stalls waiting for udev cookie cooperation.
+            if "$CS_LD" --library-path "$CS_LIBS" "$CRYPTSETUP" open --type luks --tries 1 --disable-locks "$LUKS_TARGET" "$LUKS_NAME" </dev/console >/dev/console 2>&1; then
+                LUKS_OK=1
+                break
+            fi
+            LUKS_TRIES=$((LUKS_TRIES + 1))
+            [ "$LUKS_TRIES" -lt 3 ] && echo 'XTOS_LIVE_LUKS wrong-passphrase; retry' >/dev/console
+        done
+        if [ "$LUKS_OK" -eq 1 ]; then
+            echo "XTOS_LIVE_LUKS device=$LUKS_TARGET mapper=/dev/mapper/$LUKS_NAME attempts=$((LUKS_TRIES + 1))"
+        else
+            echo 'XTOS_LIVE_LUKS status=failed after 3 attempts; continuing RAM-only' >/dev/console
+        fi
+    fi
+fi
+if [ -n "$PERSIST_LABEL" ]; then
+    "$BB" mkdir -p /run/persist-probe
+    PERSIST_WAITED=0
+    while :; do
+        for node in /sys/class/block/*; do
+            [ -e "$node" ] || continue
+            name=${node##*/}
+            [ -b "/dev/$name" ] || continue
+            label=$("$BB" blkid "/dev/$name" 2>/dev/null)
+            case "$label" in *"LABEL=\"$PERSIST_LABEL\""*) ;; *) continue ;; esac
+            # The labeled partition must carry the XTOS persistence marker; anything
+            # else is refused (no accidental overwrites of random USB partitions).
+            # ro alone may REPLAY the ext4 journal. noload prevents any writes
+            # until the marker has been verified and e2fsck can check the fs.
+            "$BB" mount -t ext4 -o ro,noload,nodev,nosuid,noexec "/dev/$name" /run/persist-probe 2>/dev/null || continue
+            marked=0
+            if [ -f /run/persist-probe/XTOS_PERSIST_ID ] &&
+               [ ! -L /run/persist-probe/XTOS_PERSIST_ID ] &&
+               [ "$("$BB" cat /run/persist-probe/XTOS_PERSIST_ID)" = 'XTOS-PERSIST-1' ]; then
+                marked=1
+            fi
+            "$BB" umount /run/persist-probe || fail 'cannot release persistence probe'
+            if [ "$marked" -eq 1 ]; then
+                [ -z "$PERSIST_DEV" ] || fail 'ambiguous marked persistence volumes'
+                PERSIST_DEV="/dev/$name"
+            fi
+        done
+        [ -n "$PERSIST_DEV" ] && break
+        # Block discovery can lag init start (e.g. NVMe namespaces). Retry like
+        # the Live-media scan, but bounded, and stay RAM-only on timeout.
+        [ "$PERSIST_WAITED" -ge 30 ] && break
+        "$BB" sleep 1
+        PERSIST_WAITED=$((PERSIST_WAITED + 1))
+        "$BB" mdev -s 2>/dev/null
+    done
+    if [ -n "$PERSIST_DEV" ]; then
+        PERSIST_MODE=1
+    else
+        seen=$("$BB" ls /sys/class/block 2>/dev/null)
+        echo "XTOS_LIVE_PERSIST label=$PERSIST_LABEL not-found-or-unmarked after ${PERSIST_WAITED}s (seen: ${seen:-none}); continuing RAM-only"
+    fi
+fi
+"$BB" mount -t tmpfs -o mode=0755,size=50% tmpfs /run/live-rw || fail 'RAM upper mount failed'
+"$BB" mkdir -p /run/live-rw/upper /run/live-rw/work
+"$BB" mount -t overlay overlay -o lowerdir=/run/live-lower,upperdir=/run/live-rw/upper,workdir=/run/live-rw/work /newroot || fail 'RAM overlay mount failed'
+if [ "$PERSIST_MODE" -eq 1 ]; then
+    "$BB" mkdir -p /run/persist
+    if ! "$BB" sh /xtos-persist-check "$PERSIST_DEV" /run/live-lower; then
+        echo "XTOS_LIVE_PERSIST fsck refused $PERSIST_DEV; continuing RAM-only"
+        PERSIST_MODE=0
+    fi
+fi
+if [ "$PERSIST_MODE" -eq 1 ]; then
+    "$BB" mount -t ext4 -o rw,relatime "$PERSIST_DEV" /run/persist || fail 'persistence mount failed'
+    "$BB" mkdir -p /run/persist/home /run/persist/root
+    # Seed first-boot home content from the image (skeleton) without overwriting
+    [ -d /run/persist/home/xtos ] || "$BB" cp -a /run/live-lower/home/xtos /run/persist/home/
+    [ -d /run/persist/root ] || { "$BB" mkdir -p /run/persist/root; "$BB" chmod 700 /run/persist/root; }
+    # Seed the packaged SSH admin key once: without it xtos-ssh stays disabled and
+    # a persistent boot would silently lose remote access (image /root is masked
+    # by the bind mount). Seeds when missing OR empty (an unclean poweroff can
+    # commit the inode but lose the data, leaving a 0-byte file); only fills the
+    # gap, never overwrites non-empty user content.
+    if [ ! -s /run/persist/root/.ssh/authorized_keys ]; then
+        "$BB" mkdir -p /run/persist/root/.ssh
+        "$BB" chmod 700 /run/persist/root/.ssh
+        if [ -f /run/live-lower/root/.ssh/authorized_keys ]; then
+            "$BB" cp /run/live-lower/root/.ssh/authorized_keys /run/persist/root/.ssh/authorized_keys
+            "$BB" chmod 600 /run/persist/root/.ssh/authorized_keys
+            "$BB" sync
+        fi
+        [ -s /run/persist/root/.ssh/authorized_keys ] ||
+            echo 'XTOS_LIVE_PERSIST warning: ssh admin key seed produced an empty file'
+    fi
+fi
+if [ "$PERSIST_MODE" -eq 1 ]; then
+    # Bind BEFORE moving /run into /newroot: after `mount --move /run /newroot/run`
+    # the old /run path no longer exists in this namespace and bind sources under
+    # it would fail with ENOENT.
+    "$BB" mount --bind /run/persist/home /newroot/home || fail 'persistent home bind failed'
+    "$BB" mount --bind /run/persist/root /newroot/root || fail 'persistent root bind failed'
+fi
+"$BB" mkdir -p /newroot/run /newroot/dev /newroot/proc /newroot/sys
+"$BB" mount --move /run /newroot/run || fail 'run mount transfer failed'
+"$BB" mount --move /dev /newroot/dev || fail 'dev mount transfer failed'
+"$BB" mount --move /proc /newroot/proc || fail 'proc mount transfer failed'
+"$BB" mount --move /sys /newroot/sys || fail 'sys mount transfer failed'
+if [ "$PERSIST_MODE" -eq 1 ]; then
+    echo "XTOS_LIVE_ROOT media=$selected lower=squashfs upper=tmpfs persistence=1 persist=$PERSIST_DEV toram=$TORAM media_required=1"
+else
+    echo "XTOS_LIVE_ROOT media=$selected lower=squashfs upper=tmpfs persistence=0 toram=$TORAM media_required=1"
+fi
+exec "$BB" switch_root /newroot /sbin/xtos-start --init
+fail 'switch_root failed'

@@ -1,0 +1,4 @@
+#!/bin/sh
+# XTOS hello-world application payload: this file becomes payload/bin/hello-world
+# in the xpkg archive. Regular files only — no symlinks, no setuid bits.
+echo "hello from an XTOS xpkg application"

@@ -1,6 +1,8 @@
-# OpenXTOS 1.0.0-beta.4
+# OpenXTOS 1.0.1
 
-OpenXTOS is an installable real-time operating system based on Linux 6.6.0 with PREEMPT_RT rt15, XTOS kernel components, BusyBox, and the XTOS SDK. The x86_64 release is a BIOS/UEFI USB installer, not only a QEMU test image. ARM64 boot artifacts are published separately; board support depends on its device tree, firmware, and drivers.
+OpenXTOS is an installable real-time operating system based on Linux 6.6.0 with PREEMPT_RT rt15, XTOS kernel components, BusyBox, and the XTOS SDK. The x86_64 release is a BIOS/UEFI USB installer, not only a QEMU test image.
+
+1.0.1 adds the P1 delivery set: the sandboxed native runner (`tools/xtos-native/runner`), the Ed25519 model verifier (`tools/xtos-native/modelverify`), the cgroup v2 partition/pin tool, the signed private AI inference runtime source (`tools/xtos-ai-runtime`, binary closure assembled at build time from the pinned 9-package lock), the xpkg application package tooling, and the Live image builder (`scripts/build_live.py`). All source-gate, guest-acceptance and version-alignment evidence for this release is bound to the source tag. ARM64 boot artifacts are published separately; board support depends on its device tree, firmware, and drivers.
 
 ## Release downloads
 

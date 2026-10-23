@@ -1,0 +1,627 @@
+{
+  "bomFormat": "CycloneDX",
+  "specVersion": "1.5",
+  "serialNumber": "urn:uuid:a9271b6d1d5c54ca21b0b123b39646079320",
+  "version": 1,
+  "metadata": {
+    "timestamp": "2026-10-23T02:45:09.017532+00:00",
+    "component": {
+      "type": "application",
+      "bom-ref": "xtos-component-xtos-system",
+      "name": "xtos",
+      "version": "1.0.1",
+      "licenses": [
+        {
+          "license": {
+            "id": "Apache-2.0"
+          }
+        }
+      ],
+      "description": "XTOS real-time operating system research build: Linux 6.6.0-rt15 kernel + XTOS BCI components + BusyBox userland + XTOS SDK",
+      "scope": "required"
+    },
+    "tools": [
+      {
+        "vendor": "XTOS",
+        "name": "gen_sbom.py",
+        "version": "1"
+      }
+    ],
+    "properties": [
+      {
+        "name": "xtos:git-commit",
+        "value": "64634335a658dcfeee47e44a8239fdc78c266a5a"
+      },
+      {
+        "name": "xtos:kernel-release",
+        "value": "6.6.0-rt15"
+      },
+      {
+        "name": "xtos:generated-by-host",
+        "value": "Linux-6.12.107+deb13-amd64-x86_64-with-glibc2.41"
+      }
+    ]
+  },
+  "components": [
+    {
+      "type": "application",
+      "bom-ref": "xtos-component-xtos-system",
+      "name": "xtos",
+      "version": "1.0.1",
+      "licenses": [
+        {
+          "license": {
+            "id": "Apache-2.0"
+          }
+        }
+      ],
+      "description": "XTOS real-time operating system research build: Linux 6.6.0-rt15 kernel + XTOS BCI components + BusyBox userland + XTOS SDK",
+      "scope": "required"
+    },
+    {
+      "type": "library",
+      "bom-ref": "xtos-component-linux",
+      "name": "linux",
+      "version": "6.6.0",
+      "licenses": [
+        {
+          "license": {
+            "id": "GPL-2.0 WITH Linux-syscall-note"
+          }
+        }
+      ],
+      "description": "Linux kernel source vendored in kernel/linux (upstream 6.6.0)",
+      "scope": "required",
+      "purl": "pkg:generic/linux@6.6.0",
+      "externalReferences": [
+        {
+          "type": "distribution",
+          "url": "https://kernel.org/pub/linux/kernel/v6.x/linux-6.6.0.tar.xz"
+        }
+      ],
+      "properties": [
+        {
+          "name": "xtos:source-path",
+          "value": "kernel/linux"
+        }
+      ],
+      "hashes": [
+        {
+          "alg": "SHA-256",
+          "content": "e2c19bb5a1ef678d150dfc26f11bfa91e5a4458738f305f4abb7848ebeb2b399"
+        },
+        {
+          "alg": "SHA-256",
+          "content": "fb5a425bd3b3cd6071a3a9aff9909a859e7c1158d54d32e07658398cd67eb6a0"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "bom-ref": "xtos-component-preempt-rt",
+      "name": "preempt-rt",
+      "version": "6.6-rt15",
+      "licenses": [
+        {
+          "license": {
+            "id": "GPL-2.0-only"
+          }
+        }
+      ],
+      "description": "PREEMPT_RT realtime patch set applied to the vendored kernel",
+      "scope": "required",
+      "purl": "pkg:generic/preempt-rt@6.6-rt15",
+      "externalReferences": [
+        {
+          "type": "distribution",
+          "url": "https://cdn.kernel.org/pub/linux/kernel/projects/rt/6.6/older/patch-6.6-rt15.patch.xz"
+        }
+      ],
+      "properties": [
+        {
+          "name": "xtos:source-path",
+          "value": "kernel/patches/preempt-rt-6.6-rt15.patch"
+        }
+      ],
+      "hashes": [
+        {
+          "alg": "SHA-256",
+          "content": "ccf2d5a5bb41585f1bea33f3c1d4d2c5a5d9fb66742dde25bb92730aa2728784"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "bom-ref": "xtos-component-xtos-linux-integration",
+      "name": "xtos-linux-integration",
+      "version": "1.0.1",
+      "licenses": [
+        {
+          "license": {
+            "id": "GPL-2.0-only"
+          }
+        }
+      ],
+      "description": "XTOS kernel integration patch: scheduler helper, BCI core, BCI buffer, OpenBCI Cyton serdev driver, UAPI headers",
+      "scope": "required",
+      "purl": "pkg:generic/xtos-linux-integration@1.0.1",
+      "properties": [
+        {
+          "name": "xtos:source-path",
+          "value": "kernel/patches/xtos-linux-6.6.patch"
+        }
+      ],
+      "hashes": [
+        {
+          "alg": "SHA-256",
+          "content": "59f96281610024f6879f250f730da4a89eae007170cc3550b7e7d21f66c1905e"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "bom-ref": "xtos-component-busybox",
+      "name": "busybox",
+      "version": "1.37.0",
+      "licenses": [
+        {
+          "license": {
+            "id": "GPL-2.0-only"
+          }
+        }
+      ],
+      "description": "BusyBox userland vendored in userspace/busybox",
+      "scope": "required",
+      "purl": "pkg:generic/busybox@1.37.0",
+      "externalReferences": [
+        {
+          "type": "distribution",
+          "url": "https://busybox.net/downloads/busybox-1.37.0.tar.bz2"
+        }
+      ],
+      "properties": [
+        {
+          "name": "xtos:source-path",
+          "value": "userspace/busybox"
+        },
+        {
+          "name": "xtos:upstream-archive-sha256",
+          "value": "3311dff32e746499f4df0d5df04d7eb396382d7e108bb9250e7b519b837043a4"
+        }
+      ],
+      "hashes": [
+        {
+          "alg": "SHA-256",
+          "content": "bbfc9843646d483c334664f651c208b9839626891d8f17604db2146962f43548"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "bom-ref": "xtos-component-libxtos-rt",
+      "name": "libxtos-rt",
+      "version": "1.0.1",
+      "licenses": [
+        {
+          "license": {
+            "id": "Apache-2.0"
+          }
+        }
+      ],
+      "description": "XTOS real-time runtime library (scheduling helpers, SPSC ring queue)",
+      "scope": "required",
+      "purl": "pkg:generic/libxtos-rt@1.0.1",
+      "properties": [
+        {
+          "name": "xtos:source-path",
+          "value": "sdk/libxtos-rt"
+        }
+      ],
+      "hashes": [
+        {
+          "alg": "SHA-256",
+          "content": "52c825453ca6fca397da53bdeb1b1a3f90d367ee9ec66304d72b38fc02042cdb"
+        },
+        {
+          "alg": "SHA-256",
+          "content": "919ab07efea8736546f8dc805923549fd8a3efddd2567dcae4b7f0b5dbd496ef"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "bom-ref": "xtos-component-libxtos-signal",
+      "name": "libxtos-signal",
+      "version": "1.0.1",
+      "licenses": [
+        {
+          "license": {
+            "id": "Apache-2.0"
+          }
+        }
+      ],
+      "description": "XTOS deterministic signal processing library (FFT, notch, bandpass, SSVEP, P300)",
+      "scope": "required",
+      "purl": "pkg:generic/libxtos-signal@1.0.1",
+      "properties": [
+        {
+          "name": "xtos:source-path",
+          "value": "sdk/libxtos-signal"
+        }
+      ],
+      "hashes": [
+        {
+          "alg": "SHA-256",
+          "content": "938e691254458345a8ef091086cd79bec5af3600e6f2724733771170b51471e0"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "bom-ref": "xtos-component-libxtos-bci",
+      "name": "libxtos-bci",
+      "version": "1.0.1",
+      "licenses": [
+        {
+          "license": {
+            "id": "Apache-2.0"
+          }
+        }
+      ],
+      "description": "XTOS BCI session library (device open, ioctl wrappers, impedance/stat APIs)",
+      "scope": "required",
+      "purl": "pkg:generic/libxtos-bci@1.0.1",
+      "properties": [
+        {
+          "name": "xtos:source-path",
+          "value": "sdk/libxtos-bci"
+        }
+      ],
+      "hashes": [
+        {
+          "alg": "SHA-256",
+          "content": "28472d89545f3173c0fa29dfc6914536675c3e47df20d9293490b45bbfc9b0c5"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "bom-ref": "xtos-component-xtos-eeg-pipeline",
+      "name": "xtos-eeg-pipeline",
+      "version": "1.0.1",
+      "licenses": [
+        {
+          "license": {
+            "id": "Apache-2.0"
+          }
+        }
+      ],
+      "description": "Virtual EEG CSV pipeline tool (parse, SPSC, bandpass, latency stats)",
+      "scope": "required",
+      "purl": "pkg:generic/xtos-eeg-pipeline@1.0.1",
+      "properties": [
+        {
+          "name": "xtos:source-path",
+          "value": "tools/xtos-eeg-pipeline"
+        }
+      ],
+      "hashes": [
+        {
+          "alg": "SHA-256",
+          "content": "40c08039986bb8b07f10beb276f95c46f7b9355478e06371f98ff4c2ddbcf18b"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "bom-ref": "xtos-component-xtos-signal-benchmark",
+      "name": "xtos-signal-benchmark",
+      "version": "1.0.1",
+      "licenses": [
+        {
+          "license": {
+            "id": "Apache-2.0"
+          }
+        }
+      ],
+      "description": "Fixed-input signal processing benchmark tool",
+      "scope": "required",
+      "purl": "pkg:generic/xtos-signal-benchmark@1.0.1",
+      "properties": [
+        {
+          "name": "xtos:source-path",
+          "value": "tools/xtos-signal-benchmark"
+        }
+      ],
+      "hashes": [
+        {
+          "alg": "SHA-256",
+          "content": "e0ada88c14cb9490dede918578a398137eb132dcc4c97ad7a534068ea4494ec7"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "bom-ref": "xtos-component-xtos-eeg-replay",
+      "name": "xtos-eeg-replay",
+      "version": "1.0.1",
+      "licenses": [
+        {
+          "license": {
+            "id": "Apache-2.0"
+          }
+        }
+      ],
+      "description": "Virtual EEG replay CSV validator (Python)",
+      "scope": "required",
+      "purl": "pkg:generic/xtos-eeg-replay@1.0.1",
+      "properties": [
+        {
+          "name": "xtos:source-path",
+          "value": "tools/xtos-eeg-replay"
+        }
+      ],
+      "hashes": [
+        {
+          "alg": "SHA-256",
+          "content": "9daa6b2b7756c7bf58eddb544c7575d70eaa76a2b3f23657fb072d7d6d0cd0a0"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "bom-ref": "xtos-component-xtos-fuzz",
+      "name": "xtos-fuzz",
+      "version": "1.0.1",
+      "licenses": [
+        {
+          "license": {
+            "id": "Apache-2.0"
+          }
+        }
+      ],
+      "description": "Fuzz harnesses and corpus generator (development tooling)",
+      "scope": "excluded",
+      "purl": "pkg:generic/xtos-fuzz@1.0.1",
+      "properties": [
+        {
+          "name": "xtos:source-path",
+          "value": "tools/xtos-fuzz"
+        }
+      ],
+      "hashes": [
+        {
+          "alg": "SHA-256",
+          "content": "bd5a9b20871f9b0678c73ddd24e0f600dfc750abd365b2902fb2cb3f269d2e8a"
+        },
+        {
+          "alg": "SHA-256",
+          "content": "aca3513ee815025cc56b8d88180b72643aef51fb75315a0d1e5e56bec0fe5196"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "bom-ref": "xtos-component-xtos-onnx-baseline",
+      "name": "xtos-onnx-baseline",
+      "version": "1.0.1",
+      "licenses": [
+        {
+          "license": {
+            "id": "Apache-2.0"
+          }
+        }
+      ],
+      "description": "Optional ONNX/PyTorch/TensorFlow inference parity baselines (isolated envs, not shipped)",
+      "scope": "excluded",
+      "purl": "pkg:generic/xtos-onnx-baseline@1.0.1",
+      "properties": [
+        {
+          "name": "xtos:source-path",
+          "value": "tools/xtos-onnx-baseline"
+        }
+      ],
+      "hashes": [
+        {
+          "alg": "SHA-256",
+          "content": "7004ee86b38c623c535531cca6ab6f91431560d4a91c0950dda6086f433a83c1"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "bom-ref": "xtos-component-optional-onnxruntime",
+      "name": "onnxruntime",
+      "version": "1.23.2",
+      "licenses": [
+        {
+          "license": {
+            "id": "MIT"
+          }
+        }
+      ],
+      "description": "Optional host-side ML baseline dependency (isolated environment)",
+      "scope": "excluded",
+      "purl": "pkg:pypi/onnxruntime@1.23.2",
+      "externalReferences": [
+        {
+          "type": "distribution",
+          "url": "https://pypi.org/project/onnxruntime/1.23.2/"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "bom-ref": "xtos-component-optional-numpy",
+      "name": "numpy",
+      "version": "2.2.4",
+      "licenses": [
+        {
+          "license": {
+            "id": "BSD-3-Clause"
+          }
+        }
+      ],
+      "description": "Optional host-side ML baseline dependency (isolated environment)",
+      "scope": "excluded",
+      "purl": "pkg:pypi/numpy@2.2.4",
+      "externalReferences": [
+        {
+          "type": "distribution",
+          "url": "https://pypi.org/project/numpy/2.2.4/"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "bom-ref": "xtos-component-optional-torch",
+      "name": "torch",
+      "version": "2.6.0",
+      "licenses": [
+        {
+          "license": {
+            "id": "BSD-3-Clause"
+          }
+        }
+      ],
+      "description": "Optional host-side ML baseline dependency (isolated environment)",
+      "scope": "excluded",
+      "purl": "pkg:pypi/torch@2.6.0",
+      "externalReferences": [
+        {
+          "type": "distribution",
+          "url": "https://pypi.org/project/torch/2.6.0/"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "bom-ref": "xtos-component-optional-onnx",
+      "name": "onnx",
+      "version": "1.20.1",
+      "licenses": [
+        {
+          "license": {
+            "id": "Apache-2.0"
+          }
+        }
+      ],
+      "description": "Optional host-side ML baseline dependency (isolated environment)",
+      "scope": "excluded",
+      "purl": "pkg:pypi/onnx@1.20.1",
+      "externalReferences": [
+        {
+          "type": "distribution",
+          "url": "https://pypi.org/project/onnx/1.20.1/"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "bom-ref": "xtos-component-optional-tensorflow",
+      "name": "tensorflow",
+      "version": "2.18.0",
+      "licenses": [
+        {
+          "license": {
+            "id": "Apache-2.0"
+          }
+        }
+      ],
+      "description": "Optional host-side ML baseline dependency (isolated environment)",
+      "scope": "excluded",
+      "purl": "pkg:pypi/tensorflow@2.18.0",
+      "externalReferences": [
+        {
+          "type": "distribution",
+          "url": "https://pypi.org/project/tensorflow/2.18.0/"
+        }
+      ]
+    }
+  ],
+  "dependencies": [
+    {
+      "ref": "xtos-component-xtos-system",
+      "dependsOn": [
+        "xtos-component-linux",
+        "xtos-component-preempt-rt",
+        "xtos-component-xtos-linux-integration",
+        "xtos-component-busybox",
+        "xtos-component-libxtos-rt",
+        "xtos-component-libxtos-signal",
+        "xtos-component-libxtos-bci",
+        "xtos-component-xtos-eeg-pipeline",
+        "xtos-component-xtos-signal-benchmark",
+        "xtos-component-xtos-eeg-replay"
+      ]
+    },
+    {
+      "ref": "xtos-component-linux",
+      "dependsOn": []
+    },
+    {
+      "ref": "xtos-component-preempt-rt",
+      "dependsOn": []
+    },
+    {
+      "ref": "xtos-component-xtos-linux-integration",
+      "dependsOn": []
+    },
+    {
+      "ref": "xtos-component-busybox",
+      "dependsOn": []
+    },
+    {
+      "ref": "xtos-component-libxtos-rt",
+      "dependsOn": []
+    },
+    {
+      "ref": "xtos-component-libxtos-signal",
+      "dependsOn": []
+    },
+    {
+      "ref": "xtos-component-libxtos-bci",
+      "dependsOn": []
+    },
+    {
+      "ref": "xtos-component-xtos-eeg-pipeline",
+      "dependsOn": []
+    },
+    {
+      "ref": "xtos-component-xtos-signal-benchmark",
+      "dependsOn": []
+    },
+    {
+      "ref": "xtos-component-xtos-eeg-replay",
+      "dependsOn": []
+    },
+    {
+      "ref": "xtos-component-xtos-fuzz",
+      "dependsOn": []
+    },
+    {
+      "ref": "xtos-component-xtos-onnx-baseline",
+      "dependsOn": []
+    },
+    {
+      "ref": "xtos-component-optional-onnxruntime",
+      "dependsOn": []
+    },
+    {
+      "ref": "xtos-component-optional-numpy",
+      "dependsOn": []
+    },
+    {
+      "ref": "xtos-component-optional-torch",
+      "dependsOn": []
+    },
+    {
+      "ref": "xtos-component-optional-onnx",
+      "dependsOn": []
+    },
+    {
+      "ref": "xtos-component-optional-tensorflow",
+      "dependsOn": []
+    }
+  ]
+}

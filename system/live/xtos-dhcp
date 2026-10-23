@@ -1,0 +1,94 @@
+#!/usr/bin/python3
+"""BusyBox udhcpc callback: validate the complete lease before any effects."""
+import ipaddress
+import os
+from pathlib import Path
+import re
+import subprocess
+import sys
+import tempfile
+
+
+def validate_interface(name, sysfs=Path('/sys/class/net')):
+    if not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9_.-]{0,14}', name or '') or name == 'lo':
+        raise ValueError('invalid wired interface name')
+    path = Path(sysfs) / name
+    if (not (path / 'device').exists() or (path / 'wireless').exists()
+            or (path / 'type').read_text().strip() != '1'):
+        raise ValueError('interface is not a physical wired Ethernet device')
+    return name
+
+
+def unicast4(value):
+    address = ipaddress.IPv4Address(value)
+    if address.is_unspecified or address.is_multicast or address.is_loopback or int(address) == 0xffffffff:
+        raise ValueError('unusable IPv4 address')
+    return str(address)
+
+
+def validate_lease(env, sysfs=Path('/sys/class/net')):
+    interface = validate_interface(env.get('interface', ''), sysfs)
+    address = unicast4(env.get('ip', ''))
+    mask = env.get('subnet', '')
+    # A dotted contiguous netmask is required; hostmasks and shell tokens are not accepted.
+    ipaddress.IPv4Address(mask)
+    network = ipaddress.IPv4Network(f'{address}/{mask}', strict=False)
+    if str(network.netmask) != mask:
+        raise ValueError('invalid subnet mask')
+    routers = [unicast4(value) for value in env.get('router', '').split()]
+    servers = []
+    for value in env.get('dns', '').split():
+        if '%' in value:
+            raise ValueError('scoped DNS address is not supported')
+        server = ipaddress.ip_address(value)
+        if server.is_unspecified or server.is_multicast:
+            raise ValueError('unusable DNS address')
+        servers.append(str(server))
+    return interface, f'{address}/{network.prefixlen}', routers, servers
+
+
+def configure(event, env, *, ip_command='/usr/sbin/ip', sysfs=Path('/sys/class/net'), resolv=Path('/etc/resolv.conf')):
+    if event not in ('bound', 'renew', 'deconfig'):
+        raise ValueError('unsupported DHCP event')
+    if event == 'deconfig':
+        interface = validate_interface(env.get('interface', ''), sysfs)
+        subprocess.run([ip_command, '-4', 'route', 'flush', 'dev', interface], check=True)
+        subprocess.run([ip_command, '-4', 'addr', 'flush', 'dev', interface], check=True)
+        print(f'XTOS_DHCP_DECONFIG interface={interface}', flush=True)
+        return
+    interface, address, routers, servers = validate_lease(env, sysfs)
+    # Flush routes BEFORE adding the address: addr add installs the on-link route,
+    # and flushing after it deletes that route, breaking 'default via gateway'.
+    subprocess.run([ip_command, '-4', 'route', 'flush', 'dev', interface], check=True)
+    subprocess.run([ip_command, '-4', 'addr', 'flush', 'dev', interface], check=True)
+    subprocess.run([ip_command, '-4', 'addr', 'add', address, 'dev', interface], check=True)
+    # One preferred default route; extra offered routers do not replace it nondeterministically.
+    if routers:
+        subprocess.run([ip_command, '-4', 'route', 'replace', 'default', 'via', routers[0],
+                        'dev', interface, 'metric', '100'], check=True)
+    resolv = Path(resolv)
+    fd, temporary = tempfile.mkstemp(prefix='.xtos-resolv-', dir=resolv.parent)
+    try:
+        with os.fdopen(fd, 'w') as out:
+            os.fchmod(out.fileno(), 0o644)
+            out.write(''.join(f'nameserver {server}\n' for server in servers))
+        os.replace(temporary, resolv)
+    finally:
+        if os.path.exists(temporary):
+            os.unlink(temporary)
+    print(f'XTOS_DHCP interface={interface} address={address} router={routers[0] if routers else "none"}', flush=True)
+
+
+def main():
+    try:
+        if len(sys.argv) != 2:
+            raise ValueError('usage: xtos-dhcp bound|renew|deconfig')
+        configure(sys.argv[1], os.environ)
+    except (ValueError, OSError, subprocess.SubprocessError) as exc:
+        print(f'XTOS_DHCP_ERROR {exc}', file=sys.stderr)
+        return 1
+    return 0
+
+
+if __name__ == '__main__':
+    raise SystemExit(main())

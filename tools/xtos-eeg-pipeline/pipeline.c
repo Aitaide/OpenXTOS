@@ -22,6 +22,7 @@ struct pipeline_stats {
     uint64_t malformed;
     uint64_t interval_anomalies;
     uint64_t timestamp_anomalies;
+    uint64_t quality_rejected;
     uint64_t *latencies_ns;
     size_t latency_count;
 };
@@ -87,13 +88,14 @@ static int parse_row(const char *line, uint64_t *timestamp_ns, int32_t samples[C
 
 static int parse_options(int argc, char **argv, double *low_cut_hz,
                          double *high_cut_hz, const char **input_path,
-                         const char **filtered_path)
+                         const char **filtered_path, int *strict_quality)
 {
     int index = 1;
 
     *low_cut_hz = 0.0;
     *high_cut_hz = 0.0;
     *filtered_path = NULL;
+    *strict_quality = 0;
     if (index >= argc || strcmp(argv[index], "--input") != 0 || index + 1 >= argc)
         return -1;
     *input_path = argv[index + 1];
@@ -111,6 +113,9 @@ static int parse_options(int argc, char **argv, double *low_cut_hz,
         } else if (strcmp(argv[index], "--dump-filtered") == 0 && index + 1 < argc) {
             *filtered_path = argv[index + 1];
             index += 2;
+        } else if (strcmp(argv[index], "--strict-quality") == 0 && !*strict_quality) {
+            *strict_quality = 1;
+            index++;
         } else {
             return -1;
         }
@@ -147,6 +152,7 @@ static void print_summary(const struct pipeline_stats *stats,
            ",\"frames_out\":%" PRIu64
            ",\"interval_anomalies\":%" PRIu64
            ",\"timestamp_anomalies\":%" PRIu64
+           ",\"quality_rejected\":%" PRIu64
            ",\"rejected_full\":%" PRIu64
            ",\"p50_latency_ns\":%" PRIu64
            ",\"p95_latency_ns\":%" PRIu64
@@ -154,7 +160,8 @@ static void print_summary(const struct pipeline_stats *stats,
            (stats->malformed || stats->interval_anomalies ||
             stats->timestamp_anomalies || queue_stats->rejected_full) ? "degraded" : "ok",
            stats->frames_in, stats->frames_out, stats->interval_anomalies,
-           stats->timestamp_anomalies, queue_stats->rejected_full,
+           stats->timestamp_anomalies, stats->quality_rejected,
+           queue_stats->rejected_full,
            sorted ? percentile(&(struct pipeline_stats){
                .latencies_ns = sorted, .latency_count = stats->latency_count}, 0.50) : 0,
            sorted ? percentile(&(struct pipeline_stats){
@@ -187,11 +194,12 @@ int main(int argc, char **argv)
     struct xtos_bandpass_filter filters[CHANNELS];
     double filtered_samples[CHANNELS];
     int filter_enabled = 0;
+    int strict_quality = 0;
     int exit_code = 0;
 
     if (parse_options(argc, argv, &low_cut_hz, &high_cut_hz,
-                      &input_path, &filtered_path) != 0) {
-        fprintf(stderr, "usage: %s --input FILE [--bandpass LOW HIGH --dump-filtered FILE]\n",
+                      &input_path, &filtered_path, &strict_quality) != 0) {
+        fprintf(stderr, "usage: %s --input FILE [--strict-quality] [--bandpass LOW HIGH --dump-filtered FILE]\n",
                 argv[0]);
         return 2;
     }
@@ -251,6 +259,13 @@ int main(int argc, char **argv)
             fprintf(stderr, "error: malformed data row\n");
             break;
         }
+        if (timestamp_ns == 0) {
+            stats.timestamp_anomalies++;
+            stats.quality_rejected += (uint64_t)strict_quality;
+            exit_code = 3;
+            fprintf(stderr, "error: timestamp must be positive\n");
+            break;
+        }
         if (previous_timestamp != 0) {
             if (timestamp_ns <= previous_timestamp) {
                 stats.timestamp_anomalies++;
@@ -262,7 +277,12 @@ int main(int argc, char **argv)
             if (interval < expected_interval * (1.0 - INTERVAL_TOLERANCE) ||
                 interval > expected_interval * (1.0 + INTERVAL_TOLERANCE)) {
                 stats.interval_anomalies++;
+                stats.quality_rejected += (uint64_t)strict_quality;
                 exit_code = 3;
+                if (strict_quality) {
+                    fprintf(stderr, "error: strict quality gate rejected frame\n");
+                    break;
+                }
             }
         }
         frame.timestamp_ns = timestamp_ns;
@@ -293,16 +313,20 @@ int main(int argc, char **argv)
         }
         if (filter_enabled) {
             size_t index;
+            int filter_failed = 0;
             for (index = 0; index < CHANNELS; index++) {
                 double input_value = (double)output_samples[index];
                 if (xtos_bandpass_process(&filters[index], &input_value,
                                           &filtered_samples[index], 1) != 0) {
                     fprintf(stderr, "error: bandpass processing failed\n");
                     exit_code = 3;
+                    filter_failed = 1;
                     break;
                 }
             }
-            if (exit_code != 0 || write_filtered(filtered_output, timestamp_ns,
+            if (filter_failed)
+                break;
+            if (write_filtered(filtered_output, timestamp_ns,
                                                   filtered_samples) != 0) {
                 fprintf(stderr, "error: filtered output failed\n");
                 exit_code = 2;

@@ -1,0 +1,123 @@
+#!/usr/bin/python3
+"""Report unverified wall time, or explicitly request a bounded one-shot NTP set."""
+import argparse
+import datetime
+import ipaddress
+import json
+import os
+from pathlib import Path
+import re
+import signal
+import subprocess
+import sys
+import tempfile
+import time
+
+STATE = Path('/run/xtos-clock.json')
+
+
+def validate_server(server):
+    if not server or len(server) > 253 or '%' in server:
+        raise ValueError('invalid time server')
+    try:
+        address = ipaddress.ip_address(server)
+    except ValueError:
+        labels = server.rstrip('.').split('.')
+        if not all(re.fullmatch(r'[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?', label) for label in labels):
+            raise ValueError('invalid time server hostname')
+    else:
+        if address.is_unspecified or address.is_multicast:
+            raise ValueError('invalid time server address')
+    return server
+
+
+def status(state_path=STATE):
+    result = {'utc': datetime.datetime.now(datetime.timezone.utc).isoformat(),
+              'synchronized': False, 'source': 'unsynchronized',
+              'warning': 'Wall time is unverified; use monotonic time for elapsed durations.'}
+    try:
+        last = json.loads(Path(state_path).read_text())
+        if not isinstance(last, dict):
+            raise ValueError('invalid clock record')
+        result['last_sync'] = last
+        if last.get('result') == 'success':
+            result['source'] = 'chronyd-one-shot'
+            result['warning'] = 'Last explicit one-shot sync succeeded; no ongoing synchronization is running.'
+    except (OSError, ValueError):
+        pass
+    return result
+
+
+def sync(server, *, timeout=15, chronyd='/usr/sbin/chronyd', run_dir=Path('/run'), state_path=STATE):
+    server = validate_server(server)
+    if not isinstance(timeout, int) or not 1 <= timeout <= 30:
+        raise ValueError('timeout must be between 1 and 30 seconds')
+    run_dir = Path(run_dir)
+    fd, filename = tempfile.mkstemp(prefix='xtos-chrony-', suffix='.conf', dir=run_dir)
+    started = time.monotonic()
+    record = {'server': server, 'result': 'failed'}
+    code = 1
+    try:
+        with os.fdopen(fd, 'w') as out:
+            # -q exits after setting the clock; no service, RTC write or persistent drift file.
+            out.write(f'server {server} iburst\nuser root\n')
+        process = subprocess.Popen([chronyd, '-q', '-t', str(timeout), '-f', filename], start_new_session=True)
+        try:
+            code = process.wait(timeout=timeout + 2)
+        except subprocess.TimeoutExpired:
+            os.killpg(process.pid, signal.SIGKILL)
+            process.wait()
+            record['error'] = 'chronyd exceeded timeout'
+            code = 124
+        if code == 0:
+            record['result'] = 'success'
+        else:
+            record.setdefault('error', f'chronyd exit={code}')
+    except OSError as exc:
+        record['error'] = str(exc)
+    finally:
+        os.unlink(filename)
+    record['elapsed_seconds'] = round(time.monotonic() - started, 3)
+    record['completed_utc'] = datetime.datetime.now(datetime.timezone.utc).isoformat()
+    # A root-created mode-0600 RAM record describes only this explicit attempt.
+    state_path = Path(state_path)
+    fd, temporary = tempfile.mkstemp(prefix='.xtos-clock-', dir=state_path.parent)
+    try:
+        with os.fdopen(fd, 'w') as out:
+            json.dump(record, out, sort_keys=True)
+            out.write('\n')
+        os.replace(temporary, state_path)
+    finally:
+        if os.path.exists(temporary):
+            os.unlink(temporary)
+    print('XTOS_CLOCK_SYNC ' + json.dumps(record, sort_keys=True), flush=True)
+    return code if code > 0 else (0 if record['result'] == 'success' else 1)
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    subparsers = parser.add_subparsers(dest='command', required=True)
+    report = subparsers.add_parser('status', help='report wall time and last explicit attempt')
+    report.add_argument('--json', action='store_true')
+    update = subparsers.add_parser('sync', help='explicit root-only one-shot network synchronization')
+    update.add_argument('server', nargs='?')
+    update.add_argument('--server', dest='server_option')
+    update.add_argument('--timeout', type=int, default=15)
+    args = parser.parse_args()
+    try:
+        if args.command == 'status':
+            result = status()
+            print(('' if args.json else 'XTOS_CLOCK ') + json.dumps(result, sort_keys=True))
+            return 0
+        if os.geteuid() != 0:
+            raise ValueError('clock sync requires root; run sudo xtos-clock sync SERVER')
+        if bool(args.server) == bool(args.server_option):
+            raise ValueError('supply exactly one time server')
+        return sync(args.server or args.server_option, timeout=args.timeout)
+    except (OSError, ValueError) as exc:
+        print(f'XTOS_CLOCK_ERROR {exc}', file=sys.stderr)
+        return 1
+
+
+if __name__ == '__main__':
+    raise SystemExit(main())

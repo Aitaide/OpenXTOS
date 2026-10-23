@@ -1,0 +1,104 @@
+#!/bin/sh
+# --init is PID 1 handoff only. BusyBox inittab calls this without arguments as sysinit.
+BB=/usr/libexec/xtos/busybox
+export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+export LANG=C.UTF-8 LC_ALL=C.UTF-8 GOTOOLCHAIN=local GOROOT=/usr/lib/go
+if [ "${1-}" = --init ]; then
+    exec "$BB" init
+fi
+[ "$#" -eq 0 ] || { echo 'XTOS_START_ERROR unexpected arguments'; exit 1; }
+set -e
+"$BB" mkdir -p /dev/pts /dev/shm /run /tmp
+"$BB" mountpoint -q /dev/pts || "$BB" mount -t devpts -o mode=0620,gid=5 devpts /dev/pts
+"$BB" mountpoint -q /dev/shm || "$BB" mount -t tmpfs -o mode=1777,nosuid,nodev,size=25% tmpfs /dev/shm
+"$BB" chmod 1777 /tmp
+# RAM ring-buffer logging: kernel + user messages land in /run/log/messages
+# (256 KiB x 2 rotations). The log is deliberately ephemeral — the root
+# overlay is tmpfs, so a boot is a fresh log. Persistence volumes are not
+# written by the logger.
+"$BB" mkdir -p /run/log /run/chrony
+"$BB" syslogd -O /run/log/messages -s 256 -b 2 || echo 'XTOS_LOG syslogd-unavailable'
+"$BB" klogd || echo 'XTOS_LOG klogd-unavailable'
+echo 'XTOS_LOG ring=/run/log/messages size_kb=256 rotations=2 persistence=none'
+# cgroup v2 hierarchy: mounted at boot so cpuset partitions are ready before
+# any workload starts (RT vs AI/inference CPU pinning — see `cgroup status`).
+# The shipped kernel has CPUSETS but not MEMCG; the tool reports that honestly.
+if [ -x /usr/bin/cgroup ]; then
+    if /usr/bin/cgroup init >/run/cgroup-boot.log 2>&1; then
+        echo 'XTOS_CGROUP hierarchy=mounted mode=auto-partition-later'
+    else
+        echo 'XTOS_CGROUP init-failed see=/run/cgroup-boot.log'
+    fi
+else
+    echo 'XTOS_CGROUP missing'
+fi
+# Cold-plug module autoload: scan the hardware's own modalias entries and
+# load the matching drivers — GPU (amdgpu/nouveau; i915/virtio-gpu are
+# built-in), USB cameras (uvcvideo), NICs, and anything else present.
+# Modules stay dormant when their hardware is absent. Present GPUs can probe
+# during boot. Kernel IRQ threads/workqueues are NOT confined by mounting a
+# cgroup hierarchy: their policy/affinity require separate RT acceptance.
+# Subscribe before cold-plug so asynchronously created DRM nodes and later
+# hotplug events receive /etc/mdev.conf ownership and permissions too.
+if "$BB" mdev -d; then
+    echo 'XTOS_DEVICES manager=mdev hotplug=netlink permissions=/etc/mdev.conf'
+else
+    echo 'XTOS_DEVICES hotplug=failed coldplug-only=1'
+    "$BB" mdev -s
+fi
+modloaded_file=/run/xtos-modalias.count
+echo 0 >"$modloaded_file"
+# Read one complete pathname per line: sysfs device paths can contain spaces
+# (for example "Fixed MDIO bus.0"). A command-substitution/for loop splits
+# those paths and feeds an empty or truncated alias to modprobe.
+"$BB" find /sys/devices -name modalias -type f 2>/dev/null |
+while IFS= read -r ma; do
+    modalias=$("$BB" cat "$ma" 2>/dev/null) || continue
+    [ -n "$modalias" ] || continue
+    if modprobe -b -q "$modalias" 2>/dev/null; then
+        modloaded=$("$BB" cat "$modloaded_file")
+        modloaded=$((modloaded + 1))
+        echo "$modloaded" >"$modloaded_file"
+    fi
+done
+modloaded=$("$BB" cat "$modloaded_file")
+echo "XTOS_MODULES modalias=auto-loaded count=$modloaded policy=present-hardware-only"
+"$BB" hostname xtos-live
+/usr/sbin/ip link set lo up
+# Read the RTC for diagnosis only: a present RTC is not proof of synchronized time.
+"$BB" hwclock -u -r 2>/dev/null || echo 'XTOS_RTC unavailable'
+echo 'XTOS_SYSTEM_IDENTITY_BEGIN'
+"$BB" cat /etc/os-release
+"$BB" uname -a
+if [ -r /sys/kernel/realtime ]; then
+    echo "XTOS_REALTIME realtime=$("$BB" cat /sys/kernel/realtime)"
+else
+    echo 'XTOS_REALTIME realtime=unknown'
+fi
+PERSIST=0
+"$BB" mountpoint -q /run/persist 2>/dev/null && PERSIST=1
+case " $(cat /proc/cmdline) " in *' xtos.persist='*) PERSIST_REQUESTED=1 ;; *) PERSIST_REQUESTED=0 ;; esac
+echo "XTOS_LIVE mode=overlay lower=squashfs upper=tmpfs persistence=$PERSIST requested=$PERSIST_REQUESTED media_required=1"
+/usr/bin/clock status
+# Prepare the ephemeral host key and print its public fingerprint before readiness.
+/usr/libexec/xtos/xtos-ssh --prepare || echo 'XTOS_SSH unavailable'
+for path in /sys/class/net/*; do
+    [ -e "$path" ] || continue
+    interface=${path##*/}
+    case "$interface" in ''|lo|*[!A-Za-z0-9_.-]*|-*) continue ;; esac
+    [ "${#interface}" -le 15 ] || continue
+    [ -e "$path/device" ] && [ ! -d "$path/wireless" ] && [ "$("$BB" cat "$path/type")" = 1 ] || continue
+    /usr/sbin/ip link set dev "$interface" up || continue
+    # Bound initial negotiation; XTOS_READY says startup completed, not that DHCP succeeded.
+    "$BB" udhcpc -n -q -t 3 -T 3 -i "$interface" -s /usr/libexec/xtos/xtos-dhcp &
+done
+# Resident NTP daemon: continuous synchronization whenever the network
+# allows it. `clock status` reports synchronized=true only when chronyc
+# confirms tracking; `clock sync` defers to the daemon while it runs.
+# Isolated/QEMU networks simply leave the clock honestly unsynchronized.
+if [ -x /usr/sbin/chronyd ]; then
+    /usr/sbin/chronyd && echo 'XTOS_NTP daemon=chronyd mode=resident conf=/etc/chrony/chrony.conf' || echo 'XTOS_NTP chronyd-start-failed'
+else
+    echo 'XTOS_NTP chronyd-missing'
+fi
+echo "XTOS_READY mode=live persistence=$PERSIST clock=see-status network=see-XTOS_DHCP"
