@@ -24,7 +24,7 @@ make -C "$ROOT/userspace/busybox" O="$BB_OUTPUT" KBUILD_DEFCONFIG="$ROOT/system/
 # guest (the live tree historically relied on a hand-augmented .config that
 # the defconfig never matched). This gate fails the build on any drift.
 for setting in CONFIG_STATIC=y CONFIG_BUSYBOX=y CONFIG_ASH=y CONFIG_MODPROBE=y \
-    CONFIG_SH=y CONFIG_FEATURE_SH_MATH=y CONFIG_FEATURE_SH_MATH_64=y \
+    CONFIG_SH_IS_ASH=y CONFIG_FEATURE_SH_MATH=y CONFIG_FEATURE_SH_MATH_64=y \
     CONFIG_INIT=y CONFIG_SWITCH_ROOT=y CONFIG_MDEV=y CONFIG_BLKID=y \
     CONFIG_FEATURE_MDEV_CONF=y CONFIG_FEATURE_MDEV_EXEC=y CONFIG_FEATURE_MDEV_DAEMON=y \
     CONFIG_FIND=y CONFIG_FEATURE_FIND_TYPE=y \
