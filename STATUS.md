@@ -1,6 +1,8 @@
 # XTOS 当前状态
 
-最后更新：2026-10-12
+最后更新：2026-10-30
+
+本文件保留各历史候选的验收范围。当前工作树的源码实现、维护测试、镜像验收和物理硬件验收分别记录；历史镜像的 PASS 不自动覆盖本次提交。
 
 唯一开发目录：`/root/xtos-development/xtos`。
 
@@ -8,6 +10,9 @@
 
 当前已验证：
 
+- 本轮缺口闭环的本地交付为 M0 证据验证器、sched_class RFC/完整 callback 审查矩阵、EEG 设备报告契约和 OpenBCI Cyton 用户态串口切片（33-byte parser、115200 8N1 bounded capture、hash-bound raw/frame bundle、八通道滤波 replay）。system/Live 构建路径已接入这批用户态源文件；Live profile 声明 Python 运行时契约，system rootfs 明确不内置 Python。构建检查区分 source-staged 与运行时模式，Live 新构建强制执行 chroot 合成采集/回放烟测并记录构建清单；尚未重建或启动含该功能的新 ISO。代码路径由 PTY/合成包测试，不能算真实设备 adapter 通过；当前 scheduler acceptance 仍以 `.build/scheduler-gap-closure/acceptance-ledger.json` 绑定的候选源码哈希、独立审查和维护 attempt 为准。
+- `m0_gate.py` 要求协议指定的原生策略组各至少 10 个不同执行、同条件、固定 CPU trace，拒绝诊断 DEADLINE、哈希漂移和不完整证据。最多返回 ready_for_independent_review，hardware_gate_accepted 固定 false；当前 `m0-target-intake.json` 仍是 `needs_operator_input`，因此 M0 实机门未关闭。
+- `device_contract.py` 与 Cyton capture/replay 验证器已覆盖样本序号/时间戳/单位/丢包/报告一致性；新增的 OpenBCI Cyton adapter 仅是通过 PTY 和合成协议帧验证的用户态代码。真实板卡身份、实际 gain/firmware、物理 USB/UART、断连恢复、DMA/内核 serdev 和端到端链路仍未验证。
 - `scripts/build_system.sh` 完成 x86_64 内核、模块、BusyBox 和 initramfs 构建。
 - `scripts/verify_system.sh` 启动同一组镜像，输出 `realtime=1`、`xtos_modules=pass`、`guest_userspace=pass`、`XTOS_SYSTEM_TEST=PASS`；本轮 guest 还通过 181 项信号断言和 101 项 XTOS 队列断言。
 - 用户态测试、181 项信号处理断言、固定 P300 跨试次 fixture、Python 对照测试和 SPSC 检查通过。
@@ -29,6 +34,24 @@
 系统范围为可启动的 x86_64 开发系统，不是桌面发行版或硬盘安装器。XTOS 调度组件是辅助层，未替代 Linux 的常规任务调度。P300 当前是单窗口研究基线和跨试次质量门禁，不是分类器。真实 OpenBCI 设备、ARM64/RISC-V 板卡、目标硬件最坏延迟和医疗安全均未验证。QEMU 结果不能作为硬件实时性能保证。
 
 入口：`scripts/build_system.sh`、`scripts/verify_system.sh`、`scripts/run_system.sh`。详见 `docs/system_build.md`；开发任务、计划及架构设计继续保留在 `plans/` 和 `docs/`。
+
+## 本轮内核 Cyton 收敛
+
+共享 C packet helper、driver 控制/接收路径、host sanitizer 回归、有效 footer/长流 fuzz、serdev Kconfig、integration patch 与 SBOM 的第一轮本地切片已完成；历史验收在 `.build/cyton-kernel-closure-v1/`。该验收不覆盖后续生命周期、快照和原生工具改动。
+
+`plans/xtos-bci-software-completion-plan.md` 的上一轮本地软件交付已完成：设备引用/解绑安全与阻塞读唤醒、C 八通道生产者/消费者、用户态实际 gain/通道状态/固件信息读回、有限重连及停止、只读不可变快照 UAPI/SDK、原生 `bci` 命令和 system/Live 安装。验收索引 `.build/bci-software-completion/acceptance.json` 状态 ACCEPTED_LOCAL_SOFTWARE，记录66组857次执行、零失败/跳过（含11项AI）、实际VFS/VMA合成内核设备guest、新system与candidate-55四模式启动。该结果只绑定索引内的历史源码快照；本节更新或后续功能修改不能借用它作为新候选验收。
+
+内核传统 `read` 仍返回 s32 纳伏；快照 v1 提供带版本/单位/通道/速率/游标/token 的不可变批次头及完整帧对齐 payload，不包含每帧设备时间、sequence 或质量字段。用户态 `bci` JSONL 提供 host receive/processing 时间、sequence、generation、quality、逐通道 gain 和固件信息；固件 banner 不是唯一物理板卡身份。candidate-54 与上一轮candidate-55均保留；candidate-55是dirty源码私有诊断镜像，未作为clean-source正式发布版验收。
+
+当前按 `plans/xtos-remaining-development-plan.md` 逐项开发。阶段1的冻结本地软件候选已验收，索引 `.build/xtos-roadmap-v1/phase1-acceptance.json` 为 `ACCEPTED_LOCAL_SOFTWARE`：共享寄存器解析、内核实际配置与增益读回、配置 UAPI/SDK、非复位 SHORTED/P/N 阻抗诊断和外部参考拟合/显式应用完成组件与集成 SPEC/QUALITY 审查；完整维护80组1077次执行、零失败/跳过（包含11项AI），源码快照与34项既有产物恢复一致。新candidate-56镜像的实际已安装命令、三模式PTY、合成Linux设备配置/SDK/旧快照VMA与解绑路径、校准拟合/应用及BIOS/UEFI×CD/USB四模式通过。配置结构的32位独立布局编译与原生布局比较通过；这不代表32位 compat_ioctl 已运行。
+
+阶段1验收只绑定索引记录的冻结源码与candidate-56；本状态更新和后续阶段改动不追溯套用该PASS。candidate-56为dirty源码私有诊断镜像，继承已锁定用户态与early initramfs，重新构建当前内核/模块/SDK/CLI；不是clean-source正式发布验收。证据与原始失败/修复记录位于 `.build/xtos-roadmap-v1/`。阻抗名义估计、SHORTED观察自检和外部参考校准分别报告；固件v会复位配置，s停止采集不关闭lead-off电流。校准文件哈希只绑定输入字节和模型完整性，不证明参考仪器真实性或物理精度。真实Cyton/电极与硬件时延保持未验证。
+
+阶段2的精确冻结本地软件版本已验收，索引 `.build/xtos-roadmap-v1/phase2-acceptance.json` 为 `ACCEPTED_LOCAL_SOFTWARE`，绑定源码快照 `bf860f3b7a0c7d70b81502649e84dbb499b3edf58b9437d504030cd313f129a1` 和 candidate-57 ISO `936fbca0ae047f714135d8550dbf2d6d5ae7866bbf80d9a68fd3f8e1d74d16d0`。逐帧版本化 UAPI/SDK、独立帧 ring、配置/流代次与质量元数据、只读不可变帧快照以及旧 read/snapshot 兼容已完成组件和集成 SPEC/QUALITY。完整维护82组1139次执行、零失败/跳过（11项AI已包含），34个既有产物叶节点精确恢复；实际Linux VFS/VM合成设备、镜像内已安装SDK的逐帧读/映射/fork/解绑/重载、旧接口、三种PTY诊断和离线校准以及BIOS/UEFI×CD/USB四模式通过。独立收尾审计核验481项输入哈希。candidate-57继续为dirty源码私有诊断镜像，显式继承已锁定用户态与early initramfs，并重新构建当前内核/模块/SDK/CLI；不代表clean-source正式发布、真实32位compat syscall、当前ARM64/RISC-V运行或物理设备验收。
+
+阶段2的PASS仅覆盖索引记录的历史冻结源码和ISO；本次状态更新及P3新文件不继承该PASS。当前P3已实现固定容量C窗口/均值RMS特征、SDK安装、逐帧采集适配、版本化JSONL导出、特征/模型绑定、真实UDS协议往返、流生命周期控制和单次确认的无危险模拟反馈，相关源码测试已接入维护入口。合成输入始终保留 `no_action`，算术ONNX fixture不代表经训练的脑电识别模型。阶段3当前仍为 `in_progress`：源码测试与安装验证不等于新镜像、真实板卡或物理延迟验收，不借用阶段2或历史P3证据关闭当前版本的产物门。
+
+多设备插件已加入同步、内存内的Cyton契约适配及生命周期测试，明确为 `fixture_replay`、`physical_device_evidence=false`，不包含真实USB/BLE/网络传输或物理身份认证。GPU、XR与调度类实机决策仍按计划保留；当前自定义 `sched_class` 尚未实现。
 
 ## 历史状态记录
 

@@ -13,6 +13,8 @@ ROOTFS="$BUILD_ROOT/rootfs"
 IMAGES="$BUILD_ROOT/images"
 JOBS="${JOBS:-2}"
 CC="${CC:-gcc}"
+AR="${AR:-ar}"
+export CC AR
 for tool in "$CC" make cpio gzip depmod python3; do
     command -v "$tool" >/dev/null || { printf 'error: missing tool %s\n' "$tool" >&2; exit 1; }
 done
@@ -24,7 +26,7 @@ make -C "$ROOT/userspace/busybox" O="$BB_OUTPUT" KBUILD_DEFCONFIG="$ROOT/system/
 # guest (the live tree historically relied on a hand-augmented .config that
 # the defconfig never matched). This gate fails the build on any drift.
 for setting in CONFIG_STATIC=y CONFIG_BUSYBOX=y CONFIG_ASH=y CONFIG_MODPROBE=y \
-    CONFIG_SH=y CONFIG_FEATURE_SH_MATH=y CONFIG_FEATURE_SH_MATH_64=y \
+    CONFIG_SH_IS_ASH=y CONFIG_FEATURE_SH_MATH=y CONFIG_FEATURE_SH_MATH_64=y \
     CONFIG_INIT=y CONFIG_SWITCH_ROOT=y CONFIG_MDEV=y CONFIG_BLKID=y \
     CONFIG_FEATURE_MDEV_CONF=y CONFIG_FEATURE_MDEV_EXEC=y CONFIG_FEATURE_MDEV_DAEMON=y \
     CONFIG_FIND=y CONFIG_FEATURE_FIND_TYPE=y \
@@ -48,13 +50,17 @@ for directory in sdk tools examples; do
 done
 mkdir -p "$STAGING/kernel/linux/include/linux"
 cp "$KERNEL_DIR/include/linux/xtos_queue.h" "$STAGING/kernel/linux/include/linux/"
+mkdir -p "$STAGING/kernel/linux/drivers/xtos/bci"
+cp "$KERNEL_DIR/drivers/xtos/bci/xtos_cyton_packet.h" "$STAGING/kernel/linux/drivers/xtos/bci/"
+cp "$KERNEL_DIR/drivers/xtos/bci/xtos_cyton_config.h" "$STAGING/kernel/linux/drivers/xtos/bci/"
 make -C "$STAGING/sdk/libxtos-bci" clean all
 make -C "$STAGING/sdk/libxtos-rt" clean all
 make -C "$STAGING/sdk/libxtos-signal" clean all
 make -C "$STAGING/tools/xtos-eeg-pipeline" clean all LDFLAGS='-static -lm'
+make -C "$STAGING/tools/xtos-cyton" clean all LDFLAGS='-static'
 make -C "$STAGING/tools/xtos-signal-benchmark" clean all LDLIBS='-static -lm'
 make -C "$STAGING/sdk/libxtos-rt" test_rt test_spsc CFLAGS='-O2 -Wall -Wextra -Werror -static'
-make -C "$STAGING/sdk/libxtos-signal" test_signal CFLAGS='-std=c11 -O2 -Wall -Wextra -Werror -static'
+make -C "$STAGING/sdk/libxtos-signal" test_signal test_eeg_window CFLAGS='-std=c11 -O2 -Wall -Wextra -Werror -static'
 "$CC" -O2 -Wall -Wextra -static -I"$STAGING/sdk/libxtos-bci/include" \
     "$STAGING/examples/bci_test.c" "$STAGING/sdk/libxtos-bci/libxtos-bci.a" -o "$STAGING/examples/bci_test"
 cp -a "$ROOT/system/rootfs/." "$ROOTFS/"
@@ -70,6 +76,8 @@ while IFS= read -r applet; do
     [[ "$applet" == busybox ]] || ln -sf busybox "$ROOTFS/bin/$applet"
 done < <("$BB_OUTPUT/busybox" --list)
 install -m 0755 "$STAGING/tools/xtos-eeg-pipeline/xtos-eeg-pipeline" "$ROOTFS/usr/bin/"
+install -m 0755 "$STAGING/tools/xtos-cyton/bci" "$ROOTFS/usr/bin/bci"
+python3 "$ROOT/scripts/verify_native_bci_runtime.py" --rootfs "$ROOTFS"
 install -m 0755 "$STAGING/tools/xtos-signal-benchmark/xtos-signal-benchmark" "$ROOTFS/usr/bin/"
 install -m 0755 "$STAGING/examples/bci_test" "$ROOTFS/usr/bin/"
 for library in bci rt signal; do
@@ -80,7 +88,11 @@ for test in test_rt test_spsc; do
     install -m 0755 "$STAGING/sdk/libxtos-rt/$test" "$ROOTFS/usr/libexec/xtos/"
 done
 install -m 0755 "$STAGING/sdk/libxtos-signal/test_signal" "$ROOTFS/usr/libexec/xtos/"
+install -m 0755 "$STAGING/sdk/libxtos-signal/test_eeg_window" "$ROOTFS/usr/libexec/xtos/"
 install -m 0644 "$ROOT/tools/xtos-eeg-pipeline/fixtures/valid.csv" "$ROOTFS/usr/share/xtos/fixtures/"
+# Native-only core profile: install_eeg_stream requires host Python, no target Python.
+python3 "$ROOT/scripts/build_live.py" install-eeg-stream --rootfs "$ROOTFS" \
+    --work-dir "$STAGING/xtos-eeg-stream-install" --source-root "$ROOT"
 make -C "$KERNEL_DIR" O="$KERNEL_OUTPUT" ARCH=x86 INSTALL_MOD_PATH="$ROOTFS" modules_install
 rm -f "$ROOTFS/lib/modules/$release/build" "$ROOTFS/lib/modules/$release/source"
 depmod -b "$ROOTFS" "$release"

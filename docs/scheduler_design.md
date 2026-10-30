@@ -1,5 +1,8 @@
 # XTOS调度器设计文档
 
+> **历史设计，未实现。** 本文是早期设想，不是当前实现证明。当前代码没有 XTOS `sched_class`、EEG/GPU 调度或下文目标延迟。请以 [`scheduler_integration_audit.md`](scheduler_integration_audit.md) 为当前实现状态依据。
+
+
 ## 概述
 
 XTOS调度器是针对脑机接口(BCI)和AI推理优化的实时任务调度系统，在Linux PREEMPT_RT基础上增加EEG感知调度和GPU抢占支持。

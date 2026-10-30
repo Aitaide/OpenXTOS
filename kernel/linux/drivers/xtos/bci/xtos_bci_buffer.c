@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0
 /*
  * XTOS BCI Ring Buffer Implementation
- * 
+ *
  * Zero-copy DMA ring buffer for high-throughput data streaming
  * Copyright (C) 2026 XTOS Project
  */
@@ -42,6 +42,7 @@ struct xtos_bci_ringbuf *xtos_bci_ringbuf_alloc(struct device *dev, size_t size)
 	}
 
 	rb->size = size;
+	rb->dma_dev = get_device(dev);
 	rb->write_pos = 0;
 	rb->read_pos = 0;
 	rb->overruns = 0;
@@ -68,7 +69,8 @@ void xtos_bci_ringbuf_free(struct device *dev, struct xtos_bci_ringbuf *rb)
 		return;
 
 	if (rb->buffer)
-		dma_free_coherent(dev, rb->size, rb->buffer, rb->dma_handle);
+		dma_free_coherent(rb->dma_dev, rb->size, rb->buffer, rb->dma_handle);
+	put_device(rb->dma_dev);
 
 	kfree(rb);
 
@@ -87,8 +89,8 @@ EXPORT_SYMBOL_GPL(xtos_bci_ringbuf_free);
  *
  * Returns: Number of bytes written, or negative error code
  */
-int xtos_bci_ringbuf_write(struct xtos_bci_ringbuf *rb, 
-                           const void *data, 
+int xtos_bci_ringbuf_write(struct xtos_bci_ringbuf *rb,
+                           const void *data,
                            size_t len)
 {
 	unsigned long flags;
@@ -107,8 +109,8 @@ int xtos_bci_ringbuf_write(struct xtos_bci_ringbuf *rb,
 	avail = rb->size - fill;
 
 	/* Track maximum fill level */
-	if (fill > rb->max_fill)
-		rb->max_fill = fill;
+	if (min(rb->size, fill + len) > rb->max_fill)
+		rb->max_fill = min(rb->size, fill + len);
 
 	/* If buffer full, advance read pointer (discard oldest data) */
 	if (len > avail) {
@@ -152,8 +154,8 @@ EXPORT_SYMBOL_GPL(xtos_bci_ringbuf_write);
  *
  * Returns: Number of bytes read, or negative error code
  */
-int xtos_bci_ringbuf_read(struct xtos_bci_ringbuf *rb, 
-                          void *data, 
+int xtos_bci_ringbuf_read(struct xtos_bci_ringbuf *rb,
+                          void *data,
                           size_t len)
 {
 	unsigned long flags;

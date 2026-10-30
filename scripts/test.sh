@@ -4,10 +4,45 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
 export PYTHONDONTWRITEBYTECODE=1
+python3 "$ROOT/tests/test_scheduler_docs_currentness.py"
+python3 "$ROOT/tests/test_sched_periodic.py"
+python3 "$ROOT/tests/test_sched_bench_runner.py"
+python3 "$ROOT/tests/test_sched_trace_parser.py"
+python3 "$ROOT/tests/test_sched_preflight.py"
+python3 "$ROOT/tests/test_sched_m0_gate.py"
+python3 "$ROOT/tests/test_scheduler_class_readiness.py"
+python3 "$ROOT/tests/test_sched_class_hooks.py"
+python3 "$ROOT/tests/test_eeg_device_contract.py"
+python3 -B -m unittest discover -s "$ROOT/tests" -p 'test_xtos_devices.py' -v
+python3 -B -m unittest discover -s "$ROOT/tests" -p 'test_p4_device_plugin_integration.py' -v
+python3 "$ROOT/tests/test_cyton_runtime.py"
+bash "$ROOT/scripts/test_cyton_kernel_parser.sh"
+python3 "$ROOT/tests/test_cyton_driver.py"
+python3 "$ROOT/tests/test_cyton_kernel_integration.py"
+python3 "$ROOT/tests/test_cyton_fuzz.py"
+python3 "$ROOT/tests/test_bci_lifetime.py"
+python3 "$ROOT/tests/test_bci_kbuild.py"
+python3 "$ROOT/scripts/test_bci_frames.py"
+python3 "$ROOT/tests/test_bci_snapshot_integration.py"
+python3 "$ROOT/tests/test_bci_snapshot_kernel.py"
+python3 "$ROOT/tests/test_bci_snapshot_sdk.py"
+python3 "$ROOT/tests/test_bci_packaging.py"
+python3 -B -m unittest discover -s "$ROOT/tests" -p 'test_eeg_stream_install.py' -v
+python3 "$ROOT/tests/test_bci_uapi.py"
+python3 "$ROOT/tests/test_bci_cli.py"
+for suite in test_cyton_config.py test_bci_device_config.py test_bci_device_kernel.py test_bci_device_sdk.py test_bci_config_cli.py test_bci_main_config.py test_bci_main_calibration.py test_bci_main_diagnostic.py test_bci_diagnostic.py test_bci_diagnostic_options.py test_bci_diagnostic_cli.py test_bci_calibration.py test_bci_calibration_cli.py; do
+    python3 "$ROOT/tests/$suite"
+done
+python3 "$ROOT/tools/xtos-cyton/test_cyton_diagnostic_serial.py"
+make -C "$ROOT/tools/xtos-cyton" test
+python3 -m unittest discover -s "$ROOT/tools/xtos-eeg-pipeline" -p 'test_openbci_cyton.py' -v
+python3 -m unittest discover -s "$ROOT/tools/xtos-eeg-pipeline" -p 'test_cyton_capture.py' -v
+python3 -m unittest discover -s "$ROOT/tools/xtos-eeg-pipeline" -p 'test_cyton_replay.py' -v
+python3 -m unittest discover -s "$ROOT/tests" -p 'test_xtos_sched_model*.py' -v
 # The service smoke tests spawn ONNX workers in the selected locked runtime.
 export XTOS_TEST_AI_PYTHON="${XTOS_TEST_AI_PYTHON:-${XTOS_AI_PYTHON:-}}"
 cleanup() {
-    for component in sdk/libxtos-bci sdk/libxtos-rt sdk/libxtos-signal tools/xtos-eeg-pipeline tools/xtos-signal-benchmark tools/xtos-fuzz tools/xtos-sbom; do
+    for component in sdk/libxtos-bci sdk/libxtos-rt sdk/libxtos-signal tools/xtos-eeg-pipeline tools/xtos-cyton tools/xtos-signal-benchmark tools/xtos-fuzz tools/xtos-sbom; do
         make -C "$ROOT/$component" clean >/dev/null 2>&1 || true
     done
 }
@@ -15,6 +50,15 @@ trap cleanup EXIT
 make -C "$ROOT/sdk/libxtos-bci" clean all
 make -C "$ROOT/sdk/libxtos-rt" clean test all
 make -C "$ROOT/sdk/libxtos-signal" clean test all
+python3 "$ROOT/tests/test_eeg_window.py"
+python3 "$ROOT/tests/test_eeg_window_install.py"
+python3 "$ROOT/tests/test_eeg_window_integration.py"
+for suite in test_ai_model_binding.py test_eeg_stream.py test_eeg_stream_export.py \
+    test_eeg_feature_binding.py test_eeg_transport_fixture.py test_eeg_cpu_transport.py \
+    test_eeg_lifecycle.py test_eeg_simulation.py test_eeg_controller.py \
+    test_eeg_stream_process.py test_eeg_loop_install.py; do
+    python3 -B -m unittest discover -s "$ROOT/tests" -p "$suite"
+done
 "$ROOT/scripts/check_abi.sh"
 python3 -m unittest discover -s "$ROOT/sdk/libxtos-signal/tests" -p 'test_signal_reference.py' -v
 make -C "$ROOT/tools/xtos-eeg-pipeline" clean test

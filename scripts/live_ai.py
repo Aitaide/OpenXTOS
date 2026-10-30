@@ -164,8 +164,16 @@ def install_runtime(stage, root, descriptor, repo, lock_sha256):
     required = {'__init__.py', '__main__.py', 'client.py', 'server.py', 'worker.py', 'trust.py'}
     if not required.issubset({p.name for p in files}) or any(p.is_symlink() for p in files):
         raise ValueError('maintained AI service sources missing')
-    targets = [stage / 'opt/xtos-ai', stage / 'usr/lib/xtos/xtos_ai_runtime',
-               stage / 'usr/libexec/xtos/ai-service', stage / 'usr/libexec/xtos/ai-entry.py',
+    package = stage / 'usr/lib/xtos/xtos_ai_runtime'
+    if package.exists() or package.is_symlink():
+        if package.is_symlink() or not package.is_dir():
+            raise ValueError('AI staging destination already exists')
+        for source in files:
+            target = package / source.name
+            if target.is_symlink() or not target.is_file() or _sha(target) != _sha(source):
+                raise ValueError('AI staging destination already exists')
+    targets = [stage / 'opt/xtos-ai', stage / 'usr/libexec/xtos/ai-service',
+               stage / 'usr/libexec/xtos/ai-entry.py',
                stage / 'usr/share/xtos/ai-runtime.json']
     for target in targets:
         if os.path.lexists(target):
@@ -175,7 +183,7 @@ def install_runtime(stage, root, descriptor, repo, lock_sha256):
                 break
             if parent.is_symlink() or (parent.exists() and not parent.is_dir()):
                 raise ValueError('AI staging parent is not a real directory')
-    destination, package, launcher, bootstrap, record = targets
+    destination, launcher, bootstrap, record = targets
     with tempfile.TemporaryDirectory(prefix='.xtos-ai-', dir=stage) as temporary:
         candidate = Path(temporary) / 'runtime'
         shutil.copytree(root, candidate, symlinks=True)
@@ -185,14 +193,21 @@ def install_runtime(stage, root, descriptor, repo, lock_sha256):
             raise ValueError('AI input changed while copying')
         destination.parent.mkdir(parents=True, exist_ok=True)
         _publish_noreplace(candidate, destination)
-    package.mkdir(parents=True)
-    source_hashes = {}
-    for source in files:
-        target = package / source.name
-        shutil.copyfile(source, target)
-        source_hashes[source.name] = _sha(target)
-        if source_hashes[source.name] != _sha(source):
-            raise ValueError('AI service source changed while copying')
+    if package.exists():
+        if package.is_symlink() or not package.is_dir():
+            raise ValueError('preinstalled AI service package is not a directory')
+        for source in files:
+            target = package / source.name
+            if target.is_symlink() or not target.is_file() or _sha(target) != _sha(source):
+                raise ValueError('preinstalled AI service source mismatch: ' + source.name)
+    else:
+        package.mkdir(parents=True)
+        for source in files:
+            target = package / source.name
+            shutil.copyfile(source, target)
+            if _sha(target) != _sha(source):
+                raise ValueError('AI service source changed while copying')
+    source_hashes = {source.name: _sha(package / source.name) for source in files}
     report['service_sources_sha256'] = source_hashes
     launcher.parent.mkdir(parents=True, exist_ok=True)
     bootstrap.write_text('import runpy, sys\nsys.path.insert(0, "/usr/lib/xtos")\n'

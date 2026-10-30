@@ -3,6 +3,8 @@
 
 #include <stdint.h>
 #include <sys/ioctl.h>
+#include "bci_snapshot_uapi.h"
+#include "bci_config_uapi.h"
 
 #define XTOS_BCI_IOC_MAGIC 'X'
 

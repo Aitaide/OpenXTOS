@@ -1,0 +1,34 @@
+{
+  "schema": "xtos-scheduler-model-input-v1",
+  "status": "model_fixture_only",
+  "partition_cpus": [0],
+  "cpu": 0,
+  "horizon_ns": 200000000,
+  "dbf_horizon_ns": null,
+  "tasks": [
+    {
+      "name": "periodic-a",
+      "cpu": 0,
+      "runtime_ns": 2000000,
+      "work_ns": 2000000,
+      "deadline_ns": 10000000,
+      "period_ns": 10000000,
+      "priority": 20
+    },
+    {
+      "name": "periodic-b",
+      "cpu": 0,
+      "runtime_ns": 1000000,
+      "work_ns": 1000000,
+      "deadline_ns": 10000000,
+      "period_ns": 10000000,
+      "priority": 10
+    }
+  ],
+  "production_workload_approved": false,
+  "limitations": [
+    "Synthetic model fixture only; no physical device or application path.",
+    "No WCET, budget, IRQ, lock blocking or kernel wakeup evidence.",
+    "Model replay is not Linux scheduler performance evidence."
+  ]
+}

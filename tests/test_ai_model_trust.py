@@ -559,12 +559,37 @@ class TrustPolicyTests(unittest.TestCase):
         verifier = NativeEd25519Verifier(helper, spool_parent=spool)
         message = MODEL_DOMAIN + b'{"test":"native-real"}'
         signature = self.fx.publisher.sign(message)
-        verifier.verify(self.fx.publisher.public_raw, message, signature)
-        self.assertEqual(spool.stat().st_mode & 0o777, 0o700)
-        self.assertEqual(list(spool.iterdir()), [])
-        self.assert_reason("signature_invalid", lambda: verifier.verify(
-            self.fx.publisher.public_raw, message + b"!", signature))
-        self.assertEqual(list(spool.iterdir()), [])
+        run_helper = verifier._run_helper
+        observed_inputs = []
+
+        def inspect_then_run(argv):
+            inputs = [Path(argv[index]) for index in (2, 4, 6)]
+            observed_inputs.append([path.read_bytes() for path in inputs])
+            for path in inputs:
+                self.assertEqual(path.stat().st_mode & 0o777, 0o600)
+            # The helper reads closed, complete transient inputs. Their bytes
+            # need same-host visibility, not power-loss durability.
+            open_paths = []
+            for fd in Path('/proc/self/fd').iterdir():
+                try:
+                    open_paths.append(os.readlink(fd))
+                except FileNotFoundError:
+                    pass
+            self.assertTrue(all(str(path) not in open_paths for path in inputs))
+            return run_helper(argv)
+
+        with patch('xtos_ai_runtime.trust.os.fsync', wraps=os.fsync) as sync:
+            with patch.object(verifier, '_run_helper', side_effect=inspect_then_run):
+                verifier.verify(self.fx.publisher.public_raw, message, signature)
+                self.assertEqual(spool.stat().st_mode & 0o777, 0o700)
+                self.assertEqual(list(spool.iterdir()), [])
+                self.assert_reason("signature_invalid", lambda: verifier.verify(
+                    self.fx.publisher.public_raw, message + b"!", signature))
+                self.assertEqual(list(spool.iterdir()), [])
+            sync.assert_not_called()
+        self.assertEqual(observed_inputs, [
+            [self.fx.publisher.public_raw, message, signature],
+            [self.fx.publisher.public_raw, message + b"!", signature]])
 
     def test_file_checkpoint_adapter_persists_whole_checkpoint_atomically(self):
         state_dir = Path(self.temp.name) / "secure-state"
@@ -572,7 +597,10 @@ class TrustPolicyTests(unittest.TestCase):
         adapter = FilePolicyStore(state_dir / "checkpoint.json")
         self.assertIsNone(adapter.read())
         checkpoint = self.fx.store.read()
-        adapter.commit(checkpoint)
+        with patch('xtos_ai_runtime.trust.os.fsync', wraps=os.fsync) as sync:
+            adapter.commit(checkpoint)
+            self.assertGreaterEqual(sync.call_count, 2,
+                                    'durable checkpoint must sync both data and directory')
         loaded = adapter.read()
         self.assertEqual(loaded, checkpoint)
         self.assertEqual((state_dir / "checkpoint.json").stat().st_mode & 0o777, 0o600)

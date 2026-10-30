@@ -6,6 +6,7 @@ import tempfile
 import threading
 import time
 import unittest
+from unittest import mock
 from pathlib import Path
 
 ROOT = Path(__file__).parents[1]
@@ -60,22 +61,37 @@ class RealServiceTests(unittest.TestCase):
         try:
             loaded = service.dispatch({"id": "recover-load", "op": "load", "manifest": manifest})
             self.assertEqual(loaded["status"], "ok", loaded)
-            pid = service._models["fixed-classifier"].pid
-            os.kill(pid, signal.SIGSTOP)
-            result = service.dispatch({
-                "id": "recover-timeout", "op": "infer", "model": "fixed-classifier",
-                "input": [[2.0, 0.0, -1.0, 0.0]], "deadline_ms": 250,
-            })
+            worker = service._models["fixed-classifier"]
+            pid = worker.pid
+            original_infer = worker.infer
+            entered_worker = threading.Event()
+
+            def stopped_infer(request_id, value, remaining_ms, cancel=None):
+                # Inject after real trust validation: it can exceed 250ms under
+                # QEMU. Keep real worker timeout/kill/reap/recovery semantics.
+                entered_worker.set()
+                os.kill(pid, signal.SIGSTOP)
+                return original_infer(request_id, value, min(250, remaining_ms), cancel)
+
+            with mock.patch.object(worker, "infer", side_effect=stopped_infer):
+                result = service.dispatch({
+                    "id": "recover-timeout", "op": "infer", "model": "fixed-classifier",
+                    "input": [[2.0, 0.0, -1.0, 0.0]], "deadline_ms": 3000,
+                })
+            self.assertTrue(entered_worker.is_set(), "request expired before fault injection")
             self.assertEqual(result["status"], "timeout", result)
             self.assertEqual(result["safe_action"], "no_action")
+            with self.assertRaises(ProcessLookupError):
+                os.kill(pid, 0)
             deadline = time.monotonic() + 10
             while time.monotonic() < deadline:
                 health = service.dispatch({"id": "recover-health", "op": "health"})
                 state = health["models"]["fixed-classifier"]
-                if state["alive"] and not state["recovering"]:
+                if state["alive"] and state["pid"] != pid and not state["recovering"]:
                     break
                 time.sleep(.05)
             self.assertTrue(state["alive"], health)
+            self.assertNotEqual(state["pid"], pid, health)
             self.assertFalse(state["recovering"], health)
             recovered = service.dispatch({
                 "id": "recover-infer", "op": "infer", "model": "fixed-classifier",

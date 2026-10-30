@@ -42,6 +42,14 @@ CSV_SEEDS = [
     b"1,2,3,4",
 ]
 
+def cyton_packet(counter: int, footer: int = 0xC0) -> bytes:
+    """Protocol-shaped seed including both signed24 endpoints."""
+    samples = (-8388608, 8388607, -1, 0, 1, -1000, 1000, 0xA000)
+    return (bytes((0xA0, counter & 0xFF)) +
+            b''.join((value & 0xFFFFFF).to_bytes(3, 'big') for value in samples) +
+            bytes(6) + bytes((footer,)))
+
+
 PACKET_SEEDS = [
     bytes([0xA0]) + bytes(32),
     bytes([0xA0]) + bytes([0xFF] * 32),
@@ -52,6 +60,10 @@ PACKET_SEEDS = [
     bytes(range(64)),
     b"\xff" * 128,
     b"",
+] + [cyton_packet(i, 0xC0 + i) for i in range(16)] + [
+    b''.join(cyton_packet(i) for i in range(300)),
+    cyton_packet(10) + cyton_packet(10) + cyton_packet(9) + cyton_packet(13),
+    cyton_packet(1, 0xB0) + cyton_packet(2),
 ]
 
 CSV_TOKENS = [

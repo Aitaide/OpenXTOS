@@ -20,7 +20,8 @@ required_config=(
     CONFIG_XTOS_SCHED=y
     CONFIG_XTOS_BCI=m
     CONFIG_XTOS_BCI_OPENBCI=m
-    CONFIG_SERIAL_DEV_BUS=m
+    CONFIG_SERIAL_DEV_BUS=y
+    CONFIG_SERIAL_DEV_CTRL_TTYPORT=y
 )
 for setting in "${required_config[@]}"; do
     if ! grep -qx "$setting" "$OUTPUT_DIR/.config"; then

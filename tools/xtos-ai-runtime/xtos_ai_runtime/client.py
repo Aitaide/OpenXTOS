@@ -5,10 +5,11 @@ import json
 import math
 import socket
 import struct
+import time
 from pathlib import Path
 from typing import Any
 
-from .server import MAX_REQUEST_BYTES, SCHEMA, parse_request_line
+from .server import MAX_REQUEST_BYTES, SCHEMA, _valid_model_digest, parse_request_line
 
 
 def _validate_output(value: Any) -> None:
@@ -40,8 +41,24 @@ def request(socket_path: str | Path, document: dict[str, Any], timeout: float = 
     if type(request_id) is not str or not 1 <= len(request_id) <= 128:
         raise ValueError("request id must be a string of length 1..128")
     expected_model = document.get("model")
+    expected_digest = document.get("expected_model_sha256")
+    if "expected_model_sha256" in document:
+        if document.get("op") != "infer":
+            raise ValueError("model digest pinning requires infer")
+        if not _valid_model_digest(expected_digest):
+            raise ValueError("invalid expected model digest")
+        if type(expected_model) is not str or not expected_model:
+            raise ValueError("pinned infer requires a non-empty model identity")
     if isinstance(timeout, bool) or not isinstance(timeout, (int, float)) or not math.isfinite(timeout) or not 0 < timeout <= 300:
         raise ValueError("timeout must be finite and in (0, 300]")
+    expires = time.monotonic() + float(timeout)
+
+    def remaining() -> float:
+        budget = expires - time.monotonic()
+        if budget <= 0:
+            raise TimeoutError("total request timeout")
+        return budget
+
     try:
         payload = (json.dumps(document, allow_nan=False, separators=(",", ":")) + "\n").encode("utf-8")
     except (TypeError, ValueError, OverflowError) as exc:
@@ -49,11 +66,13 @@ def request(socket_path: str | Path, document: dict[str, Any], timeout: float = 
     if len(payload) > MAX_REQUEST_BYTES:
         raise ValueError("request exceeds size limit")
     with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as connection:
-        connection.settimeout(float(timeout))
+        connection.settimeout(remaining())
         connection.connect(str(socket_path))
+        connection.settimeout(remaining())
         connection.sendall(payload)
         chunks = bytearray()
         while len(chunks) <= MAX_REQUEST_BYTES:
+            connection.settimeout(remaining())
             chunk = connection.recv(min(8192, MAX_REQUEST_BYTES + 1 - len(chunks)))
             if not chunk:
                 break
@@ -101,6 +120,8 @@ def request(socket_path: str | Path, document: dict[str, Any], timeout: float = 
         if response.get("provider") != "CPUExecutionProvider" or "latency_ms" not in response:
             raise ValueError("success response lacks provider or latency")
         _validate_output(response["output"])
+        if expected_digest is not None and response.get("model_sha256") != expected_digest:
+            raise ValueError("response model digest mismatch")
     elif (expected_model is not None and response.get("model") is not None
           and response["model"] != expected_model):
         raise ValueError("no_action response model identity mismatch")
@@ -108,4 +129,9 @@ def request(socket_path: str | Path, document: dict[str, Any], timeout: float = 
         raise ValueError("no_action response must not expose success or output")
     elif status != "ok" and reason is None:
         raise ValueError("failed response must include a reason")
+    if expected_digest is not None and response["safe_action"] == "no_action":
+        actual_digest = response.get("model_sha256")
+        if actual_digest is not None and actual_digest != expected_digest:
+            raise ValueError("response model digest mismatch")
+    remaining()
     return response

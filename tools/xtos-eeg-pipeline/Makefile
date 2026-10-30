@@ -12,7 +12,7 @@ xtos-eeg-pipeline: pipeline.c ../../sdk/libxtos-rt/src/spsc.c ../../sdk/libxtos-
 	$(CC) $(CPPFLAGS) $(CFLAGS) -o $@ pipeline.c ../../sdk/libxtos-rt/src/spsc.c $(SIGNAL_SRC) $(LDFLAGS)
 
 test: xtos-eeg-pipeline
-	python3 -m unittest -v test_pipeline.py
+	python3 -m unittest -v test_pipeline.py test_openbci_cyton.py test_cyton_capture.py test_cyton_replay.py
 
 clean:
 	rm -f xtos-eeg-pipeline

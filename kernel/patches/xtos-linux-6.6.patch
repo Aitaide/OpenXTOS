@@ -513,10 +513,10 @@ index 000000000..08c18e659
 +#endif /* _LINUX_XTOS_H */
 diff --git a/include/linux/xtos_bci.h b/include/linux/xtos_bci.h
 new file mode 100644
-index 000000000..1730e013a
+index 000000000..709d265e3
 --- /dev/null
 +++ b/include/linux/xtos_bci.h
-@@ -0,0 +1,144 @@
+@@ -0,0 +1,182 @@
 +/* SPDX-License-Identifier: GPL-2.0 */
 +/*
 + * XTOS BCI (Brain-Computer Interface) Driver Framework
@@ -535,6 +535,8 @@ index 000000000..1730e013a
 +#include <linux/spinlock.h>
 +#include <linux/wait.h>
 +#include <linux/dma-mapping.h>
++#include <linux/mutex.h>
++#include <linux/kref.h>
 +
 +/* BCI device interface types */
 +enum xtos_bci_interface {
@@ -547,9 +549,14 @@ index 000000000..1730e013a
 +/* Forward declarations */
 +struct xtos_bci_dev;
 +struct xtos_bci_ringbuf;
++struct xtos_bci_config_v1;
++struct xtos_bci_frame_v1;
++struct xtos_bci_frame_ring;
 +
 +/* Device operation callbacks */
 +struct xtos_bci_device_ops {
++	/* Wake in-flight operations before unregister waits for op_lock. */
++	void (*cancel)(struct xtos_bci_dev *dev);
 +	/* Initialization and cleanup */
 +	int (*init)(struct xtos_bci_dev *dev);
 +	void (*cleanup)(struct xtos_bci_dev *dev);
@@ -561,7 +568,8 @@ index 000000000..1730e013a
 +	                    s32 *buffer,
 +	                    size_t num_samples);
 +	
-+	/* Configuration */
++	/* Configuration. Cyton accepts 250Hz only as a stopped readback assertion;
++	 * its firmware rate command resets unrelated ADS settings. */
 +	int (*set_sampling_rate)(struct xtos_bci_dev *dev, int rate);
 +	int (*set_channel_enable)(struct xtos_bci_dev *dev, 
 +	                          int channel, 
@@ -570,6 +578,11 @@ index 000000000..1730e013a
 +	                int channel, 
 +	                int gain);
 +	
++	int (*set_channel_config)(struct xtos_bci_dev *dev, int channel,
++				  bool enabled, int gain);
++	int (*get_config)(struct xtos_bci_dev *dev,
++			  struct xtos_bci_config_v1 *config);
++
 +	/* Calibration */
 +	int (*calibrate)(struct xtos_bci_dev *dev);
 +	int (*impedance_check)(struct xtos_bci_dev *dev, 
@@ -594,16 +607,24 @@ index 000000000..1730e013a
 +	
 +	/* Operation callbacks */
 +	const struct xtos_bci_device_ops *ops;
++	struct module *owner;       /* Callback/free code, pinned by each open FD */
++	void (*release)(struct xtos_bci_dev *dev); /* Final allocation destructor */
++	struct kref ref;
++	struct mutex op_lock;       /* Controls/open/cleanup, never held while waiting */
++	struct mutex read_lock;     /* Serialize read snapshot/commit */
++	bool disconnected;
++	bool registered;
 +	
 +	/* Ring buffer */
 +	struct xtos_bci_ringbuf *ringbuf;
++	struct xtos_bci_frame_ring *frames; /* CPU-owned, final device put frees. */
 +	
 +	/* Character device */
-+	struct cdev cdev;
++	struct cdev *cdev;          /* Independently refcounted by VFS */
 +	struct device *device;
 +	dev_t devt;                 /* Device number (major:minor) */
 +	
-+	/* Statistics */
++	/* Statistics: RX and core GET/RESET_STATS all hold lock below. */
 +	unsigned long samples_read;
 +	unsigned long samples_dropped;
 +	unsigned long errors;
@@ -611,6 +632,7 @@ index 000000000..1730e013a
 +	/* State */
 +	bool opened;
 +	bool streaming;
++	int acquisition_error;       /* Negative errno; buffered bytes drain first. */
 +	spinlock_t lock;
 +	
 +	/* Global device list */
@@ -621,6 +643,7 @@ index 000000000..1730e013a
 +struct xtos_bci_ringbuf {
 +	void *buffer;               /* DMA buffer */
 +	dma_addr_t dma_handle;      /* DMA physical address */
++	struct device *dma_dev;     /* Retained original allocation device */
 +	size_t size;                /* Buffer size (bytes) */
 +	
 +	unsigned long write_pos;    /* Write pointer */
@@ -635,6 +658,13 @@ index 000000000..1730e013a
 +};
 +
 +/* Core API functions */
++/* init gives the caller one reference; register holds another until unregister.
++ * Caller closes/quiesces transport before dropping its reference. Final put
++ * frees the ring and invokes release; successful open holds ref + owner pin.
++ */
++void xtos_bci_device_init(struct xtos_bci_dev *dev);
++void xtos_bci_get_device(struct xtos_bci_dev *dev);
++void xtos_bci_put_device(struct xtos_bci_dev *dev);
 +int xtos_bci_register_device(struct xtos_bci_dev *dev);
 +void xtos_bci_unregister_device(struct xtos_bci_dev *dev);
 +
@@ -648,6 +678,14 @@ index 000000000..1730e013a
 +                          void *data, 
 +                          size_t len);
 +size_t xtos_bci_ringbuf_available(struct xtos_bci_ringbuf *rb);
++
++/* Enable in sleepable initialization before admitting RX. Producer lifetime and
++ * current-generation admission belong to the driver; publish never allocates. */
++int xtos_bci_device_frames_enable(struct xtos_bci_dev *dev, unsigned int capacity);
++int xtos_bci_device_frame_publish(struct xtos_bci_dev *dev,
++                                const struct xtos_bci_frame_v1 *frame,
++                                const struct xtos_bci_config_v1 *config);
++void xtos_bci_device_frames_wake(struct xtos_bci_dev *dev);
 +
 +/* Device registration macro */
 +#define XTOS_BCI_DEVICE_REGISTER(name, ops_ptr) \
@@ -798,10 +836,10 @@ index 000000000..821c812eb
 +#endif /* _LINUX_XTOS_QUEUE_H */
 diff --git a/include/uapi/linux/xtos_bci.h b/include/uapi/linux/xtos_bci.h
 new file mode 100644
-index 000000000..d00bef91e
+index 000000000..5880f7abd
 --- /dev/null
 +++ b/include/uapi/linux/xtos_bci.h
-@@ -0,0 +1,70 @@
+@@ -0,0 +1,72 @@
 +/* SPDX-License-Identifier: GPL-2.0 WITH Linux-syscall-note */
 +/*
 + * XTOS BCI (Brain-Computer Interface) User API
@@ -815,6 +853,8 @@ index 000000000..d00bef91e
 +
 +#include <linux/types.h>
 +#include <linux/ioctl.h>
++#include <linux/xtos_bci_snapshot.h>
++#include <linux/xtos_bci_config.h>
 +
 +/* ioctl magic number */
 +#define XTOS_BCI_IOC_MAGIC 'X'
@@ -938,16 +978,23 @@ index 000000000..bd15051a5
 +	  If unsure, say N.
 diff --git a/drivers/xtos/bci/Makefile b/drivers/xtos/bci/Makefile
 new file mode 100644
-index 000000000..ad4378908
+index 000000000..dd54c16b8
 --- /dev/null
 +++ b/drivers/xtos/bci/Makefile
-@@ -0,0 +1,14 @@
+@@ -0,0 +1,21 @@
 +# SPDX-License-Identifier: GPL-2.0
 +#
 +# Makefile for XTOS BCI drivers
 +#
 +
 +obj-$(CONFIG_XTOS_BCI) += xtos_bci_core.o
++xtos_bci_core-y := xtos_bci_core_impl.o xtos_bci_snapshot.o xtos_bci_frame.o xtos_bci_frame_snapshot.o
++
++# Keep the established module and source names while linking the helper.
++$(obj)/xtos_bci_core_impl.o: modname := xtos_bci_core
++$(obj)/xtos_bci_core_impl.o: $(src)/xtos_bci_core.c FORCE
++	$(call if_changed_rule,cc_o_c)
++
 +obj-$(CONFIG_XTOS_BCI) += xtos_bci_buffer.o
 +
 +# Device drivers
@@ -958,10 +1005,10 @@ index 000000000..ad4378908
 +# obj-$(CONFIG_XTOS_BCI_MUSE) += devices/muse_s.o
 diff --git a/drivers/xtos/bci/xtos_bci_core.c b/drivers/xtos/bci/xtos_bci_core.c
 new file mode 100644
-index 000000000..366da67d0
+index 000000000..6e4cb4cc5
 --- /dev/null
 +++ b/drivers/xtos/bci/xtos_bci_core.c
-@@ -0,0 +1,445 @@
+@@ -0,0 +1,921 @@
 +// SPDX-License-Identifier: GPL-2.0
 +/*
 + * XTOS BCI Core Driver
@@ -980,8 +1027,12 @@ index 000000000..366da67d0
 +#include <linux/uaccess.h>
 +#include <linux/poll.h>
 +#include <linux/dma-mapping.h>
++#include <linux/compat.h>
 +#include <linux/xtos_bci.h>
 +#include <uapi/linux/xtos_bci.h>
++#include "xtos_bci_snapshot.h"
++#include "xtos_bci_frame.h"
++#include "xtos_bci_frame_snapshot.h"
 +
 +#define XTOS_BCI_NAME "xtos_bci"
 +#define XTOS_BCI_MAX_DEVICES 16
@@ -991,175 +1042,600 @@ index 000000000..366da67d0
 +static struct class *xtos_bci_class;
 +static DEFINE_MUTEX(device_list_lock);
 +static LIST_HEAD(device_list);
-+static int next_dev_id = 0;
++static bool device_ids[XTOS_BCI_MAX_DEVICES];
++
++/* op_lock protects snapshot ownership and the never-reused token sequence. */
++struct xtos_bci_file {
++	struct xtos_bci_dev *dev;
++	struct xtos_bci_snapshot *snapshot;
++	struct xtos_bci_frame_snapshot *frame_snapshot;
++	u64 next_token;
++};
++
++static bool xtos_bci_has_snapshot(struct xtos_bci_file *ctx)
++{
++	return READ_ONCE(ctx->snapshot) || READ_ONCE(ctx->frame_snapshot);
++}
++
++static void xtos_bci_wake_readers(struct xtos_bci_dev *dev)
++{
++	if (dev->ringbuf)
++		wake_up_interruptible(&dev->ringbuf->wait);
++	xtos_bci_device_frames_wake(dev);
++}
++
++/* Validate the numeric address before conversion, including compat upper bits. */
++static int xtos_bci_frame_read_input(struct xtos_bci_frame_request *input)
++{
++	struct xtos_bci_frame_request expected = {0};
++	u64 bytes;
++
++	if (input->version != XTOS_BCI_FRAME_VERSION ||
++	    input->flags & ~XTOS_BCI_FRAME_NONBLOCK || !input->capacity_frames ||
++	    input->capacity_frames > XTOS_BCI_FRAME_MAX_BATCH || !input->frames_ptr)
++		return -EINVAL;
++	expected.version = input->version;
++	expected.flags = input->flags;
++	expected.capacity_frames = input->capacity_frames;
++	expected.frames_ptr = input->frames_ptr;
++	if (memcmp(input, &expected, sizeof(expected)))
++		return -EINVAL;
++	bytes = (u64)input->capacity_frames * XTOS_BCI_FRAME_RECORD_BYTES;
++	if (input->frames_ptr > (u64)ULONG_MAX - bytes ||
++	    (in_compat_syscall() && input->frames_ptr > 0xffffffffULL - bytes))
++		return -EOVERFLOW;
++	if (!access_ok((void __user *)(unsigned long)input->frames_ptr, bytes))
++		return -EFAULT;
++	return 0;
++}
++
++static long xtos_bci_frame_read_ioctl(struct file *filp, unsigned long arg)
++{
++	struct xtos_bci_file *ctx = filp->private_data;
++	struct xtos_bci_dev *dev = ctx->dev;
++	struct xtos_bci_frame_ring *ring = READ_ONCE(dev->frames);
++	struct xtos_bci_frame_request input, output;
++	struct xtos_bci_frame_v1 *records;
++	int ret;
++
++	if (READ_ONCE(dev->disconnected))
++		return -ENODEV;
++	if (!ring)
++		return -EOPNOTSUPP;
++	if (copy_from_user(&input, (void __user *)arg, sizeof(input)))
++		return -EFAULT;
++	ret = xtos_bci_frame_read_input(&input);
++	if (ret)
++		return ret;
++	ret = mutex_lock_interruptible(&dev->read_lock);
++	if (ret)
++		return ret;
++	if (!(input.flags & XTOS_BCI_FRAME_NONBLOCK) && !(filp->f_flags & O_NONBLOCK)) {
++		ret = wait_event_interruptible(ring->wait,
++			READ_ONCE(dev->disconnected) || READ_ONCE(dev->acquisition_error) ||
++			xtos_bci_has_snapshot(ctx) || !READ_ONCE(dev->streaming) ||
++			xtos_bci_frame_ring_available(ring));
++		if (ret)
++			goto unlock_read;
++	}
++	mutex_lock(&dev->op_lock);
++	if (READ_ONCE(dev->disconnected)) {
++		ret = -ENODEV;
++		goto unlock_op;
++	}
++	if (xtos_bci_has_snapshot(ctx)) {
++		ret = -EBUSY;
++		goto unlock_op;
++	}
++	if (!xtos_bci_frame_ring_available(ring)) {
++		ret = READ_ONCE(dev->acquisition_error);
++		if (ret)
++			goto unlock_op;
++		if (READ_ONCE(dev->streaming)) {
++			ret = -EAGAIN;
++			goto unlock_op;
++		}
++		ret = copy_to_user((void __user *)arg, &input, sizeof(input)) ? -EFAULT : 0;
++		goto unlock_op;
++	}
++	records = kmalloc((size_t)input.capacity_frames * sizeof(*records), GFP_KERNEL);
++	if (!records) {
++		ret = -ENOMEM;
++		goto unlock_op;
++	}
++	ret = xtos_bci_frame_ring_peek(ring, input.capacity_frames, records, &output);
++	if (!ret) {
++		output.flags = input.flags;
++		output.frames_ptr = input.frames_ptr;
++		if (copy_to_user((void __user *)(unsigned long)input.frames_ptr,
++				 records, output.payload_bytes) ||
++		    copy_to_user((void __user *)arg, &output, sizeof(output)))
++			ret = -EFAULT;
++		else
++			ret = xtos_bci_frame_ring_commit(ring, output.cursor, output.frame_count);
++	}
++	kfree(records);
++unlock_op:
++	mutex_unlock(&dev->op_lock);
++unlock_read:
++	mutex_unlock(&dev->read_lock);
++	return ret;
++}
++
++void xtos_bci_device_init(struct xtos_bci_dev *dev)
++{
++	kref_init(&dev->ref);
++	mutex_init(&dev->op_lock);
++	mutex_init(&dev->read_lock);
++	spin_lock_init(&dev->lock);
++	INIT_LIST_HEAD(&dev->list);
++	dev->dev_id = -1;
++	dev->disconnected = false;
++	dev->registered = false;
++	dev->opened = false;
++	dev->streaming = false;
++	dev->acquisition_error = 0;
++}
++EXPORT_SYMBOL_GPL(xtos_bci_device_init);
++
++int xtos_bci_device_frames_enable(struct xtos_bci_dev *dev, unsigned int capacity)
++{
++	struct xtos_bci_frame_ring *ring;
++
++	if (!dev || !capacity || capacity > XTOS_BCI_FRAME_RING_MAX)
++		return -EINVAL;
++	if (READ_ONCE(dev->disconnected))
++		return -ENODEV;
++	if (dev->frames)
++		return dev->frames->capacity == capacity ? 0 : -EINVAL;
++	ring = xtos_bci_frame_ring_alloc(capacity);
++	if (IS_ERR(ring))
++		return PTR_ERR(ring);
++	WRITE_ONCE(dev->frames, ring);
++	return 0;
++}
++EXPORT_SYMBOL_GPL(xtos_bci_device_frames_enable);
++
++int xtos_bci_device_frame_publish(struct xtos_bci_dev *dev,
++				const struct xtos_bci_frame_v1 *frame,
++				const struct xtos_bci_config_v1 *config)
++{
++	struct xtos_bci_frame_ring *ring;
++
++	if (!dev || READ_ONCE(dev->disconnected))
++		return -ENODEV;
++	ring = READ_ONCE(dev->frames);
++	if (!ring)
++		return -EOPNOTSUPP;
++	return xtos_bci_frame_ring_publish(ring, frame, config);
++}
++EXPORT_SYMBOL_GPL(xtos_bci_device_frame_publish);
++
++void xtos_bci_device_frames_wake(struct xtos_bci_dev *dev)
++{
++	if (dev)
++		xtos_bci_frame_ring_wake(READ_ONCE(dev->frames));
++}
++EXPORT_SYMBOL_GPL(xtos_bci_device_frames_wake);
++
++void xtos_bci_get_device(struct xtos_bci_dev *dev)
++{
++	kref_get(&dev->ref);
++}
++EXPORT_SYMBOL_GPL(xtos_bci_get_device);
++
++static void xtos_bci_destroy(struct kref *ref)
++{
++	struct xtos_bci_dev *dev = container_of(ref, struct xtos_bci_dev, ref);
++
++	xtos_bci_ringbuf_free(NULL, dev->ringbuf);
++	xtos_bci_frame_ring_free(dev->frames);
++	if (dev->release)
++		dev->release(dev);
++}
++
++void xtos_bci_put_device(struct xtos_bci_dev *dev)
++{
++	kref_put(&dev->ref, xtos_bci_destroy);
++}
++EXPORT_SYMBOL_GPL(xtos_bci_put_device);
 +
 +/* Character device operations */
 +static int xtos_bci_open(struct inode *inode, struct file *filp)
 +{
-+	struct xtos_bci_dev *dev;
-+	unsigned long flags;
++	struct xtos_bci_dev *dev, *found = NULL;
++	struct module *owner;
++	struct xtos_bci_file *ctx;
 +	int ret;
 +
-+	dev = container_of(inode->i_cdev, struct xtos_bci_dev, cdev);
-+
-+	spin_lock_irqsave(&dev->lock, flags);
-+	if (dev->opened) {
-+		spin_unlock_irqrestore(&dev->lock, flags);
-+		return -EBUSY;  /* Only one process can open */
-+	}
-+	dev->opened = true;
-+	spin_unlock_irqrestore(&dev->lock, flags);
-+
-+	/* Initialize device */
-+	if (dev->ops->init) {
-+		ret = dev->ops->init(dev);
-+		if (ret) {
-+			dev->opened = false;
-+			return ret;
++	/* Compare cdev identity without dereferencing a retired inode's pointer. */
++	mutex_lock(&device_list_lock);
++	list_for_each_entry(dev, &device_list, list) {
++		if (dev->devt == inode->i_rdev && dev->cdev == inode->i_cdev &&
++		    !dev->disconnected) {
++			if (try_module_get(dev->owner)) {
++				xtos_bci_get_device(dev);
++				found = dev;
++			}
++			break;
 +		}
 +	}
++	mutex_unlock(&device_list_lock);
++	if (!found)
++		return -ENODEV;
++	dev = found;
++	owner = dev->owner;
++	ctx = kzalloc(sizeof(*ctx), GFP_KERNEL);
++	if (!ctx) {
++		xtos_bci_put_device(dev);
++		module_put(owner);
++		return -ENOMEM;
++	}
++	ctx->dev = dev;
++	ctx->next_token = 1;
++	mutex_lock(&dev->op_lock);
++	if (READ_ONCE(dev->disconnected)) {
++		ret = -ENODEV;
++		goto out;
++	}
++	if (dev->opened) {
++		ret = -EBUSY;
++		goto out;
++	}
++	ret = dev->ops->init ? dev->ops->init(dev) : 0;
++	if (!ret) {
++		if (dev->ringbuf) {
++			unsigned long flags;
 +
-+	filp->private_data = dev;
-+	pr_info("xtos_bci: Device %s opened\n", dev->name);
-+
-+	return 0;
++			spin_lock_irqsave(&dev->ringbuf->lock, flags);
++			dev->ringbuf->read_pos = dev->ringbuf->write_pos;
++			spin_unlock_irqrestore(&dev->ringbuf->lock, flags);
++		}
++		dev->opened = true;
++		xtos_bci_frame_ring_discard_unread(dev->frames);
++		filp->private_data = ctx;
++	}
++out:
++	mutex_unlock(&dev->op_lock);
++	if (ret) {
++		kfree(ctx);
++		xtos_bci_put_device(dev);
++		module_put(owner);
++	}
++	return ret;
 +}
 +
 +static int xtos_bci_release(struct inode *inode, struct file *filp)
 +{
-+	struct xtos_bci_dev *dev = filp->private_data;
-+	unsigned long flags;
++	struct xtos_bci_file *ctx = filp->private_data;
++	struct xtos_bci_dev *dev = ctx->dev;
++	struct module *owner = dev->owner;
 +
-+	/* Stop streaming if active */
-+	if (dev->streaming && dev->ops->stop_stream)
-+		dev->ops->stop_stream(dev);
-+
-+	/* Cleanup device */
-+	if (dev->ops->cleanup)
++	mutex_lock(&dev->op_lock);
++	xtos_bci_snapshot_put(ctx->snapshot);
++	ctx->snapshot = NULL;
++	xtos_bci_frame_snapshot_put(ctx->frame_snapshot);
++	ctx->frame_snapshot = NULL;
++	if (!READ_ONCE(dev->disconnected) && dev->ops->cleanup)
 +		dev->ops->cleanup(dev);
-+
-+	spin_lock_irqsave(&dev->lock, flags);
++	WRITE_ONCE(dev->streaming, false);
++	xtos_bci_wake_readers(dev);
 +	dev->opened = false;
-+	spin_unlock_irqrestore(&dev->lock, flags);
-+
-+	pr_info("xtos_bci: Device %s closed\n", dev->name);
-+
++	mutex_unlock(&dev->op_lock);
++	filp->private_data = NULL;
++	kfree(ctx);
++	/* Destructor executes in owner code, before releasing the module pin. */
++	xtos_bci_put_device(dev);
++	module_put(owner);
 +	return 0;
 +}
 +
-+static ssize_t xtos_bci_read(struct file *filp, 
-+                            char __user *buf, 
-+                            size_t count, 
-+                            loff_t *ppos)
++/* Ring storage stays attached until final device put, including after unbind. */
++static ssize_t xtos_bci_read(struct file *filp, char __user *buf,
++			     size_t count, loff_t *ppos)
 +{
-+	struct xtos_bci_dev *dev = filp->private_data;
++	struct xtos_bci_file *ctx = filp->private_data;
++	struct xtos_bci_dev *dev = ctx->dev;
 +	struct xtos_bci_ringbuf *rb = dev->ringbuf;
-+	size_t avail, to_copy;
-+	unsigned long flags;
++	size_t avail, copied, pos, first;
++	unsigned long flags, snapshot;
++	void *bounce;
 +	int ret;
 +
++	if (READ_ONCE(dev->disconnected))
++		return -ENODEV;
++	if (xtos_bci_has_snapshot(ctx))
++		return -EBUSY;
++	if (!count)
++		return 0;
 +	if (!rb)
-+		return -EINVAL;
-+
-+	/* Wait for data available */
-+	if (filp->f_flags & O_NONBLOCK) {
-+		spin_lock_irqsave(&rb->lock, flags);
-+		avail = rb->write_pos - rb->read_pos;
-+		spin_unlock_irqrestore(&rb->lock, flags);
-+		
-+		if (avail == 0)
-+			return -EAGAIN;
-+	} else {
-+		ret = wait_event_interruptible(rb->wait, 
-+		                               rb->write_pos > rb->read_pos);
++		return -ENODEV;
++	ret = mutex_lock_interruptible(&dev->read_lock);
++	if (ret)
++		return ret;
++	if (xtos_bci_has_snapshot(ctx)) {
++		ret = -EBUSY;
++		goto out_read;
++	}
++	/* Never pin op_lock while sleeping: STOP/unbind must wake this wait. */
++	if (!(filp->f_flags & O_NONBLOCK)) {
++		ret = wait_event_interruptible(rb->wait,
++			READ_ONCE(dev->disconnected) ||
++			READ_ONCE(dev->acquisition_error) ||
++			xtos_bci_has_snapshot(ctx) ||
++			!READ_ONCE(dev->streaming) ||
++			xtos_bci_ringbuf_available(rb));
 +		if (ret)
-+			return ret;
++			goto out_read;
 +	}
-+
++	mutex_lock(&dev->op_lock);
++	if (READ_ONCE(dev->disconnected)) {
++		ret = -ENODEV;
++		goto out_op;
++	}
++	if (xtos_bci_has_snapshot(ctx)) {
++		ret = -EBUSY;
++		goto out_op;
++	}
++	avail = xtos_bci_ringbuf_available(rb);
++	if (!avail) {
++		ret = READ_ONCE(dev->acquisition_error);
++		if (ret)
++			goto out_op;
++		ret = READ_ONCE(dev->streaming) ? -EAGAIN : 0;
++		goto out_op;
++	}
++	copied = min(min(count, avail), (size_t)PAGE_SIZE);
++	bounce = kmalloc(copied, GFP_KERNEL);
++	if (!bounce) {
++		ret = -ENOMEM;
++		goto out_op;
++	}
 +	spin_lock_irqsave(&rb->lock, flags);
-+
-+	/* Calculate available data */
-+	avail = rb->write_pos - rb->read_pos;
-+	to_copy = min(count, avail);
-+
-+	if (to_copy > 0) {
-+		size_t pos = rb->read_pos % rb->size;
-+		size_t to_end = rb->size - pos;
-+
-+		spin_unlock_irqrestore(&rb->lock, flags);
-+
-+		/* Copy to user space */
-+		if (to_copy <= to_end) {
-+			if (copy_to_user(buf, rb->buffer + pos, to_copy))
-+				return -EFAULT;
-+		} else {
-+			if (copy_to_user(buf, rb->buffer + pos, to_end))
-+				return -EFAULT;
-+			if (copy_to_user(buf + to_end, rb->buffer, to_copy - to_end))
-+				return -EFAULT;
-+		}
-+
-+		spin_lock_irqsave(&rb->lock, flags);
-+		rb->read_pos += to_copy;
-+		spin_unlock_irqrestore(&rb->lock, flags);
-+
-+		return to_copy;
-+	}
-+
++	copied = min(copied, (size_t)(rb->write_pos - rb->read_pos));
++	snapshot = rb->read_pos;
++	pos = snapshot % rb->size;
++	first = min(copied, rb->size - pos);
++	memcpy(bounce, rb->buffer + pos, first);
++	memcpy(bounce + first, rb->buffer, copied - first);
 +	spin_unlock_irqrestore(&rb->lock, flags);
-+	return 0;
++	/* Faulting copies see stable bytes, never an overwriteable ring pointer. */
++	if (copy_to_user(buf, bounce, copied)) {
++		ret = -EFAULT; /* This read consumes nothing; producer may still overrun. */
++	} else {
++		spin_lock_irqsave(&rb->lock, flags);
++		/* Producer overwrite may already have advanced read_pos. Never rewind
++		 * it, nor consume bytes beyond the snapshot returned to this caller. */
++		if (rb->read_pos - snapshot < copied)
++			rb->read_pos = snapshot + copied;
++		spin_unlock_irqrestore(&rb->lock, flags);
++		ret = copied;
++	}
++	kfree(bounce);
++out_op:
++	mutex_unlock(&dev->op_lock);
++out_read:
++	mutex_unlock(&dev->read_lock);
++	return ret;
 +}
 +
 +static __poll_t xtos_bci_poll(struct file *filp, poll_table *wait)
 +{
-+	struct xtos_bci_dev *dev = filp->private_data;
++	struct xtos_bci_file *ctx = filp->private_data;
++	struct xtos_bci_dev *dev = ctx->dev;
 +	struct xtos_bci_ringbuf *rb = dev->ringbuf;
 +	__poll_t mask = 0;
 +	unsigned long flags;
 +
-+	if (!rb)
++	if (!rb && !READ_ONCE(dev->frames))
 +		return EPOLLERR;
 +
-+	poll_wait(filp, &rb->wait, wait);
++	if (rb)
++		poll_wait(filp, &rb->wait, wait);
++	if (READ_ONCE(dev->frames)) {
++		poll_wait(filp, &dev->frames->wait, wait);
++		if (xtos_bci_frame_ring_available(dev->frames))
++			mask |= EPOLLIN | EPOLLRDNORM;
++	}
++	if (READ_ONCE(dev->disconnected))
++		return EPOLLHUP | EPOLLERR;
++	if (READ_ONCE(dev->acquisition_error))
++		mask |= EPOLLERR;
 +
-+	spin_lock_irqsave(&rb->lock, flags);
-+	if (rb->write_pos > rb->read_pos)
-+		mask |= EPOLLIN | EPOLLRDNORM;
-+	spin_unlock_irqrestore(&rb->lock, flags);
++	if (rb) {
++		spin_lock_irqsave(&rb->lock, flags);
++		if (rb->write_pos != rb->read_pos)
++			mask |= EPOLLIN | EPOLLRDNORM;
++		spin_unlock_irqrestore(&rb->lock, flags);
++	}
++	if (!READ_ONCE(dev->streaming))
++		mask |= EPOLLHUP;
 +
 +	return mask;
 +}
 +
 +static int xtos_bci_mmap(struct file *filp, struct vm_area_struct *vma)
 +{
-+	struct xtos_bci_dev *dev = filp->private_data;
-+	struct xtos_bci_ringbuf *rb = dev->ringbuf;
-+	unsigned long size = vma->vm_end - vma->vm_start;
++	struct xtos_bci_file *ctx = filp->private_data;
++	struct xtos_bci_dev *dev = ctx->dev;
++	int ret;
 +
-+	if (!rb)
-+		return -EINVAL;
-+
-+	if (size > rb->size)
-+		return -EINVAL;
-+
-+	/* Map DMA buffer to user space */
-+	return dma_mmap_coherent(dev->device, vma, 
-+	                        rb->buffer, 
-+	                        rb->dma_handle, 
-+	                        size);
++	mutex_lock(&dev->op_lock);
++	if (READ_ONCE(dev->disconnected))
++		ret = -ENODEV;
++	else if (ctx->frame_snapshot)
++		ret = xtos_bci_frame_snapshot_mmap(ctx->frame_snapshot, vma);
++	else if (!ctx->snapshot)
++		ret = -EOPNOTSUPP;
++	else
++		ret = xtos_bci_snapshot_mmap(ctx->snapshot, vma);
++	mutex_unlock(&dev->op_lock);
++	return ret;
 +}
 +
-+static long xtos_bci_ioctl(struct file *filp, 
++static long xtos_bci_ioctl_locked(struct file *filp,
 +                          unsigned int cmd, 
 +                          unsigned long arg)
 +{
-+	struct xtos_bci_dev *dev = filp->private_data;
++	struct xtos_bci_file *ctx = filp->private_data;
++	struct xtos_bci_dev *dev = ctx->dev;
 +	void __user *argp = (void __user *)arg;
 +	int ret = 0;
 +
 +	switch (cmd) {
++	case XTOS_BCI_FRAME_SNAPSHOT_RELEASE: {
++		struct xtos_bci_frame_release input;
++		struct xtos_bci_frame_snapshot *s = ctx->frame_snapshot;
++
++		if (!dev->frames)
++			return -EOPNOTSUPP;
++		if (copy_from_user(&input, argp, sizeof(input)))
++			return -EFAULT;
++		if (input.version != XTOS_BCI_FRAME_VERSION || input.flags ||
++		    input.reserved || !input.token)
++			return -EINVAL;
++		if (!s || input.token != s->descriptor.token)
++			return -ESTALE;
++		WRITE_ONCE(ctx->frame_snapshot, NULL);
++		xtos_bci_frame_snapshot_put(s);
++		xtos_bci_wake_readers(dev);
++		break;
++	}
++	case XTOS_BCI_FRAME_SNAPSHOT_CONSUME: {
++		struct xtos_bci_frame_consume input;
++
++		if (!dev->frames)
++			return -EOPNOTSUPP;
++		if (copy_from_user(&input, argp, sizeof(input)))
++			return -EFAULT;
++		if (input.version != XTOS_BCI_FRAME_VERSION || input.flags ||
++		    input.reserved || !input.token || !input.frame_count ||
++		    input.frame_count > XTOS_BCI_FRAME_MAX_BATCH)
++			return -EINVAL;
++		if (!ctx->frame_snapshot)
++			return -ESTALE;
++		return xtos_bci_frame_snapshot_consume(ctx->frame_snapshot, dev->frames, &input);
++	}
++	case XTOS_BCI_FRAME_SNAPSHOT_ACQUIRE: {
++		struct xtos_bci_frame_request input, expected = {0};
++		struct xtos_bci_frame_snapshot *s;
++		struct xtos_bci_frame_ring *ring = READ_ONCE(dev->frames);
++
++		if (!ring)
++			return -EOPNOTSUPP;
++		if (ctx->snapshot || ctx->frame_snapshot)
++			return -EBUSY;
++		if (copy_from_user(&input, argp, sizeof(input)))
++			return -EFAULT;
++		if (input.version != XTOS_BCI_FRAME_VERSION || !input.capacity_frames ||
++		    input.capacity_frames > XTOS_BCI_FRAME_MAX_BATCH)
++			return -EINVAL;
++		expected.version = input.version;
++		expected.capacity_frames = input.capacity_frames;
++		if (memcmp(&input, &expected, sizeof(input)))
++			return -EINVAL;
++		if (!ctx->next_token)
++			return -EOVERFLOW;
++		if (!xtos_bci_frame_ring_available(ring)) {
++			ret = READ_ONCE(dev->acquisition_error);
++			return ret ? ret : -EAGAIN;
++		}
++		s = xtos_bci_frame_snapshot_create(ring, input.capacity_frames, ctx->next_token);
++		if (IS_ERR(s))
++			return PTR_ERR(s);
++		if (copy_to_user(argp, &s->descriptor, sizeof(s->descriptor))) {
++			xtos_bci_frame_snapshot_put(s);
++			return -EFAULT;
++		}
++		ctx->next_token++;
++		WRITE_ONCE(ctx->frame_snapshot, s);
++		xtos_bci_wake_readers(dev);
++		break;
++	}
++	case XTOS_BCI_GET_CONFIG: {
++		struct xtos_bci_config_v1 input, output = { 0 };
++
++		if (!dev->ops->get_config)
++			return -EOPNOTSUPP;
++		if (copy_from_user(&input, argp, sizeof(input)))
++			return -EFAULT;
++		if (input.version != XTOS_BCI_CONFIG_VERSION)
++			return -EINVAL;
++		input.version = 0;
++		if (memcmp(&input, &output, sizeof(input)))
++			return -EINVAL;
++		ret = dev->ops->get_config(dev, &output);
++		if (ret)
++			return ret;
++		if (copy_to_user(argp, &output, sizeof(output)))
++			return -EFAULT;
++		return 0;
++	}
++	case XTOS_BCI_SNAPSHOT_ACQUIRE: {
++		struct xtos_bci_snapshot_request input, output = { 0 };
++		struct xtos_bci_snapshot *s;
++
++		if (xtos_bci_has_snapshot(ctx))
++			return -EBUSY;
++		if (copy_from_user(&input, argp, sizeof(input)))
++			return -EFAULT;
++		if (input.version != XTOS_BCI_SNAPSHOT_VERSION || input.flags ||
++		    input.reserved[0] || input.reserved[1] ||
++		    !input.requested_bytes || input.requested_bytes % sizeof(u32) ||
++		    input.requested_bytes > XTOS_BCI_SNAPSHOT_MAX_PAYLOAD)
++			return -EINVAL;
++		if (!ctx->next_token)
++			return -EOVERFLOW;
++		s = xtos_bci_snapshot_create(dev->ringbuf, dev->num_channels,
++				dev->sampling_rate, input.requested_bytes, ctx->next_token);
++		if (IS_ERR(s))
++			return PTR_ERR(s);
++		output.version = XTOS_BCI_SNAPSHOT_VERSION;
++		output.requested_bytes = input.requested_bytes;
++		output.mapping_bytes = s->mapping_bytes;
++		output.payload_bytes = s->payload_bytes;
++		output.cursor = s->cursor;
++		output.token = s->token;
++		output.channels = dev->num_channels;
++		output.sample_rate_hz = dev->sampling_rate;
++		if (copy_to_user(argp, &output, sizeof(output))) {
++			xtos_bci_snapshot_put(s);
++			return -EFAULT;
++		}
++		ctx->next_token++;
++		WRITE_ONCE(ctx->snapshot, s);
++		xtos_bci_wake_readers(dev);
++		break;
++	}
++	case XTOS_BCI_SNAPSHOT_CONSUME: {
++		struct xtos_bci_snapshot_consume input;
++
++		if (copy_from_user(&input, argp, sizeof(input)))
++			return -EFAULT;
++		if (!ctx->snapshot)
++			return -ESTALE;
++		return xtos_bci_snapshot_consume(ctx->snapshot, dev->ringbuf, &input);
++	}
++	case XTOS_BCI_SNAPSHOT_RELEASE: {
++		struct xtos_bci_snapshot_release input;
++		struct xtos_bci_snapshot *s = ctx->snapshot;
++
++		if (copy_from_user(&input, argp, sizeof(input)))
++			return -EFAULT;
++		if (input.version != XTOS_BCI_SNAPSHOT_VERSION || input.flags ||
++		    input.reserved || !input.token)
++			return -EINVAL;
++		if (!s)
++			return -ESTALE;
++		if (input.token != s->token)
++			return -EINVAL;
++		WRITE_ONCE(ctx->snapshot, NULL);
++		xtos_bci_snapshot_put(s);
++		xtos_bci_wake_readers(dev);
++		break;
++	}
 +	case XTOS_BCI_GET_INFO: {
-+		struct xtos_bci_info info;
++		struct xtos_bci_info info = { 0 };
 +		
 +		strncpy(info.name, dev->name, sizeof(info.name));
 +		info.dev_id = dev->dev_id;
@@ -1203,8 +1679,25 @@ index 000000000..366da67d0
 +		
 +		if (copy_from_user(&cfg, argp, sizeof(cfg)))
 +			return -EFAULT;
-+		
++		if (dev->num_channels <= 0 ||
++		    cfg.channel >= (u32)dev->num_channels || cfg.enabled > 1)
++			return -EINVAL;
++		switch (cfg.gain) {
++		case 0: /* Preserve gain for legacy enable-only requests. */
++		case 1: case 2: case 4: case 6: case 8: case 12: case 24:
++			break;
++		default:
++			return -EINVAL;
++		}
++		if (dev->ops->set_channel_config) {
++			ret = dev->ops->set_channel_config(dev, cfg.channel,
++						cfg.enabled, cfg.gain);
++			break;
++		}
 +		if (!dev->ops->set_channel_enable)
++			return -EOPNOTSUPP;
++		/* A nonzero gain must not be silently ignored by legacy drivers. */
++		if (cfg.gain)
 +			return -EOPNOTSUPP;
 +		ret = dev->ops->set_channel_enable(dev, cfg.channel, cfg.enabled);
 +		break;
@@ -1217,7 +1710,7 @@ index 000000000..366da67d0
 +		break;
 +
 +	case XTOS_BCI_CHECK_IMP: {
-+		__u32 impedances_kohm[32];
++		__u32 impedances_kohm[32] = { 0 };
 +		
 +		if (!dev->ops->impedance_check)
 +			return -EOPNOTSUPP;
@@ -1239,8 +1732,13 @@ index 000000000..366da67d0
 +		stats.samples_read = dev->samples_read;
 +		stats.samples_dropped = dev->samples_dropped;
 +		stats.errors = dev->errors;
-+		stats.overruns = dev->ringbuf ? dev->ringbuf->overruns : 0;
 +		spin_unlock_irqrestore(&dev->lock, flags);
++		stats.overruns = 0;
++		if (dev->ringbuf) {
++			spin_lock_irqsave(&dev->ringbuf->lock, flags);
++			stats.overruns = dev->ringbuf->overruns;
++			spin_unlock_irqrestore(&dev->ringbuf->lock, flags);
++		}
 +		
 +		if (copy_to_user(argp, &stats, sizeof(stats)))
 +			return -EFAULT;
@@ -1254,9 +1752,12 @@ index 000000000..366da67d0
 +		dev->samples_read = 0;
 +		dev->samples_dropped = 0;
 +		dev->errors = 0;
-+		if (dev->ringbuf)
-+			dev->ringbuf->overruns = 0;
 +		spin_unlock_irqrestore(&dev->lock, flags);
++		if (dev->ringbuf) {
++			spin_lock_irqsave(&dev->ringbuf->lock, flags);
++			dev->ringbuf->overruns = 0;
++			spin_unlock_irqrestore(&dev->ringbuf->lock, flags);
++		}
 +		break;
 +	}
 +
@@ -1264,6 +1765,23 @@ index 000000000..366da67d0
 +		return -ENOTTY;
 +	}
 +
++	return ret;
++}
++
++static long xtos_bci_ioctl(struct file *filp, unsigned int cmd, unsigned long arg)
++{
++	struct xtos_bci_file *ctx = filp->private_data;
++	struct xtos_bci_dev *dev = ctx->dev;
++	long ret;
++
++	if (cmd == XTOS_BCI_FRAME_READ)
++		return xtos_bci_frame_read_ioctl(filp, arg);
++	mutex_lock(&dev->op_lock);
++	ret = READ_ONCE(dev->disconnected) && cmd != XTOS_BCI_FRAME_SNAPSHOT_RELEASE ? -ENODEV :
++		xtos_bci_ioctl_locked(filp, cmd, arg);
++	if (cmd == XTOS_BCI_STOP_STREAM)
++		xtos_bci_wake_readers(dev);
++	mutex_unlock(&dev->op_lock);
 +	return ret;
 +}
 +
@@ -1275,64 +1793,60 @@ index 000000000..366da67d0
 +	.poll = xtos_bci_poll,
 +	.mmap = xtos_bci_mmap,
 +	.unlocked_ioctl = xtos_bci_ioctl,
++#ifdef CONFIG_COMPAT
++	/* Fixed-width, explicitly 64-bit-aligned UAPI; no embedded pointers. */
++	.compat_ioctl = compat_ptr_ioctl,
++#endif
 +};
 +
 +/* Device registration API */
 +int xtos_bci_register_device(struct xtos_bci_dev *dev)
 +{
-+	int ret;
++	int id, ret;
 +
-+	if (!dev || !dev->ops)
++	if (!dev || !dev->ops || !dev->release)
 +		return -EINVAL;
-+
 +	mutex_lock(&device_list_lock);
-+
-+	/* Assign device ID */
-+	dev->dev_id = next_dev_id++;
-+
-+	/* Allocate device number */
-+	dev->devt = MKDEV(MAJOR(xtos_bci_devt), dev->dev_id);
-+
-+	/* Initialize character device */
-+	cdev_init(&dev->cdev, &xtos_bci_fops);
-+	dev->cdev.owner = THIS_MODULE;
-+
-+	ret = cdev_add(&dev->cdev, dev->devt, 1);
-+	if (ret) {
-+		pr_err("xtos_bci: Failed to add cdev: %d\n", ret);
-+		goto err_cdev;
++	if (dev->registered || dev->disconnected) {
++		ret = -EINVAL;
++		goto out;
 +	}
-+
-+	/* Create device node */
++	for (id = 0; id < XTOS_BCI_MAX_DEVICES; id++)
++		if (!device_ids[id])
++			break;
++	if (id == XTOS_BCI_MAX_DEVICES) {
++		ret = -ENOSPC;
++		goto out;
++	}
++	dev->dev_id = id;
++	dev->devt = MKDEV(MAJOR(xtos_bci_devt), id);
++	/* VFS references to a deleted cdev must not retain embedded descriptor
++	 * memory. cdev_alloc owns its own kobject release, independently. */
++	dev->cdev = cdev_alloc();
++	if (!dev->cdev) {
++		ret = -ENOMEM;
++		goto out;
++	}
++	dev->cdev->ops = &xtos_bci_fops;
++	dev->cdev->owner = THIS_MODULE;
++	ret = cdev_add(dev->cdev, dev->devt, 1);
++	if (ret) {
++		kobject_put(&dev->cdev->kobj);
++		goto out;
++	}
 +	dev->device = device_create(xtos_bci_class, NULL, dev->devt, dev,
-+	                           "xtos%d", dev->dev_id);
++				    "xtos%d", id);
 +	if (IS_ERR(dev->device)) {
 +		ret = PTR_ERR(dev->device);
-+		pr_err("xtos_bci: Failed to create device: %d\n", ret);
-+		goto err_device;
++		cdev_del(dev->cdev);
++		goto out;
 +	}
-+
-+	/* Initialize state */
-+	spin_lock_init(&dev->lock);
-+	dev->opened = false;
-+	dev->streaming = false;
-+	dev->samples_read = 0;
-+	dev->samples_dropped = 0;
-+	dev->errors = 0;
-+
-+	/* Add to device list */
++	device_ids[id] = true;
++	xtos_bci_get_device(dev);
++	dev->registered = true;
 +	list_add_tail(&dev->list, &device_list);
-+
-+	mutex_unlock(&device_list_lock);
-+
-+	pr_info("xtos_bci: Registered device %s (ID %d) as /dev/xtos%d\n",
-+	        dev->name, dev->dev_id, dev->dev_id);
-+
-+	return 0;
-+
-+err_device:
-+	cdev_del(&dev->cdev);
-+err_cdev:
++	ret = 0;
++out:
 +	mutex_unlock(&device_list_lock);
 +	return ret;
 +}
@@ -1342,22 +1856,31 @@ index 000000000..366da67d0
 +{
 +	if (!dev)
 +		return;
-+
 +	mutex_lock(&device_list_lock);
-+
-+	/* Remove from device list */
-+	list_del(&dev->list);
-+
-+	/* Destroy device node */
++	if (!dev->registered) {
++		mutex_unlock(&device_list_lock);
++		return;
++	}
++	WRITE_ONCE(dev->disconnected, true);
++	dev->registered = false;
++	list_del_init(&dev->list);
 +	device_destroy(xtos_bci_class, dev->devt);
-+
-+	/* Remove character device */
-+	cdev_del(&dev->cdev);
-+
++	cdev_del(dev->cdev);
++	device_ids[dev->dev_id] = false;
 +	mutex_unlock(&device_list_lock);
-+
-+	pr_info("xtos_bci: Unregistered device %s (ID %d)\n",
-+	        dev->name, dev->dev_id);
++	if (dev->ops && dev->ops->cancel)
++		dev->ops->cancel(dev);
++	/* read never sleeps under op_lock; take it before inspecting a ring that
++	 * a concurrent first open may still be publishing. */
++	mutex_lock(&dev->op_lock);
++	/* Cleanup must quiesce receive before returning. Transport remains open
++	 * until the caller returns from unregister; release(fd) cannot call it. */
++	if (dev->ops->cleanup)
++		dev->ops->cleanup(dev);
++	WRITE_ONCE(dev->streaming, false);
++	xtos_bci_wake_readers(dev);
++	mutex_unlock(&dev->op_lock);
++	xtos_bci_put_device(dev);
 +}
 +EXPORT_SYMBOL_GPL(xtos_bci_unregister_device);
 +
@@ -1409,10 +1932,10 @@ index 000000000..366da67d0
 +MODULE_VERSION("1.0");
 diff --git a/drivers/xtos/bci/xtos_bci_buffer.c b/drivers/xtos/bci/xtos_bci_buffer.c
 new file mode 100644
-index 000000000..686eb2fad
+index 000000000..6eff2947a
 --- /dev/null
 +++ b/drivers/xtos/bci/xtos_bci_buffer.c
-@@ -0,0 +1,218 @@
+@@ -0,0 +1,220 @@
 +// SPDX-License-Identifier: GPL-2.0
 +/*
 + * XTOS BCI Ring Buffer Implementation
@@ -1457,6 +1980,7 @@ index 000000000..686eb2fad
 +	}
 +
 +	rb->size = size;
++	rb->dma_dev = get_device(dev);
 +	rb->write_pos = 0;
 +	rb->read_pos = 0;
 +	rb->overruns = 0;
@@ -1483,7 +2007,8 @@ index 000000000..686eb2fad
 +		return;
 +
 +	if (rb->buffer)
-+		dma_free_coherent(dev, rb->size, rb->buffer, rb->dma_handle);
++		dma_free_coherent(rb->dma_dev, rb->size, rb->buffer, rb->dma_handle);
++	put_device(rb->dma_dev);
 +
 +	kfree(rb);
 +
@@ -1522,8 +2047,8 @@ index 000000000..686eb2fad
 +	avail = rb->size - fill;
 +
 +	/* Track maximum fill level */
-+	if (fill > rb->max_fill)
-+		rb->max_fill = fill;
++	if (min(rb->size, fill + len) > rb->max_fill)
++		rb->max_fill = min(rb->size, fill + len);
 +
 +	/* If buffer full, advance read pointer (discard oldest data) */
 +	if (len > avail) {
@@ -1633,10 +2158,10 @@ index 000000000..686eb2fad
 +MODULE_DESCRIPTION("XTOS BCI Ring Buffer Implementation");
 diff --git a/drivers/xtos/bci/devices/openbci_cyton.c b/drivers/xtos/bci/devices/openbci_cyton.c
 new file mode 100644
-index 000000000..33d034e69
+index 000000000..0b78ea029
 --- /dev/null
 +++ b/drivers/xtos/bci/devices/openbci_cyton.c
-@@ -0,0 +1,439 @@
+@@ -0,0 +1,878 @@
 +// SPDX-License-Identifier: GPL-2.0
 +/*
 + * OpenBCI Cyton Device Driver
@@ -1649,6 +2174,9 @@ index 000000000..33d034e69
 + * Copyright (C) 2026 XTOS Project
 + */
 +
++#ifdef XTOS_CYTON_HOST_TEST
++#include "shim.h"
++#else
 +#include <linux/module.h>
 +#include <linux/kernel.h>
 +#include <linux/slab.h>
@@ -1658,40 +2186,57 @@ index 000000000..33d034e69
 +#include <linux/of.h>
 +#include <linux/workqueue.h>
 +#include <linux/delay.h>
++#include <linux/mutex.h>
 +#include <linux/xtos_bci.h>
++#include <linux/xtos_bci_config.h>
++#include <linux/jiffies.h>
++#include <linux/ktime.h>
++#include <linux/xtos_bci_frame.h>
++#endif
++#include "../xtos_cyton_packet.h"
++#include "../xtos_cyton_config.h"
 +
-+#define OPENBCI_PACKET_SIZE 33
-+#define OPENBCI_START_BYTE 0xA0
-+#define OPENBCI_NUM_CHANNELS 8
++#define OPENBCI_REPLY_MAX 8192
++#define OPENBCI_REPLY_TIMEOUT (3 * HZ)
++
 +#define OPENBCI_DEFAULT_RATE 250
-+#define OPENBCI_VREF_MV 4500
-+#define OPENBCI_VREF_NV 4500000000LL
-+#define OPENBCI_GAIN 24
 +#define OPENBCI_ADC_BITS 24
++#define OPENBCI_VREF_MV 4500
 +
 +/* OpenBCI private data */
 +struct openbci_priv {
 +	struct serdev_device *serdev;
-+	
-+	/* Packet parsing state */
-+	unsigned char packet_buf[OPENBCI_PACKET_SIZE];
-+	int packet_pos;
-+	
-+	/* Work queue for data processing */
-+	struct work_struct read_work;
-+	struct workqueue_struct *workqueue;
-+	
++
++	/* Incremental packet parser shared with host regression/fuzz tests. */
++	struct xtos_cyton_parser parser;
++
++	/* Serialize host controls against start/stop and one another. */
++	struct mutex control_lock;
++	struct mutex state_lock;
++
 +	/* Device state */
 +	bool receiving;
++	bool config_valid, cancelled;
++	struct xtos_cyton_config config;
++	u64 generation;
++	u64 stream_generation;
++	unsigned int pending_quality;
++	char firmware[256];
++	char *reply;
++	size_t reply_length, reply_limit;
++	bool reply_pending, reply_done;
++	int reply_error;
++	wait_queue_head_t reply_wait;
 +	
 +	/* Statistics */
 +	unsigned long packets_received;
 +	unsigned long packets_dropped;
 +};
 +
-+/* Global device instance */
-+static struct xtos_bci_dev openbci_cyton_dev;
 +static int openbci_stop_stream(struct xtos_bci_dev *dev);
++static int openbci_stop_locked(struct xtos_bci_dev *dev);
++static int openbci_config_locked(struct xtos_bci_dev *dev,
++			       struct xtos_bci_config_v1 *out);
 +
 +/**
 + * openbci_process_packet - Parse and process OpenBCI data packet
@@ -1700,93 +2245,172 @@ index 000000000..33d034e69
 + *
 + * OpenBCI packet format:
 + *   Byte 0: Start byte (0xA0)
-+ *   Bytes 1-24: 8 channels × 3 bytes/channel (24-bit ADC)
-+ *   Bytes 25-30: Auxiliary data
-+ *   Bytes 31-32: End bytes (0xCX where X cycles 0-F)
++ *   Byte 1: sample counter (not channel data)
++ *   Bytes 2-25: 8 channels × 3 bytes/channel (24-bit ADC)
++ *   Bytes 26-31: Auxiliary data
++ *   Byte 32: End byte (0xC0-0xCF)
 + */
-+static void openbci_process_packet(struct xtos_bci_dev *dev, 
-+                                   unsigned char *packet)
++static void openbci_process_packet(struct xtos_bci_dev *dev,
++                                   const s32 samples[XTOS_CYTON_CHANNELS])
 +{
 +	struct openbci_priv *priv = dev->hw_private;
-+	s32 samples[OPENBCI_NUM_CHANNELS];
-+	int i;
++	unsigned long flags;
++	int ret;
++	int expected = sizeof(s32) * XTOS_CYTON_CHANNELS;
 +
-+	/* Verify start byte */
-+	if (packet[0] != OPENBCI_START_BYTE) {
-+		pr_debug("openbci: Invalid start byte: 0x%02x\n", packet[0]);
-+		priv->packets_dropped++;
++	if (!dev->ringbuf)
 +		return;
++	ret = xtos_bci_ringbuf_write(dev->ringbuf, samples, expected);
++	spin_lock_irqsave(&dev->lock, flags);
++	if (ret != expected) {
++		if (ret < 0)
++			dev->errors++;
++		dev->samples_dropped += XTOS_CYTON_CHANNELS;
++	} else {
++		dev->samples_read += XTOS_CYTON_CHANNELS;
 +	}
-+
-+	/* Convert 24-bit ADC values to microvolts */
-+	for (i = 0; i < OPENBCI_NUM_CHANNELS; i++) {
-+		int32_t raw;
-+		
-+		/* Extract 3 bytes as 24-bit signed integer */
-+		raw = ((int32_t)packet[1 + i*3] << 16) |
-+		      ((int32_t)packet[2 + i*3] << 8) |
-+		      ((int32_t)packet[3 + i*3]);
-+		
-+		/* Sign extension for 24-bit value */
-+		if (raw & 0x800000)
-+			raw |= 0xFF000000;
-+		
-+		/* Convert to nanovolts using integer arithmetic.  The
-+		 * userspace API converts nV to floating-point units as needed. */
-+		samples[i] = (s32)(((s64)raw * OPENBCI_VREF_NV) /
-+				((s64)OPENBCI_GAIN * (1LL << 23)));
-+	}
-+
-+	/* Write to ring buffer */
-+	if (dev->ringbuf) {
-+		int ret = xtos_bci_ringbuf_write(dev->ringbuf, samples, 
-+		                                 sizeof(samples));
-+		if (ret < 0) {
-+			pr_err_ratelimited("openbci: Failed to write to ring buffer: %d\n", 
-+			                   ret);
-+			dev->samples_dropped += OPENBCI_NUM_CHANNELS;
-+		} else {
-+			dev->samples_read += OPENBCI_NUM_CHANNELS;
-+		}
-+	}
-+
++	spin_unlock_irqrestore(&dev->lock, flags);
 +	priv->packets_received++;
 +}
 +
-+/**
-+ * openbci_receive_buf - Serial data receive callback
-+ */
++/* state_lock held; no TX/wait and no ring lock nesting. */
++static void openbci_rx_fault(struct xtos_bci_dev *dev, int error)
++{
++	struct openbci_priv *priv = dev->hw_private;
++	unsigned long flags;
++	priv->config_valid = false;
++	priv->receiving = false;
++	WRITE_ONCE(dev->streaming, false);
++	WRITE_ONCE(dev->acquisition_error, error < 0 ? error : -EIO);
++	spin_lock_irqsave(&dev->lock, flags);
++	dev->errors++;
++	spin_unlock_irqrestore(&dev->lock, flags);
++}
++
 +static int openbci_receive_buf(struct serdev_device *serdev,
 +                              const unsigned char *data,
 +                              size_t count)
 +{
 +	struct xtos_bci_dev *dev = serdev_device_get_drvdata(serdev);
-+	struct openbci_priv *priv = dev->hw_private;
++	struct openbci_priv *priv;
++	s32 samples[XTOS_CYTON_CHANNELS];
 +	size_t i;
++	u64 host_rx_ns;
 +
-+	if (!priv->receiving)
++	if (!dev)
 +		return count;
++	priv = dev->hw_private;
++	mutex_lock(&priv->state_lock);
++	host_rx_ns = ktime_get_ns();
++	if (priv->reply_pending && !READ_ONCE(priv->cancelled)) {
++		for (i = 0; i < count && !priv->reply_done; i++) {
++			unsigned char c = data[i];
++			if (priv->reply_length >= priv->reply_limit) {
++				priv->reply_error = -EMSGSIZE;
++				WRITE_ONCE(priv->reply_done, true);
++				break;
++			}
++			if (c != '\r' && c != '\n' && c != '	' && (c < 32 || c > 126)) {
++				priv->reply_error = -EPROTO;
++				WRITE_ONCE(priv->reply_done, true);
++				break;
++			}
++			priv->reply[priv->reply_length++] = c;
++			if (priv->reply_length >= 3 &&
++			    !memcmp(priv->reply + priv->reply_length - 3, "$$$", 3))
++				WRITE_ONCE(priv->reply_done, true);
++		}
++		mutex_unlock(&priv->state_lock);
++		wake_up_interruptible(&priv->reply_wait);
++		return count;
++	}
++	if (!priv->receiving || READ_ONCE(dev->disconnected)) {
++		mutex_unlock(&priv->state_lock);
++		return count;
++	}
 +
 +	for (i = 0; i < count; i++) {
-+		unsigned char byte = data[i];
++		unsigned long before = priv->parser.missing_samples;
++		unsigned int counter_valid = priv->parser.counter_valid;
++		unsigned char previous_counter = priv->parser.last_counter;
++		unsigned long flags;
++		int result;
++		if (!priv->parser.packet_pos && data[i] != XTOS_CYTON_START_BYTE)
++			priv->pending_quality |= XTOS_BCI_FRAME_QUALITY_RESYNC;
++		result = xtos_cyton_parser_feed(&priv->parser, data[i], samples);
 +
-+		if (priv->packet_pos == 0 && byte == OPENBCI_START_BYTE) {
-+			/* Start of new packet */
-+			priv->packet_buf[priv->packet_pos++] = byte;
-+		} else if (priv->packet_pos > 0 && priv->packet_pos < OPENBCI_PACKET_SIZE) {
-+			/* Continue building packet */
-+			priv->packet_buf[priv->packet_pos++] = byte;
-+
-+			/* Complete packet received */
-+			if (priv->packet_pos == OPENBCI_PACKET_SIZE) {
-+				openbci_process_packet(dev, priv->packet_buf);
-+				priv->packet_pos = 0;
-+			}
-+		} else if (priv->packet_pos >= OPENBCI_PACKET_SIZE) {
-+			/* Should never happen - reset */
-+			pr_warn("openbci: Packet buffer overflow, resetting\n");
-+			priv->packet_pos = 0;
++		/* Count sequence gaps once, in channel samples, independently of
++		 * rejected candidates and ringbuffer delivery errors. */
++		if (result != 0) {
++			spin_lock_irqsave(&dev->lock, flags);
++			dev->samples_dropped +=
++				(priv->parser.missing_samples - before) * XTOS_CYTON_CHANNELS;
++			if (result < 0)
++				dev->errors++;
++			spin_unlock_irqrestore(&dev->lock, flags);
 +		}
++		if (result < 0) {
++			priv->packets_dropped++;
++			priv->pending_quality |= XTOS_BCI_FRAME_QUALITY_RESYNC |
++				XTOS_BCI_FRAME_QUALITY_CONTINUITY_UNKNOWN;
++		}
++		else if (result > 0) {
++			unsigned int ch;
++			struct xtos_bci_config_v1 config;
++			struct xtos_bci_frame_v1 frame = {
++				.version = XTOS_BCI_FRAME_VERSION,
++				.record_bytes = sizeof(frame),
++				.channels = XTOS_CYTON_CHANNELS,
++				.sample_rate_hz = OPENBCI_DEFAULT_RATE,
++				.unit = XTOS_BCI_UNIT_NANOVOLT,
++				.host_clock = XTOS_BCI_FRAME_CLOCK_MONOTONIC,
++				.quality_flags = XTOS_BCI_FRAME_QUALITY_CONFIG_VERIFIED |
++					priv->pending_quality,
++				.source_flags = XTOS_BCI_FRAME_SOURCE_SERDEV,
++				.host_rx_ns = host_rx_ns,
++				.stream_generation = priv->stream_generation,
++				.config_generation = priv->generation,
++				.device_counter = priv->parser.packet[1],
++				.counter_bits = 8,
++				.enabled_mask = priv->config.enabled_mask,
++			};
++			if (counter_valid) {
++				unsigned int delta = (frame.device_counter - previous_counter) & 0xff;
++				if (delta >= 2 && delta <= 127) {
++					frame.missing_before = delta - 1;
++					frame.quality_flags |= XTOS_BCI_FRAME_QUALITY_COUNTER_GAP;
++				}
++			}
++			for (ch = 0; ch < XTOS_CYTON_CHANNELS; ch++) {
++				unsigned int at = 2 + ch * 3;
++				s32 raw = ((s32)priv->parser.packet[at] << 16) |
++					((s32)priv->parser.packet[at + 1] << 8) |
++					priv->parser.packet[at + 2];
++				s64 value;
++				if (raw == 0x7fffff || raw == 0x800000)
++					frame.quality_flags |= XTOS_BCI_FRAME_QUALITY_ADC_RAIL;
++				if (raw & 0x800000) raw -= 1 << 24;
++				value = (s64)raw * XTOS_CYTON_VREF_NV /
++					((s64)priv->config.gain[ch] * 8388607);
++				if (value < -2147483647LL - 1 || value > 2147483647LL) {
++					openbci_rx_fault(dev, -ERANGE);
++					break;
++				}
++				samples[ch] = (s32)value;
++			}
++			if (ch != XTOS_CYTON_CHANNELS) break;
++			memcpy(frame.samples_nv, samples, sizeof(samples));
++			result = openbci_config_locked(dev, &config);
++			if (!result) result = xtos_bci_device_frame_publish(dev, &frame, &config);
++			if (result) { openbci_rx_fault(dev, result); break; }
++			priv->pending_quality = 0;
++			openbci_process_packet(dev, samples);
++		}
++	}
++	mutex_unlock(&priv->state_lock);
++	if (READ_ONCE(dev->acquisition_error)) {
++		if (dev->ringbuf) wake_up_interruptible(&dev->ringbuf->wait);
++		xtos_bci_device_frames_wake(dev);
 +	}
 +
 +	return count;
@@ -1794,6 +2418,7 @@ index 000000000..33d034e69
 +
 +static const struct serdev_device_ops openbci_serdev_ops = {
 +	.receive_buf = openbci_receive_buf,
++	.write_wakeup = serdev_device_write_wakeup,
 +};
 +
 +/**
@@ -1803,8 +2428,12 @@ index 000000000..33d034e69
 +{
 +	int ret;
 +
++	if (READ_ONCE(priv->cancelled))
++		return -ENODEV;
 +	ret = serdev_device_write(priv->serdev, &cmd, 1, HZ);
-+	if (ret < 0) {
++	if (ret != 1) {
++		if (ret >= 0)
++			ret = -EIO;
 +		pr_err("openbci: Failed to send command '%c': %d\n", cmd, ret);
 +		return ret;
 +	}
@@ -1815,81 +2444,259 @@ index 000000000..33d034e69
 +	return 0;
 +}
 +
++/* control_lock owns a transaction; RX only owns state_lock. Arm before TX. */
++static int openbci_transaction(struct openbci_priv *priv, const char *command,
++			       size_t length, size_t limit)
++{
++	unsigned long deadline = jiffies + OPENBCI_REPLY_TIMEOUT;
++	unsigned long now, remaining;
++	long waited;
++	int ret;
++	mutex_lock(&priv->state_lock);
++	priv->reply_length = 0;
++	priv->reply_limit = limit;
++	priv->reply_error = 0;
++	WRITE_ONCE(priv->reply_done, false);
++	priv->reply_pending = true;
++	mutex_unlock(&priv->state_lock);
++	if (READ_ONCE(priv->cancelled)) { ret = -ENODEV; goto out; }
++	ret = serdev_device_write(priv->serdev, command, length, HZ);
++	if (ret < 0 || (size_t)ret != length) { if (ret >= 0) ret = -EIO; goto out; }
++	/* Snapshot once: a second jiffies read can cross deadline and wrap
++	 * the unsigned subtraction into an unbounded wait. */
++	now = jiffies;
++	if (time_after_eq(now, deadline)) { ret = -ETIMEDOUT; goto out; }
++	remaining = deadline - now;
++	waited = wait_event_interruptible_timeout(priv->reply_wait,
++		READ_ONCE(priv->reply_done) || READ_ONCE(priv->cancelled),
++		remaining);
++	ret = waited < 0 ? (int)waited : waited == 0 ? -ETIMEDOUT : 0;
++out:
++	mutex_lock(&priv->state_lock);
++	priv->reply_pending = false;
++	if (READ_ONCE(priv->cancelled)) ret = -ENODEV;
++	if (!ret) ret = priv->reply_error;
++	priv->reply[priv->reply_length] = 0;
++	mutex_unlock(&priv->state_lock);
++	return ret;
++}
++
++static void openbci_invalidate(struct xtos_bci_dev *dev, int error)
++{
++	struct openbci_priv *priv = dev->hw_private;
++	mutex_lock(&priv->state_lock);
++	priv->config_valid = false;
++	priv->receiving = false;
++	WRITE_ONCE(dev->streaming, false);
++	WRITE_ONCE(dev->acquisition_error, error);
++	mutex_unlock(&priv->state_lock);
++	if (dev->ringbuf) wake_up_interruptible(&dev->ringbuf->wait);
++	xtos_bci_device_frames_wake(dev);
++}
++
++static int openbci_read_config(struct openbci_priv *priv,
++			       struct xtos_cyton_config *config)
++{
++	int ret = openbci_transaction(priv, "?", 1, OPENBCI_REPLY_MAX);
++	if (ret) return ret;
++	ret = xtos_cyton_config_parse(priv->reply, priv->reply_length - 3, config);
++	if (ret) return ret;
++	if (config->register_mask != 0xffffff || config->registers[0] != 0x3e ||
++	    (config->registers[1] & 7) != 6) return -EPROTO;
++	return 0;
++}
++
++static int openbci_commit_config(struct openbci_priv *priv,
++				struct xtos_cyton_config *config)
++{
++	int ret = 0;
++	mutex_lock(&priv->state_lock);
++	if (READ_ONCE(priv->cancelled)) ret = -ENODEV;
++	else if (priv->generation == ~(u64)0) ret = -EOVERFLOW;
++	else { priv->config = *config; priv->generation++; priv->config_valid = true; }
++	mutex_unlock(&priv->state_lock);
++	return ret;
++}
++
++/* Bounded banner body excludes $$$. Required identities are entire logical
++ * lines; version and other printable firmware lines remain unconstrained. */
++static bool openbci_banner_valid(const char *body, size_t n)
++{
++	size_t i, start = 0;
++	bool board = false, ads = false;
++	static const char board_line[] = "OpenBCI V3 8-16 channel";
++	static const char ads_line[] = "On Board ADS1299 Device ID: 0x3E";
++	if (!n || n > 255) return false;
++	for (i = 0; i <= n; i++) {
++		if (i < n) {
++			unsigned char c = body[i];
++			if (c != '\r' && c != '\n' && (c < 32 || c > 126)) return false;
++			if (i + 5 <= n && !memcmp(body + i, "Daisy", 5)) return false;
++			if (c != '\r' && c != '\n') continue;
++		}
++		if (i - start == sizeof(board_line) - 1 &&
++		    !memcmp(body + start, board_line, sizeof(board_line) - 1)) board = true;
++		if (i - start == sizeof(ads_line) - 1 &&
++		    !memcmp(body + start, ads_line, sizeof(ads_line) - 1)) ads = true;
++		start = i + 1;
++	}
++	return board && ads;
++}
++
 +/**
 + * Device operation callbacks
 + */
 +static int openbci_init(struct xtos_bci_dev *dev)
 +{
 +	struct openbci_priv *priv = dev->hw_private;
-+	int ret;
++	struct xtos_bci_ringbuf *ringbuf;
++	int ret = 0;
 +
-+	pr_info("openbci: Initializing device\n");
-+
-+	/* Send soft reset */
-+	ret = openbci_send_command(priv, 'v');  /* Request board info */
-+	if (ret)
-+		return ret;
-+
-+	msleep(100);
-+
-+	/* Allocate ring buffer (2 seconds of data) */
-+	dev->ringbuf = xtos_bci_ringbuf_alloc(
-+		&priv->serdev->dev,
-+		dev->num_channels * dev->sampling_rate * sizeof(float) * 2
-+	);
-+	if (!dev->ringbuf) {
-+		pr_err("openbci: Failed to allocate ring buffer\n");
-+		return -ENOMEM;
-+	}
-+
-+	priv->packet_pos = 0;
++	mutex_lock(&priv->control_lock);
++	mutex_lock(&priv->state_lock);
++	priv->config_valid = false;
 +	priv->receiving = false;
++	WRITE_ONCE(dev->streaming, false);
++	xtos_cyton_parser_init(&priv->parser);
++	mutex_unlock(&priv->state_lock);
++
++	ret = openbci_send_command(priv, 's');
++	if (!ret) ret = openbci_transaction(priv, "v", 1, 258);
++	if (!ret) {
++		size_t n = priv->reply_length - 3;
++		if (!openbci_banner_valid(priv->reply, n)) ret = -EPROTO;
++		else { memcpy(priv->firmware, priv->reply, n); priv->firmware[n] = 0; }
++	}
++	if (!ret) {
++		struct xtos_cyton_config config;
++		ret = openbci_read_config(priv, &config);
++		if (!ret) ret = openbci_commit_config(priv, &config);
++	}
++	if (ret) goto out;
++	WRITE_ONCE(dev->acquisition_error, 0);
++	ret = xtos_bci_device_frames_enable(dev, 500);
++	if (ret || dev->ringbuf) goto out;
++	/* Allocate two seconds of signed nanovolt samples (s32 per channel). */
++	ringbuf = xtos_bci_ringbuf_alloc(&priv->serdev->dev,
++		dev->num_channels * dev->sampling_rate * sizeof(s32) * 2);
++	if (!ringbuf) {
++		ret = -ENOMEM;
++		goto out;
++	}
++	mutex_lock(&priv->state_lock);
++	WRITE_ONCE(dev->ringbuf, ringbuf);
 +	priv->packets_received = 0;
 +	priv->packets_dropped = 0;
-+
-+	pr_info("openbci: Device initialized\n");
-+
-+	return 0;
++	mutex_unlock(&priv->state_lock);
++out:
++	if (ret) openbci_invalidate(dev, ret);
++	mutex_unlock(&priv->control_lock);
++	return ret;
 +}
 +
 +static void openbci_cleanup(struct xtos_bci_dev *dev)
 +{
 +	struct openbci_priv *priv = dev->hw_private;
 +
-+	pr_info("openbci: Cleaning up device\n");
++	mutex_lock(&priv->control_lock);
++	openbci_stop_locked(dev);
 +
-+	/* Stop streaming if active */
-+	if (dev->streaming)
-+		openbci_stop_stream(dev);
-+
-+	/* Free ring buffer */
-+	if (dev->ringbuf) {
-+		xtos_bci_ringbuf_free(&priv->serdev->dev, dev->ringbuf);
-+		dev->ringbuf = NULL;
-+	}
++	/* Retain storage for read/poll and open FDs. Final put frees the ring. */
++	mutex_lock(&priv->state_lock);
++	mutex_unlock(&priv->state_lock);
++	mutex_unlock(&priv->control_lock);
 +}
 +
 +static int openbci_start_stream(struct xtos_bci_dev *dev)
 +{
 +	struct openbci_priv *priv = dev->hw_private;
-+	int ret;
++	int ret = 0;
 +
-+	pr_info("openbci: Starting data stream\n");
-+
-+	priv->receiving = true;
-+	priv->packet_pos = 0;
-+
-+	/* Send 'b' command to start streaming */
-+	ret = openbci_send_command(priv, 'b');
++	mutex_lock(&priv->control_lock);
++	mutex_lock(&priv->state_lock);
++	if (priv->receiving)
++		goto unlock_state;
++	if (!dev->ringbuf) {
++		ret = -ENODEV;
++		goto unlock_state;
++	}
++	if (priv->stream_generation == ~(u64)0) {
++		mutex_unlock(&priv->state_lock);
++		openbci_invalidate(dev, -EOVERFLOW);
++		mutex_unlock(&priv->control_lock);
++		return -EOVERFLOW;
++	}
++	mutex_unlock(&priv->state_lock);
++	{
++		struct xtos_cyton_config config;
++		ret = openbci_read_config(priv, &config);
++		if (!ret) ret = openbci_commit_config(priv, &config);
++	}
 +	if (ret) {
-+		priv->receiving = false;
++		openbci_invalidate(dev, ret);
++		openbci_send_command(priv, 's');
++		mutex_unlock(&priv->control_lock);
 +		return ret;
 +	}
++	mutex_lock(&priv->state_lock);
++	if (READ_ONCE(priv->cancelled) || READ_ONCE(dev->disconnected)) {
++		ret = -ENODEV;
++		goto unlock_state;
++	}
++	WRITE_ONCE(dev->acquisition_error, 0);
++	/* The board may deliver the first frame before synchronous TX returns. */
++	xtos_cyton_parser_init(&priv->parser);
++	priv->pending_quality = 0;
++	priv->stream_generation++;
++	priv->receiving = true;
++	WRITE_ONCE(dev->streaming, true);
++	mutex_unlock(&priv->state_lock);
++	ret = openbci_send_command(priv, 'b');
++	mutex_lock(&priv->state_lock);
++	/* RX can fail synchronously inside TX; never report that START as live. */
++	if (READ_ONCE(priv->cancelled) || READ_ONCE(dev->disconnected))
++		ret = -ENODEV;
++	else if (READ_ONCE(dev->acquisition_error))
++		ret = READ_ONCE(dev->acquisition_error);
++	mutex_unlock(&priv->state_lock);
++	if (ret) {
++		mutex_lock(&priv->state_lock);
++		priv->receiving = false;
++		WRITE_ONCE(dev->streaming, false);
++		xtos_cyton_parser_init(&priv->parser);
++		mutex_unlock(&priv->state_lock);
++		/* A short/error write does not prove the board ignored START. */
++		openbci_invalidate(dev, ret);
++		openbci_send_command(priv, 's');
++	}
++	mutex_unlock(&priv->control_lock);
++	return ret;
 +
-+	dev->streaming = true;
++unlock_state:
++	mutex_unlock(&priv->state_lock);
++	mutex_unlock(&priv->control_lock);
++	return ret;
++}
 +
-+	pr_info("openbci: Data stream started\n");
++/* control_lock serializes controls; state_lock must never span serial TX. */
++static int openbci_stop_locked(struct xtos_bci_dev *dev)
++{
++	struct openbci_priv *priv = dev->hw_private;
++	bool active;
 +
++	mutex_lock(&priv->state_lock);
++	active = priv->receiving;
++	priv->receiving = false;
++	WRITE_ONCE(dev->streaming, false);
++	xtos_cyton_parser_init(&priv->parser);
++	mutex_unlock(&priv->state_lock);
++	if (dev->ringbuf) wake_up_interruptible(&dev->ringbuf->wait);
++	xtos_bci_device_frames_wake(dev);
++	if (active) {
++		int ret = openbci_send_command(priv, 's');
++		if (ret) openbci_invalidate(dev, ret);
++		return ret;
++	}
 +	return 0;
 +}
 +
@@ -1898,78 +2705,185 @@ index 000000000..33d034e69
 +	struct openbci_priv *priv = dev->hw_private;
 +	int ret;
 +
-+	pr_info("openbci: Stopping data stream\n");
++	mutex_lock(&priv->control_lock);
++	ret = openbci_stop_locked(dev);
++	mutex_unlock(&priv->control_lock);
++	return ret;
++}
 +
-+	dev->streaming = false;
-+	priv->receiving = false;
++static int openbci_config_locked(struct xtos_bci_dev *dev,
++			       struct xtos_bci_config_v1 *out)
++{
++	struct openbci_priv *priv = dev->hw_private;
++	int ret = 0;
++	if (READ_ONCE(priv->cancelled) || READ_ONCE(dev->disconnected)) ret = -ENODEV;
++	else if (!priv->config_valid) ret = -ENODATA;
++	else {
++		memset(out, 0, sizeof(*out));
++		out->version = 1;
++		out->channels = 8;
++		out->sample_rate_hz = 250;
++		out->enabled_mask = priv->config.enabled_mask;
++		out->capabilities = XTOS_BCI_CONFIG_READBACK | XTOS_BCI_FIRMWARE_READBACK |
++			XTOS_BCI_GAIN_CONTROL;
++		out->generation = priv->generation;
++		memcpy(out->gain, priv->config.gain, sizeof(out->gain));
++		memcpy(out->registers, priv->config.registers, sizeof(out->registers));
++		memcpy(out->firmware, priv->firmware, sizeof(out->firmware));
++	}
++	return ret;
++}
 +
-+	/* Send 's' command to stop streaming */
-+	ret = openbci_send_command(priv, 's');
++static int openbci_get_config(struct xtos_bci_dev *dev,
++			      struct xtos_bci_config_v1 *out)
++{
++	struct openbci_priv *priv = dev->hw_private;
++	int ret;
++	mutex_lock(&priv->state_lock);
++	ret = openbci_config_locked(dev, out);
++	mutex_unlock(&priv->state_lock);
++	return ret;
++}
 +
-+	pr_info("openbci: Data stream stopped (received %lu packets, dropped %lu)\n",
-+	        priv->packets_received, priv->packets_dropped);
++/* Caller holds control_lock, excluding START until the control completes.
++ * RX may stop receiving under state_lock; sample that transition under the
++ * same lock, then release it before any synchronous serial TX. */
++static bool openbci_control_receiving(struct openbci_priv *priv)
++{
++	bool receiving;
 +
++	mutex_lock(&priv->state_lock);
++	receiving = priv->receiving;
++	mutex_unlock(&priv->state_lock);
++	return receiving;
++}
++
++/* Comparator status is read-only; every other ADS byte must remain stable. */
++static int openbci_verify_registers(const struct xtos_cyton_config *observed,
++				   const unsigned char desired[24])
++{
++	unsigned int i;
++	for (i = 1; i < 24; i++) {
++		if (i == 18 || i == 19) continue;
++		if (observed->registers[i] != desired[i]) return -EPROTO;
++	}
++	return 0;
++}
++
++static int openbci_set_channel_config(struct xtos_bci_dev *dev, int channel,
++				       bool enabled, int gain)
++{
++	static const int gains[] = {1,2,4,6,8,12,24};
++	struct openbci_priv *priv = dev->hw_private;
++	struct xtos_cyton_config before, after;
++	unsigned char desired[24];
++	char command[10], ack[40];
++	int code = 0, ret;
++	if (channel < 0 || channel >= 8) return -EINVAL;
++	if (gain) {
++		for (code = 0; code < 7 && gains[code] != gain; code++);
++		if (code == 7) return -EINVAL;
++	}
++	mutex_lock(&priv->control_lock);
++	if (openbci_control_receiving(priv)) { ret = -EBUSY; goto out; }
++	ret = openbci_read_config(priv, &before);
++	if (ret) goto failed;
++	/* Firmware writes both bias masks and the board-wide SRB1 byte. */
++	if (before.registers[13] != before.registers[14] ||
++	    (before.registers[21] & ~0x20)) { ret = -EOPNOTSUPP; goto out; }
++	if (!gain) code = (before.registers[5 + channel] >> 4) & 7;
++	memcpy(desired, before.registers, sizeof(desired));
++	desired[5 + channel] = (desired[5 + channel] & 15) |
++		(code << 4) | (enabled ? 0 : 0x80);
++	snprintf(command, sizeof(command), "x%c%c%c%c%c%c%cX", '1' + channel,
++		enabled ? '0' : '1', '0' + code, '0' + (desired[5 + channel] & 7),
++		'0' + ((desired[13] >> channel) & 1),
++		'0' + ((desired[5 + channel] >> 3) & 1),
++		'0' + ((desired[21] >> 5) & 1));
++	ret = openbci_transaction(priv, command, 9, 255);
++	if (ret) goto failed;
++	snprintf(ack, sizeof(ack), "Success: Channel set for %c$$$", '1' + channel);
++	if (strcmp(priv->reply, ack)) { ret = -EPROTO; goto failed; }
++	ret = openbci_read_config(priv, &after);
++	if (!ret) ret = openbci_verify_registers(&after, desired);
++	if (!ret) ret = openbci_commit_config(priv, &after);
++	if (ret) goto failed;
++	goto out;
++failed:
++	openbci_invalidate(dev, ret);
++out:
++	mutex_unlock(&priv->control_lock);
 +	return ret;
 +}
 +
 +static int openbci_set_sampling_rate(struct xtos_bci_dev *dev, int rate)
 +{
 +	struct openbci_priv *priv = dev->hw_private;
-+	char cmd;
++	struct xtos_cyton_config config;
++	int ret;
 +
-+	/* OpenBCI Cyton supports specific sample rates via tilde commands */
 +	switch (rate) {
 +	case 250:
-+		cmd = '~';  /* ~6 = 250 Hz */
-+		serdev_device_write(priv->serdev, "~6", 2, HZ);
 +		break;
 +	case 500:
-+		cmd = '~';  /* ~5 = 500 Hz */
-+		serdev_device_write(priv->serdev, "~5", 2, HZ);
-+		break;
 +	case 1000:
-+		cmd = '~';  /* ~4 = 1000 Hz */
-+		serdev_device_write(priv->serdev, "~4", 2, HZ);
-+		break;
 +	case 2000:
-+		cmd = '~';  /* ~3 = 2000 Hz */
-+		serdev_device_write(priv->serdev, "~3", 2, HZ);
-+		break;
++		/* 33-byte frames, 8N1: 500 Hz already exceeds 115200 baud. */
++		return -EOPNOTSUPP;
 +	default:
 +		pr_err("openbci: Unsupported sampling rate: %d Hz\n", rate);
 +		return -EINVAL;
 +	}
 +
-+	dev->sampling_rate = rate;
-+	pr_info("openbci: Sampling rate set to %d Hz\n", rate);
-+
-+	return 0;
++	mutex_lock(&priv->control_lock);
++	if (openbci_control_receiving(priv)) {
++		mutex_unlock(&priv->control_lock);
++		return -EBUSY;
++	}
++	/* The sole supported rate is a readback assertion. Firmware ~6 resets
++	 * all ADS state; never use it to acknowledge an already-250Hz profile. */
++	ret = openbci_read_config(priv, &config);
++	if (!ret) ret = openbci_commit_config(priv, &config);
++	if (ret) openbci_invalidate(dev, ret);
++	mutex_unlock(&priv->control_lock);
++	return ret;
 +}
 +
-+static int openbci_set_channel_enable(struct xtos_bci_dev *dev, 
-+                                     int channel, 
++static int openbci_set_channel_enable(struct xtos_bci_dev *dev,
++                                     int channel,
 +                                     bool enable)
 +{
 +	struct openbci_priv *priv = dev->hw_private;
-+	char cmd[2];
++	char command;
++	int ret;
 +
-+	if (channel < 0 || channel >= OPENBCI_NUM_CHANNELS)
++	if (channel < 0 || channel >= XTOS_CYTON_CHANNELS)
 +		return -EINVAL;
 +
-+	/* OpenBCI channel control: 1-8 = disable, ! = enable channel 1, etc */
-+	if (enable) {
-+		cmd[0] = '!' + channel;  /* '!' to '(' for channels 1-8 */
-+	} else {
-+		cmd[0] = '1' + channel;  /* '1' to '8' for channels 1-8 */
++	/* Firmware commands are a literal keyboard-symbol table. */
++	command = enable ? "!@#$%^&*"[channel] : "12345678"[channel];
++	mutex_lock(&priv->control_lock);
++	if (openbci_control_receiving(priv)) ret = -EBUSY;
++	else {
++		struct xtos_cyton_config before, after;
++		ret = openbci_read_config(priv, &before);
++		if (!ret) ret = openbci_send_command(priv, command);
++		if (!ret) ret = openbci_read_config(priv, &after);
++		if (!ret) {
++			before.registers[5 + channel] = (before.registers[5 + channel] & 0x7f) |
++				(enable ? 0 : 0x80);
++			ret = openbci_verify_registers(&after, before.registers);
++		}
++		if (!ret) ret = openbci_commit_config(priv, &after);
++		if (ret) openbci_invalidate(dev, ret);
 +	}
-+
-+	return openbci_send_command(priv, cmd[0]);
++	mutex_unlock(&priv->control_lock);
++	return ret;
 +}
 +
 +static int openbci_calibrate(struct xtos_bci_dev *dev)
 +{
-+	pr_info("openbci: Calibration not implemented\n");
-+	return 0;
++	return -EOPNOTSUPP;
 +}
 +
 +static int openbci_impedance_check(struct xtos_bci_dev *dev, __u32 *impedances_kohm)
@@ -1978,8 +2892,13 @@ index 000000000..33d034e69
 +	return -EOPNOTSUPP;
 +}
 +
++static void openbci_cancel(struct xtos_bci_dev *dev);
++
 +/* Device operations table */
 +static const struct xtos_bci_device_ops openbci_ops = {
++	.cancel = openbci_cancel,
++	.get_config = openbci_get_config,
++	.set_channel_config = openbci_set_channel_config,
 +	.init = openbci_init,
 +	.cleanup = openbci_cleanup,
 +	.start_stream = openbci_start_stream,
@@ -1990,67 +2909,112 @@ index 000000000..33d034e69
 +	.impedance_check = openbci_impedance_check,
 +};
 +
++static void openbci_cancel(struct xtos_bci_dev *dev)
++{
++	struct openbci_priv *priv = dev->hw_private;
++	WRITE_ONCE(priv->cancelled, true);
++	/* Wake a transaction before waiting for any state/control owner. */
++	wake_up_interruptible(&priv->reply_wait);
++	mutex_lock(&priv->state_lock);
++	priv->receiving = false;
++	priv->config_valid = false;
++	WRITE_ONCE(dev->streaming, false);
++	mutex_unlock(&priv->state_lock);
++	if (dev->ringbuf) wake_up_interruptible(&dev->ringbuf->wait);
++	xtos_bci_device_frames_wake(dev);
++}
++
++static void openbci_release(struct xtos_bci_dev *dev)
++{
++	struct openbci_priv *priv = dev->hw_private;
++	kfree(priv->reply);
++	kfree(priv);
++	kfree(dev);
++}
++
 +/**
 + * Serial device probe/remove
 + */
 +static int openbci_probe(struct serdev_device *serdev)
 +{
 +	struct openbci_priv *priv;
++	struct xtos_bci_dev *dev;
 +	int ret;
 +
 +	pr_info("openbci: Probing device\n");
 +
 +	/* Allocate private data */
-+	priv = devm_kzalloc(&serdev->dev, sizeof(*priv), GFP_KERNEL);
-+	if (!priv)
++	dev = kzalloc(sizeof(*dev), GFP_KERNEL);
++	if (!dev)
 +		return -ENOMEM;
++	priv = kzalloc(sizeof(*priv), GFP_KERNEL);
++	if (!priv) {
++		kfree(dev);
++		return -ENOMEM;
++	}
++	xtos_bci_device_init(dev);
++	dev->owner = THIS_MODULE;
++	dev->release = openbci_release;
 +
++	priv->reply = kzalloc(OPENBCI_REPLY_MAX + 1, GFP_KERNEL);
++	if (!priv->reply) { kfree(priv); kfree(dev); return -ENOMEM; }
++	init_waitqueue_head(&priv->reply_wait);
 +	priv->serdev = serdev;
++	mutex_init(&priv->control_lock);
++	mutex_init(&priv->state_lock);
++	xtos_cyton_parser_init(&priv->parser);
++
++	/* Initialize device descriptor */
++	strncpy(dev->name, "OpenBCI Cyton", sizeof(dev->name) - 1);
++	dev->num_channels = XTOS_CYTON_CHANNELS;
++	dev->sampling_rate = OPENBCI_DEFAULT_RATE;
++	dev->resolution_bits = OPENBCI_ADC_BITS;
++	dev->input_range_mv = OPENBCI_VREF_MV;
++	dev->interface = XTOS_BCI_SERIAL;
++	dev->hw_private = priv;
++	dev->ops = &openbci_ops;
 +
 +	/* Configure serial device */
-+	serdev_device_set_drvdata(serdev, &openbci_cyton_dev);
++	serdev_device_set_drvdata(serdev, dev);
 +	serdev_device_set_client_ops(serdev, &openbci_serdev_ops);
 +
 +	ret = serdev_device_open(serdev);
 +	if (ret) {
 +		pr_err("openbci: Failed to open serial device: %d\n", ret);
-+		return ret;
++		goto err_put;
 +	}
 +
 +	/* Configure serial parameters: 115200 8N1 */
 +	serdev_device_set_baudrate(serdev, 115200);
 +	serdev_device_set_flow_control(serdev, false);
 +
-+	/* Initialize device descriptor */
-+	strncpy(openbci_cyton_dev.name, "OpenBCI Cyton", 
-+	        sizeof(openbci_cyton_dev.name) - 1);
-+	openbci_cyton_dev.num_channels = OPENBCI_NUM_CHANNELS;
-+	openbci_cyton_dev.sampling_rate = OPENBCI_DEFAULT_RATE;
-+	openbci_cyton_dev.resolution_bits = OPENBCI_ADC_BITS;
-+	openbci_cyton_dev.input_range_mv = OPENBCI_VREF_MV;
-+	openbci_cyton_dev.interface = XTOS_BCI_SERIAL;
-+	openbci_cyton_dev.hw_private = priv;
-+	openbci_cyton_dev.ops = &openbci_ops;
-+
 +	/* Register with BCI core */
-+	ret = xtos_bci_register_device(&openbci_cyton_dev);
++	ret = xtos_bci_register_device(dev);
 +	if (ret) {
 +		pr_err("openbci: Failed to register device: %d\n", ret);
 +		serdev_device_close(serdev);
-+		return ret;
++		goto err_put;
 +	}
 +
 +	pr_info("openbci: Device probed successfully\n");
 +
 +	return 0;
++err_put:
++	serdev_device_set_drvdata(serdev, NULL);
++	xtos_bci_put_device(dev);
++	return ret;
 +}
 +
 +static void openbci_remove(struct serdev_device *serdev)
 +{
++	struct xtos_bci_dev *dev = serdev_device_get_drvdata(serdev);
 +	pr_info("openbci: Removing device\n");
 +
-+	xtos_bci_unregister_device(&openbci_cyton_dev);
++	openbci_cancel(dev);
++	xtos_bci_unregister_device(dev);
 +	serdev_device_close(serdev);
++	serdev_device_set_drvdata(serdev, NULL);
++	xtos_bci_put_device(dev);
 +
 +	pr_info("openbci: Device removed\n");
 +}
@@ -2076,3 +3040,1230 @@ index 000000000..33d034e69
 +MODULE_AUTHOR("XTOS Project");
 +MODULE_DESCRIPTION("OpenBCI Cyton 8-Channel EEG Driver");
 +MODULE_VERSION("1.0");
+diff --git a/drivers/xtos/bci/xtos_cyton_packet.h b/drivers/xtos/bci/xtos_cyton_packet.h
+new file mode 100644
+index 000000000..a640b08c9
+--- /dev/null
++++ b/drivers/xtos/bci/xtos_cyton_packet.h
+@@ -0,0 +1,150 @@
++/* SPDX-License-Identifier: GPL-2.0 */
++#ifndef _XTOS_CYTON_PACKET_H
++#define _XTOS_CYTON_PACKET_H
++
++#ifdef __KERNEL__
++#include <linux/string.h>
++#include <linux/types.h>
++typedef u8 xtos_cyton_u8;
++typedef s32 xtos_cyton_s32;
++typedef s64 xtos_cyton_s64;
++#else
++#include <stdint.h>
++#include <string.h>
++typedef uint8_t xtos_cyton_u8;
++typedef int32_t xtos_cyton_s32;
++typedef int64_t xtos_cyton_s64;
++#endif
++
++#define XTOS_CYTON_PACKET_SIZE 33
++#define XTOS_CYTON_CHANNELS 8
++#define XTOS_CYTON_START_BYTE 0xA0
++#define XTOS_CYTON_VREF_NV 4500000000LL
++#define XTOS_CYTON_GAIN 24
++#define XTOS_CYTON_SCALE_DENOMINATOR \
++    ((xtos_cyton_s64)XTOS_CYTON_GAIN * (((xtos_cyton_s64)1 << 23) - 1))
++#define OPENBCI_PACKET_SIZE XTOS_CYTON_PACKET_SIZE
++#define OPENBCI_NUM_CHANNELS XTOS_CYTON_CHANNELS
++#define OPENBCI_START_BYTE XTOS_CYTON_START_BYTE
++
++typedef char xtos_cyton_s32_must_be_4_bytes[sizeof(xtos_cyton_s32) == 4 ? 1 : -1];
++
++typedef struct xtos_cyton_parser {
++    xtos_cyton_u8 packet[XTOS_CYTON_PACKET_SIZE];
++    unsigned int packet_pos;
++    xtos_cyton_u8 last_counter;
++    unsigned int counter_valid;
++    /* Saturates at the maximum unsigned long rather than losing history. */
++    unsigned long missing_samples;
++} xtos_cyton_parser;
++
++/* A null parser is a no-op, matching the other helpers' null safety. */
++static inline void xtos_cyton_parser_init(xtos_cyton_parser *parser)
++{
++    if (!parser)
++        return;
++    parser->packet_pos = 0;
++    parser->last_counter = 0;
++    parser->counter_valid = 0;
++    parser->missing_samples = 0;
++}
++
++/* Decode the atomic packet. On failure, leave the caller's output untouched. */
++static inline int xtos_cyton_decode_packet(
++    const xtos_cyton_u8 packet[XTOS_CYTON_PACKET_SIZE],
++    xtos_cyton_s32 output[XTOS_CYTON_CHANNELS])
++{
++    xtos_cyton_s32 decoded[XTOS_CYTON_CHANNELS];
++    unsigned int channel;
++
++    if (!packet || !output || packet[0] != XTOS_CYTON_START_BYTE ||
++        (packet[32] & 0xF0) != 0xC0)
++        return -1;
++
++    for (channel = 0; channel < XTOS_CYTON_CHANNELS; ++channel) {
++        unsigned int offset = 2 + channel * 3;
++        xtos_cyton_s32 raw = ((xtos_cyton_s32)packet[offset] << 16) |
++                             ((xtos_cyton_s32)packet[offset + 1] << 8) |
++                             (xtos_cyton_s32)packet[offset + 2];
++        xtos_cyton_s64 numerator;
++        xtos_cyton_s64 magnitude;
++
++        if (raw & 0x800000)
++            raw -= (xtos_cyton_s32)1 << 24;
++        numerator = (xtos_cyton_s64)raw * XTOS_CYTON_VREF_NV;
++        magnitude = numerator < 0 ? -numerator : numerator;
++        magnitude /= XTOS_CYTON_SCALE_DENOMINATOR;
++        decoded[channel] = (xtos_cyton_s32)(numerator < 0 ? -magnitude : magnitude);
++    }
++
++    memcpy(output, decoded, sizeof(decoded));
++    return 0;
++}
++
++/* Feed one byte. Return 1 for a decoded frame, 0 for incomplete/noise, or -1
++ * for a rejected full candidate. A malformed frame retains only its bounded
++ * suffix beginning at the next start byte so later frames can resynchronize. */
++static inline int xtos_cyton_parser_feed(
++    xtos_cyton_parser *parser, xtos_cyton_u8 byte,
++    xtos_cyton_s32 output[XTOS_CYTON_CHANNELS])
++{
++    xtos_cyton_s32 decoded[XTOS_CYTON_CHANNELS];
++    xtos_cyton_u8 counter;
++    unsigned int index;
++
++    if (!parser || !output)
++        return -1;
++    if (parser->packet_pos == 0) {
++        if (byte != XTOS_CYTON_START_BYTE)
++            return 0;
++        parser->packet[parser->packet_pos++] = byte;
++        return 0;
++    }
++    if (parser->packet_pos >= XTOS_CYTON_PACKET_SIZE) {
++        parser->packet_pos = 0;
++        return -1;
++    }
++    parser->packet[parser->packet_pos++] = byte;
++    if (parser->packet_pos < XTOS_CYTON_PACKET_SIZE)
++        return 0;
++    if (xtos_cyton_decode_packet(parser->packet, decoded) == 0) {
++        counter = parser->packet[1];
++        if (parser->counter_valid) {
++            unsigned int delta = (counter - parser->last_counter) & 0xff;
++
++            if (delta == 0 || delta >= 0x80) {
++                parser->packet_pos = 0;
++                return -1;
++            }
++            if (delta > 1) {
++                unsigned long missing = delta - 1;
++                unsigned long maximum = ~0UL;
++
++                if (parser->missing_samples > maximum - missing)
++                    parser->missing_samples = maximum;
++                else
++                    parser->missing_samples += missing;
++            }
++        }
++        parser->last_counter = counter;
++        parser->counter_valid = 1;
++        parser->packet_pos = 0;
++        memcpy(output, decoded, sizeof(decoded));
++        return 1;
++    }
++
++    for (index = 1; index < XTOS_CYTON_PACKET_SIZE; ++index) {
++        if (parser->packet[index] == XTOS_CYTON_START_BYTE)
++            break;
++    }
++    if (index == XTOS_CYTON_PACKET_SIZE) {
++        parser->packet_pos = 0;
++    } else {
++        unsigned int remaining = XTOS_CYTON_PACKET_SIZE - index;
++        memmove(parser->packet, parser->packet + index, remaining);
++        parser->packet_pos = remaining;
++    }
++    return -1;
++}
++
++#endif /* _XTOS_CYTON_PACKET_H */
+diff --git a/drivers/xtos/bci/xtos_bci_snapshot.c b/drivers/xtos/bci/xtos_bci_snapshot.c
+new file mode 100644
+index 000000000..473727823
+--- /dev/null
++++ b/drivers/xtos/bci/xtos_bci_snapshot.c
+@@ -0,0 +1,165 @@
++// SPDX-License-Identifier: GPL-2.0
++#include "xtos_bci_snapshot.h"
++#ifndef XTOS_BCI_SNAPSHOT_HOST_TEST
++#include <linux/err.h>
++#include <linux/mm.h>
++#include <linux/slab.h>
++#include <linux/string.h>
++#include <linux/vmalloc.h>
++#include <linux/xtos_bci.h>
++#endif
++
++struct xtos_bci_snapshot *
++xtos_bci_snapshot_create(struct xtos_bci_ringbuf *rb, u32 channels,
++			 u32 rate, u64 requested, u64 token)
++{
++	struct xtos_bci_snapshot_header *header;
++	struct xtos_bci_snapshot *s;
++	unsigned long flags;
++	size_t frame, capacity, available, payload, pos, first;
++	int error;
++
++	if (!rb || !rb->buffer || !rb->size || !channels || channels > 32 ||
++	    !rate || !token || !requested || requested % sizeof(u32) ||
++	    requested > XTOS_BCI_SNAPSHOT_MAX_PAYLOAD)
++		return ERR_PTR(-EINVAL);
++	frame = channels * sizeof(u32);
++	capacity = (size_t)requested / frame * frame;
++	if (!capacity)
++		return ERR_PTR(-EAGAIN);
++	spin_lock_irqsave(&rb->lock, flags);
++	available = rb->write_pos - rb->read_pos;
++	spin_unlock_irqrestore(&rb->lock, flags);
++	if (available > rb->size)
++		return ERR_PTR(-EOVERFLOW);
++	payload = min(capacity, available) / frame * frame;
++	if (!payload)
++		return ERR_PTR(-EAGAIN);
++	s = kzalloc(sizeof(*s), GFP_KERNEL);
++	if (!s)
++		return ERR_PTR(-ENOMEM);
++	/* Allocation can sleep; the operation mutex stabilizes ring lifetime.
++	 * Recheck availability and take the actual source cursor after allocation.
++	 */
++	s->mapping = vmalloc_user(PAGE_ALIGN(sizeof(*header) + payload));
++	if (!s->mapping) {
++		kfree(s);
++		return ERR_PTR(-ENOMEM);
++	}
++	spin_lock_irqsave(&rb->lock, flags);
++	available = rb->write_pos - rb->read_pos;
++	if (available > rb->size) {
++		error = -EOVERFLOW;
++		goto unlock_error;
++	}
++	if (available < payload) {
++		error = -EAGAIN;
++		goto unlock_error;
++	}
++	s->cursor = rb->read_pos;
++	pos = rb->read_pos % rb->size;
++	first = min(payload, rb->size - pos);
++	header = s->mapping;
++	memcpy(header + 1, (char *)rb->buffer + pos, first);
++	memcpy((char *)(header + 1) + first, rb->buffer, payload - first);
++	spin_unlock_irqrestore(&rb->lock, flags);
++
++	s->mapping_bytes = PAGE_ALIGN(sizeof(*header) + payload);
++	s->token = token;
++	s->payload_bytes = payload;
++	refcount_set(&s->refs, 1);
++	header->magic = XTOS_BCI_SNAPSHOT_MAGIC;
++	header->version = XTOS_BCI_SNAPSHOT_VERSION;
++	header->header_size = sizeof(*header);
++	header->unit = XTOS_BCI_UNIT_NANOVOLT;
++	header->payload_bytes = payload;
++	header->cursor = s->cursor;
++	header->token = token;
++	header->channels = channels;
++	header->sample_rate_hz = rate;
++	header->sample_size = sizeof(u32);
++	return s;
++
++unlock_error:
++	spin_unlock_irqrestore(&rb->lock, flags);
++	vfree(s->mapping);
++	kfree(s);
++	return ERR_PTR(error);
++}
++
++int xtos_bci_snapshot_consume(struct xtos_bci_snapshot *s,
++			    struct xtos_bci_ringbuf *rb,
++			    const struct xtos_bci_snapshot_consume *request)
++{
++	unsigned long flags;
++	int error = 0;
++
++	if (!s || !rb || !request ||
++	    request->version != XTOS_BCI_SNAPSHOT_VERSION || request->flags ||
++	    request->reserved[0] || request->reserved[1] ||
++	    request->token != s->token || request->cursor != s->cursor ||
++	    request->bytes != s->payload_bytes)
++		return -EINVAL;
++	spin_lock_irqsave(&rb->lock, flags);
++	if (s->consumed)
++		error = -ESTALE;
++	else if ((u64)rb->read_pos != s->cursor)
++		error = -EOVERFLOW;
++	else {
++		rb->read_pos += s->payload_bytes;
++		s->consumed = true;
++	}
++	spin_unlock_irqrestore(&rb->lock, flags);
++	return error;
++}
++
++static void xtos_bci_snapshot_vma_open(struct vm_area_struct *vma)
++{
++	xtos_bci_snapshot_get(vma->vm_private_data);
++}
++
++static void xtos_bci_snapshot_vma_close(struct vm_area_struct *vma)
++{
++	xtos_bci_snapshot_put(vma->vm_private_data);
++}
++
++static const struct vm_operations_struct xtos_bci_snapshot_vm_ops = {
++	.open = xtos_bci_snapshot_vma_open,
++	.close = xtos_bci_snapshot_vma_close,
++};
++
++int xtos_bci_snapshot_mmap(struct xtos_bci_snapshot *s,
++			   struct vm_area_struct *vma)
++{
++	int error;
++
++	if (!s || !vma || vma->vm_pgoff ||
++	    vma->vm_end <= vma->vm_start ||
++	    vma->vm_end - vma->vm_start != s->mapping_bytes ||
++	    (vma->vm_flags & VM_WRITE) || !(vma->vm_flags & VM_SHARED))
++		return -EINVAL;
++	vm_flags_clear(vma, VM_MAYWRITE);
++	error = remap_vmalloc_range(vma, s->mapping, 0);
++	if (error)
++		return error;
++	/* mmap does not call open for the initial VMA. Own that reference here;
++	 * fork/split clones are subsequently accounted through vm_ops.open.
++	 */
++	xtos_bci_snapshot_get(s);
++	vma->vm_private_data = s;
++	vma->vm_ops = &xtos_bci_snapshot_vm_ops;
++	return 0;
++}
++
++void xtos_bci_snapshot_get(struct xtos_bci_snapshot *s)
++{
++	refcount_inc(&s->refs);
++}
++
++void xtos_bci_snapshot_put(struct xtos_bci_snapshot *s)
++{
++	if (s && refcount_dec_and_test(&s->refs)) {
++		vfree(s->mapping);
++		kfree(s);
++	}
++}
+diff --git a/drivers/xtos/bci/xtos_bci_snapshot.h b/drivers/xtos/bci/xtos_bci_snapshot.h
+new file mode 100644
+index 000000000..80c873f01
+--- /dev/null
++++ b/drivers/xtos/bci/xtos_bci_snapshot.h
+@@ -0,0 +1,45 @@
++/* SPDX-License-Identifier: GPL-2.0 */
++#ifndef _XTOS_BCI_SNAPSHOT_H
++#define _XTOS_BCI_SNAPSHOT_H
++#ifdef XTOS_BCI_SNAPSHOT_HOST_TEST
++#include "snapshot_shim.h"
++#else
++#include <linux/types.h>
++#include <linux/refcount.h>
++#include <uapi/linux/xtos_bci_snapshot.h>
++#endif
++
++struct xtos_bci_ringbuf;
++struct vm_area_struct;
++
++/* Owns only immutable CPU memory; never retains a transport or DMA object. */
++struct xtos_bci_snapshot {
++	refcount_t refs;
++	void *mapping;
++	size_t mapping_bytes;
++	u64 cursor;
++	u64 token;
++	u64 payload_bytes;
++	bool consumed;
++};
++
++/* Caller holds its device operation mutex throughout create/consume and checks
++ * connection/session state. Ring contents and read_pos are protected internally.
++ * requested_bytes is nonzero, signed32-aligned and <= MAX_PAYLOAD; channels is
++ * 1..32, rate and token are nonzero. Payload is rounded down to complete frames.
++ * Create returns one owned reference or ERR_PTR; it never consumes the ring.
++ */
++struct xtos_bci_snapshot *
++xtos_bci_snapshot_create(struct xtos_bci_ringbuf *rb, u32 channels,
++			 u32 sample_rate_hz, u64 requested_bytes, u64 token);
++void xtos_bci_snapshot_get(struct xtos_bci_snapshot *snapshot);
++void xtos_bci_snapshot_put(struct xtos_bci_snapshot *snapshot);
++int xtos_bci_snapshot_consume(struct xtos_bci_snapshot *snapshot,
++			    struct xtos_bci_ringbuf *rb,
++			    const struct xtos_bci_snapshot_consume *request);
++/* Caller owns a reference until return; success adds the initial VMA reference.
++ * Subsequent VMA clones acquire their own reference through vm_ops.open.
++ */
++int xtos_bci_snapshot_mmap(struct xtos_bci_snapshot *snapshot,
++			   struct vm_area_struct *vma);
++#endif
+diff --git a/include/uapi/linux/xtos_bci_snapshot.h b/include/uapi/linux/xtos_bci_snapshot.h
+new file mode 100644
+index 000000000..2883f6fcf
+--- /dev/null
++++ b/include/uapi/linux/xtos_bci_snapshot.h
+@@ -0,0 +1,56 @@
++/* SPDX-License-Identifier: GPL-2.0 WITH Linux-syscall-note */
++#ifndef _UAPI_XTOS_BCI_SNAPSHOT_H
++#define _UAPI_XTOS_BCI_SNAPSHOT_H
++#include <linux/types.h>
++#include <linux/ioctl.h>
++
++#define XTOS_BCI_SNAPSHOT_VERSION 1u
++#define XTOS_BCI_SNAPSHOT_MAGIC 0x58424349u
++#define XTOS_BCI_SNAPSHOT_MAX_PAYLOAD 65536u
++#define XTOS_BCI_UNIT_NANOVOLT 1u
++
++/* Fixed-width native-endian UAPI; all reserved fields must be zero. */
++struct xtos_bci_snapshot_request {
++    __u32 version;
++    __u32 flags;
++    __aligned_u64 requested_bytes;
++    __aligned_u64 mapping_bytes;
++    __aligned_u64 payload_bytes;
++    __aligned_u64 cursor;
++    __aligned_u64 token;
++    __u32 channels;
++    __u32 sample_rate_hz;
++    __aligned_u64 reserved[2];
++};
++struct xtos_bci_snapshot_header {
++    __u32 magic;
++    __u32 version;
++    __u32 header_size;
++    __u32 unit;
++    __aligned_u64 payload_bytes;
++    __aligned_u64 cursor;
++    __aligned_u64 token;
++    __u32 channels;
++    __u32 sample_rate_hz;
++    __u32 sample_size;
++    __u32 reserved0;
++    __aligned_u64 reserved1;
++};
++struct xtos_bci_snapshot_consume {
++    __u32 version;
++    __u32 flags;
++    __aligned_u64 token;
++    __aligned_u64 cursor;
++    __aligned_u64 bytes;
++    __aligned_u64 reserved[2];
++};
++struct xtos_bci_snapshot_release {
++    __u32 version;
++    __u32 flags;
++    __aligned_u64 token;
++    __aligned_u64 reserved;
++};
++#define XTOS_BCI_SNAPSHOT_ACQUIRE _IOWR('X', 13, struct xtos_bci_snapshot_request)
++#define XTOS_BCI_SNAPSHOT_CONSUME _IOW('X', 14, struct xtos_bci_snapshot_consume)
++#define XTOS_BCI_SNAPSHOT_RELEASE _IOW('X', 15, struct xtos_bci_snapshot_release)
++#endif
+diff --git a/drivers/xtos/bci/xtos_cyton_config.h b/drivers/xtos/bci/xtos_cyton_config.h
+new file mode 100644
+index 000000000..c3952b44b
+--- /dev/null
++++ b/drivers/xtos/bci/xtos_cyton_config.h
+@@ -0,0 +1,155 @@
++/* SPDX-License-Identifier: GPL-2.0 */
++#ifndef _XTOS_CYTON_CONFIG_H
++#define _XTOS_CYTON_CONFIG_H
++
++#ifdef __KERNEL__
++#include <linux/types.h>
++#include <linux/string.h>
++#include <linux/errno.h>
++#else
++#include <stddef.h>
++#include <stdint.h>
++#include <string.h>
++#include <errno.h>
++#endif
++
++struct xtos_cyton_config {
++    unsigned int gain[8], enabled_mask;
++    unsigned char registers[24];
++    unsigned int register_mask;
++};
++
++static inline int xtos_cyton_config_equal(const char *s, size_t n,
++                                         const char *literal)
++{
++    size_t length = strlen(literal);
++    return n == length && !memcmp(s, literal, length);
++}
++
++static inline void xtos_cyton_config_space(const char **p, const char *end)
++{
++    while (*p < end && (**p == ' ' || **p == '\t')) ++*p;
++}
++
++static inline int xtos_cyton_config_hex(unsigned char c)
++{
++    if (c >= '0' && c <= '9') return c - '0';
++    if (c >= 'A' && c <= 'F') return c - 'A' + 10;
++    if (c >= 'a' && c <= 'f') return c - 'a' + 10;
++    return -1;
++}
++
++static inline int xtos_cyton_config_field(const char **p, const char *end,
++                                         unsigned int *value)
++{
++    int a, b;
++    xtos_cyton_config_space(p, end);
++    if ((size_t)(end - *p) < 2) return -EPROTO;
++    a = xtos_cyton_config_hex((unsigned char)(*p)[0]);
++    b = xtos_cyton_config_hex((unsigned char)(*p)[1]);
++    if (a < 0 || b < 0) return -EPROTO;
++    *p += 2;
++    xtos_cyton_config_space(p, end);
++    if (*p == end || *(*p)++ != ',') return -EPROTO;
++    *value = (unsigned int)(a * 16 + b);
++    return 0;
++}
++
++static inline int xtos_cyton_config_row(const char *p, const char *end,
++                                       unsigned int expected, unsigned int *value)
++{
++    unsigned int address, bit;
++    if (xtos_cyton_config_field(&p, end, &address) ||
++        xtos_cyton_config_field(&p, end, value) || address != expected)
++        return -EPROTO;
++    for (bit = 0; bit < 8; ++bit) {
++        xtos_cyton_config_space(&p, end);
++        if (p == end || *p++ != (char)('0' + ((*value >> (7 - bit)) & 1u)))
++            return -EPROTO;
++        xtos_cyton_config_space(&p, end);
++        if (bit < 7 && (p == end || *p++ != ',')) return -EPROTO;
++    }
++    return p == end ? 0 : -EPROTO;
++}
++
++/* Parse official Cyton RREGS/printRegisterName/printHex output:
++ * https://github.com/OpenBCI/OpenBCI_Cyton_Library/blob/master/OpenBCI_32bit_Library.cpp
++ * Input is immutable, 1..8192 bytes, excluding $$$ and any NUL terminator.
++ * Only the eight Board CHnSET rows are mandatory. Optional ADS rows retain
++ * their address-indexed bytes and mask; unrelated LIS3DH rows are ignored.
++ * Commit the local snapshot only after full validation; errors leave result
++ * unchanged. No allocation, floating point, or mutable static state is used.
++ */
++static inline int xtos_cyton_config_parse(const char *text, size_t length,
++                                         struct xtos_cyton_config *result)
++{
++    static const unsigned int gains[] = {1, 2, 4, 6, 8, 12, 24};
++    static const char * const names[24] = {
++        "ADS_ID", "CONFIG1", "CONFIG2", "CONFIG3", "LOFF",
++        "CH1SET", "CH2SET", "CH3SET", "CH4SET", "CH5SET", "CH6SET", "CH7SET", "CH8SET",
++        "BIAS_SENSP", "BIAS_SENSN", "LOFF_SENSP", "LOFF_SENSN", "LOFF_FLIP",
++        "LOFF_STATP", "LOFF_STATN", "GPIO", "MISC1", "MISC2", "CONFIG4"
++    };
++    struct xtos_cyton_config parsed = { {0}, 0, {0}, 0 };
++    size_t offset = 0;
++    unsigned int header_seen = 0, board = 0;
++
++    if (!text || !result || !length) return -EINVAL;
++    if (length > 8192u) return -EMSGSIZE;
++    {
++        size_t i;
++        for (i = 0; i < length; ++i)
++            if (text[i] != '\r' && text[i] != '\n' && text[i] != '\t' &&
++                ((unsigned char)text[i] < 32 || (unsigned char)text[i] > 126))
++                return -EPROTO;
++    }
++    while (offset < length) {
++        size_t start = offset, n;
++        const char *line;
++        unsigned int ch, value, code, address;
++        size_t name_length = 0;
++        while (offset < length && text[offset] != '\r' && text[offset] != '\n') ++offset;
++        n = offset - start;
++        line = text + start;
++        if (offset < length) ++offset;
++        {
++            size_t i;
++            for (i = 0; i + 19 <= n; ++i)
++                if (!memcmp(line + i, "Daisy ADS Registers", 19)) return -EPROTONOSUPPORT;
++        }
++        if (xtos_cyton_config_equal(line, n, "Board ADS Registers")) {
++            if (header_seen) return -EPROTO;
++            header_seen = 1;
++            board = 1;
++            continue;
++        }
++        if (xtos_cyton_config_equal(line, n, "LIS3DH Registers")) {
++            board = 0;
++            continue;
++        }
++        if (n >= 2 && !memcmp(line, "CH", 2) &&
++            (!board || n < 7 || line[2] < '1' || line[2] > '8' ||
++             memcmp(line + 3, "SET,", 4))) return -EPROTO;
++        if (!board) continue;
++        while (name_length < n && line[name_length] != ',') ++name_length;
++        for (address = 0; address < 24; ++address)
++            if (xtos_cyton_config_equal(line, name_length, names[address])) break;
++        if (address == 24) continue;
++        if (name_length == n || (parsed.register_mask & (1u << address)) ||
++            xtos_cyton_config_row(line + name_length + 1, line + n, address, &value))
++            return -EPROTO;
++        if (address >= 5 && address <= 12) {
++            ch = address - 5;
++            code = (value >> 4) & 7u;
++            if (code == 7) return -EPROTO;
++            parsed.gain[ch] = gains[code];
++            if (!(value & 0x80u)) parsed.enabled_mask |= 1u << ch;
++        }
++        parsed.registers[address] = (unsigned char)value;
++        parsed.register_mask |= 1u << address;
++    }
++    if (!header_seen || (parsed.register_mask & 0x1FE0u) != 0x1FE0u) return -EPROTO;
++    *result = parsed;
++    return 0;
++}
++#endif
+diff --git a/include/uapi/linux/xtos_bci_config.h b/include/uapi/linux/xtos_bci_config.h
+new file mode 100644
+index 000000000..5e1995af3
+--- /dev/null
++++ b/include/uapi/linux/xtos_bci_config.h
+@@ -0,0 +1,33 @@
++/* SPDX-License-Identifier: GPL-2.0 WITH Linux-syscall-note */
++#ifndef XTOS_BCI_CONFIG_UAPI_H
++#define XTOS_BCI_CONFIG_UAPI_H
++
++#include <linux/types.h>
++#include <linux/ioctl.h>
++
++#define XTOS_BCI_CONFIG_VERSION 1u
++#define XTOS_BCI_CONFIG_READBACK 1u
++#define XTOS_BCI_FIRMWARE_READBACK 2u
++#define XTOS_BCI_GAIN_CONTROL 4u
++#define XTOS_BCI_IMPEDANCE 8u
++#define XTOS_BCI_SELF_TEST 16u
++
++/* Request version=1, everything else zero. Firmware identity is not a unique ID. */
++struct xtos_bci_config_v1 {
++	__u32 version;
++	__u32 flags;
++	__u32 channels;
++	__u32 sample_rate_hz;
++	__u32 enabled_mask;
++	__u32 capabilities;
++	__u32 reserved0[2];
++	__aligned_u64 generation;
++	__u32 gain[8];
++	__u8 registers[24];
++	char firmware[256];
++	__u32 reserved[8];
++};
++
++#define XTOS_BCI_GET_CONFIG _IOWR('X', 16, struct xtos_bci_config_v1)
++
++#endif
+diff --git a/drivers/xtos/bci/xtos_bci_frame.c b/drivers/xtos/bci/xtos_bci_frame.c
+new file mode 100644
+index 000000000..10ab26914
+--- /dev/null
++++ b/drivers/xtos/bci/xtos_bci_frame.c
+@@ -0,0 +1,236 @@
++/* SPDX-License-Identifier: GPL-2.0 */
++#include "xtos_bci_frame.h"
++#ifndef XTOS_BCI_FRAME_HOST_TEST
++#include <linux/err.h>
++#include <linux/limits.h>
++#include <linux/sched.h>
++#include <linux/slab.h>
++#include <linux/string.h>
++#endif
++struct xtos_bci_frame_ring *xtos_bci_frame_ring_alloc(u32 capacity)
++{
++    struct xtos_bci_frame_ring *ring;
++    if (!capacity || capacity > XTOS_BCI_FRAME_RING_MAX)
++        return ERR_PTR(-EINVAL);
++    ring = kcalloc(1, sizeof(*ring), GFP_KERNEL);
++    if (!ring)
++        return ERR_PTR(-ENOMEM);
++    ring->slots = kcalloc(capacity, sizeof(*ring->slots), GFP_KERNEL);
++    if (!ring->slots) {
++        kfree(ring);
++        return ERR_PTR(-ENOMEM);
++    }
++    ring->capacity = capacity;
++    spin_lock_init(&ring->lock);
++    init_waitqueue_head(&ring->wait);
++    return ring;
++}
++void xtos_bci_frame_ring_free(struct xtos_bci_frame_ring *ring)
++{
++    if (!ring)
++        return;
++#ifdef XTOS_BCI_FRAME_HOST_TEST
++    assert(!pthread_mutex_destroy(&ring->lock));
++    assert(!pthread_mutex_destroy(&ring->wait.lock));
++    assert(!pthread_cond_destroy(&ring->wait.cond));
++#endif
++    kfree(ring->slots);
++    kfree(ring);
++}
++/* Pure binary validation mirrors SDK config_valid; no ASCII reply parser. */
++static bool frame_input_valid(const struct xtos_bci_frame_v1 *f,
++    const struct xtos_bci_config_v1 *c)
++{
++    static const u32 gains[] = {1, 2, 4, 6, 8, 12, 24};
++    const char *end;
++    u32 i, code;
++    if (!f || !c || f->version != 1 || f->record_bytes != 224 ||
++        f->channels != 8 || f->sample_rate_hz != 250 || f->unit != 1 ||
++        f->host_clock != 1 || (f->quality_flags & ~31u) ||
++        !(f->quality_flags & 1u) || (f->source_flags != 1 && f->source_flags != 2) ||
++        !f->host_rx_ns || f->sequence || !f->stream_generation ||
++        !f->config_generation || f->counter_bits != 8 || f->device_counter > 255 ||
++        f->missing_before > 126 || !!(f->quality_flags & 2u) != !!f->missing_before ||
++        f->reserved[0] || f->reserved[1])
++        return false;
++    for (i = 8; i < 32; i++)
++        if (f->samples_nv[i])
++            return false;
++    if (c->version != 1 || c->flags || c->channels != 8 || c->sample_rate_hz != 250 ||
++        c->enabled_mask > 255 || f->enabled_mask != c->enabled_mask ||
++        !c->generation || c->generation != f->config_generation ||
++        (c->capabilities & ~31u) || (c->capabilities & 3u) != 3 ||
++        c->reserved0[0] || c->reserved0[1] || (c->registers[1] & 7u) != 6)
++        return false;
++    for (i = 0; i < 8; i++) {
++        if (c->reserved[i])
++            return false;
++        code = (c->registers[5+i] >> 4) & 7u;
++        if (code >= 7 || c->gain[i] != gains[code] ||
++            !!(c->registers[5+i] & 0x80u) == !!(c->enabled_mask & (1u << i)))
++            return false;
++    }
++    end = memchr(c->firmware, 0, sizeof(c->firmware));
++    if (!end || end == c->firmware)
++        return false;
++    for (i = 0; c->firmware+i < end; i++) {
++        unsigned char ch = (unsigned char)c->firmware[i];
++        if (ch != '\r' && ch != '\n' && (ch < 0x20 || ch > 0x7e))
++            return false;
++    }
++    return true;
++}
++static bool frame_run_equal(const struct xtos_bci_frame_slot *a,
++    const struct xtos_bci_frame_slot *b)
++{
++    return a->record.stream_generation == b->record.stream_generation &&
++        a->record.source_flags == b->record.source_flags &&
++        a->record.host_clock == b->record.host_clock &&
++        a->record.channels == b->record.channels &&
++        a->record.sample_rate_hz == b->record.sample_rate_hz &&
++        a->record.unit == b->record.unit && !memcmp(&a->config, &b->config, sizeof(a->config));
++}
++int xtos_bci_frame_ring_peek(struct xtos_bci_frame_ring *ring, u32 capacity,
++    struct xtos_bci_frame_v1 *records, struct xtos_bci_frame_request *out)
++{
++    unsigned long flags;
++    u32 count = 0, i;
++    const struct xtos_bci_frame_slot *first;
++    struct xtos_bci_frame_request result = {0};
++    int error = 0;
++    if (!ring || !records || !out || !capacity || capacity > XTOS_BCI_FRAME_MAX_BATCH)
++        return -EINVAL;
++    spin_lock_irqsave(&ring->lock, flags);
++    if (ring->read_cursor > ring->write_cursor ||
++        ring->write_cursor - ring->read_cursor > ring->capacity) {
++        error = -EOVERFLOW;
++        goto unlock_peek;
++    }
++    if (ring->read_cursor == ring->write_cursor) {
++        error = -EAGAIN;
++        goto unlock_peek;
++    }
++    first = &ring->slots[ring->read_cursor % ring->capacity];
++    while (count < capacity && count < ring->write_cursor - ring->read_cursor &&
++        frame_run_equal(first, &ring->slots[(ring->read_cursor + count) % ring->capacity]))
++        count++;
++    result.version = 1;
++    result.capacity_frames = capacity;
++    result.frame_count = count;
++    result.cursor = ring->read_cursor;
++    result.next_cursor = ring->read_cursor + count;
++    result.overwritten_frames = ring->overwritten_frames;
++    result.stream_generation = first->record.stream_generation;
++    result.record_bytes = XTOS_BCI_FRAME_RECORD_BYTES;
++    result.header_bytes = XTOS_BCI_FRAME_HEADER_BYTES;
++    result.payload_bytes = (u64)count * XTOS_BCI_FRAME_RECORD_BYTES;
++    result.config = first->config;
++    for (i = 0; i < count; i++)
++        records[i] = ring->slots[(ring->read_cursor + i) % ring->capacity].record;
++    *out = result;
++unlock_peek:
++    spin_unlock_irqrestore(&ring->lock, flags);
++    return error;
++}
++int xtos_bci_frame_ring_commit(struct xtos_bci_frame_ring *ring, u64 cursor, u32 count)
++{
++    unsigned long flags;
++    u32 i;
++    int error = 0;
++    const struct xtos_bci_frame_slot *first;
++    if (!ring || !count || count > XTOS_BCI_FRAME_MAX_BATCH)
++        return -EINVAL;
++    spin_lock_irqsave(&ring->lock, flags);
++    if (ring->read_cursor > ring->write_cursor ||
++        ring->write_cursor - ring->read_cursor > ring->capacity ||
++        cursor != ring->read_cursor || cursor > U64_MAX - count) {
++        error = -EOVERFLOW;
++        goto unlock_commit;
++    }
++    if (count > ring->write_cursor - cursor) {
++        error = -EINVAL;
++        goto unlock_commit;
++    }
++    first = &ring->slots[cursor % ring->capacity];
++    for (i = 1; i < count; i++)
++        if (!frame_run_equal(first, &ring->slots[(cursor+i) % ring->capacity])) {
++            error = -EINVAL;
++            goto unlock_commit;
++        }
++    ring->read_cursor = cursor + count;
++unlock_commit:
++    spin_unlock_irqrestore(&ring->lock, flags);
++    return error;
++}
++void xtos_bci_frame_ring_discard_unread(struct xtos_bci_frame_ring *ring)
++{
++    unsigned long flags;
++    if (!ring)
++        return;
++    spin_lock_irqsave(&ring->lock, flags);
++    ring->read_cursor = ring->write_cursor;
++    spin_unlock_irqrestore(&ring->lock, flags);
++}
++bool xtos_bci_frame_ring_available(struct xtos_bci_frame_ring *ring)
++{
++    unsigned long flags;
++    bool available;
++    if (!ring)
++        return false;
++    spin_lock_irqsave(&ring->lock, flags);
++    available = ring->read_cursor < ring->write_cursor;
++    spin_unlock_irqrestore(&ring->lock, flags);
++    return available;
++}
++void xtos_bci_frame_ring_wake(struct xtos_bci_frame_ring *ring)
++{
++    if (ring)
++        wake_up_interruptible(&ring->wait);
++}
++static bool frame_ledger_valid(const struct xtos_bci_frame_ring *r)
++{
++    return r->read_cursor <= r->write_cursor &&
++        r->write_cursor - r->read_cursor <= r->capacity;
++}
++int xtos_bci_frame_ring_publish(struct xtos_bci_frame_ring *ring,
++    const struct xtos_bci_frame_v1 *record, const struct xtos_bci_config_v1 *config)
++{
++    unsigned long flags;
++    struct xtos_bci_frame_slot *slot;
++    int error = 0;
++    if (!ring || !frame_input_valid(record, config))
++        return -EINVAL;
++    spin_lock_irqsave(&ring->lock, flags);
++    if (!frame_ledger_valid(ring) || ring->write_cursor == U64_MAX ||
++        (ring->write_cursor - ring->read_cursor == ring->capacity &&
++         ring->overwritten_frames == U64_MAX)) {
++        error = -EOVERFLOW;
++        goto unlock;
++    }
++    if (record->stream_generation < ring->last_stream_generation ||
++        config->generation < ring->last_config.generation ||
++        (config->generation == ring->last_config.generation &&
++         memcmp(config, &ring->last_config, sizeof(*config))) ||
++        (record->stream_generation == ring->last_stream_generation &&
++         record->host_rx_ns < ring->last_host_rx_ns)) {
++        error = -EINVAL;
++        goto unlock;
++    }
++    slot = &ring->slots[ring->write_cursor % ring->capacity];
++    slot->record = *record;
++    slot->record.sequence = ring->write_cursor + 1;
++    slot->config = *config;
++    if (ring->write_cursor - ring->read_cursor == ring->capacity) {
++        ring->read_cursor++;
++        ring->overwritten_frames++;
++    }
++    ring->last_stream_generation = record->stream_generation;
++    ring->last_host_rx_ns = record->host_rx_ns;
++    ring->last_config = *config;
++    ring->write_cursor++;
++unlock:
++    spin_unlock_irqrestore(&ring->lock, flags);
++    if (!error)
++        wake_up_interruptible(&ring->wait);
++    return error;
++}
+diff --git a/drivers/xtos/bci/xtos_bci_frame.h b/drivers/xtos/bci/xtos_bci_frame.h
+new file mode 100644
+index 000000000..354894333
+--- /dev/null
++++ b/drivers/xtos/bci/xtos_bci_frame.h
+@@ -0,0 +1,40 @@
++/* SPDX-License-Identifier: GPL-2.0 */
++#ifndef XTOS_BCI_FRAME_RING_H
++#define XTOS_BCI_FRAME_RING_H
++#ifdef XTOS_BCI_FRAME_HOST_TEST
++#include "../../../../../tests/bci_frame_host/frame_shim.h"
++#else
++#include <linux/spinlock.h>
++#include <linux/wait.h>
++#include <uapi/linux/xtos_bci_frame.h>
++#endif
++#define XTOS_BCI_FRAME_RING_MAX 4096u
++struct xtos_bci_frame_slot {
++    struct xtos_bci_frame_v1 record;
++    struct xtos_bci_config_v1 config;
++};
++/* Caller owns lifetime. All mutable state except capacity/slots/wait is locked. */
++struct xtos_bci_frame_ring {
++    spinlock_t lock;
++    wait_queue_head_t wait;
++    struct xtos_bci_frame_slot *slots;
++    u32 capacity;
++    u64 read_cursor, write_cursor, overwritten_frames;
++    u64 last_stream_generation, last_host_rx_ns;
++    struct xtos_bci_config_v1 last_config;
++};
++struct xtos_bci_frame_ring *xtos_bci_frame_ring_alloc(u32 capacity);
++void xtos_bci_frame_ring_free(struct xtos_bci_frame_ring *ring);
++int xtos_bci_frame_ring_publish(struct xtos_bci_frame_ring *ring,
++    const struct xtos_bci_frame_v1 *record, const struct xtos_bci_config_v1 *config);
++/* Output-only descriptor; caller stages user fields later. Invalid/empty leaves
++ * descriptor AND record buffer unchanged. At most 292 records; no allocation. */
++int xtos_bci_frame_ring_peek(struct xtos_bci_frame_ring *ring, u32 capacity,
++    struct xtos_bci_frame_v1 *records, struct xtos_bci_frame_request *out);
++/* Exact current cursor, positive count <=292 within ONE homogeneous run.
++ * Core serializes consumers and retains the peek descriptor across usercopy. */
++int xtos_bci_frame_ring_commit(struct xtos_bci_frame_ring *ring, u64 cursor, u32 count);
++void xtos_bci_frame_ring_discard_unread(struct xtos_bci_frame_ring *ring);
++bool xtos_bci_frame_ring_available(struct xtos_bci_frame_ring *ring);
++void xtos_bci_frame_ring_wake(struct xtos_bci_frame_ring *ring);
++#endif
+diff --git a/drivers/xtos/bci/xtos_bci_frame_snapshot.c b/drivers/xtos/bci/xtos_bci_frame_snapshot.c
+new file mode 100644
+index 000000000..a08537fbb
+--- /dev/null
++++ b/drivers/xtos/bci/xtos_bci_frame_snapshot.c
+@@ -0,0 +1,130 @@
++/* SPDX-License-Identifier: GPL-2.0 */
++#include "xtos_bci_frame_snapshot.h"
++#ifndef XTOS_BCI_FRAME_SNAPSHOT_HOST_TEST
++#include <linux/err.h>
++#include <linux/mm.h>
++#include <linux/slab.h>
++#include <linux/string.h>
++#include <linux/vmalloc.h>
++#endif
++static void frame_snapshot_vma_open(struct vm_area_struct *vma)
++{
++    xtos_bci_frame_snapshot_get(vma->vm_private_data);
++}
++static void frame_snapshot_vma_close(struct vm_area_struct *vma)
++{
++    xtos_bci_frame_snapshot_put(vma->vm_private_data);
++}
++static const struct vm_operations_struct frame_snapshot_vm_ops = {
++    .open = frame_snapshot_vma_open,
++    .close = frame_snapshot_vma_close,
++};
++int xtos_bci_frame_snapshot_mmap(struct xtos_bci_frame_snapshot *s,
++    struct vm_area_struct *vma)
++{
++    int error;
++
++    if (!s || !vma || vma->vm_pgoff || vma->vm_end <= vma->vm_start ||
++        vma->vm_end - vma->vm_start != s->mapping_bytes ||
++        (vma->vm_flags & VM_WRITE) || !(vma->vm_flags & VM_SHARED))
++        return -EINVAL;
++    vm_flags_clear(vma, VM_MAYWRITE);
++    error = remap_vmalloc_range(vma, s->mapping, 0);
++    if (error)
++        return error;
++    /* The initial mmap does not invoke vm_ops.open. */
++    xtos_bci_frame_snapshot_get(s);
++    vma->vm_private_data = s;
++    vma->vm_ops = &frame_snapshot_vm_ops;
++    return 0;
++}
++void xtos_bci_frame_snapshot_get(struct xtos_bci_frame_snapshot *s)
++{
++    refcount_inc(&s->refs);
++}
++void xtos_bci_frame_snapshot_put(struct xtos_bci_frame_snapshot *s)
++{
++    if (s && refcount_dec_and_test(&s->refs)) {
++        vfree(s->mapping);
++        kfree(s);
++    }
++}
++int xtos_bci_frame_snapshot_consume(struct xtos_bci_frame_snapshot *s,
++    struct xtos_bci_frame_ring *ring, const struct xtos_bci_frame_consume *request)
++{
++    int error;
++
++    if (!s || !ring || !request ||
++        request->version != XTOS_BCI_FRAME_VERSION || request->flags ||
++        request->reserved || !request->token || !request->frame_count ||
++        request->frame_count > XTOS_BCI_FRAME_MAX_BATCH)
++        return -EINVAL;
++    if (request->token != s->descriptor.token || s->consumed)
++        return -ESTALE;
++    if (request->cursor != s->descriptor.cursor ||
++        request->frame_count != s->descriptor.frame_count ||
++        request->stream_generation != s->descriptor.stream_generation)
++        return -EINVAL;
++    error = xtos_bci_frame_ring_commit(ring, s->descriptor.cursor,
++        s->descriptor.frame_count);
++    if (!error)
++        s->consumed = true;
++    return error;
++}
++struct xtos_bci_frame_snapshot *xtos_bci_frame_snapshot_create(
++    struct xtos_bci_frame_ring *ring, u32 capacity, u64 token)
++{
++    struct xtos_bci_frame_snapshot *s;
++    struct xtos_bci_frame_snapshot_header *header;
++    struct xtos_bci_frame_v1 *records;
++    int error;
++
++    if (!ring || !capacity || capacity > XTOS_BCI_FRAME_MAX_BATCH || !token)
++        return ERR_PTR(-EINVAL);
++    s = kzalloc(sizeof(*s), GFP_KERNEL);
++    if (!s)
++        return ERR_PTR(-ENOMEM);
++    /* Allocate for the requested capacity before sampling any ring state. */
++    s->mapping = vmalloc_user(PAGE_ALIGN(XTOS_BCI_FRAME_RECORDS_OFFSET +
++        (size_t)capacity * XTOS_BCI_FRAME_RECORD_BYTES));
++    if (!s->mapping) {
++        kfree(s);
++        return ERR_PTR(-ENOMEM);
++    }
++    error = xtos_bci_frame_ring_peek(ring, capacity,
++        (struct xtos_bci_frame_v1 *)((char *)s->mapping +
++            XTOS_BCI_FRAME_RECORDS_OFFSET), &s->descriptor);
++    if (error) {
++        vfree(s->mapping);
++        kfree(s);
++        return ERR_PTR(error);
++    }
++    s->mapping_bytes = PAGE_ALIGN(XTOS_BCI_FRAME_RECORDS_OFFSET +
++        (size_t)s->descriptor.payload_bytes);
++    s->descriptor.token = token;
++    s->descriptor.mapping_bytes = s->mapping_bytes;
++    header = s->mapping;
++    records = (struct xtos_bci_frame_v1 *)((char *)s->mapping +
++        XTOS_BCI_FRAME_RECORDS_OFFSET);
++    header->magic = XTOS_BCI_FRAME_SNAPSHOT_MAGIC;
++    header->version = s->descriptor.version;
++    header->header_bytes = s->descriptor.header_bytes;
++    header->record_bytes = s->descriptor.record_bytes;
++    header->frame_count = s->descriptor.frame_count;
++    header->unit = records[0].unit;
++    header->host_clock = records[0].host_clock;
++    header->payload_bytes = s->descriptor.payload_bytes;
++    header->cursor = s->descriptor.cursor;
++    header->next_cursor = s->descriptor.next_cursor;
++    header->token = s->descriptor.token;
++    header->stream_generation = s->descriptor.stream_generation;
++    header->config_generation = s->descriptor.config.generation;
++    header->overwritten_frames = s->descriptor.overwritten_frames;
++    header->mapping_bytes = s->descriptor.mapping_bytes;
++    header->config_bytes = XTOS_BCI_FRAME_CONFIG_BYTES;
++    header->records_offset = XTOS_BCI_FRAME_RECORDS_OFFSET;
++    memcpy((char *)s->mapping + XTOS_BCI_FRAME_HEADER_BYTES,
++        &s->descriptor.config, sizeof(s->descriptor.config));
++    refcount_set(&s->refs, 1);
++    return s;
++}
+diff --git a/drivers/xtos/bci/xtos_bci_frame_snapshot.h b/drivers/xtos/bci/xtos_bci_frame_snapshot.h
+new file mode 100644
+index 000000000..e4e41d2ae
+--- /dev/null
++++ b/drivers/xtos/bci/xtos_bci_frame_snapshot.h
+@@ -0,0 +1,31 @@
++/* SPDX-License-Identifier: GPL-2.0 */
++#ifndef XTOS_BCI_FRAME_SNAPSHOT_H
++#define XTOS_BCI_FRAME_SNAPSHOT_H
++#include "xtos_bci_frame.h"
++#ifdef XTOS_BCI_FRAME_SNAPSHOT_HOST_TEST
++#include "../../../../../tests/bci_frame_snapshot_host/snapshot_shim.h"
++#else
++#include <linux/refcount.h>
++#include <linux/types.h>
++#endif
++struct vm_area_struct;
++struct xtos_bci_frame_snapshot {
++    refcount_t refs;
++    void *mapping;
++    size_t mapping_bytes;
++    struct xtos_bci_frame_request descriptor;
++    bool consumed;
++};
++/* Caller retains ring lifetime and serializes capture/consume using op_lock.
++ * Do not wait for a blocked reader's read_lock during snapshot acquisition.
++ * RX publication remains independent under the frame ring lock.
++ */
++struct xtos_bci_frame_snapshot *xtos_bci_frame_snapshot_create(
++    struct xtos_bci_frame_ring *ring, u32 capacity, u64 token);
++void xtos_bci_frame_snapshot_get(struct xtos_bci_frame_snapshot *s);
++void xtos_bci_frame_snapshot_put(struct xtos_bci_frame_snapshot *s);
++int xtos_bci_frame_snapshot_consume(struct xtos_bci_frame_snapshot *s,
++    struct xtos_bci_frame_ring *ring, const struct xtos_bci_frame_consume *request);
++int xtos_bci_frame_snapshot_mmap(struct xtos_bci_frame_snapshot *s,
++    struct vm_area_struct *vma);
++#endif
+diff --git a/include/uapi/linux/xtos_bci_frame.h b/include/uapi/linux/xtos_bci_frame.h
+new file mode 100644
+index 000000000..882db0c92
+--- /dev/null
++++ b/include/uapi/linux/xtos_bci_frame.h
+@@ -0,0 +1,120 @@
++/* SPDX-License-Identifier: GPL-2.0 WITH Linux-syscall-note */
++#ifndef XTOS_BCI_FRAME_UAPI_H
++#define XTOS_BCI_FRAME_UAPI_H
++#include <linux/types.h>
++#include <linux/ioctl.h>
++#include "xtos_bci_config.h"
++
++#define XTOS_BCI_FRAME_VERSION 1u
++#define XTOS_BCI_FRAME_RECORD_BYTES 224u
++#define XTOS_BCI_FRAME_HEADER_BYTES 128u
++#define XTOS_BCI_FRAME_CONFIG_BYTES 384u
++#define XTOS_BCI_FRAME_RECORDS_OFFSET 512u
++#define XTOS_BCI_FRAME_MAX_PAYLOAD 65536u
++#define XTOS_BCI_FRAME_MAX_BATCH (XTOS_BCI_FRAME_MAX_PAYLOAD / XTOS_BCI_FRAME_RECORD_BYTES)
++#define XTOS_BCI_FRAME_SNAPSHOT_MAGIC 0x58424631u
++#define XTOS_BCI_FRAME_CLOCK_MONOTONIC 1u
++#ifndef XTOS_BCI_UNIT_NANOVOLT
++#define XTOS_BCI_UNIT_NANOVOLT 1u
++#endif
++#define XTOS_BCI_FRAME_NONBLOCK 1u
++#define XTOS_BCI_FRAME_SOURCE_SERDEV 1u
++#define XTOS_BCI_FRAME_SOURCE_SYNTHETIC 2u
++#define XTOS_BCI_FRAME_QUALITY_CONFIG_VERIFIED 1u
++#define XTOS_BCI_FRAME_QUALITY_COUNTER_GAP 2u
++#define XTOS_BCI_FRAME_QUALITY_RESYNC 4u
++#define XTOS_BCI_FRAME_QUALITY_ADC_RAIL 8u
++#define XTOS_BCI_FRAME_QUALITY_CONTINUITY_UNKNOWN 16u
++#define XTOS_BCI_FRAME_QUALITY_KNOWN 31u
++
++/* Native endian; all reserved/unused positions zero. Integer nanovolts only.
++ * host_rx_ns is CLOCK_MONOTONIC after the callback acquires state_lock, before
++ * processing that callback. It is not device acquisition or physical latency.
++ */
++struct xtos_bci_frame_v1 {
++    __u32 version;
++    __u32 record_bytes;
++    __u32 channels;
++    __u32 sample_rate_hz;
++    __u32 unit;
++    __u32 host_clock;
++    __u32 quality_flags;
++    __u32 source_flags;
++    __aligned_u64 host_rx_ns;
++    __aligned_u64 sequence;
++    __aligned_u64 stream_generation;
++    __aligned_u64 config_generation;
++    __u32 device_counter;
++    __u32 counter_bits;
++    __u32 missing_before;
++    __u32 enabled_mask;
++    __aligned_u64 reserved[2];
++    __s32 samples_nv[32];
++};
++
++/* READ input: version, flags NONBLOCK/0, capacity_frames and frames_ptr only.
++ * ACQUIRE input: version and capacity_frames only. Other input bytes zero.
++ * frames_ptr is a numeric user address; validate width and addition before use.
++ */
++struct xtos_bci_frame_request {
++    __u32 version;
++    __u32 flags;
++    __u32 capacity_frames;
++    __u32 frame_count;
++    __aligned_u64 frames_ptr;
++    __aligned_u64 cursor;
++    __aligned_u64 next_cursor;
++    __aligned_u64 overwritten_frames;
++    __aligned_u64 token;
++    __aligned_u64 stream_generation;
++    __u32 record_bytes;
++    __u32 header_bytes;
++    __aligned_u64 mapping_bytes;
++    __aligned_u64 payload_bytes;
++    __u32 reserved[10];
++    struct xtos_bci_config_v1 config;
++};
++
++/* Immutable mapping: header at 0, config at 128, records at 512, zero tail. */
++struct xtos_bci_frame_snapshot_header {
++    __u32 magic;
++    __u32 version;
++    __u32 header_bytes;
++    __u32 record_bytes;
++    __u32 frame_count;
++    __u32 flags;
++    __u32 unit;
++    __u32 host_clock;
++    __aligned_u64 payload_bytes;
++    __aligned_u64 cursor;
++    __aligned_u64 next_cursor;
++    __aligned_u64 token;
++    __aligned_u64 stream_generation;
++    __aligned_u64 config_generation;
++    __aligned_u64 overwritten_frames;
++    __aligned_u64 mapping_bytes;
++    __u32 config_bytes;
++    __u32 records_offset;
++    __u32 reserved[6];
++};
++struct xtos_bci_frame_consume {
++    __u32 version;
++    __u32 flags;
++    __aligned_u64 token;
++    __aligned_u64 cursor;
++    __aligned_u64 frame_count;
++    __aligned_u64 stream_generation;
++    __aligned_u64 reserved;
++};
++struct xtos_bci_frame_release {
++    __u32 version;
++    __u32 flags;
++    __aligned_u64 token;
++    __aligned_u64 reserved;
++};
++
++#define XTOS_BCI_FRAME_READ _IOWR('X', 17, struct xtos_bci_frame_request)
++#define XTOS_BCI_FRAME_SNAPSHOT_ACQUIRE _IOWR('X', 18, struct xtos_bci_frame_request)
++#define XTOS_BCI_FRAME_SNAPSHOT_CONSUME _IOW('X', 19, struct xtos_bci_frame_consume)
++#define XTOS_BCI_FRAME_SNAPSHOT_RELEASE _IOW('X', 20, struct xtos_bci_frame_release)
++#endif

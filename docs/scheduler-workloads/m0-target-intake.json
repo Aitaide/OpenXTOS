@@ -1,0 +1,71 @@
+{
+  "schema": "xtos-scheduler-m0-intake-v1",
+  "status": "needs_operator_input",
+  "policy": "null and empty arrays are unfilled fields, never accepted evidence",
+  "target": {
+    "owner": null,
+    "asset_id": null,
+    "physical_platform_attestation": null,
+    "vendor_model_board": null,
+    "cpu_model_microcode_topology": null,
+    "numa_smt_online_cpus": null,
+    "firmware_bios_revision": null,
+    "power_frequency_policy": null,
+    "target_access_or_operator_run_method": null,
+    "maintenance_window_and_recovery_owner": null
+  },
+  "runtime_image": {
+    "xtos_source_commit": null,
+    "kernel_source_commit": null,
+    "kernel_config_sha256": null,
+    "kernel_image_sha256": null,
+    "running_kernel_identity": null,
+    "sys_kernel_realtime_value": null,
+    "independent_fallback_image_and_boot_method": null
+  },
+  "workload": {
+    "business_or_system_use_case": null,
+    "workload_owner": null,
+    "real_application_or_device": null,
+    "input_capture_and_replay_artifact": null,
+    "task_set": [],
+    "dependencies_blocking_and_locking": null,
+    "device_irq_and_cpu_placement": null,
+    "background_interference": null,
+    "overload_and_missed_deadline_behavior": null,
+    "wcet_or_budget_estimation_method_and_evidence": null
+  },
+  "comparison_protocol": {
+    "required_native_policies": ["SCHED_FIFO_or_SCHED_RR", "SCHED_DEADLINE"],
+    "identical_workload_and_placement_verified": null,
+    "primary_metric": null,
+    "minimum_meaningful_improvement": null,
+    "maximum_allowed_regression_by_metric": null,
+    "deadline_miss_acceptance": null,
+    "valid_repetitions_per_policy_minimum": 10,
+    "run_duration_and_reset_or_warmup_rule": null,
+    "interleaving_or_randomization_rule": null,
+    "confidence_interval_and_outlier_rule": null,
+    "independent_reviewer": null
+  },
+  "configuration_changes": {
+    "default": "none",
+    "explicitly_authorized_changes": [],
+    "before_after_evidence_location": null,
+    "rollback_owner_and_method": null
+  },
+  "evidence": {
+    "separate_preflight_report_per_run": true,
+    "all_raw_traces_retained_immutable": true,
+    "runner_analyzer_source_hashes_recorded": true,
+    "failed_and_rejected_runs_retained": true,
+    "evidence_root": null
+  },
+  "go_no_go": {
+    "status": "blocked_until_required_fields_and_valid_runs_exist",
+    "custom_scheduler_necessity": null,
+    "decision_owner": null,
+    "decision_date": null,
+    "rationale_and_evidence": null
+  }
+}

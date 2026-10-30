@@ -11,6 +11,8 @@
 
 #include <linux/types.h>
 #include <linux/ioctl.h>
+#include <linux/xtos_bci_snapshot.h>
+#include <linux/xtos_bci_config.h>
 
 /* ioctl magic number */
 #define XTOS_BCI_IOC_MAGIC 'X'

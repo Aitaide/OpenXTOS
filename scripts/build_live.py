@@ -18,6 +18,7 @@ sys.path.insert(0,str(ROOT/'scripts'))
 from userspace import resolve_root, verify_rootfs
 from userspace_root import open_owned_root
 from live_ai import install_runtime, validate_runtime
+from install_eeg_loop import install as install_eeg_loop
 
 REQUIRED_CONFIG=['CONFIG_PREEMPT_RT=y','CONFIG_SQUASHFS=y','CONFIG_SQUASHFS_ZLIB=y','CONFIG_OVERLAY_FS=y','CONFIG_BLK_DEV_LOOP=y','CONFIG_ISO9660_FS=y','CONFIG_USB_STORAGE=y','CONFIG_DEVTMPFS=y']
 REQUIRED_CONFIG += ['CONFIG_SECURITY=y','CONFIG_SECURITY_LANDLOCK=y','CONFIG_SECCOMP=y',
@@ -180,13 +181,49 @@ def build_native_tools(stage):
         output.chmod(0o755)
 
 
+def install_eeg_stream(stage, work, repo=ROOT):
+    """Build the native producer against the staged SDK; never need target Python."""
+    stage, work, repo = Path(stage), Path(work), Path(repo)
+    work.mkdir(parents=True,exist_ok=True)
+    # A reused system build root must never reuse stale objects or toolchain state.
+    work=Path(tempfile.mkdtemp(prefix='eeg-stream-',dir=work))
+    directory=work/'eeg-stream-source'
+    directory.mkdir()
+    native=repo/'tools/xtos-eeg-stream'
+    sources=sorted(p for p in native.iterdir() if p.suffix in ('.c','.h') or p.name=='Makefile')
+    expected={str(p.relative_to(repo)):sha(p) for p in sources}
+    for path in sources:
+        shutil.copy2(path,directory/path.name)
+        if sha(directory/path.name)!=expected[str(path.relative_to(repo))]:
+            raise ValueError('EEG stream source changed while staging')
+    env=dict(os.environ,CC=os.environ.get('CC','gcc'),AR=os.environ.get('AR','ar'))
+    run(['make','-C',directory,'install',f'CC={env["CC"]}',f'AR={env["AR"]}',
+         f'BUILD_DIR={work/"eeg-stream-build"}',f'DESTDIR={stage}','PREFIX=/usr',
+         f'CPPFLAGS=-I{stage/"usr/include"}',
+         f'SDK_LIBS={stage/"usr/lib/libxtos-bci.a"} {stage/"usr/lib/libxtos-signal.a"}',
+         'LDFLAGS=-static'],env=env)
+    if {str(p.relative_to(repo)):sha(p) for p in sources}!=expected:
+        raise ValueError('EEG stream source changed during build')
+    binary=stage/'usr/bin/eeg-stream'
+    if binary.read_bytes()[:4]!=b'\x7fELF':
+        raise ValueError('EEG stream producer is not ELF')
+    record={'schema':'xtos-eeg-stream-source-inventory-v1','status':'installed_native',
+            'source_hashes':expected,'binary_hashes':{'usr/bin/eeg-stream':sha(binary)},
+            'physical_device_evidence':False}
+    write(stage,'usr/share/xtos/eeg-stream-sources.json',json.dumps(record,sort_keys=True,indent=2)+'\n')
+    return record
+
+
 def install_sdk(stage, work):
     source=work/'sdk-source'
     for name in ['sdk']:
         shutil.copytree(ROOT/name,source/name,symlinks=True)
     include=source/'kernel/linux/include/linux';include.mkdir(parents=True)
     shutil.copy2(ROOT/'kernel/linux/include/linux/xtos_queue.h',include/'xtos_queue.h')
-    env=dict(os.environ,CC='gcc',AR='ar')
+    parser=source/'kernel/linux/drivers/xtos/bci';parser.mkdir(parents=True)
+    shutil.copy2(ROOT/'kernel/linux/drivers/xtos/bci/xtos_cyton_packet.h',parser/'xtos_cyton_packet.h')
+    shutil.copy2(ROOT/'kernel/linux/drivers/xtos/bci/xtos_cyton_config.h',parser/'xtos_cyton_config.h')
+    env=dict(os.environ,CC=os.environ.get('CC','gcc'),AR=os.environ.get('AR','ar'))
     for library in ['rt','signal','bci']:
         directory=source/'sdk'/('libxtos-'+library)
         run(['make','-C',directory,'clean','all'],env=env)
@@ -194,7 +231,7 @@ def install_sdk(stage, work):
         shutil.copy2(directory/('libxtos-'+library+'.a'),stage/'usr/lib')
         headers=stage/'usr/include/xtos';headers.mkdir(parents=True,exist_ok=True)
         for h in (directory/'include/xtos').glob('*.h'):shutil.copy2(h,headers/h.name)
-    tests=[('rt','test_rt'),('rt','test_spsc'),('signal','test_signal')]
+    tests=[('rt','test_rt'),('rt','test_spsc'),('signal','test_signal'),('signal','test_eeg_window')]
     dest=stage/'usr/libexec/xtos';dest.mkdir(parents=True,exist_ok=True)
     for library,name in tests:
         directory=source/'sdk'/('libxtos-'+library)
@@ -207,8 +244,16 @@ def install_sdk(stage, work):
         run(['make','-C',directory,'clean','all','LDFLAGS=-static -lm','LDLIBS=-static -lm'],env=env)
         shutil.copy2(directory/tool,stage/'usr/bin'/tool)
     fixture=stage/'usr/share/xtos/fixtures';fixture.mkdir(parents=True,exist_ok=True)
+    native_bci=source/'tools/xtos-cyton'
+    shutil.copytree(ROOT/'tools/xtos-cyton',native_bci,symlinks=True)
+    run(['make','-C',native_bci,'clean','all','LDFLAGS=-static'],env=env)
+    shutil.copy2(native_bci/'bci',stage/'usr/bin/bci')
     shutil.copy2(ROOT/'tools/xtos-eeg-pipeline/fixtures/valid.csv',fixture/'valid.csv')
+    cyton=stage/'usr/share/xtos/eeg-pipeline';cyton.mkdir(parents=True,exist_ok=True)
+    for name in ['openbci_cyton.py','cyton_capture.py','cyton_replay.py','device_contract.py']:
+        shutil.copy2(ROOT/'tools/xtos-eeg-pipeline'/name,cyton/name)
     shutil.copy2(ROOT/'system/rootfs/usr/bin/xtos-selftest',stage/'usr/bin/xtos-selftest')
+    return install_eeg_stream(stage,work,ROOT)
 
 
 def grub_config(kernel_extra=''):
@@ -306,7 +351,19 @@ def build(args):
         for name in ['build','source']:(runtime/'usr/lib/modules'/release/name).unlink(missing_ok=True)
         run(['depmod','-b',runtime,release])
         build_native_tools(runtime)
-        install_sdk(runtime,stage)
+        eeg_stream_sources=install_sdk(runtime,stage)
+        native_bci_result=subprocess.run([sys.executable,str(ROOT/'scripts/verify_native_bci_runtime.py'),'--rootfs',runtime],
+                                        capture_output=True,text=True,check=True,timeout=20)
+        native_bci_runtime=json.loads(native_bci_result.stdout)
+        if native_bci_runtime.get('status')!='pass' or native_bci_runtime.get('eight_channel_filter') is not True:
+            raise ValueError('Native BCI runtime smoke did not pass')
+        cyton_result=subprocess.run([sys.executable,str(ROOT/'scripts/verify_cyton_runtime.py'),'--rootfs',runtime,'--smoke'],
+                                   capture_output=True,text=True,check=True,timeout=40)
+        cyton_runtime=json.loads(cyton_result.stdout)
+        if cyton_runtime.get('status')!='pass' or cyton_runtime.get('interpreter_runtime_smoke') is not True:
+            raise ValueError('Cyton runtime smoke did not pass')
+        cyton_runtime['profile_sha256']=sha(ROOT/'system/profiles/live-developer.json')
+        eeg_loop_sources = install_eeg_loop(runtime, ROOT)
         ai_runtime=install_runtime(runtime,ai_root,ai_descriptor,ROOT,ai_lock) if ai_root else None
         # liblsl (Lab Streaming Layer) from the pinned upstream build; the lock
         # covers the .so hash (see tools/lsl/build_lsl.sh + tests/test_lsl_build.py).
@@ -423,6 +480,10 @@ def build(args):
         run(['grub-mkrescue','-o',product,iso],env=env)
         build_manifest={'schema_version':1,'status':'built-unverified-live-candidate','architecture':'x86_64','kernel_release':release,'kernel_sha256':sha(image),'kernel_config_sha256':sha(kernel/'.config'),'userspace_lock_sha256':manifest['lock_sha256'],'source_git_head':provenance['source_git_head'],'source_state':provenance['source_state'],'authorized_public_key_sha256':hashlib.sha256(key.encode()).hexdigest() if key else None,'rootfs_squashfs_sha256':sha(squash),'initramfs_sha256':sha(iso/'boot/initramfs.gz'),'iso_sha256':sha(product),'iso_bytes':product.stat().st_size,'epoch':epoch,'storage':live_storage,'ssh':'publickey only when provisioned','firewall':'implemented for private QEMU validation; physical policy deployment unverified','secure_boot':'unverified/unsupported','private_key_included':False}
         build_manifest['ai_runtime']=ai_runtime
+        build_manifest['cyton_runtime']=cyton_runtime
+        build_manifest['native_bci_runtime']=native_bci_runtime
+        build_manifest['eeg_loop_sources']=eeg_loop_sources
+        build_manifest['eeg_stream_sources']=eeg_stream_sources
         shutil.copy2(kernel/'.config', images/'kernel.config')
         write(stage,'images/build-manifest.json',json.dumps(build_manifest,sort_keys=True,indent=2)+'\n')
         write(stage,'images/SHA256SUMS',sha(product)+'  '+product.name+'\n'+sha(images/'build-manifest.json')+'  build-manifest.json\n')
@@ -435,6 +496,14 @@ def build(args):
 
 
 def main():
+    if sys.argv[1:2]==['install-eeg-stream']:
+        p=argparse.ArgumentParser(description='Install only the native producer using the staged SDK')
+        p.add_argument('--rootfs',type=Path,required=True)
+        p.add_argument('--work-dir',type=Path,required=True)
+        p.add_argument('--source-root',type=Path,default=ROOT)
+        args=p.parse_args(sys.argv[2:])
+        print(json.dumps(install_eeg_stream(args.rootfs,args.work_dir,args.source_root),sort_keys=True))
+        return 0
     p=argparse.ArgumentParser(description=__doc__)
     p.add_argument('--userspace-root',type=Path,required=True)
     p.add_argument('--kernel-build',type=Path,required=True)

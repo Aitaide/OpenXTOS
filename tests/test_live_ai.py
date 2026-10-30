@@ -28,8 +28,9 @@ class LiveAiTests(unittest.TestCase):
         self.source = self.work / 'source'
         package = self.source / 'tools/xtos-ai-runtime/xtos_ai_runtime'
         package.mkdir(parents=True)
-        for name in ['__init__.py', '__main__.py', 'client.py', 'server.py', 'worker.py', 'trust.py']:
-            (package / name).write_text('# source fixture\n')
+        maintained = ROOT / 'tools/xtos-ai-runtime/xtos_ai_runtime'
+        for source in maintained.glob('*.py'):
+            (package / source.name).write_bytes(source.read_bytes())
         self.runtime = self.work / 'runtime'
         self.runtime.mkdir()
         (self.runtime / 'bin').mkdir()
@@ -83,7 +84,7 @@ class LiveAiTests(unittest.TestCase):
         result = self.validate()
         stage = self.work / 'stage'
         stage.mkdir()
-        report = self.module.install_runtime(stage, self.runtime, self.descriptor, self.source, 'a' * 64)
+        report = self.module.install_runtime(stage, self.runtime, self.descriptor, ROOT, 'a' * 64)
         self.assertEqual(report['provision_manifest_sha256'], result['provision_manifest_sha256'])
         self.assertEqual((stage / 'opt/xtos-ai/bin/xtos-ai-python').read_bytes(),
                          (self.runtime / 'bin/xtos-ai-python').read_bytes())
@@ -191,6 +192,43 @@ class LiveAiTests(unittest.TestCase):
                      'test_action_gate.py', 'test_action_executor.py',
                      'test_action_executor_resources.py', 'test_native_modelverify.py',
                      'test_ai_runtime_bundle.py', 'test_live_ai.py']:
+            self.assertIn(name, text)
+
+    def test_preinstalled_verified_runtime_sources_are_reused_not_overwritten(self):
+        spec = importlib.util.spec_from_file_location('install_eeg_loop', ROOT / 'scripts/install_eeg_loop.py')
+        install_module = importlib.util.module_from_spec(spec); spec.loader.exec_module(install_module)
+        install_eeg = install_module.install
+        stage = self.work / 'stage'
+        stage.mkdir()
+        install_eeg(stage, ROOT)
+        before = {path.relative_to(stage / 'usr/lib/xtos').as_posix(): sha(path)
+                  for path in (stage / 'usr/lib/xtos/xtos_ai_runtime').glob('*.py')}
+        report = self.module.install_runtime(stage, self.runtime, self.descriptor, ROOT, 'a' * 64)
+        self.assertEqual(set(report['service_sources_sha256']),
+                         {Path(path).name for path in before})
+        after = {path.name: sha(path)
+                 for path in (stage / 'usr/lib/xtos/xtos_ai_runtime').glob('*.py')}
+        self.assertEqual(report['service_sources_sha256'], after)
+        self.assertEqual({path.relative_to(stage / 'usr/lib/xtos').as_posix(): sha(path)
+                          for path in (stage / 'usr/lib/xtos/xtos_ai_runtime').glob('*.py')}, before)
+
+    def test_preinstalled_tampered_runtime_source_is_refused_without_overwrite(self):
+        spec = importlib.util.spec_from_file_location('install_eeg_loop', ROOT / 'scripts/install_eeg_loop.py')
+        install_module = importlib.util.module_from_spec(spec); spec.loader.exec_module(install_module)
+        install_eeg = install_module.install
+        stage = self.work / 'stage'
+        stage.mkdir()
+        install_eeg(stage, ROOT)
+        target = stage / 'usr/lib/xtos/xtos_ai_runtime/client.py'
+        target.write_bytes(b'caller-owned tampering')
+        with self.assertRaisesRegex(ValueError, 'AI staging destination already exists'):
+            self.module.install_runtime(stage, self.runtime, self.descriptor, ROOT, 'a' * 64)
+        self.assertEqual(target.read_bytes(), b'caller-owned tampering')
+
+    def test_p3_suites_remain_in_shared_maintenance_entry(self):
+        text = (ROOT / 'scripts/test.sh').read_text()
+        for name in ('test_eeg_stream_process.py', 'test_eeg_controller.py',
+                     'test_eeg_feature_binding.py', 'test_ai_model_binding.py'):
             self.assertIn(name, text)
 
     def test_postcopy_validation_failure_removes_only_owned_runtime(self):
@@ -358,7 +396,7 @@ class LiveAiTests(unittest.TestCase):
                 self.module.install_runtime(stage, self.runtime, self.descriptor, self.source, 'a' * 64)
         self.assertEqual(len(tampered), 1)
         self.assertEqual((self.source / 'tools/xtos-ai-runtime/xtos_ai_runtime/__init__.py').read_bytes(),
-                         b'# source fixture\n')
+                         (ROOT / 'tools/xtos-ai-runtime/xtos_ai_runtime/__init__.py').read_bytes())
         for relative in ['usr/libexec/xtos/ai-service', 'usr/libexec/xtos/ai-entry.py',
                          'usr/share/xtos/ai-runtime.json']:
             self.assertFalse(os.path.lexists(stage / relative))

@@ -465,6 +465,11 @@ def _valid_id(value: Any) -> bool:
     return type(value) is str and 1 <= len(value) <= 128
 
 
+def _valid_model_digest(value: Any) -> bool:
+    return (type(value) is str and len(value) == 64
+            and all(char in "0123456789abcdef" for char in value))
+
+
 def _envelope(request_id: Any, status: str, reason: str) -> dict[str, Any]:
     return {
         "schema": SCHEMA,
@@ -913,6 +918,11 @@ class InferenceService:
 
     def _infer(self, request: dict[str, Any]) -> dict[str, Any]:
         request_id = request["id"]
+        if "expected_model_sha256" in request:
+            if not _valid_model_digest(request["expected_model_sha256"]):
+                return _envelope(request_id, "invalid", "invalid_model_digest")
+            if type(request.get("model")) is not str or not request["model"]:
+                return _envelope(request_id, "invalid", "invalid_request")
         deadline_ms = self._deadline(request.get("deadline_ms", 1000))
         if deadline_ms is None:
             return _envelope(request_id, "invalid", "invalid_deadline")
@@ -978,6 +988,14 @@ class InferenceService:
                 self._inflight_tickets.pop(request_id, None)
                 self._condition.notify_all()
                 return _envelope(request_id, "unavailable", "policy_unavailable")
+            expected_digest = request.get("expected_model_sha256")
+            if expected_digest is not None and expected_digest != ticket.manifest.sha256:
+                self._active_id = None
+                self._inflight.pop(request_id, None)
+                self._inflight_tickets.pop(request_id, None)
+                self._request_denials.pop(request_id, None)
+                self._condition.notify_all()
+                return _envelope(request_id, "unavailable", "model_digest_mismatch")
             self._worker_users[worker] = self._worker_users.get(worker, 0) + 1
         try:
             reason = self._check_ticket(ticket)
@@ -1003,6 +1021,8 @@ class InferenceService:
             with self._condition:
                 if ticket.deny_event.is_set() or self._trust_failure:
                     return _envelope(request_id, "unavailable", self._deny_reasons.get(worker, self._trust_failure or "model_revoked"))
+                if expected_digest is not None and result.get("status") == "success":
+                    result = dict(result, model_sha256=ticket.manifest.sha256)
                 return result
         except RequestError:
             return _envelope(request_id, "invalid", "invalid_request")
@@ -1098,6 +1118,8 @@ class InferenceService:
             if self._closed:
                 return _envelope(request_id, "unavailable", "service_closed")
         op = request.get("op")
+        if "expected_model_sha256" in request and op != "infer":
+            return _envelope(request_id, "invalid", "invalid_request")
         if op == "list":
             with self._condition:
                 models = sorted(self._models)

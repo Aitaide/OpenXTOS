@@ -1,5 +1,8 @@
 # XTOS调度器实现文档
 
+> **过期历史记录，非当前实现说明。** 文中“核心功能已完成”、系统调用、15 级实时优先级和实现路径与当前源码不符。现有 `xtos_sched.c` 是辅助队列，不是 Linux `sched_class`。当前事实见 [`scheduler_integration_audit.md`](scheduler_integration_audit.md)。
+
+
 ## 概述
 
 本文档描述了XTOS实时调度器的第一阶段实现，包括核心调度算法、15级优先级队列和系统调用接口。

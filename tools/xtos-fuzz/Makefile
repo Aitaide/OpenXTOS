@@ -20,8 +20,8 @@ fuzz_csv_parse: fuzz_csv_parse.c $(FUZZ_RT_SRC) $(FUZZ_SIGNAL_SRC) \
                 ../../sdk/libxtos-signal/include/xtos/signal.h
 	$(CC) $(CPPFLAGS) $(CFLAGS) -o $@ fuzz_csv_parse.c $(FUZZ_RT_SRC) $(FUZZ_SIGNAL_SRC) -lm
 
-fuzz_openbci_packet: fuzz_openbci_packet.c
-	$(CC) $(CFLAGS) -o $@ fuzz_openbci_packet.c
+fuzz_openbci_packet: fuzz_openbci_packet.c ../../kernel/linux/drivers/xtos/bci/xtos_cyton_packet.h
+	$(CC) $(CFLAGS) -o $@ fuzz_openbci_packet.c -I../../kernel/linux/drivers/xtos/bci
 
 # Generate deterministic corpus and run both harnesses over it.
 # Any harness abort (crash / sanitizer trap) fails make.

@@ -31,6 +31,27 @@ class FetchTests(unittest.TestCase):
         for command in ['vulkaninfo --help', 'clinfo --help']:
             self.assertIn(command, data['required_commands'])
 
+    def test_live_profile_declares_cyton_runtime_contract(self):
+        result = subprocess.run([sys.executable, str(SCRIPT), '--profile', 'live-developer',
+                                '--arch', 'x86_64', '--describe'], capture_output=True,
+                               text=True)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        data = json.loads(result.stdout)
+        contract = data.get('runtime_contracts', {}).get('cyton_userspace')
+        self.assertIsInstance(contract, dict)
+        self.assertEqual(contract['interpreter'], 'python3')
+        self.assertEqual(contract['source_dir'], '/usr/share/xtos/eeg-pipeline')
+        self.assertEqual(contract['filter_binary'], '/usr/bin/xtos-eeg-pipeline')
+        stdlib = {'argparse', 'ctypes', 'dataclasses', 'errno', 'hashlib', 'json', 'math',
+                  'os', 'pathlib', 'select', 'shutil', 'signal', 'stat', 'subprocess',
+                  'sys', 'tempfile', 'termios', 'threading', 'time', 'typing'}
+        self.assertTrue(stdlib.issubset(set(contract['modules'])))
+        self.assertEqual(contract['minimum_python_version'], '3.10')
+        self.assertEqual(contract['libc_required_symbols'], ['renameat2'])
+        self.assertFalse(contract['physical_device_evidence'])
+        for command in ('python3', 'python3 -c "import argparse,ctypes,json,termios"'):
+            self.assertIn(command, data['required_commands'])
+
     def test_unsupported_architecture_is_rejected_without_work_dir(self):
         with tempfile.TemporaryDirectory(dir=os.environ.get('TMPDIR')) as tmp:
             work = Path(tmp) / 'download'

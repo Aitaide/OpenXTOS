@@ -1,10 +1,10 @@
 {
   "bomFormat": "CycloneDX",
   "specVersion": "1.5",
-  "serialNumber": "urn:uuid:fabc575927a73201054a1d64eb3b32dc05be",
+  "serialNumber": "urn:uuid:79b039656c52d8399084c76fbaef6922e5ee",
   "version": 1,
   "metadata": {
-    "timestamp": "2026-10-22T23:32:47.948064+00:00",
+    "timestamp": "2026-10-30T12:25:26.970973+00:00",
     "component": {
       "type": "application",
       "bom-ref": "xtos-component-xtos-system",
@@ -30,7 +30,7 @@
     "properties": [
       {
         "name": "xtos:git-commit",
-        "value": "60c985e7e2e109e613c5b4858dc498b60af169b0"
+        "value": "3f6d63e4b1518e5e923fdb77c90c0d73d8aba382"
       },
       {
         "name": "xtos:kernel-release",
@@ -142,19 +142,43 @@
           }
         }
       ],
-      "description": "XTOS kernel integration patch: scheduler helper, BCI core, BCI buffer, OpenBCI Cyton serdev driver, UAPI headers",
+      "description": "XTOS kernel integration patch: scheduler helper, BCI core, BCI buffer, OpenBCI Cyton serdev driver and shared packet parser, UAPI headers",
       "scope": "required",
       "purl": "pkg:generic/xtos-linux-integration@1.0.1",
       "properties": [
         {
           "name": "xtos:source-path",
           "value": "kernel/patches/xtos-linux-6.6.patch"
+        },
+        {
+          "name": "openbci-cyton-packet.h",
+          "value": "5f7c40cc6ccff6aae11ff2071ff8eb6c2ba3cfcfc9232b9fdba058502f617d9c"
+        },
+        {
+          "name": "xtos:source:drivers/xtos/bci/xtos_bci_frame.c",
+          "value": "341b169e5231895fc6a2b3d54a95e9adf01279388f700c940b5fefb62adbfec1"
+        },
+        {
+          "name": "xtos:source:drivers/xtos/bci/xtos_bci_frame.h",
+          "value": "a62840caf9c1dae91a3ddf8ba0c98e5774f5540f8c2492ebc6fa1e103ee6c36b"
+        },
+        {
+          "name": "xtos:source:drivers/xtos/bci/xtos_bci_frame_snapshot.c",
+          "value": "bf461bf3d58aba36fb5b335bd41c7c065fc88e4cb5d52c3634c2f0d2809e0a77"
+        },
+        {
+          "name": "xtos:source:drivers/xtos/bci/xtos_bci_frame_snapshot.h",
+          "value": "9f6161209fb3d7ba8f9c91bd515739fed4883af9f4591e68243b884c6790bc30"
+        },
+        {
+          "name": "xtos:source:include/uapi/linux/xtos_bci_frame.h",
+          "value": "5624bf38d39fff39cfb883deba5155eda4e72aa55d0fd3738d8df505f098deca"
         }
       ],
       "hashes": [
         {
           "alg": "SHA-256",
-          "content": "59f96281610024f6879f250f730da4a89eae007170cc3550b7e7d21f66c1905e"
+          "content": "b22c3bd7cafbf78679e19f45ec3b9d7c7043e0d2bde124798d3d8922614fcd28"
         }
       ]
     },
@@ -232,7 +256,7 @@
       "type": "library",
       "bom-ref": "xtos-component-libxtos-signal",
       "name": "libxtos-signal",
-      "version": "1.0.1",
+      "version": "1.1.0",
       "licenses": [
         {
           "license": {
@@ -240,9 +264,9 @@
           }
         }
       ],
-      "description": "XTOS deterministic signal processing library (FFT, notch, bandpass, SSVEP, P300)",
+      "description": "XTOS deterministic signal library (FFT, notch, bandpass, SSVEP, P300, bounded versioned EEG mean/RMS windows)",
       "scope": "required",
-      "purl": "pkg:generic/libxtos-signal@1.0.1",
+      "purl": "pkg:generic/libxtos-signal@1.1.0",
       "properties": [
         {
           "name": "xtos:source-path",
@@ -253,6 +277,22 @@
         {
           "alg": "SHA-256",
           "content": "938e691254458345a8ef091086cd79bec5af3600e6f2724733771170b51471e0"
+        },
+        {
+          "alg": "SHA-256",
+          "content": "318d3864c773c679dc58e4809860b508ab3a697190211dd2a6a65531e30185a2"
+        },
+        {
+          "alg": "SHA-256",
+          "content": "2a665fdfa5d4779d2905928eabd8b160d49f1a55d74616cb3fae8a8737b6f9bc"
+        },
+        {
+          "alg": "SHA-256",
+          "content": "4f78460caed6cb7183013d3202357798a256f944f3fbb43f3a20faf8f57ddd7d"
+        },
+        {
+          "alg": "SHA-256",
+          "content": "3361770d56380e8fe2356e796a03c9d741e768dcb360b7930f16ee83015e15ea"
         }
       ]
     },
@@ -268,7 +308,7 @@
           }
         }
       ],
-      "description": "XTOS BCI session library (device open, ioctl wrappers, impedance/stat APIs)",
+      "description": "XTOS BCI session library (versioned frame read and immutable snapshots, configuration, legacy sample APIs)",
       "scope": "required",
       "purl": "pkg:generic/libxtos-bci@1.0.1",
       "properties": [
@@ -280,7 +320,31 @@
       "hashes": [
         {
           "alg": "SHA-256",
-          "content": "28472d89545f3173c0fa29dfc6914536675c3e47df20d9293490b45bbfc9b0c5"
+          "content": "788eac2cd9360688e75fc1495c32daf3f60eedde3768c3e02a01529432aecda4"
+        },
+        {
+          "alg": "SHA-256",
+          "content": "e77280f57748af991b3a92afa8bc6ca4a93ba1d72b283d1e97142115aca61284"
+        },
+        {
+          "alg": "SHA-256",
+          "content": "38ac98e8638f5547a8f62b96a04894b21c051b6fc0ad7dd1c93601ee0c2f5dad"
+        },
+        {
+          "alg": "SHA-256",
+          "content": "d4bd22e021b5a6f0dd10f430495adb7200e08f874d4ae678a8b4f78589ffecb7"
+        },
+        {
+          "alg": "SHA-256",
+          "content": "72bf2ca67e4c93c2805cc92f98a68bb4352336677bdda22f727ac7d2685b50ff"
+        },
+        {
+          "alg": "SHA-256",
+          "content": "0c38657288618e1f033a877e734a296aa2b2979ff4a5e7e4e3058a6abee2836a"
+        },
+        {
+          "alg": "SHA-256",
+          "content": "405c5d7759cdb4d1782323531917d7071bbfe0ebfe6673034aacd886c0fdc458"
         }
       ]
     },
@@ -296,7 +360,7 @@
           }
         }
       ],
-      "description": "Virtual EEG CSV pipeline tool (parse, SPSC, bandpass, latency stats)",
+      "description": "Virtual EEG CSV pipeline, Cyton Python capture/replay and bounded device-report validation",
       "scope": "required",
       "purl": "pkg:generic/xtos-eeg-pipeline@1.0.1",
       "properties": [
@@ -308,7 +372,187 @@
       "hashes": [
         {
           "alg": "SHA-256",
+          "content": "7c7cd1ee7d621f051634e36ec37bb90844ef067ec084c0d6d3bcf6035ec2d171"
+        },
+        {
+          "alg": "SHA-256",
           "content": "40c08039986bb8b07f10beb276f95c46f7b9355478e06371f98ff4c2ddbcf18b"
+        },
+        {
+          "alg": "SHA-256",
+          "content": "684e93c8e6d9027a1e063b69db6bd1bd5eb0749ea7e7e2c0f6f89e22f0314ef5"
+        },
+        {
+          "alg": "SHA-256",
+          "content": "11c725fb20fc07a5fc9c780fab575d0d8fc40bac1f624ba71bd633b1bf9abb82"
+        },
+        {
+          "alg": "SHA-256",
+          "content": "c407dea84bd42b3b5e98b42a8ec54551d59bc7c70d6d17dbbc29d250fd32457b"
+        },
+        {
+          "alg": "SHA-256",
+          "content": "32c2d4b1c85cb874ff5f6f7944678f16c5c0c9e719bbc96f2653712bbed53bc9"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "bom-ref": "xtos-component-bci",
+      "name": "bci",
+      "version": "1.0.1",
+      "licenses": [
+        {
+          "license": {
+            "id": "GPL-2.0-only"
+          }
+        }
+      ],
+      "description": "Native Cyton configuration, diagnostics, explicit reference calibration, and eight-channel streaming command",
+      "scope": "required",
+      "purl": "pkg:generic/bci@1.0.1",
+      "properties": [
+        {
+          "name": "xtos:source-path",
+          "value": "tools/xtos-cyton"
+        }
+      ],
+      "hashes": [
+        {
+          "alg": "SHA-256",
+          "content": "47833b7789b963f6d674de13d9e9dac7d4a4db4094266a4fe8a505db7d22529e"
+        },
+        {
+          "alg": "SHA-256",
+          "content": "07272c71732578a505374bf1ffcae61866c8fdfa0c9532896dce208cd18bfc2e"
+        },
+        {
+          "alg": "SHA-256",
+          "content": "2c8805ecb6af4307a0208a228615b3179f6a8a9acfb75b2d7f3c50dd7283e908"
+        },
+        {
+          "alg": "SHA-256",
+          "content": "7be6b12d034101e051f44e6ca125e93e3225e0d80b8cdfee1f7ddfc97ca06045"
+        },
+        {
+          "alg": "SHA-256",
+          "content": "aee4d388efc633d6980298580fe07e6c62c3642799b931d62df146ac6837e84d"
+        },
+        {
+          "alg": "SHA-256",
+          "content": "d0bd05da58ff66f7d8742b03bbbeff5ae0dfa4e7bd3bee28a68e53fcc20070b5"
+        },
+        {
+          "alg": "SHA-256",
+          "content": "c365f7ec23ff4056f7c66a1fba9f2c5c2e582f925445d6d9b4c4c9f911b629cd"
+        },
+        {
+          "alg": "SHA-256",
+          "content": "64797a05205c94ea15d2a1ba76b2561920e15b725f8d4def5c824fc1ae58e024"
+        },
+        {
+          "alg": "SHA-256",
+          "content": "8bad20c8bd76731572a41ea9a06d0d84e5f1d6747a25c47a62b69428422ba208"
+        },
+        {
+          "alg": "SHA-256",
+          "content": "75e059aa435cffdcf9d25a2f71c7f9a018198947d1b266b6779009401ef696d0"
+        },
+        {
+          "alg": "SHA-256",
+          "content": "8e1aa78a3d6e1ecd1ff48e40a28ec999dc7bd15380f3c8f126dc159c9cf4bb66"
+        },
+        {
+          "alg": "SHA-256",
+          "content": "8dd25573b3165359cdf4f96f385cf92ed78680674129e32c40f388d7fbdc7583"
+        },
+        {
+          "alg": "SHA-256",
+          "content": "9fba8f5d650d13c9fab7186a7e10fa0e60118d910bd452f619eaa7cd59d1f2bb"
+        },
+        {
+          "alg": "SHA-256",
+          "content": "1798c3d86e8403b5763f5b08f04cd930b7f4b34aea6e599e2acdb02bb9c8f517"
+        },
+        {
+          "alg": "SHA-256",
+          "content": "00260cc99be44a7adf876f01044f70c66e78b4847848b240af84788b75e0dd11"
+        },
+        {
+          "alg": "SHA-256",
+          "content": "4e736974716ade1f6aab8ccb02f29f7029593fd685ec211ebc084cf5164329c4"
+        },
+        {
+          "alg": "SHA-256",
+          "content": "39f8225d995e171be5ca5e6826b82a06007393742431ed7ecba1b96848bb340f"
+        },
+        {
+          "alg": "SHA-256",
+          "content": "4a39eb7d4201d7f4f6c0d14d1b526642030a6db48d629ca87474ddcabb5323d0"
+        },
+        {
+          "alg": "SHA-256",
+          "content": "c85c28d683ed8baea272215f5cd0d7df06b708f701504f1563d0d70892026756"
+        },
+        {
+          "alg": "SHA-256",
+          "content": "85e8ed203dd3732a46f2926041df027f9814ee88090e3f85e945503d9fb345a1"
+        },
+        {
+          "alg": "SHA-256",
+          "content": "c68aba13d72c88bfd11bdb640c5871a72df59299bdce4b8745a960237b0bca0a"
+        },
+        {
+          "alg": "SHA-256",
+          "content": "0e170918bec2c970d5d6f4503f894f681dfcbe5de391682e99526d526b3cd381"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "bom-ref": "xtos-component-xtos-eeg-stream",
+      "name": "xtos-eeg-stream",
+      "version": "1.0.1",
+      "licenses": [
+        {
+          "license": {
+            "id": "Apache-2.0"
+          }
+        }
+      ],
+      "description": "Native bounded BCI frame/window JSONL producer for the EEG loop consumer",
+      "scope": "required",
+      "purl": "pkg:generic/xtos-eeg-stream@1.0.1",
+      "properties": [
+        {
+          "name": "xtos:source-path",
+          "value": "tools/xtos-eeg-stream"
+        }
+      ],
+      "hashes": [
+        {
+          "alg": "SHA-256",
+          "content": "99ae794768b4b161fa842275e8105d1028ab3031122ebd22fc67afb14882d644"
+        },
+        {
+          "alg": "SHA-256",
+          "content": "8936ca241110c17ed25d6c961b028f3e37474f02e5415a65d7fd6a76507825a6"
+        },
+        {
+          "alg": "SHA-256",
+          "content": "cad0dd126db60b9a0926c4dabaeb0f1103b878bd519deb9d7fdefc1e17e9d5fd"
+        },
+        {
+          "alg": "SHA-256",
+          "content": "87c43d749ff73dd642ce59b17bd8bfef5977787a271f2508efa7694ebffc0b51"
+        },
+        {
+          "alg": "SHA-256",
+          "content": "df122f52ac1f239c5b5d57d3c63d9beb3d8f63114a9c31eac60a7432eb7fbbee"
+        },
+        {
+          "alg": "SHA-256",
+          "content": "5d4b4365361d4b2860084f550b4758aaafcaee4e6e1cef0b4b94c94622c4eeb8"
         }
       ]
     },
@@ -370,6 +614,178 @@
     },
     {
       "type": "library",
+      "bom-ref": "xtos-component-xtos-device-plugins",
+      "name": "xtos-device-plugins",
+      "version": "0.1.0",
+      "licenses": [
+        {
+          "license": {
+            "id": "Apache-2.0"
+          }
+        }
+      ],
+      "description": "Fixture-only multi-device plugin contract and canonical Cyton adapter; physical transports are not shipped",
+      "scope": "excluded",
+      "purl": "pkg:generic/xtos-device-plugins@0.1.0",
+      "properties": [
+        {
+          "name": "xtos:source-path",
+          "value": "tools/xtos-devices"
+        }
+      ],
+      "hashes": [
+        {
+          "alg": "SHA-256",
+          "content": "d432a57fd2336cccc8b3e6b30efe4a5cbae952c7dcf1783aecfaf68ec600e3f1"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "bom-ref": "xtos-component-xtos-eeg-loop",
+      "name": "xtos-eeg-loop",
+      "version": "1.0.1",
+      "licenses": [
+        {
+          "license": {
+            "id": "Apache-2.0"
+          }
+        }
+      ],
+      "description": "Bounded EEG feature binding, signed CPU transport, lifecycle, harmless simulation, controller, and JSONL process source",
+      "scope": "required",
+      "purl": "pkg:generic/xtos-eeg-loop@1.0.1",
+      "properties": [
+        {
+          "name": "xtos:source-path",
+          "value": "tools/xtos_eeg_loop"
+        }
+      ],
+      "hashes": [
+        {
+          "alg": "SHA-256",
+          "content": "f8dedecd613fece42cfd34d3d45c4500145d60ad719c71a1375069451352a5e8"
+        },
+        {
+          "alg": "SHA-256",
+          "content": "a958d5267a5e0325015d2fb2803a8acedeece0edaa505704cf8fe47c90cd7026"
+        },
+        {
+          "alg": "SHA-256",
+          "content": "2cde5ae019b4d5328d43b1d9ba71242a8e36d5752d25dba70a35b1e11180481c"
+        },
+        {
+          "alg": "SHA-256",
+          "content": "02020a6be4253b29961b117a9da42ca7a98a604cdacae2ec30e442b550dcb56f"
+        },
+        {
+          "alg": "SHA-256",
+          "content": "f081fe60e5ceb34633fc887b32672923c4049b2e87bfb8e7af96725ed9c04cff"
+        },
+        {
+          "alg": "SHA-256",
+          "content": "6abaa8bf9fb8af8fcc0d8fc8a0b315a9dd1d916610e8fc3730130ab774850f3b"
+        },
+        {
+          "alg": "SHA-256",
+          "content": "8c30a2a9d08730ff547ac4725b16f3e5bb77ff8b2c609ef6aa44a9092fce2122"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "bom-ref": "xtos-component-xtos-ai-runtime",
+      "name": "xtos-ai-runtime",
+      "version": "1.0.1",
+      "licenses": [
+        {
+          "license": {
+            "id": "Apache-2.0"
+          }
+        }
+      ],
+      "description": "Bounded local AF_UNIX model runtime and signed model trust source",
+      "scope": "required",
+      "purl": "pkg:generic/xtos-ai-runtime@1.0.1",
+      "properties": [
+        {
+          "name": "xtos:source-path",
+          "value": "tools/xtos-ai-runtime/xtos_ai_runtime"
+        }
+      ],
+      "hashes": [
+        {
+          "alg": "SHA-256",
+          "content": "c6250699e654aacc96d061ff45ef967b4ea6b00c1dcb9a6592145f63689d4e00"
+        },
+        {
+          "alg": "SHA-256",
+          "content": "f7a825b3b1cc94d3f8eeffcc6c1362677dcf7dc229bc5f4d287e362661587cfd"
+        },
+        {
+          "alg": "SHA-256",
+          "content": "6b7df44013e5d93328eb90fd60c29a3f820c344cd74b50be2a3f124fb63d5060"
+        },
+        {
+          "alg": "SHA-256",
+          "content": "a2d6273a721b39f54a3862d9bccf51c5eeef51c629b05216d2a180b14c7553a0"
+        },
+        {
+          "alg": "SHA-256",
+          "content": "d5567826439c46ac17ef774dd19c6aa6785589d5ae93815a71426b790efad5c8"
+        },
+        {
+          "alg": "SHA-256",
+          "content": "1bd9265fc98bd6daeac3db41225943baeb8db4b197695c9d2bd9f98f39a8d89e"
+        },
+        {
+          "alg": "SHA-256",
+          "content": "f7ef14e185302d9ff14ce30b032b745078b2d4245891b32e6e071dd27e8f3cbb"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "bom-ref": "xtos-component-xtos-action-gate",
+      "name": "xtos-action-gate",
+      "version": "1.0.1",
+      "licenses": [
+        {
+          "license": {
+            "id": "Apache-2.0"
+          }
+        }
+      ],
+      "description": "Fixed root-owned approval store and exact harmless action request schema",
+      "scope": "required",
+      "purl": "pkg:generic/xtos-action-gate@1.0.1",
+      "properties": [
+        {
+          "name": "xtos:source-path",
+          "value": "tools/xtos_action_gate"
+        }
+      ],
+      "hashes": [
+        {
+          "alg": "SHA-256",
+          "content": "d1d4bc81986a4958ce489b9dbcdf26d161da719ef54ce42daaa47d74f12e74a2"
+        },
+        {
+          "alg": "SHA-256",
+          "content": "7523223e8febdd9a573eb66698532e11dd63775522b4d3b532a3d7dd00c2f1c9"
+        },
+        {
+          "alg": "SHA-256",
+          "content": "277fc8cb290906f06bdf3501bfd1550ebf12e03fd2ac7f7be8d322c15699f2b5"
+        },
+        {
+          "alg": "SHA-256",
+          "content": "7181547088fe14f9f22badf947f2501af8c012b86bd2a1a3bcca6aeb8e624578"
+        }
+      ]
+    },
+    {
+      "type": "library",
       "bom-ref": "xtos-component-xtos-fuzz",
       "name": "xtos-fuzz",
       "version": "1.0.1",
@@ -396,7 +812,7 @@
         },
         {
           "alg": "SHA-256",
-          "content": "aca3513ee815025cc56b8d88180b72643aef51fb75315a0d1e5e56bec0fe5196"
+          "content": "5817bb708309a004cbfafa8ee2cf535ebca50764d355ed603c225b351bc0700b"
         }
       ]
     },
@@ -551,8 +967,13 @@
         "xtos-component-libxtos-signal",
         "xtos-component-libxtos-bci",
         "xtos-component-xtos-eeg-pipeline",
+        "xtos-component-bci",
+        "xtos-component-xtos-eeg-stream",
         "xtos-component-xtos-signal-benchmark",
-        "xtos-component-xtos-eeg-replay"
+        "xtos-component-xtos-eeg-replay",
+        "xtos-component-xtos-eeg-loop",
+        "xtos-component-xtos-ai-runtime",
+        "xtos-component-xtos-action-gate"
       ]
     },
     {
@@ -588,11 +1009,38 @@
       "dependsOn": []
     },
     {
+      "ref": "xtos-component-bci",
+      "dependsOn": []
+    },
+    {
+      "ref": "xtos-component-xtos-eeg-stream",
+      "dependsOn": [
+        "xtos-component-libxtos-bci",
+        "xtos-component-libxtos-signal"
+      ]
+    },
+    {
       "ref": "xtos-component-xtos-signal-benchmark",
       "dependsOn": []
     },
     {
       "ref": "xtos-component-xtos-eeg-replay",
+      "dependsOn": []
+    },
+    {
+      "ref": "xtos-component-xtos-device-plugins",
+      "dependsOn": []
+    },
+    {
+      "ref": "xtos-component-xtos-eeg-loop",
+      "dependsOn": []
+    },
+    {
+      "ref": "xtos-component-xtos-ai-runtime",
+      "dependsOn": []
+    },
+    {
+      "ref": "xtos-component-xtos-action-gate",
       "dependsOn": []
     },
     {

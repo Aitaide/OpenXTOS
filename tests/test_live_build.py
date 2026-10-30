@@ -6,7 +6,67 @@ ROOT=Path(__file__).resolve().parents[1]
 SCRIPT=ROOT/'scripts/build_live.py'
 
 class LiveBuildTests(unittest.TestCase):
-    def test_help_describes_non_installing_live_output(self):
+    def test_live_and_system_builds_package_cyton_userspace_slice(self):
+        build_system = (ROOT / 'scripts/build_system.sh').read_text()
+        build_live = (ROOT / 'scripts/build_live.py').read_text()
+        runtime_check = (ROOT / 'scripts/verify_cyton_runtime.py').read_text()
+        for name in ('openbci_cyton.py', 'cyton_capture.py', 'cyton_replay.py', 'device_contract.py'):
+            self.assertIn(name, build_live)
+            self.assertNotIn(name, build_system)
+        self.assertIn('verify_cyton_runtime.py', build_live)
+        self.assertIn("'--rootfs',runtime,'--smoke'", build_live)
+        self.assertIn("build_manifest['cyton_runtime']", build_live)
+        self.assertIn('install-eeg-stream', build_system)
+        self.assertIn('interpreter_runtime_smoke', runtime_check)
+
+        self.assertIn('usr/share/xtos/eeg-pipeline', build_live)
+    def test_p3_suites_are_in_shared_maintenance_entry(self):
+        text = (ROOT / 'scripts/test.sh').read_text()
+        for name in ('test_eeg_stream.py', 'test_eeg_stream_export.py',
+                     'test_eeg_feature_binding.py', 'test_eeg_transport_fixture.py',
+                     'test_eeg_cpu_transport.py', 'test_eeg_lifecycle.py',
+                     'test_eeg_simulation.py', 'test_eeg_controller.py',
+                     'test_eeg_stream_process.py', 'test_ai_model_binding.py',
+                     'test_eeg_loop_install.py'):
+            self.assertIn(name, text)
+
+    def test_shared_p3_loop_executes_suites_without_main_guard(self):
+        import re
+        text = (ROOT / 'scripts/test.sh').read_text()
+        match = re.search(r'for suite in test_ai_model_binding\.py\b.*?\ndone', text, re.S)
+        if match is None:
+            self.fail('shared P3 suite loop is missing')
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            tests = root / 'tests'
+            tests.mkdir()
+            names = re.findall(r'test_[a-z_]+\.py', match.group())
+            self.assertEqual(len(names), 11)
+            for name in names:
+                (tests / name).write_text('import unittest\n'
+                    'class EntryTests(unittest.TestCase):\n'
+                    '    def test_entry(self):\n'
+                    '        self.assertTrue(True)\n')
+            result = subprocess.run(['bash', '-eu', '-c', match.group()],
+                env={**os.environ, 'ROOT': str(root), 'PYTHONDONTWRITEBYTECODE': '1'},
+                capture_output=True, text=True, timeout=15)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual(len(re.findall(r'^Ran 1 test in ', result.stderr, re.M)), 11,
+                             result.stdout + result.stderr)
+
+    def test_live_builder_installs_stream_sources_and_checks_source_only_manifest(self):
+        import ast
+        text = (ROOT / 'scripts/build_live.py').read_text()
+        self.assertIn('from install_eeg_loop import install as install_eeg_loop', text)
+        self.assertIn("build_manifest['eeg_loop_sources']", text)
+        self.assertIn("eeg_loop_sources = install_eeg_loop(runtime, ROOT)", text)
+        tree = ast.parse(text)
+        build = next(node for node in tree.body if isinstance(node, ast.FunctionDef) and node.name == 'build')
+        calls = [node for node in ast.walk(build) if isinstance(node, ast.Call)]
+        installer_calls = [node for node in calls if isinstance(node.func, ast.Name) and node.func.id == 'install_eeg_loop']
+        self.assertEqual(len(installer_calls), 1)
+
+    def test_help_lists_read_only_build_arguments(self):
         p=subprocess.run([sys.executable,str(SCRIPT),'--help'],capture_output=True,text=True)
         self.assertEqual(p.returncode,0,p.stderr)
         self.assertIn('--userspace-root',p.stdout)

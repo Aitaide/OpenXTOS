@@ -179,6 +179,7 @@ AR=aarch64-linux-gnu-ar \
 cp "$ROOT/sdk/libxtos-signal/libxtos-signal.a" "$ROOTFS/usr/lib/"
 cp "$ROOT/sdk/libxtos-signal/include/xtos/signal.h" "$ROOTFS/usr/include/xtos/"
 cp "$ROOT/sdk/libxtos-signal/include/xtos/signal_version.h" "$ROOTFS/usr/include/xtos/"
+cp "$ROOT/sdk/libxtos-signal/include/xtos/eeg_window.h" "$ROOTFS/usr/include/xtos/"
 
 # libxtos-bci
 log "Building libxtos-bci..."
@@ -190,6 +191,12 @@ AR=aarch64-linux-gnu-ar \
 cp "$ROOT/sdk/libxtos-bci/libxtos-bci.a" "$ROOTFS/usr/lib/"
 cp "$ROOT/sdk/libxtos-bci/include/xtos/bci.h" "$ROOTFS/usr/include/xtos/"
 cp "$ROOT/sdk/libxtos-bci/include/xtos/bci_version.h" "$ROOTFS/usr/include/xtos/"
+cp "$ROOT/sdk/libxtos-bci/include/xtos/"*.h "$ROOTFS/usr/include/xtos/"
+
+# Native-only install_eeg_stream; all objects stay under BUILD_ROOT.
+CC="${CC:-aarch64-linux-gnu-gcc}" AR="${AR:-aarch64-linux-gnu-ar}" \
+    python3 "$ROOT/scripts/build_live.py" install-eeg-stream --rootfs "$ROOTFS" \
+    --work-dir "$BUILD_ROOT/xtos-eeg-stream-install-arm64" --source-root "$ROOT"
 
 # Verify all installed libraries are aarch64 (guards against stale x86_64
 # artifacts in the sdk tree breaking Stage 4 static links)

@@ -8,7 +8,7 @@ from pathlib import Path
 ROOT = Path(__file__).parents[3]
 LIB_DIR = ROOT / "sdk" / "libxtos-signal"
 FIXTURE = LIB_DIR / "tests" / "fixtures" / "p300_trials.json"
-LIB = LIB_DIR / "libxtos-signal.so.1.0"
+LIB = LIB_DIR / "libxtos-signal.so.1"
 
 
 class SSVEPFeature(ctypes.Structure):

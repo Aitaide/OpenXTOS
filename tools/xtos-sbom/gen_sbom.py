@@ -69,7 +69,7 @@ COMPONENTS = [
         "version": "1.0.1",
         "license": LICENSE_GPL2,
         "description": ("XTOS kernel integration patch: scheduler helper, BCI core, "
-                        "BCI buffer, OpenBCI Cyton serdev driver, UAPI headers"),
+                        "BCI buffer, OpenBCI Cyton serdev driver and shared packet parser, UAPI headers"),
         "scope": "required",
         "path": "kernel/patches/xtos-linux-6.6.patch",
         "hash_globs": ["kernel/patches/xtos-linux-6.6.patch"],
@@ -96,30 +96,60 @@ COMPONENTS = [
     },
     {
         "name": "libxtos-signal",
-        "version": "1.0.1",
+        "version": "1.1.0",
         "license": LICENSE_APACHE,
-        "description": "XTOS deterministic signal processing library (FFT, notch, bandpass, SSVEP, P300)",
+        "description": "XTOS deterministic signal library (FFT, notch, bandpass, SSVEP, P300, bounded versioned EEG mean/RMS windows)",
         "scope": "required",
         "path": "sdk/libxtos-signal",
-        "hash_globs": ["src/signal.c"],
+        "hash_globs": ["src/signal.c", "src/eeg_window.c", "include/xtos/signal.h",
+                       "include/xtos/signal_version.h", "include/xtos/eeg_window.h"],
     },
     {
         "name": "libxtos-bci",
         "version": "1.0.1",
         "license": LICENSE_APACHE,
-        "description": "XTOS BCI session library (device open, ioctl wrappers, impedance/stat APIs)",
+        "description": "XTOS BCI session library (versioned frame read and immutable snapshots, configuration, legacy sample APIs)",
         "scope": "required",
         "path": "sdk/libxtos-bci",
-        "hash_globs": ["src/session.c"],
+        "hash_globs": ["src/session.c", "include/xtos/bci.h", "include/xtos/bci_uapi.h",
+                       "include/xtos/bci_config_uapi.h", "include/xtos/bci_snapshot_uapi.h",
+                       "include/xtos/bci_frame_uapi.h", "include/xtos/bci_version.h"],
     },
     {
         "name": "xtos-eeg-pipeline",
         "version": "1.0.1",
         "license": LICENSE_APACHE,
-        "description": "Virtual EEG CSV pipeline tool (parse, SPSC, bandpass, latency stats)",
+        "description": "Virtual EEG CSV pipeline, Cyton Python capture/replay and bounded device-report validation",
         "scope": "required",
         "path": "tools/xtos-eeg-pipeline",
-        "hash_globs": ["pipeline.c"],
+        "hash_globs": ["Makefile", "pipeline.c", "openbci_cyton.py", "cyton_capture.py",
+                       "cyton_replay.py", "device_contract.py"],
+    },
+    {
+        "name": "bci",
+        "version": "1.0.1",
+        "license": LICENSE_GPL2,
+        "description": "Native Cyton configuration, diagnostics, explicit reference calibration, and eight-channel streaming command",
+        "scope": "required",
+        "path": "tools/xtos-cyton",
+        "hash_globs": ["Makefile", "main.c", "bci_stream.c", "bci_stream.h",
+                       "cyton_serial.c", "cyton_serial.h", "cli_options.h", "bci_decode.h",
+                       "bci_config_cli.c", "bci_config_cli.h",
+                       "bci_diagnostic_cli.c", "bci_diagnostic_cli.h",
+                       "bci_diagnostic.c", "bci_diagnostic.h", "bci_diagnostic_options.h",
+                       "cyton_diagnostic_serial.c", "cyton_diagnostic_serial.h",
+                       "bci_calibration.c", "bci_calibration.h", "bci_calibration_cli.c",
+                       "bci_calibration_cli.h", "bci_sha256.h"],
+    },
+    {
+        "name": "xtos-eeg-stream",
+        "version": "1.0.1",
+        "license": LICENSE_APACHE,
+        "description": "Native bounded BCI frame/window JSONL producer for the EEG loop consumer",
+        "scope": "required",
+        "path": "tools/xtos-eeg-stream",
+        "hash_globs": ["Makefile", "main.c", "eeg_export.c", "eeg_export.h",
+                       "eeg_stream.c", "eeg_stream.h"],
     },
     {
         "name": "xtos-signal-benchmark",
@@ -138,6 +168,43 @@ COMPONENTS = [
         "scope": "required",
         "path": "tools/xtos-eeg-replay",
         "hash_globs": ["replay.py"],
+    },
+    {
+        "name": "xtos-device-plugins",
+        "version": "0.1.0",
+        "license": LICENSE_APACHE,
+        "description": "Fixture-only multi-device plugin contract and canonical Cyton adapter; physical transports are not shipped",
+        "scope": "excluded",
+        "path": "tools/xtos-devices",
+        "hash_globs": ["xtos_devices.py"],
+    },
+    {
+        "name": "xtos-eeg-loop",
+        "version": "1.0.1",
+        "license": LICENSE_APACHE,
+        "description": "Bounded EEG feature binding, signed CPU transport, lifecycle, harmless simulation, controller, and JSONL process source",
+        "scope": "required",
+        "path": "tools/xtos_eeg_loop",
+        "hash_globs": ["__init__.py", "controller.py", "feature_binding.py", "inference.py",
+                       "lifecycle.py", "simulation.py", "stream.py"],
+    },
+    {
+        "name": "xtos-ai-runtime",
+        "version": "1.0.1",
+        "license": LICENSE_APACHE,
+        "description": "Bounded local AF_UNIX model runtime and signed model trust source",
+        "scope": "required",
+        "path": "tools/xtos-ai-runtime/xtos_ai_runtime",
+        "hash_globs": ["__init__.py", "__main__.py", "client.py", "protocol.py", "server.py", "trust.py", "worker.py"],
+    },
+    {
+        "name": "xtos-action-gate",
+        "version": "1.0.1",
+        "license": LICENSE_APACHE,
+        "description": "Fixed root-owned approval store and exact harmless action request schema",
+        "scope": "required",
+        "path": "tools/xtos_action_gate",
+        "hash_globs": ["__init__.py", "__main__.py", "schema.py", "store.py"],
     },
     {
         "name": "xtos-fuzz",
@@ -219,6 +286,18 @@ def build_component(entry: dict) -> dict:
         hashes.append({"alg": "SHA-256", "content": sha256_file(base)})
         comp.setdefault("properties", []).append(
             {"name": "xtos:source-path", "value": entry["path"]})
+    if entry["name"] == "xtos-linux-integration":
+        parser_path = ROOT / "kernel/linux/drivers/xtos/bci/xtos_cyton_packet.h"
+        comp.setdefault("properties", []).append({
+            "name": "openbci-cyton-packet.h", "value": sha256_file(parser_path)})
+        for name in ("drivers/xtos/bci/xtos_bci_frame.c",
+                     "drivers/xtos/bci/xtos_bci_frame.h",
+                     "drivers/xtos/bci/xtos_bci_frame_snapshot.c",
+                     "drivers/xtos/bci/xtos_bci_frame_snapshot.h",
+                     "include/uapi/linux/xtos_bci_frame.h"):
+            comp["properties"].append({
+                "name": "xtos:source:" + name,
+                "value": sha256_file(ROOT / "kernel/linux" / name)})
     if hashes:
         comp["hashes"] = hashes
     if "upstream_sha256" in entry:
@@ -271,7 +350,8 @@ def main() -> int:
                      "dependsOn": [c["bom-ref"] for c in components
                                    if c["scope"] == "required"]}]
     for comp in components:
-        dependencies.append({"ref": comp["bom-ref"], "dependsOn": []})
+        requires = [component_ref(name) for name in ('libxtos-bci', 'libxtos-signal')] if comp['name'] == 'xtos-eeg-stream' else []
+        dependencies.append({"ref": comp["bom-ref"], "dependsOn": requires})
 
     bom = {
         "bomFormat": "CycloneDX",

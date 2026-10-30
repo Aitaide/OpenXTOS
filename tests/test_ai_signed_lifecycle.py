@@ -7,6 +7,7 @@ import tempfile
 import threading
 import time
 import unittest
+from unittest.mock import patch
 
 ROOT = Path(__file__).resolve().parents[1]
 import sys
@@ -14,10 +15,73 @@ sys.path.insert(0, str(ROOT / "tools/xtos-ai-runtime"))
 from xtos_ai_runtime.client import request
 from xtos_ai_runtime.server import InferenceService, UnixInferenceServer
 from ai_trust_fixtures import policy_claims, signed_envelope
-from ai_service_trust_fixtures import make_real_signed_service_fixture
+from ai_service_trust_fixtures import FixtureTrustPolicy, make_real_signed_service_fixture
+
+
+def _shutdown_server(server, owner):
+    server.shutdown()
+    owner.join(3)
+    if owner.is_alive():
+        raise AssertionError('server close owner did not exit')
+    server.server_close()
 
 
 class SignedLifecycleTests(unittest.TestCase):
+    def test_cleanup_waits_for_automatic_close_owner_before_redundant_close(self):
+        import xtos_ai_runtime.server as runtime_server
+        with tempfile.TemporaryDirectory() as directory:
+            service = InferenceService(Path(directory), trust_policy=FixtureTrustPolicy())
+            server = UnixInferenceServer(Path(directory) / 'owner.sock', service)
+            entered, release = threading.Event(), threading.Event()
+            errors = []
+            original_unlink = server._unlink_owned_socket
+            original_shutdown = server.shutdown
+
+            def shutdown_after_owner_enters():
+                original_shutdown()
+                self.assertTrue(entered.wait(2), 'automatic close did not acquire ownership')
+
+            def delayed_unlink():
+                entered.set()
+                if not release.wait(2):
+                    raise AssertionError('test did not release close owner')
+                return original_unlink()
+
+            def serve():
+                try:
+                    server.serve_forever()
+                except BaseException as error:
+                    errors.append(error)
+
+            def release_after_owner_stalls():
+                if entered.wait(2):
+                    time.sleep(runtime_server.SERVER_CLOSE_LOCK_TIMEOUT * 3)
+                release.set()
+
+            owner = threading.Thread(target=serve, daemon=True)
+            releaser = threading.Thread(target=release_after_owner_stalls, daemon=True)
+            try:
+                with patch.object(server, '_unlink_owned_socket', side_effect=delayed_unlink), \
+                     patch.object(server, 'shutdown', side_effect=shutdown_after_owner_enters):
+                    owner.start()
+                    releaser.start()
+                    _shutdown_server(server, owner)
+                    self.assertTrue(entered.is_set(), 'automatic close was not exercised')
+                    self.assertFalse(owner.is_alive())
+                    self.assertEqual(errors, [])
+                    self.assertTrue(server._closed)
+                    self.assertEqual(server._socket_reference_fd, -1)
+                    self.assertFalse(server.path.exists())
+            finally:
+                release.set()
+                if owner.ident is not None:
+                    owner.join(3)
+                if releaser.ident is not None:
+                    releaser.join(3)
+                if not owner.is_alive():
+                    server.server_close()
+                service.close()
+
     @unittest.skipUnless(os.environ.get("XTOS_TEST_AI_PYTHON"), "explicit locked AI Python not selected")
     def test_signed_policy_revocation_kills_stopped_cpu_worker_and_denies_active_queue(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -85,7 +149,7 @@ class SignedLifecycleTests(unittest.TestCase):
                 if queued.ident is not None: queued.join(3)
                 try: service.close()
                 finally:
-                    server.shutdown(); server.server_close(); owner.join(3)
+                    _shutdown_server(server, owner)
 
 
 if __name__ == "__main__":

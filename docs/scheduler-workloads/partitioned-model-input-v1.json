@@ -1,0 +1,14 @@
+{
+  "schema": "xtos-scheduler-partitioned-input-v1",
+  "partition_cpus": [1, 3, 7],
+  "horizon_ns": 40000000,
+  "dbf_horizon_ns": 40000000,
+  "tasks": [
+    {"name": "cpu1-primary", "cpu": 1, "runtime_ns": 2000000,
+     "deadline_ns": 10000000, "period_ns": 10000000, "priority": 30},
+    {"name": "cpu1-secondary", "cpu": 1, "runtime_ns": 1000000,
+     "deadline_ns": 20000000, "period_ns": 20000000, "priority": 20},
+    {"name": "cpu3-worker", "cpu": 3, "runtime_ns": 3000000,
+     "deadline_ns": 10000000, "period_ns": 10000000, "priority": 25}
+  ]
+}

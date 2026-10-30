@@ -63,6 +63,8 @@
     "ffprobe",
     "v4l2-ctl",
     "nft",
+    "python3",
+    "python3 -c \"import argparse,ctypes,json,termios\"",
     "python3 -c \"import numpy\"",
     "python3 -c \"import scipy\"",
     "python3 -c \"import onnxruntime\"",
@@ -77,5 +79,16 @@
     "mkfs.ext4",
     "tune2fs"
   ],
+  "runtime_contracts": {
+    "cyton_userspace": {
+      "interpreter": "python3",
+      "source_dir": "/usr/share/xtos/eeg-pipeline",
+      "filter_binary": "/usr/bin/xtos-eeg-pipeline",
+      "minimum_python_version": "3.10",
+      "libc_required_symbols": ["renameat2"],
+      "modules": ["argparse", "ctypes", "dataclasses", "errno", "hashlib", "json", "math", "os", "pathlib", "select", "shutil", "signal", "stat", "subprocess", "sys", "tempfile", "termios", "threading", "time", "typing"],
+      "physical_device_evidence": false
+    }
+  },
   "schema_version": 1
 }

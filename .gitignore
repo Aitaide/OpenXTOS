@@ -46,8 +46,16 @@ sdk/libxtos-rt/tests/test_rt
 sdk/libxtos-rt/tests/test_spsc
 sdk/libxtos-rt/tests/test_spsc_tsan
 sdk/libxtos-signal/test_signal
+sdk/libxtos-signal/test_eeg_window
 sdk/libxtos-signal/test_signal_san
 tools/xtos-eeg-pipeline/xtos-eeg-pipeline
+tools/xtos-cyton/bci
+tools/xtos-cyton/test_bci_stream
+tools/xtos-cyton/test_bci_decode
+tools/xtos-cyton/test_cli_options
+sdk/libxtos-bci/tests/test_samples
+sdk/libxtos-bci/tests/test_snapshot
+sdk/libxtos-bci/tests/test_snapshot_uapi
 tools/xtos-fuzz/fuzz_csv_parse
 tools/xtos-fuzz/fuzz_openbci_packet
 tools/xtos-fuzz/corpus/

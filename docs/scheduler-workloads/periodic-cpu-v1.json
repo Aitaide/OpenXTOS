@@ -1,0 +1,22 @@
+{
+  "schema":"xtos-scheduler-workload-v1",
+  "name":"periodic-cpu-v1",
+  "status":"synthetic_tool_smoke_only",
+  "production_workload_approved":false,
+  "task_count":1,
+  "background_competitor":{"policy":"other","count":1,"placement":"same_selected_cpu"},
+  "period_ns":10000000,
+  "deadline_ns":8000000,
+  "work_ns":1000000,
+  "runtime_ns":1200000,
+  "duration_s":1,
+  "warmup_jobs":10,
+  "expected_jobs":100,
+  "measured_jobs":90,
+  "policies":{"other":0,"fifo":20,"rr":20,"deadline":0},
+  "cpu_selection":"explicit_online_cpu_within_inherited_affinity",
+  "deadline_unpinned":{"default":false,"diagnostic_only":true,"comparable_to_pinned":false},
+  "timing":{"wall_clock":"CLOCK_MONOTONIC","cpu_clock":"CLOCK_THREAD_CPUTIME_ID","wake_semantics":"first_userspace_timestamp_after_absolute_sleep"},
+  "hardware_performance_evidence":false,
+  "limitations":["Not a device or EEG acquisition workload","Not an application WCET bound","Not evidence of a custom XTOS scheduling class","No hardware superiority conclusion"]
+}

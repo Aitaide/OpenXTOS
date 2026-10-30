@@ -16,6 +16,8 @@
 #include <linux/spinlock.h>
 #include <linux/wait.h>
 #include <linux/dma-mapping.h>
+#include <linux/mutex.h>
+#include <linux/kref.h>
 
 /* BCI device interface types */
 enum xtos_bci_interface {
@@ -28,9 +30,14 @@ enum xtos_bci_interface {
 /* Forward declarations */
 struct xtos_bci_dev;
 struct xtos_bci_ringbuf;
+struct xtos_bci_config_v1;
+struct xtos_bci_frame_v1;
+struct xtos_bci_frame_ring;
 
 /* Device operation callbacks */
 struct xtos_bci_device_ops {
+	/* Wake in-flight operations before unregister waits for op_lock. */
+	void (*cancel)(struct xtos_bci_dev *dev);
 	/* Initialization and cleanup */
 	int (*init)(struct xtos_bci_dev *dev);
 	void (*cleanup)(struct xtos_bci_dev *dev);
@@ -42,7 +49,8 @@ struct xtos_bci_device_ops {
 	                    s32 *buffer,
 	                    size_t num_samples);
 	
-	/* Configuration */
+	/* Configuration. Cyton accepts 250Hz only as a stopped readback assertion;
+	 * its firmware rate command resets unrelated ADS settings. */
 	int (*set_sampling_rate)(struct xtos_bci_dev *dev, int rate);
 	int (*set_channel_enable)(struct xtos_bci_dev *dev, 
 	                          int channel, 
@@ -51,6 +59,11 @@ struct xtos_bci_device_ops {
 	                int channel, 
 	                int gain);
 	
+	int (*set_channel_config)(struct xtos_bci_dev *dev, int channel,
+				  bool enabled, int gain);
+	int (*get_config)(struct xtos_bci_dev *dev,
+			  struct xtos_bci_config_v1 *config);
+
 	/* Calibration */
 	int (*calibrate)(struct xtos_bci_dev *dev);
 	int (*impedance_check)(struct xtos_bci_dev *dev, 
@@ -75,16 +88,24 @@ struct xtos_bci_dev {
 	
 	/* Operation callbacks */
 	const struct xtos_bci_device_ops *ops;
+	struct module *owner;       /* Callback/free code, pinned by each open FD */
+	void (*release)(struct xtos_bci_dev *dev); /* Final allocation destructor */
+	struct kref ref;
+	struct mutex op_lock;       /* Controls/open/cleanup, never held while waiting */
+	struct mutex read_lock;     /* Serialize read snapshot/commit */
+	bool disconnected;
+	bool registered;
 	
 	/* Ring buffer */
 	struct xtos_bci_ringbuf *ringbuf;
+	struct xtos_bci_frame_ring *frames; /* CPU-owned, final device put frees. */
 	
 	/* Character device */
-	struct cdev cdev;
+	struct cdev *cdev;          /* Independently refcounted by VFS */
 	struct device *device;
 	dev_t devt;                 /* Device number (major:minor) */
 	
-	/* Statistics */
+	/* Statistics: RX and core GET/RESET_STATS all hold lock below. */
 	unsigned long samples_read;
 	unsigned long samples_dropped;
 	unsigned long errors;
@@ -92,6 +113,7 @@ struct xtos_bci_dev {
 	/* State */
 	bool opened;
 	bool streaming;
+	int acquisition_error;       /* Negative errno; buffered bytes drain first. */
 	spinlock_t lock;
 	
 	/* Global device list */
@@ -102,6 +124,7 @@ struct xtos_bci_dev {
 struct xtos_bci_ringbuf {
 	void *buffer;               /* DMA buffer */
 	dma_addr_t dma_handle;      /* DMA physical address */
+	struct device *dma_dev;     /* Retained original allocation device */
 	size_t size;                /* Buffer size (bytes) */
 	
 	unsigned long write_pos;    /* Write pointer */
@@ -116,6 +139,13 @@ struct xtos_bci_ringbuf {
 };
 
 /* Core API functions */
+/* init gives the caller one reference; register holds another until unregister.
+ * Caller closes/quiesces transport before dropping its reference. Final put
+ * frees the ring and invokes release; successful open holds ref + owner pin.
+ */
+void xtos_bci_device_init(struct xtos_bci_dev *dev);
+void xtos_bci_get_device(struct xtos_bci_dev *dev);
+void xtos_bci_put_device(struct xtos_bci_dev *dev);
 int xtos_bci_register_device(struct xtos_bci_dev *dev);
 void xtos_bci_unregister_device(struct xtos_bci_dev *dev);
 
@@ -129,6 +159,14 @@ int xtos_bci_ringbuf_read(struct xtos_bci_ringbuf *rb,
                           void *data, 
                           size_t len);
 size_t xtos_bci_ringbuf_available(struct xtos_bci_ringbuf *rb);
+
+/* Enable in sleepable initialization before admitting RX. Producer lifetime and
+ * current-generation admission belong to the driver; publish never allocates. */
+int xtos_bci_device_frames_enable(struct xtos_bci_dev *dev, unsigned int capacity);
+int xtos_bci_device_frame_publish(struct xtos_bci_dev *dev,
+                                const struct xtos_bci_frame_v1 *frame,
+                                const struct xtos_bci_config_v1 *config);
+void xtos_bci_device_frames_wake(struct xtos_bci_dev *dev);
 
 /* Device registration macro */
 #define XTOS_BCI_DEVICE_REGISTER(name, ops_ptr) \

@@ -29,6 +29,7 @@ def describe(name, architecture, seen=()):
         'requested_packages': sorted(set(parent.get('requested_packages', []) + data['requested_packages'])),
         'required_commands': sorted(set(parent.get('required_commands', []) + data['required_commands'])),
         'defaults': dict(parent.get('defaults', {}), **data.get('defaults', {})),
+        'runtime_contracts': dict(parent.get('runtime_contracts', {}), **data.get('runtime_contracts', {})),
     }
 
 def run(command, log_dir, name, apt_config=None):

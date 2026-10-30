@@ -17,7 +17,7 @@ XTOS is a research-grade real-time operating system designed for brain-computer 
 - **Real-Time Kernel**: Linux 6.6.0 + PREEMPT_RT rt15
   - Full preemption support (`CONFIG_PREEMPT_RT=y`)
   - High-resolution timers (1000 Hz)
-  - Custom XTOS scheduler (`CONFIG_XTOS_SCHED=y`)
+  - Optional XTOS scheduler helper (`CONFIG_XTOS_SCHED`); it is not a Linux `sched_class` and does not replace normal Linux task selection
 
 - **BCI Framework**: Kernel-space BCI subsystem
   - XTOS BCI core (`CONFIG_XTOS_BCI=m`)
@@ -141,6 +141,8 @@ Current development phase: **Developer Preview** — three-architecture (x86_64 
 
 See [STATUS.md](STATUS.md) for detailed verification results.
 
+**Scheduler/device gap-closure boundary**: The XTOS scheduler component remains an optional helper, not a Linux `sched_class`. The M0 evidence gate, scheduler-class RFC/lifecycle matrix, and EEG validation contract are implemented. A userspace OpenBCI Cyton serial capture/parser and eight-channel filter-replay slice is now implemented and PTY-tested; physical device identity, board gain/firmware, device recovery, kernel serdev/DMA integration, real workload and kernel scheduler-class integration remain open stage gates.
+
 ---
 
 ## 中文
@@ -156,7 +158,7 @@ XTOS 是面向脑机接口（BCI）和信号处理应用的研究级实时操作
 - **实时内核**：Linux 6.6.0 + PREEMPT_RT rt15
   - 完全抢占支持（`CONFIG_PREEMPT_RT=y`）
   - 高精度定时器（1000 Hz）
-  - 自定义 XTOS 调度器（`CONFIG_XTOS_SCHED=y`）
+  - 可选 XTOS 调度辅助层（`CONFIG_XTOS_SCHED`）；它不是 Linux `sched_class`，不会替换 Linux 正常任务选择
 
 - **BCI 框架**：内核空间 BCI 子系统
   - XTOS BCI 核心（`CONFIG_XTOS_BCI=m`）
@@ -262,3 +264,5 @@ xtos/
 当前开发阶段：**Developer Preview** —— 三架构（x86_64 / ARM64 / RISC-V 64）QEMU 验证系统，含 fuzz、SBOM、ABI 版本化与可复现构建（见 STATUS.md）
 
 详细验证结果见 [STATUS.md](STATUS.md)。
+
+**调度/设备缺口闭环边界**：XTOS 调度组件仍为可选辅助层，不是 Linux `sched_class`。M0 证据门禁、sched_class RFC/生命周期矩阵和 EEG 验收契约已实现。新增 OpenBCI Cyton 用户态串口采集/解析及八通道滤波回放切片，并通过 PTY 合成帧测试；真实板卡身份、gain/firmware、设备恢复、内核 serdev/DMA、真实 workload 和原生调度类集成仍待验收。

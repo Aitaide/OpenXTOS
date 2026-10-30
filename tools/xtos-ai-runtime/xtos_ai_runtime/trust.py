@@ -323,7 +323,9 @@ class NativeEd25519Verifier:
             while view:
                 count = os.write(fd, view)
                 view = view[count:]
-            os.fsync(fd)
+            # These private files are temporary verifier inputs, removed after
+            # the helper exits. Closing completes their same-host visibility;
+            # durability belongs to FilePolicyStore's checkpoint transaction.
         finally:
             os.close(fd)
 

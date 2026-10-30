@@ -1,5 +1,8 @@
 # XTOS调度器测试报告
 
+> **历史测试记录，非当前调度器验收。** 本文记录的队列/编译测试不证明 XTOS 接入 Linux `sched_class`、控制任务选择、成功启动或达到实时延迟目标。当前实现边界见 [`scheduler_integration_audit.md`](scheduler_integration_audit.md)。
+
+
 ## 测试概览
 
 **测试日期**: 2026-09-30  
