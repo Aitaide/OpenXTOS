@@ -56,7 +56,7 @@ class SbomTests(unittest.TestCase):
         self.assertEqual(plugin["scope"], "required")
         plugin_hashes = {h["content"] for h in plugin["hashes"]}
         for name in ("xtos_devices.py", "serial_transport.py", "cyton_protocol.py",
-                     "cyton_serial_plugin.py"):
+                     "cyton_serial_plugin.py", "ganglion_protocol.py", "ganglion_plugin.py"):
             self.assertIn(hashlib.sha256((ROOT / "tools/xtos-devices" / name).read_bytes()).hexdigest(),
                           plugin_hashes)
         kernel = next(c for c in self.bom["components"] if c["name"] == "xtos-linux-integration")

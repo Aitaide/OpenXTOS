@@ -1,0 +1,4466 @@
+[
+  {
+    "width": 18,
+    "notification_index": 0,
+    "notification_hex": "00000064ffff9c000064ffff9c41424344454647",
+    "kind": "raw",
+    "expected_counts": [
+      [
+        100,
+        -100,
+        100,
+        -100
+      ]
+    ],
+    "firmware_generated": true,
+    "physical_capture": false
+  },
+  {
+    "width": 18,
+    "notification_index": 1,
+    "notification_hex": "01ffffc0002ffffc0002ffffc0002ffffc000212",
+    "kind": "compressed",
+    "expected_counts": [
+      [
+        101,
+        -102,
+        101,
+        -102
+      ],
+      [
+        102,
+        -104,
+        102,
+        -104
+      ]
+    ],
+    "firmware_generated": true,
+    "physical_capture": false
+  },
+  {
+    "width": 18,
+    "notification_index": 2,
+    "notification_hex": "02ffffc0002ffffc0002ffffc0002ffffc0002a5",
+    "kind": "compressed",
+    "expected_counts": [
+      [
+        103,
+        -106,
+        103,
+        -106
+      ],
+      [
+        104,
+        -108,
+        104,
+        -108
+      ]
+    ],
+    "firmware_generated": true,
+    "physical_capture": false
+  },
+  {
+    "width": 18,
+    "notification_index": 3,
+    "notification_hex": "03ffffc0002ffffc0002ffffc0002ffffc0002fe",
+    "kind": "compressed",
+    "expected_counts": [
+      [
+        105,
+        -110,
+        105,
+        -110
+      ],
+      [
+        106,
+        -112,
+        106,
+        -112
+      ]
+    ],
+    "firmware_generated": true,
+    "physical_capture": false
+  },
+  {
+    "width": 18,
+    "notification_index": 4,
+    "notification_hex": "04ffffc0002ffffc0002ffffc0002ffffc0002fe",
+    "kind": "compressed",
+    "expected_counts": [
+      [
+        107,
+        -114,
+        107,
+        -114
+      ],
+      [
+        108,
+        -116,
+        108,
+        -116
+      ]
+    ],
+    "firmware_generated": true,
+    "physical_capture": false
+  },
+  {
+    "width": 18,
+    "notification_index": 5,
+    "notification_hex": "05ffffc0002ffffc0002ffffc0002ffffc0002fe",
+    "kind": "compressed",
+    "expected_counts": [
+      [
+        109,
+        -118,
+        109,
+        -118
+      ],
+      [
+        110,
+        -120,
+        110,
+        -120
+      ]
+    ],
+    "firmware_generated": true,
+    "physical_capture": false
+  },
+  {
+    "width": 18,
+    "notification_index": 6,
+    "notification_hex": "06ffffc0002ffffc0002ffffc0002ffffc0002fe",
+    "kind": "compressed",
+    "expected_counts": [
+      [
+        111,
+        -122,
+        111,
+        -122
+      ],
+      [
+        112,
+        -124,
+        112,
+        -124
+      ]
+    ],
+    "firmware_generated": true,
+    "physical_capture": false
+  },
+  {
+    "width": 18,
+    "notification_index": 7,
+    "notification_hex": "07ffffc0002ffffc0002ffffc0002ffffc0002fe",
+    "kind": "compressed",
+    "expected_counts": [
+      [
+        113,
+        -126,
+        113,
+        -126
+      ],
+      [
+        114,
+        -128,
+        114,
+        -128
+      ]
+    ],
+    "firmware_generated": true,
+    "physical_capture": false
+  },
+  {
+    "width": 18,
+    "notification_index": 8,
+    "notification_hex": "08ffffc0002ffffc0002ffffc0002ffffc0002fe",
+    "kind": "compressed",
+    "expected_counts": [
+      [
+        115,
+        -130,
+        115,
+        -130
+      ],
+      [
+        116,
+        -132,
+        116,
+        -132
+      ]
+    ],
+    "firmware_generated": true,
+    "physical_capture": false
+  },
+  {
+    "width": 18,
+    "notification_index": 9,
+    "notification_hex": "09ffffc0002ffffc0002ffffc0002ffffc0002fe",
+    "kind": "compressed",
+    "expected_counts": [
+      [
+        117,
+        -134,
+        117,
+        -134
+      ],
+      [
+        118,
+        -136,
+        118,
+        -136
+      ]
+    ],
+    "firmware_generated": true,
+    "physical_capture": false
+  },
+  {
+    "width": 18,
+    "notification_index": 10,
+    "notification_hex": "0affffc0002ffffc0002ffffc0002ffffc0002fe",
+    "kind": "compressed",
+    "expected_counts": [
+      [
+        119,
+        -138,
+        119,
+        -138
+      ],
+      [
+        120,
+        -140,
+        120,
+        -140
+      ]
+    ],
+    "firmware_generated": true,
+    "physical_capture": false
+  },
+  {
+    "width": 18,
+    "notification_index": 11,
+    "notification_hex": "0bffffc0002ffffc0002ffffc0002ffffc000212",
+    "kind": "compressed",
+    "expected_counts": [
+      [
+        121,
+        -142,
+        121,
+        -142
+      ],
+      [
+        122,
+        -144,
+        122,
+        -144
+      ]
+    ],
+    "firmware_generated": true,
+    "physical_capture": false
+  },
+  {
+    "width": 18,
+    "notification_index": 12,
+    "notification_hex": "0cffffc0002ffffc0002ffffc0002ffffc0002a5",
+    "kind": "compressed",
+    "expected_counts": [
+      [
+        123,
+        -146,
+        123,
+        -146
+      ],
+      [
+        124,
+        -148,
+        124,
+        -148
+      ]
+    ],
+    "firmware_generated": true,
+    "physical_capture": false
+  },
+  {
+    "width": 18,
+    "notification_index": 13,
+    "notification_hex": "0dffffc0002ffffc0002ffffc0002ffffc0002fe",
+    "kind": "compressed",
+    "expected_counts": [
+      [
+        125,
+        -150,
+        125,
+        -150
+      ],
+      [
+        126,
+        -152,
+        126,
+        -152
+      ]
+    ],
+    "firmware_generated": true,
+    "physical_capture": false
+  },
+  {
+    "width": 18,
+    "notification_index": 14,
+    "notification_hex": "0effffc0002ffffc0002ffffc0002ffffc0002fe",
+    "kind": "compressed",
+    "expected_counts": [
+      [
+        127,
+        -154,
+        127,
+        -154
+      ],
+      [
+        128,
+        -156,
+        128,
+        -156
+      ]
+    ],
+    "firmware_generated": true,
+    "physical_capture": false
+  },
+  {
+    "width": 18,
+    "notification_index": 15,
+    "notification_hex": "0fffffc0002ffffc0002ffffc0002ffffc0002fe",
+    "kind": "compressed",
+    "expected_counts": [
+      [
+        129,
+        -158,
+        129,
+        -158
+      ],
+      [
+        130,
+        -160,
+        130,
+        -160
+      ]
+    ],
+    "firmware_generated": true,
+    "physical_capture": false
+  },
+  {
+    "width": 18,
+    "notification_index": 16,
+    "notification_hex": "10ffffc0002ffffc0002ffffc0002ffffc0002fe",
+    "kind": "compressed",
+    "expected_counts": [
+      [
+        131,
+        -162,
+        131,
+        -162
+      ],
+      [
+        132,
+        -164,
+        132,
+        -164
+      ]
+    ],
+    "firmware_generated": true,
+    "physical_capture": false
+  },
+  {
+    "width": 18,
+    "notification_index": 17,
+    "notification_hex": "11ffffc0002ffffc0002ffffc0002ffffc0002fe",
+    "kind": "compressed",
+    "expected_counts": [
+      [
+        133,
+        -166,
+        133,
+        -166
+      ],
+      [
+        134,
+        -168,
+        134,
+        -168
+      ]
+    ],
+    "firmware_generated": true,
+    "physical_capture": false
+  },
+  {
+    "width": 18,
+    "notification_index": 18,
+    "notification_hex": "12ffffc0002ffffc0002ffffc0002ffffc0002fe",
+    "kind": "compressed",
+    "expected_counts": [
+      [
+        135,
+        -170,
+        135,
+        -170
+      ],
+      [
+        136,
+        -172,
+        136,
+        -172
+      ]
+    ],
+    "firmware_generated": true,
+    "physical_capture": false
+  },
+  {
+    "width": 18,
+    "notification_index": 19,
+    "notification_hex": "13ffffc0002ffffc0002ffffc0002ffffc0002fe",
+    "kind": "compressed",
+    "expected_counts": [
+      [
+        137,
+        -174,
+        137,
+        -174
+      ],
+      [
+        138,
+        -176,
+        138,
+        -176
+      ]
+    ],
+    "firmware_generated": true,
+    "physical_capture": false
+  },
+  {
+    "width": 18,
+    "notification_index": 20,
+    "notification_hex": "14ffffc0002ffffc0002ffffc0002ffffc0002fe",
+    "kind": "compressed",
+    "expected_counts": [
+      [
+        139,
+        -178,
+        139,
+        -178
+      ],
+      [
+        140,
+        -180,
+        140,
+        -180
+      ]
+    ],
+    "firmware_generated": true,
+    "physical_capture": false
+  },
+  {
+    "width": 18,
+    "notification_index": 21,
+    "notification_hex": "15ffffc0002ffffc0002ffffc0002ffffc000212",
+    "kind": "compressed",
+    "expected_counts": [
+      [
+        141,
+        -182,
+        141,
+        -182
+      ],
+      [
+        142,
+        -184,
+        142,
+        -184
+      ]
+    ],
+    "firmware_generated": true,
+    "physical_capture": false
+  },
+  {
+    "width": 18,
+    "notification_index": 22,
+    "notification_hex": "16ffffc0002ffffc0002ffffc0002ffffc0002a5",
+    "kind": "compressed",
+    "expected_counts": [
+      [
+        143,
+        -186,
+        143,
+        -186
+      ],
+      [
+        144,
+        -188,
+        144,
+        -188
+      ]
+    ],
+    "firmware_generated": true,
+    "physical_capture": false
+  },
+  {
+    "width": 18,
+    "notification_index": 23,
+    "notification_hex": "17ffffc0002ffffc0002ffffc0002ffffc0002fe",
+    "kind": "compressed",
+    "expected_counts": [
+      [
+        145,
+        -190,
+        145,
+        -190
+      ],
+      [
+        146,
+        -192,
+        146,
+        -192
+      ]
+    ],
+    "firmware_generated": true,
+    "physical_capture": false
+  },
+  {
+    "width": 18,
+    "notification_index": 24,
+    "notification_hex": "18ffffc0002ffffc0002ffffc0002ffffc0002fe",
+    "kind": "compressed",
+    "expected_counts": [
+      [
+        147,
+        -194,
+        147,
+        -194
+      ],
+      [
+        148,
+        -196,
+        148,
+        -196
+      ]
+    ],
+    "firmware_generated": true,
+    "physical_capture": false
+  },
+  {
+    "width": 18,
+    "notification_index": 25,
+    "notification_hex": "19ffffc0002ffffc0002ffffc0002ffffc0002fe",
+    "kind": "compressed",
+    "expected_counts": [
+      [
+        149,
+        -198,
+        149,
+        -198
+      ],
+      [
+        150,
+        -200,
+        150,
+        -200
+      ]
+    ],
+    "firmware_generated": true,
+    "physical_capture": false
+  },
+  {
+    "width": 18,
+    "notification_index": 26,
+    "notification_hex": "1affffc0002ffffc0002ffffc0002ffffc0002fe",
+    "kind": "compressed",
+    "expected_counts": [
+      [
+        151,
+        -202,
+        151,
+        -202
+      ],
+      [
+        152,
+        -204,
+        152,
+        -204
+      ]
+    ],
+    "firmware_generated": true,
+    "physical_capture": false
+  },
+  {
+    "width": 18,
+    "notification_index": 27,
+    "notification_hex": "1bffffc0002ffffc0002ffffc0002ffffc0002fe",
+    "kind": "compressed",
+    "expected_counts": [
+      [
+        153,
+        -206,
+        153,
+        -206
+      ],
+      [
+        154,
+        -208,
+        154,
+        -208
+      ]
+    ],
+    "firmware_generated": true,
+    "physical_capture": false
+  },
+  {
+    "width": 18,
+    "notification_index": 28,
+    "notification_hex": "1cffffc0002ffffc0002ffffc0002ffffc0002fe",
+    "kind": "compressed",
+    "expected_counts": [
+      [
+        155,
+        -210,
+        155,
+        -210
+      ],
+      [
+        156,
+        -212,
+        156,
+        -212
+      ]
+    ],
+    "firmware_generated": true,
+    "physical_capture": false
+  },
+  {
+    "width": 18,
+    "notification_index": 29,
+    "notification_hex": "1dffffc0002ffffc0002ffffc0002ffffc0002fe",
+    "kind": "compressed",
+    "expected_counts": [
+      [
+        157,
+        -214,
+        157,
+        -214
+      ],
+      [
+        158,
+        -216,
+        158,
+        -216
+      ]
+    ],
+    "firmware_generated": true,
+    "physical_capture": false
+  },
+  {
+    "width": 18,
+    "notification_index": 30,
+    "notification_hex": "1effffc0002ffffc0002ffffc0002ffffc0002fe",
+    "kind": "compressed",
+    "expected_counts": [
+      [
+        159,
+        -218,
+        159,
+        -218
+      ],
+      [
+        160,
+        -220,
+        160,
+        -220
+      ]
+    ],
+    "firmware_generated": true,
+    "physical_capture": false
+  },
+  {
+    "width": 18,
+    "notification_index": 31,
+    "notification_hex": "1fffffc0002ffffc0002ffffc0002ffffc000212",
+    "kind": "compressed",
+    "expected_counts": [
+      [
+        161,
+        -222,
+        161,
+        -222
+      ],
+      [
+        162,
+        -224,
+        162,
+        -224
+      ]
+    ],
+    "firmware_generated": true,
+    "physical_capture": false
+  },
+  {
+    "width": 18,
+    "notification_index": 32,
+    "notification_hex": "20ffffc0002ffffc0002ffffc0002ffffc0002a5",
+    "kind": "compressed",
+    "expected_counts": [
+      [
+        163,
+        -226,
+        163,
+        -226
+      ],
+      [
+        164,
+        -228,
+        164,
+        -228
+      ]
+    ],
+    "firmware_generated": true,
+    "physical_capture": false
+  },
+  {
+    "width": 18,
+    "notification_index": 33,
+    "notification_hex": "21ffffc0002ffffc0002ffffc0002ffffc0002fe",
+    "kind": "compressed",
+    "expected_counts": [
+      [
+        165,
+        -230,
+        165,
+        -230
+      ],
+      [
+        166,
+        -232,
+        166,
+        -232
+      ]
+    ],
+    "firmware_generated": true,
+    "physical_capture": false
+  },
+  {
+    "width": 18,
+    "notification_index": 34,
+    "notification_hex": "22ffffc0002ffffc0002ffffc0002ffffc0002fe",
+    "kind": "compressed",
+    "expected_counts": [
+      [
+        167,
+        -234,
+        167,
+        -234
+      ],
+      [
+        168,
+        -236,
+        168,
+        -236
+      ]
+    ],
+    "firmware_generated": true,
+    "physical_capture": false
+  },
+  {
+    "width": 18,
+    "notification_index": 35,
+    "notification_hex": "23ffffc0002ffffc0002ffffc0002ffffc0002fe",
+    "kind": "compressed",
+    "expected_counts": [
+      [
+        169,
+        -238,
+        169,
+        -238
+      ],
+      [
+        170,
+        -240,
+        170,
+        -240
+      ]
+    ],
+    "firmware_generated": true,
+    "physical_capture": false
+  },
+  {
+    "width": 18,
+    "notification_index": 36,
+    "notification_hex": "24ffffc0002ffffc0002ffffc0002ffffc0002fe",
+    "kind": "compressed",
+    "expected_counts": [
+      [
+        171,
+        -242,
+        171,
+        -242
+      ],
+      [
+        172,
+        -244,
+        172,
+        -244
+      ]
+    ],
+    "firmware_generated": true,
+    "physical_capture": false
+  },
+  {
+    "width": 18,
+    "notification_index": 37,
+    "notification_hex": "25ffffc0002ffffc0002ffffc0002ffffc0002fe",
+    "kind": "compressed",
+    "expected_counts": [
+      [
+        173,
+        -246,
+        173,
+        -246
+      ],
+      [
+        174,
+        -248,
+        174,
+        -248
+      ]
+    ],
+    "firmware_generated": true,
+    "physical_capture": false
+  },
+  {
+    "width": 18,
+    "notification_index": 38,
+    "notification_hex": "26ffffc0002ffffc0002ffffc0002ffffc0002fe",
+    "kind": "compressed",
+    "expected_counts": [
+      [
+        175,
+        -250,
+        175,
+        -250
+      ],
+      [
+        176,
+        -252,
+        176,
+        -252
+      ]
+    ],
+    "firmware_generated": true,
+    "physical_capture": false
+  },
+  {
+    "width": 18,
+    "notification_index": 39,
+    "notification_hex": "27ffffc0002ffffc0002ffffc0002ffffc0002fe",
+    "kind": "compressed",
+    "expected_counts": [
+      [
+        177,
+        -254,
+        177,
+        -254
+      ],
+      [
+        178,
+        -256,
+        178,
+        -256
+      ]
+    ],
+    "firmware_generated": true,
+    "physical_capture": false
+  },
+  {
+    "width": 18,
+    "notification_index": 40,
+    "notification_hex": "28ffffc0002ffffc0002ffffc0002ffffc0002fe",
+    "kind": "compressed",
+    "expected_counts": [
+      [
+        179,
+        -258,
+        179,
+        -258
+      ],
+      [
+        180,
+        -260,
+        180,
+        -260
+      ]
+    ],
+    "firmware_generated": true,
+    "physical_capture": false
+  },
+  {
+    "width": 18,
+    "notification_index": 41,
+    "notification_hex": "29ffffc0002ffffc0002ffffc0002ffffc000212",
+    "kind": "compressed",
+    "expected_counts": [
+      [
+        181,
+        -262,
+        181,
+        -262
+      ],
+      [
+        182,
+        -264,
+        182,
+        -264
+      ]
+    ],
+    "firmware_generated": true,
+    "physical_capture": false
+  },
+  {
+    "width": 18,
+    "notification_index": 42,
+    "notification_hex": "2affffc0002ffffc0002ffffc0002ffffc0002a5",
+    "kind": "compressed",
+    "expected_counts": [
+      [
+        183,
+        -266,
+        183,
+        -266
+      ],
+      [
+        184,
+        -268,
+        184,
+        -268
+      ]
+    ],
+    "firmware_generated": true,
+    "physical_capture": false
+  },
+  {
+    "width": 18,
+    "notification_index": 43,
+    "notification_hex": "2bffffc0002ffffc0002ffffc0002ffffc0002fe",
+    "kind": "compressed",
+    "expected_counts": [
+      [
+        185,
+        -270,
+        185,
+        -270
+      ],
+      [
+        186,
+        -272,
+        186,
+        -272
+      ]
+    ],
+    "firmware_generated": true,
+    "physical_capture": false
+  },
+  {
+    "width": 18,
+    "notification_index": 44,
+    "notification_hex": "2cffffc0002ffffc0002ffffc0002ffffc0002fe",
+    "kind": "compressed",
+    "expected_counts": [
+      [
+        187,
+        -274,
+        187,
+        -274
+      ],
+      [
+        188,
+        -276,
+        188,
+        -276
+      ]
+    ],
+    "firmware_generated": true,
+    "physical_capture": false
+  },
+  {
+    "width": 18,
+    "notification_index": 45,
+    "notification_hex": "2dffffc0002ffffc0002ffffc0002ffffc0002fe",
+    "kind": "compressed",
+    "expected_counts": [
+      [
+        189,
+        -278,
+        189,
+        -278
+      ],
+      [
+        190,
+        -280,
+        190,
+        -280
+      ]
+    ],
+    "firmware_generated": true,
+    "physical_capture": false
+  },
+  {
+    "width": 18,
+    "notification_index": 46,
+    "notification_hex": "2effffc0002ffffc0002ffffc0002ffffc0002fe",
+    "kind": "compressed",
+    "expected_counts": [
+      [
+        191,
+        -282,
+        191,
+        -282
+      ],
+      [
+        192,
+        -284,
+        192,
+        -284
+      ]
+    ],
+    "firmware_generated": true,
+    "physical_capture": false
+  },
+  {
+    "width": 18,
+    "notification_index": 47,
+    "notification_hex": "2fffffc0002ffffc0002ffffc0002ffffc0002fe",
+    "kind": "compressed",
+    "expected_counts": [
+      [
+        193,
+        -286,
+        193,
+        -286
+      ],
+      [
+        194,
+        -288,
+        194,
+        -288
+      ]
+    ],
+    "firmware_generated": true,
+    "physical_capture": false
+  },
+  {
+    "width": 18,
+    "notification_index": 48,
+    "notification_hex": "30ffffc0002ffffc0002ffffc0002ffffc0002fe",
+    "kind": "compressed",
+    "expected_counts": [
+      [
+        195,
+        -290,
+        195,
+        -290
+      ],
+      [
+        196,
+        -292,
+        196,
+        -292
+      ]
+    ],
+    "firmware_generated": true,
+    "physical_capture": false
+  },
+  {
+    "width": 18,
+    "notification_index": 49,
+    "notification_hex": "31ffffc0002ffffc0002ffffc0002ffffc0002fe",
+    "kind": "compressed",
+    "expected_counts": [
+      [
+        197,
+        -294,
+        197,
+        -294
+      ],
+      [
+        198,
+        -296,
+        198,
+        -296
+      ]
+    ],
+    "firmware_generated": true,
+    "physical_capture": false
+  },
+  {
+    "width": 18,
+    "notification_index": 50,
+    "notification_hex": "32ffffc0002ffffc0002ffffc0002ffffc0002fe",
+    "kind": "compressed",
+    "expected_counts": [
+      [
+        199,
+        -298,
+        199,
+        -298
+      ],
+      [
+        200,
+        -300,
+        200,
+        -300
+      ]
+    ],
+    "firmware_generated": true,
+    "physical_capture": false
+  },
+  {
+    "width": 18,
+    "notification_index": 51,
+    "notification_hex": "33ffffc0002ffffc0002ffffc0002ffffc000212",
+    "kind": "compressed",
+    "expected_counts": [
+      [
+        201,
+        -302,
+        201,
+        -302
+      ],
+      [
+        202,
+        -304,
+        202,
+        -304
+      ]
+    ],
+    "firmware_generated": true,
+    "physical_capture": false
+  },
+  {
+    "width": 18,
+    "notification_index": 52,
+    "notification_hex": "34ffffc0002ffffc0002ffffc0002ffffc0002a5",
+    "kind": "compressed",
+    "expected_counts": [
+      [
+        203,
+        -306,
+        203,
+        -306
+      ],
+      [
+        204,
+        -308,
+        204,
+        -308
+      ]
+    ],
+    "firmware_generated": true,
+    "physical_capture": false
+  },
+  {
+    "width": 18,
+    "notification_index": 53,
+    "notification_hex": "35ffffc0002ffffc0002ffffc0002ffffc0002fe",
+    "kind": "compressed",
+    "expected_counts": [
+      [
+        205,
+        -310,
+        205,
+        -310
+      ],
+      [
+        206,
+        -312,
+        206,
+        -312
+      ]
+    ],
+    "firmware_generated": true,
+    "physical_capture": false
+  },
+  {
+    "width": 18,
+    "notification_index": 54,
+    "notification_hex": "36ffffc0002ffffc0002ffffc0002ffffc0002fe",
+    "kind": "compressed",
+    "expected_counts": [
+      [
+        207,
+        -314,
+        207,
+        -314
+      ],
+      [
+        208,
+        -316,
+        208,
+        -316
+      ]
+    ],
+    "firmware_generated": true,
+    "physical_capture": false
+  },
+  {
+    "width": 18,
+    "notification_index": 55,
+    "notification_hex": "37ffffc0002ffffc0002ffffc0002ffffc0002fe",
+    "kind": "compressed",
+    "expected_counts": [
+      [
+        209,
+        -318,
+        209,
+        -318
+      ],
+      [
+        210,
+        -320,
+        210,
+        -320
+      ]
+    ],
+    "firmware_generated": true,
+    "physical_capture": false
+  },
+  {
+    "width": 18,
+    "notification_index": 56,
+    "notification_hex": "38ffffc0002ffffc0002ffffc0002ffffc0002fe",
+    "kind": "compressed",
+    "expected_counts": [
+      [
+        211,
+        -322,
+        211,
+        -322
+      ],
+      [
+        212,
+        -324,
+        212,
+        -324
+      ]
+    ],
+    "firmware_generated": true,
+    "physical_capture": false
+  },
+  {
+    "width": 18,
+    "notification_index": 57,
+    "notification_hex": "39ffffc0002ffffc0002ffffc0002ffffc0002fe",
+    "kind": "compressed",
+    "expected_counts": [
+      [
+        213,
+        -326,
+        213,
+        -326
+      ],
+      [
+        214,
+        -328,
+        214,
+        -328
+      ]
+    ],
+    "firmware_generated": true,
+    "physical_capture": false
+  },
+  {
+    "width": 18,
+    "notification_index": 58,
+    "notification_hex": "3affffc0002ffffc0002ffffc0002ffffc0002fe",
+    "kind": "compressed",
+    "expected_counts": [
+      [
+        215,
+        -330,
+        215,
+        -330
+      ],
+      [
+        216,
+        -332,
+        216,
+        -332
+      ]
+    ],
+    "firmware_generated": true,
+    "physical_capture": false
+  },
+  {
+    "width": 18,
+    "notification_index": 59,
+    "notification_hex": "3bffffc0002ffffc0002ffffc0002ffffc0002fe",
+    "kind": "compressed",
+    "expected_counts": [
+      [
+        217,
+        -334,
+        217,
+        -334
+      ],
+      [
+        218,
+        -336,
+        218,
+        -336
+      ]
+    ],
+    "firmware_generated": true,
+    "physical_capture": false
+  },
+  {
+    "width": 18,
+    "notification_index": 60,
+    "notification_hex": "3cffffc0002ffffc0002ffffc0002ffffc0002fe",
+    "kind": "compressed",
+    "expected_counts": [
+      [
+        219,
+        -338,
+        219,
+        -338
+      ],
+      [
+        220,
+        -340,
+        220,
+        -340
+      ]
+    ],
+    "firmware_generated": true,
+    "physical_capture": false
+  },
+  {
+    "width": 18,
+    "notification_index": 61,
+    "notification_hex": "3dffffc0002ffffc0002ffffc0002ffffc000212",
+    "kind": "compressed",
+    "expected_counts": [
+      [
+        221,
+        -342,
+        221,
+        -342
+      ],
+      [
+        222,
+        -344,
+        222,
+        -344
+      ]
+    ],
+    "firmware_generated": true,
+    "physical_capture": false
+  },
+  {
+    "width": 18,
+    "notification_index": 62,
+    "notification_hex": "3effffc0002ffffc0002ffffc0002ffffc0002a5",
+    "kind": "compressed",
+    "expected_counts": [
+      [
+        223,
+        -346,
+        223,
+        -346
+      ],
+      [
+        224,
+        -348,
+        224,
+        -348
+      ]
+    ],
+    "firmware_generated": true,
+    "physical_capture": false
+  },
+  {
+    "width": 18,
+    "notification_index": 63,
+    "notification_hex": "3fffffc0002ffffc0002ffffc0002ffffc0002fe",
+    "kind": "compressed",
+    "expected_counts": [
+      [
+        225,
+        -350,
+        225,
+        -350
+      ],
+      [
+        226,
+        -352,
+        226,
+        -352
+      ]
+    ],
+    "firmware_generated": true,
+    "physical_capture": false
+  },
+  {
+    "width": 18,
+    "notification_index": 64,
+    "notification_hex": "40ffffc0002ffffc0002ffffc0002ffffc0002fe",
+    "kind": "compressed",
+    "expected_counts": [
+      [
+        227,
+        -354,
+        227,
+        -354
+      ],
+      [
+        228,
+        -356,
+        228,
+        -356
+      ]
+    ],
+    "firmware_generated": true,
+    "physical_capture": false
+  },
+  {
+    "width": 18,
+    "notification_index": 65,
+    "notification_hex": "41ffffc0002ffffc0002ffffc0002ffffc0002fe",
+    "kind": "compressed",
+    "expected_counts": [
+      [
+        229,
+        -358,
+        229,
+        -358
+      ],
+      [
+        230,
+        -360,
+        230,
+        -360
+      ]
+    ],
+    "firmware_generated": true,
+    "physical_capture": false
+  },
+  {
+    "width": 18,
+    "notification_index": 66,
+    "notification_hex": "42ffffc0002ffffc0002ffffc0002ffffc0002fe",
+    "kind": "compressed",
+    "expected_counts": [
+      [
+        231,
+        -362,
+        231,
+        -362
+      ],
+      [
+        232,
+        -364,
+        232,
+        -364
+      ]
+    ],
+    "firmware_generated": true,
+    "physical_capture": false
+  },
+  {
+    "width": 18,
+    "notification_index": 67,
+    "notification_hex": "43ffffc0002ffffc0002ffffc0002ffffc0002fe",
+    "kind": "compressed",
+    "expected_counts": [
+      [
+        233,
+        -366,
+        233,
+        -366
+      ],
+      [
+        234,
+        -368,
+        234,
+        -368
+      ]
+    ],
+    "firmware_generated": true,
+    "physical_capture": false
+  },
+  {
+    "width": 18,
+    "notification_index": 68,
+    "notification_hex": "44ffffc0002ffffc0002ffffc0002ffffc0002fe",
+    "kind": "compressed",
+    "expected_counts": [
+      [
+        235,
+        -370,
+        235,
+        -370
+      ],
+      [
+        236,
+        -372,
+        236,
+        -372
+      ]
+    ],
+    "firmware_generated": true,
+    "physical_capture": false
+  },
+  {
+    "width": 18,
+    "notification_index": 69,
+    "notification_hex": "45ffffc0002ffffc0002ffffc0002ffffc0002fe",
+    "kind": "compressed",
+    "expected_counts": [
+      [
+        237,
+        -374,
+        237,
+        -374
+      ],
+      [
+        238,
+        -376,
+        238,
+        -376
+      ]
+    ],
+    "firmware_generated": true,
+    "physical_capture": false
+  },
+  {
+    "width": 18,
+    "notification_index": 70,
+    "notification_hex": "46ffffc0002ffffc0002ffffc0002ffffc0002fe",
+    "kind": "compressed",
+    "expected_counts": [
+      [
+        239,
+        -378,
+        239,
+        -378
+      ],
+      [
+        240,
+        -380,
+        240,
+        -380
+      ]
+    ],
+    "firmware_generated": true,
+    "physical_capture": false
+  },
+  {
+    "width": 18,
+    "notification_index": 71,
+    "notification_hex": "47ffffc0002ffffc0002ffffc0002ffffc000212",
+    "kind": "compressed",
+    "expected_counts": [
+      [
+        241,
+        -382,
+        241,
+        -382
+      ],
+      [
+        242,
+        -384,
+        242,
+        -384
+      ]
+    ],
+    "firmware_generated": true,
+    "physical_capture": false
+  },
+  {
+    "width": 18,
+    "notification_index": 72,
+    "notification_hex": "48ffffc0002ffffc0002ffffc0002ffffc0002a5",
+    "kind": "compressed",
+    "expected_counts": [
+      [
+        243,
+        -386,
+        243,
+        -386
+      ],
+      [
+        244,
+        -388,
+        244,
+        -388
+      ]
+    ],
+    "firmware_generated": true,
+    "physical_capture": false
+  },
+  {
+    "width": 18,
+    "notification_index": 73,
+    "notification_hex": "49ffffc0002ffffc0002ffffc0002ffffc0002fe",
+    "kind": "compressed",
+    "expected_counts": [
+      [
+        245,
+        -390,
+        245,
+        -390
+      ],
+      [
+        246,
+        -392,
+        246,
+        -392
+      ]
+    ],
+    "firmware_generated": true,
+    "physical_capture": false
+  },
+  {
+    "width": 18,
+    "notification_index": 74,
+    "notification_hex": "4affffc0002ffffc0002ffffc0002ffffc0002fe",
+    "kind": "compressed",
+    "expected_counts": [
+      [
+        247,
+        -394,
+        247,
+        -394
+      ],
+      [
+        248,
+        -396,
+        248,
+        -396
+      ]
+    ],
+    "firmware_generated": true,
+    "physical_capture": false
+  },
+  {
+    "width": 18,
+    "notification_index": 75,
+    "notification_hex": "4bffffc0002ffffc0002ffffc0002ffffc0002fe",
+    "kind": "compressed",
+    "expected_counts": [
+      [
+        249,
+        -398,
+        249,
+        -398
+      ],
+      [
+        250,
+        -400,
+        250,
+        -400
+      ]
+    ],
+    "firmware_generated": true,
+    "physical_capture": false
+  },
+  {
+    "width": 18,
+    "notification_index": 76,
+    "notification_hex": "4cffffc0002ffffc0002ffffc0002ffffc0002fe",
+    "kind": "compressed",
+    "expected_counts": [
+      [
+        251,
+        -402,
+        251,
+        -402
+      ],
+      [
+        252,
+        -404,
+        252,
+        -404
+      ]
+    ],
+    "firmware_generated": true,
+    "physical_capture": false
+  },
+  {
+    "width": 18,
+    "notification_index": 77,
+    "notification_hex": "4dffffc0002ffffc0002ffffc0002ffffc0002fe",
+    "kind": "compressed",
+    "expected_counts": [
+      [
+        253,
+        -406,
+        253,
+        -406
+      ],
+      [
+        254,
+        -408,
+        254,
+        -408
+      ]
+    ],
+    "firmware_generated": true,
+    "physical_capture": false
+  },
+  {
+    "width": 18,
+    "notification_index": 78,
+    "notification_hex": "4effffc0002ffffc0002ffffc0002ffffc0002fe",
+    "kind": "compressed",
+    "expected_counts": [
+      [
+        255,
+        -410,
+        255,
+        -410
+      ],
+      [
+        256,
+        -412,
+        256,
+        -412
+      ]
+    ],
+    "firmware_generated": true,
+    "physical_capture": false
+  },
+  {
+    "width": 18,
+    "notification_index": 79,
+    "notification_hex": "4fffffc0002ffffc0002ffffc0002ffffc0002fe",
+    "kind": "compressed",
+    "expected_counts": [
+      [
+        257,
+        -414,
+        257,
+        -414
+      ],
+      [
+        258,
+        -416,
+        258,
+        -416
+      ]
+    ],
+    "firmware_generated": true,
+    "physical_capture": false
+  },
+  {
+    "width": 18,
+    "notification_index": 80,
+    "notification_hex": "50ffffc0002ffffc0002ffffc0002ffffc0002fe",
+    "kind": "compressed",
+    "expected_counts": [
+      [
+        259,
+        -418,
+        259,
+        -418
+      ],
+      [
+        260,
+        -420,
+        260,
+        -420
+      ]
+    ],
+    "firmware_generated": true,
+    "physical_capture": false
+  },
+  {
+    "width": 18,
+    "notification_index": 81,
+    "notification_hex": "51ffffc0002ffffc0002ffffc0002ffffc000212",
+    "kind": "compressed",
+    "expected_counts": [
+      [
+        261,
+        -422,
+        261,
+        -422
+      ],
+      [
+        262,
+        -424,
+        262,
+        -424
+      ]
+    ],
+    "firmware_generated": true,
+    "physical_capture": false
+  },
+  {
+    "width": 18,
+    "notification_index": 82,
+    "notification_hex": "52ffffc0002ffffc0002ffffc0002ffffc0002a5",
+    "kind": "compressed",
+    "expected_counts": [
+      [
+        263,
+        -426,
+        263,
+        -426
+      ],
+      [
+        264,
+        -428,
+        264,
+        -428
+      ]
+    ],
+    "firmware_generated": true,
+    "physical_capture": false
+  },
+  {
+    "width": 18,
+    "notification_index": 83,
+    "notification_hex": "53ffffc0002ffffc0002ffffc0002ffffc0002fe",
+    "kind": "compressed",
+    "expected_counts": [
+      [
+        265,
+        -430,
+        265,
+        -430
+      ],
+      [
+        266,
+        -432,
+        266,
+        -432
+      ]
+    ],
+    "firmware_generated": true,
+    "physical_capture": false
+  },
+  {
+    "width": 18,
+    "notification_index": 84,
+    "notification_hex": "54ffffc0002ffffc0002ffffc0002ffffc0002fe",
+    "kind": "compressed",
+    "expected_counts": [
+      [
+        267,
+        -434,
+        267,
+        -434
+      ],
+      [
+        268,
+        -436,
+        268,
+        -436
+      ]
+    ],
+    "firmware_generated": true,
+    "physical_capture": false
+  },
+  {
+    "width": 18,
+    "notification_index": 85,
+    "notification_hex": "55ffffc0002ffffc0002ffffc0002ffffc0002fe",
+    "kind": "compressed",
+    "expected_counts": [
+      [
+        269,
+        -438,
+        269,
+        -438
+      ],
+      [
+        270,
+        -440,
+        270,
+        -440
+      ]
+    ],
+    "firmware_generated": true,
+    "physical_capture": false
+  },
+  {
+    "width": 18,
+    "notification_index": 86,
+    "notification_hex": "56ffffc0002ffffc0002ffffc0002ffffc0002fe",
+    "kind": "compressed",
+    "expected_counts": [
+      [
+        271,
+        -442,
+        271,
+        -442
+      ],
+      [
+        272,
+        -444,
+        272,
+        -444
+      ]
+    ],
+    "firmware_generated": true,
+    "physical_capture": false
+  },
+  {
+    "width": 18,
+    "notification_index": 87,
+    "notification_hex": "57ffffc0002ffffc0002ffffc0002ffffc0002fe",
+    "kind": "compressed",
+    "expected_counts": [
+      [
+        273,
+        -446,
+        273,
+        -446
+      ],
+      [
+        274,
+        -448,
+        274,
+        -448
+      ]
+    ],
+    "firmware_generated": true,
+    "physical_capture": false
+  },
+  {
+    "width": 18,
+    "notification_index": 88,
+    "notification_hex": "58ffffc0002ffffc0002ffffc0002ffffc0002fe",
+    "kind": "compressed",
+    "expected_counts": [
+      [
+        275,
+        -450,
+        275,
+        -450
+      ],
+      [
+        276,
+        -452,
+        276,
+        -452
+      ]
+    ],
+    "firmware_generated": true,
+    "physical_capture": false
+  },
+  {
+    "width": 18,
+    "notification_index": 89,
+    "notification_hex": "59ffffc0002ffffc0002ffffc0002ffffc0002fe",
+    "kind": "compressed",
+    "expected_counts": [
+      [
+        277,
+        -454,
+        277,
+        -454
+      ],
+      [
+        278,
+        -456,
+        278,
+        -456
+      ]
+    ],
+    "firmware_generated": true,
+    "physical_capture": false
+  },
+  {
+    "width": 18,
+    "notification_index": 90,
+    "notification_hex": "5affffc0002ffffc0002ffffc0002ffffc0002fe",
+    "kind": "compressed",
+    "expected_counts": [
+      [
+        279,
+        -458,
+        279,
+        -458
+      ],
+      [
+        280,
+        -460,
+        280,
+        -460
+      ]
+    ],
+    "firmware_generated": true,
+    "physical_capture": false
+  },
+  {
+    "width": 18,
+    "notification_index": 91,
+    "notification_hex": "5bffffc0002ffffc0002ffffc0002ffffc000212",
+    "kind": "compressed",
+    "expected_counts": [
+      [
+        281,
+        -462,
+        281,
+        -462
+      ],
+      [
+        282,
+        -464,
+        282,
+        -464
+      ]
+    ],
+    "firmware_generated": true,
+    "physical_capture": false
+  },
+  {
+    "width": 18,
+    "notification_index": 92,
+    "notification_hex": "5cffffc0002ffffc0002ffffc0002ffffc0002a5",
+    "kind": "compressed",
+    "expected_counts": [
+      [
+        283,
+        -466,
+        283,
+        -466
+      ],
+      [
+        284,
+        -468,
+        284,
+        -468
+      ]
+    ],
+    "firmware_generated": true,
+    "physical_capture": false
+  },
+  {
+    "width": 18,
+    "notification_index": 93,
+    "notification_hex": "5dffffc0002ffffc0002ffffc0002ffffc0002fe",
+    "kind": "compressed",
+    "expected_counts": [
+      [
+        285,
+        -470,
+        285,
+        -470
+      ],
+      [
+        286,
+        -472,
+        286,
+        -472
+      ]
+    ],
+    "firmware_generated": true,
+    "physical_capture": false
+  },
+  {
+    "width": 18,
+    "notification_index": 94,
+    "notification_hex": "5effffc0002ffffc0002ffffc0002ffffc0002fe",
+    "kind": "compressed",
+    "expected_counts": [
+      [
+        287,
+        -474,
+        287,
+        -474
+      ],
+      [
+        288,
+        -476,
+        288,
+        -476
+      ]
+    ],
+    "firmware_generated": true,
+    "physical_capture": false
+  },
+  {
+    "width": 18,
+    "notification_index": 95,
+    "notification_hex": "5fffffc0002ffffc0002ffffc0002ffffc0002fe",
+    "kind": "compressed",
+    "expected_counts": [
+      [
+        289,
+        -478,
+        289,
+        -478
+      ],
+      [
+        290,
+        -480,
+        290,
+        -480
+      ]
+    ],
+    "firmware_generated": true,
+    "physical_capture": false
+  },
+  {
+    "width": 18,
+    "notification_index": 96,
+    "notification_hex": "60ffffc0002ffffc0002ffffc0002ffffc0002fe",
+    "kind": "compressed",
+    "expected_counts": [
+      [
+        291,
+        -482,
+        291,
+        -482
+      ],
+      [
+        292,
+        -484,
+        292,
+        -484
+      ]
+    ],
+    "firmware_generated": true,
+    "physical_capture": false
+  },
+  {
+    "width": 18,
+    "notification_index": 97,
+    "notification_hex": "61ffffc0002ffffc0002ffffc0002ffffc0002fe",
+    "kind": "compressed",
+    "expected_counts": [
+      [
+        293,
+        -486,
+        293,
+        -486
+      ],
+      [
+        294,
+        -488,
+        294,
+        -488
+      ]
+    ],
+    "firmware_generated": true,
+    "physical_capture": false
+  },
+  {
+    "width": 18,
+    "notification_index": 98,
+    "notification_hex": "62ffffc0002ffffc0002ffffc0002ffffc0002fe",
+    "kind": "compressed",
+    "expected_counts": [
+      [
+        295,
+        -490,
+        295,
+        -490
+      ],
+      [
+        296,
+        -492,
+        296,
+        -492
+      ]
+    ],
+    "firmware_generated": true,
+    "physical_capture": false
+  },
+  {
+    "width": 18,
+    "notification_index": 99,
+    "notification_hex": "63ffffc0002ffffc0002ffffc0002ffffc0002fe",
+    "kind": "compressed",
+    "expected_counts": [
+      [
+        297,
+        -494,
+        297,
+        -494
+      ],
+      [
+        298,
+        -496,
+        298,
+        -496
+      ]
+    ],
+    "firmware_generated": true,
+    "physical_capture": false
+  },
+  {
+    "width": 18,
+    "notification_index": 100,
+    "notification_hex": "64ffffc0002ffffc0002ffffc0002ffffc0002fe",
+    "kind": "compressed",
+    "expected_counts": [
+      [
+        299,
+        -498,
+        299,
+        -498
+      ],
+      [
+        300,
+        -500,
+        300,
+        -500
+      ]
+    ],
+    "firmware_generated": true,
+    "physical_capture": false
+  },
+  {
+    "width": 18,
+    "notification_index": 101,
+    "notification_hex": "00000064ffff9c000064ffff9c41424344454647",
+    "kind": "raw",
+    "expected_counts": [
+      [
+        100,
+        -100,
+        100,
+        -100
+      ]
+    ],
+    "firmware_generated": true,
+    "physical_capture": false
+  },
+  {
+    "width": 19,
+    "notification_index": 0,
+    "notification_hex": "00000064ffff9c000064ffff9c41424344454647",
+    "kind": "raw",
+    "expected_counts": [
+      [
+        100,
+        -100,
+        100,
+        -100
+      ]
+    ],
+    "firmware_generated": true,
+    "physical_capture": false
+  },
+  {
+    "width": 19,
+    "notification_index": 1,
+    "notification_hex": "65ffffe0000bffff80002ffffe0000bffff80002",
+    "kind": "compressed",
+    "expected_counts": [
+      [
+        101,
+        -102,
+        101,
+        -102
+      ],
+      [
+        102,
+        -104,
+        102,
+        -104
+      ]
+    ],
+    "firmware_generated": true,
+    "physical_capture": false
+  },
+  {
+    "width": 19,
+    "notification_index": 2,
+    "notification_hex": "66ffffe0000bffff80002ffffe0000bffff80002",
+    "kind": "compressed",
+    "expected_counts": [
+      [
+        103,
+        -106,
+        103,
+        -106
+      ],
+      [
+        104,
+        -108,
+        104,
+        -108
+      ]
+    ],
+    "firmware_generated": true,
+    "physical_capture": false
+  },
+  {
+    "width": 19,
+    "notification_index": 3,
+    "notification_hex": "67ffffe0000bffff80002ffffe0000bffff80002",
+    "kind": "compressed",
+    "expected_counts": [
+      [
+        105,
+        -110,
+        105,
+        -110
+      ],
+      [
+        106,
+        -112,
+        106,
+        -112
+      ]
+    ],
+    "firmware_generated": true,
+    "physical_capture": false
+  },
+  {
+    "width": 19,
+    "notification_index": 4,
+    "notification_hex": "68ffffe0000bffff80002ffffe0000bffff80002",
+    "kind": "compressed",
+    "expected_counts": [
+      [
+        107,
+        -114,
+        107,
+        -114
+      ],
+      [
+        108,
+        -116,
+        108,
+        -116
+      ]
+    ],
+    "firmware_generated": true,
+    "physical_capture": false
+  },
+  {
+    "width": 19,
+    "notification_index": 5,
+    "notification_hex": "69ffffe0000bffff80002ffffe0000bffff80002",
+    "kind": "compressed",
+    "expected_counts": [
+      [
+        109,
+        -118,
+        109,
+        -118
+      ],
+      [
+        110,
+        -120,
+        110,
+        -120
+      ]
+    ],
+    "firmware_generated": true,
+    "physical_capture": false
+  },
+  {
+    "width": 19,
+    "notification_index": 6,
+    "notification_hex": "6affffe0000bffff80002ffffe0000bffff80002",
+    "kind": "compressed",
+    "expected_counts": [
+      [
+        111,
+        -122,
+        111,
+        -122
+      ],
+      [
+        112,
+        -124,
+        112,
+        -124
+      ]
+    ],
+    "firmware_generated": true,
+    "physical_capture": false
+  },
+  {
+    "width": 19,
+    "notification_index": 7,
+    "notification_hex": "6bffffe0000bffff80002ffffe0000bffff80002",
+    "kind": "compressed",
+    "expected_counts": [
+      [
+        113,
+        -126,
+        113,
+        -126
+      ],
+      [
+        114,
+        -128,
+        114,
+        -128
+      ]
+    ],
+    "firmware_generated": true,
+    "physical_capture": false
+  },
+  {
+    "width": 19,
+    "notification_index": 8,
+    "notification_hex": "6cffffe0000bffff80002ffffe0000bffff80002",
+    "kind": "compressed",
+    "expected_counts": [
+      [
+        115,
+        -130,
+        115,
+        -130
+      ],
+      [
+        116,
+        -132,
+        116,
+        -132
+      ]
+    ],
+    "firmware_generated": true,
+    "physical_capture": false
+  },
+  {
+    "width": 19,
+    "notification_index": 9,
+    "notification_hex": "6dffffe0000bffff80002ffffe0000bffff80002",
+    "kind": "compressed",
+    "expected_counts": [
+      [
+        117,
+        -134,
+        117,
+        -134
+      ],
+      [
+        118,
+        -136,
+        118,
+        -136
+      ]
+    ],
+    "firmware_generated": true,
+    "physical_capture": false
+  },
+  {
+    "width": 19,
+    "notification_index": 10,
+    "notification_hex": "6effffe0000bffff80002ffffe0000bffff80002",
+    "kind": "compressed",
+    "expected_counts": [
+      [
+        119,
+        -138,
+        119,
+        -138
+      ],
+      [
+        120,
+        -140,
+        120,
+        -140
+      ]
+    ],
+    "firmware_generated": true,
+    "physical_capture": false
+  },
+  {
+    "width": 19,
+    "notification_index": 11,
+    "notification_hex": "6fffffe0000bffff80002ffffe0000bffff80002",
+    "kind": "compressed",
+    "expected_counts": [
+      [
+        121,
+        -142,
+        121,
+        -142
+      ],
+      [
+        122,
+        -144,
+        122,
+        -144
+      ]
+    ],
+    "firmware_generated": true,
+    "physical_capture": false
+  },
+  {
+    "width": 19,
+    "notification_index": 12,
+    "notification_hex": "70ffffe0000bffff80002ffffe0000bffff80002",
+    "kind": "compressed",
+    "expected_counts": [
+      [
+        123,
+        -146,
+        123,
+        -146
+      ],
+      [
+        124,
+        -148,
+        124,
+        -148
+      ]
+    ],
+    "firmware_generated": true,
+    "physical_capture": false
+  },
+  {
+    "width": 19,
+    "notification_index": 13,
+    "notification_hex": "71ffffe0000bffff80002ffffe0000bffff80002",
+    "kind": "compressed",
+    "expected_counts": [
+      [
+        125,
+        -150,
+        125,
+        -150
+      ],
+      [
+        126,
+        -152,
+        126,
+        -152
+      ]
+    ],
+    "firmware_generated": true,
+    "physical_capture": false
+  },
+  {
+    "width": 19,
+    "notification_index": 14,
+    "notification_hex": "72ffffe0000bffff80002ffffe0000bffff80002",
+    "kind": "compressed",
+    "expected_counts": [
+      [
+        127,
+        -154,
+        127,
+        -154
+      ],
+      [
+        128,
+        -156,
+        128,
+        -156
+      ]
+    ],
+    "firmware_generated": true,
+    "physical_capture": false
+  },
+  {
+    "width": 19,
+    "notification_index": 15,
+    "notification_hex": "73ffffe0000bffff80002ffffe0000bffff80002",
+    "kind": "compressed",
+    "expected_counts": [
+      [
+        129,
+        -158,
+        129,
+        -158
+      ],
+      [
+        130,
+        -160,
+        130,
+        -160
+      ]
+    ],
+    "firmware_generated": true,
+    "physical_capture": false
+  },
+  {
+    "width": 19,
+    "notification_index": 16,
+    "notification_hex": "74ffffe0000bffff80002ffffe0000bffff80002",
+    "kind": "compressed",
+    "expected_counts": [
+      [
+        131,
+        -162,
+        131,
+        -162
+      ],
+      [
+        132,
+        -164,
+        132,
+        -164
+      ]
+    ],
+    "firmware_generated": true,
+    "physical_capture": false
+  },
+  {
+    "width": 19,
+    "notification_index": 17,
+    "notification_hex": "75ffffe0000bffff80002ffffe0000bffff80002",
+    "kind": "compressed",
+    "expected_counts": [
+      [
+        133,
+        -166,
+        133,
+        -166
+      ],
+      [
+        134,
+        -168,
+        134,
+        -168
+      ]
+    ],
+    "firmware_generated": true,
+    "physical_capture": false
+  },
+  {
+    "width": 19,
+    "notification_index": 18,
+    "notification_hex": "76ffffe0000bffff80002ffffe0000bffff80002",
+    "kind": "compressed",
+    "expected_counts": [
+      [
+        135,
+        -170,
+        135,
+        -170
+      ],
+      [
+        136,
+        -172,
+        136,
+        -172
+      ]
+    ],
+    "firmware_generated": true,
+    "physical_capture": false
+  },
+  {
+    "width": 19,
+    "notification_index": 19,
+    "notification_hex": "77ffffe0000bffff80002ffffe0000bffff80002",
+    "kind": "compressed",
+    "expected_counts": [
+      [
+        137,
+        -174,
+        137,
+        -174
+      ],
+      [
+        138,
+        -176,
+        138,
+        -176
+      ]
+    ],
+    "firmware_generated": true,
+    "physical_capture": false
+  },
+  {
+    "width": 19,
+    "notification_index": 20,
+    "notification_hex": "78ffffe0000bffff80002ffffe0000bffff80002",
+    "kind": "compressed",
+    "expected_counts": [
+      [
+        139,
+        -178,
+        139,
+        -178
+      ],
+      [
+        140,
+        -180,
+        140,
+        -180
+      ]
+    ],
+    "firmware_generated": true,
+    "physical_capture": false
+  },
+  {
+    "width": 19,
+    "notification_index": 21,
+    "notification_hex": "79ffffe0000bffff80002ffffe0000bffff80002",
+    "kind": "compressed",
+    "expected_counts": [
+      [
+        141,
+        -182,
+        141,
+        -182
+      ],
+      [
+        142,
+        -184,
+        142,
+        -184
+      ]
+    ],
+    "firmware_generated": true,
+    "physical_capture": false
+  },
+  {
+    "width": 19,
+    "notification_index": 22,
+    "notification_hex": "7affffe0000bffff80002ffffe0000bffff80002",
+    "kind": "compressed",
+    "expected_counts": [
+      [
+        143,
+        -186,
+        143,
+        -186
+      ],
+      [
+        144,
+        -188,
+        144,
+        -188
+      ]
+    ],
+    "firmware_generated": true,
+    "physical_capture": false
+  },
+  {
+    "width": 19,
+    "notification_index": 23,
+    "notification_hex": "7bffffe0000bffff80002ffffe0000bffff80002",
+    "kind": "compressed",
+    "expected_counts": [
+      [
+        145,
+        -190,
+        145,
+        -190
+      ],
+      [
+        146,
+        -192,
+        146,
+        -192
+      ]
+    ],
+    "firmware_generated": true,
+    "physical_capture": false
+  },
+  {
+    "width": 19,
+    "notification_index": 24,
+    "notification_hex": "7cffffe0000bffff80002ffffe0000bffff80002",
+    "kind": "compressed",
+    "expected_counts": [
+      [
+        147,
+        -194,
+        147,
+        -194
+      ],
+      [
+        148,
+        -196,
+        148,
+        -196
+      ]
+    ],
+    "firmware_generated": true,
+    "physical_capture": false
+  },
+  {
+    "width": 19,
+    "notification_index": 25,
+    "notification_hex": "7dffffe0000bffff80002ffffe0000bffff80002",
+    "kind": "compressed",
+    "expected_counts": [
+      [
+        149,
+        -198,
+        149,
+        -198
+      ],
+      [
+        150,
+        -200,
+        150,
+        -200
+      ]
+    ],
+    "firmware_generated": true,
+    "physical_capture": false
+  },
+  {
+    "width": 19,
+    "notification_index": 26,
+    "notification_hex": "7effffe0000bffff80002ffffe0000bffff80002",
+    "kind": "compressed",
+    "expected_counts": [
+      [
+        151,
+        -202,
+        151,
+        -202
+      ],
+      [
+        152,
+        -204,
+        152,
+        -204
+      ]
+    ],
+    "firmware_generated": true,
+    "physical_capture": false
+  },
+  {
+    "width": 19,
+    "notification_index": 27,
+    "notification_hex": "7fffffe0000bffff80002ffffe0000bffff80002",
+    "kind": "compressed",
+    "expected_counts": [
+      [
+        153,
+        -206,
+        153,
+        -206
+      ],
+      [
+        154,
+        -208,
+        154,
+        -208
+      ]
+    ],
+    "firmware_generated": true,
+    "physical_capture": false
+  },
+  {
+    "width": 19,
+    "notification_index": 28,
+    "notification_hex": "80ffffe0000bffff80002ffffe0000bffff80002",
+    "kind": "compressed",
+    "expected_counts": [
+      [
+        155,
+        -210,
+        155,
+        -210
+      ],
+      [
+        156,
+        -212,
+        156,
+        -212
+      ]
+    ],
+    "firmware_generated": true,
+    "physical_capture": false
+  },
+  {
+    "width": 19,
+    "notification_index": 29,
+    "notification_hex": "81ffffe0000bffff80002ffffe0000bffff80002",
+    "kind": "compressed",
+    "expected_counts": [
+      [
+        157,
+        -214,
+        157,
+        -214
+      ],
+      [
+        158,
+        -216,
+        158,
+        -216
+      ]
+    ],
+    "firmware_generated": true,
+    "physical_capture": false
+  },
+  {
+    "width": 19,
+    "notification_index": 30,
+    "notification_hex": "82ffffe0000bffff80002ffffe0000bffff80002",
+    "kind": "compressed",
+    "expected_counts": [
+      [
+        159,
+        -218,
+        159,
+        -218
+      ],
+      [
+        160,
+        -220,
+        160,
+        -220
+      ]
+    ],
+    "firmware_generated": true,
+    "physical_capture": false
+  },
+  {
+    "width": 19,
+    "notification_index": 31,
+    "notification_hex": "83ffffe0000bffff80002ffffe0000bffff80002",
+    "kind": "compressed",
+    "expected_counts": [
+      [
+        161,
+        -222,
+        161,
+        -222
+      ],
+      [
+        162,
+        -224,
+        162,
+        -224
+      ]
+    ],
+    "firmware_generated": true,
+    "physical_capture": false
+  },
+  {
+    "width": 19,
+    "notification_index": 32,
+    "notification_hex": "84ffffe0000bffff80002ffffe0000bffff80002",
+    "kind": "compressed",
+    "expected_counts": [
+      [
+        163,
+        -226,
+        163,
+        -226
+      ],
+      [
+        164,
+        -228,
+        164,
+        -228
+      ]
+    ],
+    "firmware_generated": true,
+    "physical_capture": false
+  },
+  {
+    "width": 19,
+    "notification_index": 33,
+    "notification_hex": "85ffffe0000bffff80002ffffe0000bffff80002",
+    "kind": "compressed",
+    "expected_counts": [
+      [
+        165,
+        -230,
+        165,
+        -230
+      ],
+      [
+        166,
+        -232,
+        166,
+        -232
+      ]
+    ],
+    "firmware_generated": true,
+    "physical_capture": false
+  },
+  {
+    "width": 19,
+    "notification_index": 34,
+    "notification_hex": "86ffffe0000bffff80002ffffe0000bffff80002",
+    "kind": "compressed",
+    "expected_counts": [
+      [
+        167,
+        -234,
+        167,
+        -234
+      ],
+      [
+        168,
+        -236,
+        168,
+        -236
+      ]
+    ],
+    "firmware_generated": true,
+    "physical_capture": false
+  },
+  {
+    "width": 19,
+    "notification_index": 35,
+    "notification_hex": "87ffffe0000bffff80002ffffe0000bffff80002",
+    "kind": "compressed",
+    "expected_counts": [
+      [
+        169,
+        -238,
+        169,
+        -238
+      ],
+      [
+        170,
+        -240,
+        170,
+        -240
+      ]
+    ],
+    "firmware_generated": true,
+    "physical_capture": false
+  },
+  {
+    "width": 19,
+    "notification_index": 36,
+    "notification_hex": "88ffffe0000bffff80002ffffe0000bffff80002",
+    "kind": "compressed",
+    "expected_counts": [
+      [
+        171,
+        -242,
+        171,
+        -242
+      ],
+      [
+        172,
+        -244,
+        172,
+        -244
+      ]
+    ],
+    "firmware_generated": true,
+    "physical_capture": false
+  },
+  {
+    "width": 19,
+    "notification_index": 37,
+    "notification_hex": "89ffffe0000bffff80002ffffe0000bffff80002",
+    "kind": "compressed",
+    "expected_counts": [
+      [
+        173,
+        -246,
+        173,
+        -246
+      ],
+      [
+        174,
+        -248,
+        174,
+        -248
+      ]
+    ],
+    "firmware_generated": true,
+    "physical_capture": false
+  },
+  {
+    "width": 19,
+    "notification_index": 38,
+    "notification_hex": "8affffe0000bffff80002ffffe0000bffff80002",
+    "kind": "compressed",
+    "expected_counts": [
+      [
+        175,
+        -250,
+        175,
+        -250
+      ],
+      [
+        176,
+        -252,
+        176,
+        -252
+      ]
+    ],
+    "firmware_generated": true,
+    "physical_capture": false
+  },
+  {
+    "width": 19,
+    "notification_index": 39,
+    "notification_hex": "8bffffe0000bffff80002ffffe0000bffff80002",
+    "kind": "compressed",
+    "expected_counts": [
+      [
+        177,
+        -254,
+        177,
+        -254
+      ],
+      [
+        178,
+        -256,
+        178,
+        -256
+      ]
+    ],
+    "firmware_generated": true,
+    "physical_capture": false
+  },
+  {
+    "width": 19,
+    "notification_index": 40,
+    "notification_hex": "8cffffe0000bffff80002ffffe0000bffff80002",
+    "kind": "compressed",
+    "expected_counts": [
+      [
+        179,
+        -258,
+        179,
+        -258
+      ],
+      [
+        180,
+        -260,
+        180,
+        -260
+      ]
+    ],
+    "firmware_generated": true,
+    "physical_capture": false
+  },
+  {
+    "width": 19,
+    "notification_index": 41,
+    "notification_hex": "8dffffe0000bffff80002ffffe0000bffff80002",
+    "kind": "compressed",
+    "expected_counts": [
+      [
+        181,
+        -262,
+        181,
+        -262
+      ],
+      [
+        182,
+        -264,
+        182,
+        -264
+      ]
+    ],
+    "firmware_generated": true,
+    "physical_capture": false
+  },
+  {
+    "width": 19,
+    "notification_index": 42,
+    "notification_hex": "8effffe0000bffff80002ffffe0000bffff80002",
+    "kind": "compressed",
+    "expected_counts": [
+      [
+        183,
+        -266,
+        183,
+        -266
+      ],
+      [
+        184,
+        -268,
+        184,
+        -268
+      ]
+    ],
+    "firmware_generated": true,
+    "physical_capture": false
+  },
+  {
+    "width": 19,
+    "notification_index": 43,
+    "notification_hex": "8fffffe0000bffff80002ffffe0000bffff80002",
+    "kind": "compressed",
+    "expected_counts": [
+      [
+        185,
+        -270,
+        185,
+        -270
+      ],
+      [
+        186,
+        -272,
+        186,
+        -272
+      ]
+    ],
+    "firmware_generated": true,
+    "physical_capture": false
+  },
+  {
+    "width": 19,
+    "notification_index": 44,
+    "notification_hex": "90ffffe0000bffff80002ffffe0000bffff80002",
+    "kind": "compressed",
+    "expected_counts": [
+      [
+        187,
+        -274,
+        187,
+        -274
+      ],
+      [
+        188,
+        -276,
+        188,
+        -276
+      ]
+    ],
+    "firmware_generated": true,
+    "physical_capture": false
+  },
+  {
+    "width": 19,
+    "notification_index": 45,
+    "notification_hex": "91ffffe0000bffff80002ffffe0000bffff80002",
+    "kind": "compressed",
+    "expected_counts": [
+      [
+        189,
+        -278,
+        189,
+        -278
+      ],
+      [
+        190,
+        -280,
+        190,
+        -280
+      ]
+    ],
+    "firmware_generated": true,
+    "physical_capture": false
+  },
+  {
+    "width": 19,
+    "notification_index": 46,
+    "notification_hex": "92ffffe0000bffff80002ffffe0000bffff80002",
+    "kind": "compressed",
+    "expected_counts": [
+      [
+        191,
+        -282,
+        191,
+        -282
+      ],
+      [
+        192,
+        -284,
+        192,
+        -284
+      ]
+    ],
+    "firmware_generated": true,
+    "physical_capture": false
+  },
+  {
+    "width": 19,
+    "notification_index": 47,
+    "notification_hex": "93ffffe0000bffff80002ffffe0000bffff80002",
+    "kind": "compressed",
+    "expected_counts": [
+      [
+        193,
+        -286,
+        193,
+        -286
+      ],
+      [
+        194,
+        -288,
+        194,
+        -288
+      ]
+    ],
+    "firmware_generated": true,
+    "physical_capture": false
+  },
+  {
+    "width": 19,
+    "notification_index": 48,
+    "notification_hex": "94ffffe0000bffff80002ffffe0000bffff80002",
+    "kind": "compressed",
+    "expected_counts": [
+      [
+        195,
+        -290,
+        195,
+        -290
+      ],
+      [
+        196,
+        -292,
+        196,
+        -292
+      ]
+    ],
+    "firmware_generated": true,
+    "physical_capture": false
+  },
+  {
+    "width": 19,
+    "notification_index": 49,
+    "notification_hex": "95ffffe0000bffff80002ffffe0000bffff80002",
+    "kind": "compressed",
+    "expected_counts": [
+      [
+        197,
+        -294,
+        197,
+        -294
+      ],
+      [
+        198,
+        -296,
+        198,
+        -296
+      ]
+    ],
+    "firmware_generated": true,
+    "physical_capture": false
+  },
+  {
+    "width": 19,
+    "notification_index": 50,
+    "notification_hex": "96ffffe0000bffff80002ffffe0000bffff80002",
+    "kind": "compressed",
+    "expected_counts": [
+      [
+        199,
+        -298,
+        199,
+        -298
+      ],
+      [
+        200,
+        -300,
+        200,
+        -300
+      ]
+    ],
+    "firmware_generated": true,
+    "physical_capture": false
+  },
+  {
+    "width": 19,
+    "notification_index": 51,
+    "notification_hex": "97ffffe0000bffff80002ffffe0000bffff80002",
+    "kind": "compressed",
+    "expected_counts": [
+      [
+        201,
+        -302,
+        201,
+        -302
+      ],
+      [
+        202,
+        -304,
+        202,
+        -304
+      ]
+    ],
+    "firmware_generated": true,
+    "physical_capture": false
+  },
+  {
+    "width": 19,
+    "notification_index": 52,
+    "notification_hex": "98ffffe0000bffff80002ffffe0000bffff80002",
+    "kind": "compressed",
+    "expected_counts": [
+      [
+        203,
+        -306,
+        203,
+        -306
+      ],
+      [
+        204,
+        -308,
+        204,
+        -308
+      ]
+    ],
+    "firmware_generated": true,
+    "physical_capture": false
+  },
+  {
+    "width": 19,
+    "notification_index": 53,
+    "notification_hex": "99ffffe0000bffff80002ffffe0000bffff80002",
+    "kind": "compressed",
+    "expected_counts": [
+      [
+        205,
+        -310,
+        205,
+        -310
+      ],
+      [
+        206,
+        -312,
+        206,
+        -312
+      ]
+    ],
+    "firmware_generated": true,
+    "physical_capture": false
+  },
+  {
+    "width": 19,
+    "notification_index": 54,
+    "notification_hex": "9affffe0000bffff80002ffffe0000bffff80002",
+    "kind": "compressed",
+    "expected_counts": [
+      [
+        207,
+        -314,
+        207,
+        -314
+      ],
+      [
+        208,
+        -316,
+        208,
+        -316
+      ]
+    ],
+    "firmware_generated": true,
+    "physical_capture": false
+  },
+  {
+    "width": 19,
+    "notification_index": 55,
+    "notification_hex": "9bffffe0000bffff80002ffffe0000bffff80002",
+    "kind": "compressed",
+    "expected_counts": [
+      [
+        209,
+        -318,
+        209,
+        -318
+      ],
+      [
+        210,
+        -320,
+        210,
+        -320
+      ]
+    ],
+    "firmware_generated": true,
+    "physical_capture": false
+  },
+  {
+    "width": 19,
+    "notification_index": 56,
+    "notification_hex": "9cffffe0000bffff80002ffffe0000bffff80002",
+    "kind": "compressed",
+    "expected_counts": [
+      [
+        211,
+        -322,
+        211,
+        -322
+      ],
+      [
+        212,
+        -324,
+        212,
+        -324
+      ]
+    ],
+    "firmware_generated": true,
+    "physical_capture": false
+  },
+  {
+    "width": 19,
+    "notification_index": 57,
+    "notification_hex": "9dffffe0000bffff80002ffffe0000bffff80002",
+    "kind": "compressed",
+    "expected_counts": [
+      [
+        213,
+        -326,
+        213,
+        -326
+      ],
+      [
+        214,
+        -328,
+        214,
+        -328
+      ]
+    ],
+    "firmware_generated": true,
+    "physical_capture": false
+  },
+  {
+    "width": 19,
+    "notification_index": 58,
+    "notification_hex": "9effffe0000bffff80002ffffe0000bffff80002",
+    "kind": "compressed",
+    "expected_counts": [
+      [
+        215,
+        -330,
+        215,
+        -330
+      ],
+      [
+        216,
+        -332,
+        216,
+        -332
+      ]
+    ],
+    "firmware_generated": true,
+    "physical_capture": false
+  },
+  {
+    "width": 19,
+    "notification_index": 59,
+    "notification_hex": "9fffffe0000bffff80002ffffe0000bffff80002",
+    "kind": "compressed",
+    "expected_counts": [
+      [
+        217,
+        -334,
+        217,
+        -334
+      ],
+      [
+        218,
+        -336,
+        218,
+        -336
+      ]
+    ],
+    "firmware_generated": true,
+    "physical_capture": false
+  },
+  {
+    "width": 19,
+    "notification_index": 60,
+    "notification_hex": "a0ffffe0000bffff80002ffffe0000bffff80002",
+    "kind": "compressed",
+    "expected_counts": [
+      [
+        219,
+        -338,
+        219,
+        -338
+      ],
+      [
+        220,
+        -340,
+        220,
+        -340
+      ]
+    ],
+    "firmware_generated": true,
+    "physical_capture": false
+  },
+  {
+    "width": 19,
+    "notification_index": 61,
+    "notification_hex": "a1ffffe0000bffff80002ffffe0000bffff80002",
+    "kind": "compressed",
+    "expected_counts": [
+      [
+        221,
+        -342,
+        221,
+        -342
+      ],
+      [
+        222,
+        -344,
+        222,
+        -344
+      ]
+    ],
+    "firmware_generated": true,
+    "physical_capture": false
+  },
+  {
+    "width": 19,
+    "notification_index": 62,
+    "notification_hex": "a2ffffe0000bffff80002ffffe0000bffff80002",
+    "kind": "compressed",
+    "expected_counts": [
+      [
+        223,
+        -346,
+        223,
+        -346
+      ],
+      [
+        224,
+        -348,
+        224,
+        -348
+      ]
+    ],
+    "firmware_generated": true,
+    "physical_capture": false
+  },
+  {
+    "width": 19,
+    "notification_index": 63,
+    "notification_hex": "a3ffffe0000bffff80002ffffe0000bffff80002",
+    "kind": "compressed",
+    "expected_counts": [
+      [
+        225,
+        -350,
+        225,
+        -350
+      ],
+      [
+        226,
+        -352,
+        226,
+        -352
+      ]
+    ],
+    "firmware_generated": true,
+    "physical_capture": false
+  },
+  {
+    "width": 19,
+    "notification_index": 64,
+    "notification_hex": "a4ffffe0000bffff80002ffffe0000bffff80002",
+    "kind": "compressed",
+    "expected_counts": [
+      [
+        227,
+        -354,
+        227,
+        -354
+      ],
+      [
+        228,
+        -356,
+        228,
+        -356
+      ]
+    ],
+    "firmware_generated": true,
+    "physical_capture": false
+  },
+  {
+    "width": 19,
+    "notification_index": 65,
+    "notification_hex": "a5ffffe0000bffff80002ffffe0000bffff80002",
+    "kind": "compressed",
+    "expected_counts": [
+      [
+        229,
+        -358,
+        229,
+        -358
+      ],
+      [
+        230,
+        -360,
+        230,
+        -360
+      ]
+    ],
+    "firmware_generated": true,
+    "physical_capture": false
+  },
+  {
+    "width": 19,
+    "notification_index": 66,
+    "notification_hex": "a6ffffe0000bffff80002ffffe0000bffff80002",
+    "kind": "compressed",
+    "expected_counts": [
+      [
+        231,
+        -362,
+        231,
+        -362
+      ],
+      [
+        232,
+        -364,
+        232,
+        -364
+      ]
+    ],
+    "firmware_generated": true,
+    "physical_capture": false
+  },
+  {
+    "width": 19,
+    "notification_index": 67,
+    "notification_hex": "a7ffffe0000bffff80002ffffe0000bffff80002",
+    "kind": "compressed",
+    "expected_counts": [
+      [
+        233,
+        -366,
+        233,
+        -366
+      ],
+      [
+        234,
+        -368,
+        234,
+        -368
+      ]
+    ],
+    "firmware_generated": true,
+    "physical_capture": false
+  },
+  {
+    "width": 19,
+    "notification_index": 68,
+    "notification_hex": "a8ffffe0000bffff80002ffffe0000bffff80002",
+    "kind": "compressed",
+    "expected_counts": [
+      [
+        235,
+        -370,
+        235,
+        -370
+      ],
+      [
+        236,
+        -372,
+        236,
+        -372
+      ]
+    ],
+    "firmware_generated": true,
+    "physical_capture": false
+  },
+  {
+    "width": 19,
+    "notification_index": 69,
+    "notification_hex": "a9ffffe0000bffff80002ffffe0000bffff80002",
+    "kind": "compressed",
+    "expected_counts": [
+      [
+        237,
+        -374,
+        237,
+        -374
+      ],
+      [
+        238,
+        -376,
+        238,
+        -376
+      ]
+    ],
+    "firmware_generated": true,
+    "physical_capture": false
+  },
+  {
+    "width": 19,
+    "notification_index": 70,
+    "notification_hex": "aaffffe0000bffff80002ffffe0000bffff80002",
+    "kind": "compressed",
+    "expected_counts": [
+      [
+        239,
+        -378,
+        239,
+        -378
+      ],
+      [
+        240,
+        -380,
+        240,
+        -380
+      ]
+    ],
+    "firmware_generated": true,
+    "physical_capture": false
+  },
+  {
+    "width": 19,
+    "notification_index": 71,
+    "notification_hex": "abffffe0000bffff80002ffffe0000bffff80002",
+    "kind": "compressed",
+    "expected_counts": [
+      [
+        241,
+        -382,
+        241,
+        -382
+      ],
+      [
+        242,
+        -384,
+        242,
+        -384
+      ]
+    ],
+    "firmware_generated": true,
+    "physical_capture": false
+  },
+  {
+    "width": 19,
+    "notification_index": 72,
+    "notification_hex": "acffffe0000bffff80002ffffe0000bffff80002",
+    "kind": "compressed",
+    "expected_counts": [
+      [
+        243,
+        -386,
+        243,
+        -386
+      ],
+      [
+        244,
+        -388,
+        244,
+        -388
+      ]
+    ],
+    "firmware_generated": true,
+    "physical_capture": false
+  },
+  {
+    "width": 19,
+    "notification_index": 73,
+    "notification_hex": "adffffe0000bffff80002ffffe0000bffff80002",
+    "kind": "compressed",
+    "expected_counts": [
+      [
+        245,
+        -390,
+        245,
+        -390
+      ],
+      [
+        246,
+        -392,
+        246,
+        -392
+      ]
+    ],
+    "firmware_generated": true,
+    "physical_capture": false
+  },
+  {
+    "width": 19,
+    "notification_index": 74,
+    "notification_hex": "aeffffe0000bffff80002ffffe0000bffff80002",
+    "kind": "compressed",
+    "expected_counts": [
+      [
+        247,
+        -394,
+        247,
+        -394
+      ],
+      [
+        248,
+        -396,
+        248,
+        -396
+      ]
+    ],
+    "firmware_generated": true,
+    "physical_capture": false
+  },
+  {
+    "width": 19,
+    "notification_index": 75,
+    "notification_hex": "afffffe0000bffff80002ffffe0000bffff80002",
+    "kind": "compressed",
+    "expected_counts": [
+      [
+        249,
+        -398,
+        249,
+        -398
+      ],
+      [
+        250,
+        -400,
+        250,
+        -400
+      ]
+    ],
+    "firmware_generated": true,
+    "physical_capture": false
+  },
+  {
+    "width": 19,
+    "notification_index": 76,
+    "notification_hex": "b0ffffe0000bffff80002ffffe0000bffff80002",
+    "kind": "compressed",
+    "expected_counts": [
+      [
+        251,
+        -402,
+        251,
+        -402
+      ],
+      [
+        252,
+        -404,
+        252,
+        -404
+      ]
+    ],
+    "firmware_generated": true,
+    "physical_capture": false
+  },
+  {
+    "width": 19,
+    "notification_index": 77,
+    "notification_hex": "b1ffffe0000bffff80002ffffe0000bffff80002",
+    "kind": "compressed",
+    "expected_counts": [
+      [
+        253,
+        -406,
+        253,
+        -406
+      ],
+      [
+        254,
+        -408,
+        254,
+        -408
+      ]
+    ],
+    "firmware_generated": true,
+    "physical_capture": false
+  },
+  {
+    "width": 19,
+    "notification_index": 78,
+    "notification_hex": "b2ffffe0000bffff80002ffffe0000bffff80002",
+    "kind": "compressed",
+    "expected_counts": [
+      [
+        255,
+        -410,
+        255,
+        -410
+      ],
+      [
+        256,
+        -412,
+        256,
+        -412
+      ]
+    ],
+    "firmware_generated": true,
+    "physical_capture": false
+  },
+  {
+    "width": 19,
+    "notification_index": 79,
+    "notification_hex": "b3ffffe0000bffff80002ffffe0000bffff80002",
+    "kind": "compressed",
+    "expected_counts": [
+      [
+        257,
+        -414,
+        257,
+        -414
+      ],
+      [
+        258,
+        -416,
+        258,
+        -416
+      ]
+    ],
+    "firmware_generated": true,
+    "physical_capture": false
+  },
+  {
+    "width": 19,
+    "notification_index": 80,
+    "notification_hex": "b4ffffe0000bffff80002ffffe0000bffff80002",
+    "kind": "compressed",
+    "expected_counts": [
+      [
+        259,
+        -418,
+        259,
+        -418
+      ],
+      [
+        260,
+        -420,
+        260,
+        -420
+      ]
+    ],
+    "firmware_generated": true,
+    "physical_capture": false
+  },
+  {
+    "width": 19,
+    "notification_index": 81,
+    "notification_hex": "b5ffffe0000bffff80002ffffe0000bffff80002",
+    "kind": "compressed",
+    "expected_counts": [
+      [
+        261,
+        -422,
+        261,
+        -422
+      ],
+      [
+        262,
+        -424,
+        262,
+        -424
+      ]
+    ],
+    "firmware_generated": true,
+    "physical_capture": false
+  },
+  {
+    "width": 19,
+    "notification_index": 82,
+    "notification_hex": "b6ffffe0000bffff80002ffffe0000bffff80002",
+    "kind": "compressed",
+    "expected_counts": [
+      [
+        263,
+        -426,
+        263,
+        -426
+      ],
+      [
+        264,
+        -428,
+        264,
+        -428
+      ]
+    ],
+    "firmware_generated": true,
+    "physical_capture": false
+  },
+  {
+    "width": 19,
+    "notification_index": 83,
+    "notification_hex": "b7ffffe0000bffff80002ffffe0000bffff80002",
+    "kind": "compressed",
+    "expected_counts": [
+      [
+        265,
+        -430,
+        265,
+        -430
+      ],
+      [
+        266,
+        -432,
+        266,
+        -432
+      ]
+    ],
+    "firmware_generated": true,
+    "physical_capture": false
+  },
+  {
+    "width": 19,
+    "notification_index": 84,
+    "notification_hex": "b8ffffe0000bffff80002ffffe0000bffff80002",
+    "kind": "compressed",
+    "expected_counts": [
+      [
+        267,
+        -434,
+        267,
+        -434
+      ],
+      [
+        268,
+        -436,
+        268,
+        -436
+      ]
+    ],
+    "firmware_generated": true,
+    "physical_capture": false
+  },
+  {
+    "width": 19,
+    "notification_index": 85,
+    "notification_hex": "b9ffffe0000bffff80002ffffe0000bffff80002",
+    "kind": "compressed",
+    "expected_counts": [
+      [
+        269,
+        -438,
+        269,
+        -438
+      ],
+      [
+        270,
+        -440,
+        270,
+        -440
+      ]
+    ],
+    "firmware_generated": true,
+    "physical_capture": false
+  },
+  {
+    "width": 19,
+    "notification_index": 86,
+    "notification_hex": "baffffe0000bffff80002ffffe0000bffff80002",
+    "kind": "compressed",
+    "expected_counts": [
+      [
+        271,
+        -442,
+        271,
+        -442
+      ],
+      [
+        272,
+        -444,
+        272,
+        -444
+      ]
+    ],
+    "firmware_generated": true,
+    "physical_capture": false
+  },
+  {
+    "width": 19,
+    "notification_index": 87,
+    "notification_hex": "bbffffe0000bffff80002ffffe0000bffff80002",
+    "kind": "compressed",
+    "expected_counts": [
+      [
+        273,
+        -446,
+        273,
+        -446
+      ],
+      [
+        274,
+        -448,
+        274,
+        -448
+      ]
+    ],
+    "firmware_generated": true,
+    "physical_capture": false
+  },
+  {
+    "width": 19,
+    "notification_index": 88,
+    "notification_hex": "bcffffe0000bffff80002ffffe0000bffff80002",
+    "kind": "compressed",
+    "expected_counts": [
+      [
+        275,
+        -450,
+        275,
+        -450
+      ],
+      [
+        276,
+        -452,
+        276,
+        -452
+      ]
+    ],
+    "firmware_generated": true,
+    "physical_capture": false
+  },
+  {
+    "width": 19,
+    "notification_index": 89,
+    "notification_hex": "bdffffe0000bffff80002ffffe0000bffff80002",
+    "kind": "compressed",
+    "expected_counts": [
+      [
+        277,
+        -454,
+        277,
+        -454
+      ],
+      [
+        278,
+        -456,
+        278,
+        -456
+      ]
+    ],
+    "firmware_generated": true,
+    "physical_capture": false
+  },
+  {
+    "width": 19,
+    "notification_index": 90,
+    "notification_hex": "beffffe0000bffff80002ffffe0000bffff80002",
+    "kind": "compressed",
+    "expected_counts": [
+      [
+        279,
+        -458,
+        279,
+        -458
+      ],
+      [
+        280,
+        -460,
+        280,
+        -460
+      ]
+    ],
+    "firmware_generated": true,
+    "physical_capture": false
+  },
+  {
+    "width": 19,
+    "notification_index": 91,
+    "notification_hex": "bfffffe0000bffff80002ffffe0000bffff80002",
+    "kind": "compressed",
+    "expected_counts": [
+      [
+        281,
+        -462,
+        281,
+        -462
+      ],
+      [
+        282,
+        -464,
+        282,
+        -464
+      ]
+    ],
+    "firmware_generated": true,
+    "physical_capture": false
+  },
+  {
+    "width": 19,
+    "notification_index": 92,
+    "notification_hex": "c0ffffe0000bffff80002ffffe0000bffff80002",
+    "kind": "compressed",
+    "expected_counts": [
+      [
+        283,
+        -466,
+        283,
+        -466
+      ],
+      [
+        284,
+        -468,
+        284,
+        -468
+      ]
+    ],
+    "firmware_generated": true,
+    "physical_capture": false
+  },
+  {
+    "width": 19,
+    "notification_index": 93,
+    "notification_hex": "c1ffffe0000bffff80002ffffe0000bffff80002",
+    "kind": "compressed",
+    "expected_counts": [
+      [
+        285,
+        -470,
+        285,
+        -470
+      ],
+      [
+        286,
+        -472,
+        286,
+        -472
+      ]
+    ],
+    "firmware_generated": true,
+    "physical_capture": false
+  },
+  {
+    "width": 19,
+    "notification_index": 94,
+    "notification_hex": "c2ffffe0000bffff80002ffffe0000bffff80002",
+    "kind": "compressed",
+    "expected_counts": [
+      [
+        287,
+        -474,
+        287,
+        -474
+      ],
+      [
+        288,
+        -476,
+        288,
+        -476
+      ]
+    ],
+    "firmware_generated": true,
+    "physical_capture": false
+  },
+  {
+    "width": 19,
+    "notification_index": 95,
+    "notification_hex": "c3ffffe0000bffff80002ffffe0000bffff80002",
+    "kind": "compressed",
+    "expected_counts": [
+      [
+        289,
+        -478,
+        289,
+        -478
+      ],
+      [
+        290,
+        -480,
+        290,
+        -480
+      ]
+    ],
+    "firmware_generated": true,
+    "physical_capture": false
+  },
+  {
+    "width": 19,
+    "notification_index": 96,
+    "notification_hex": "c4ffffe0000bffff80002ffffe0000bffff80002",
+    "kind": "compressed",
+    "expected_counts": [
+      [
+        291,
+        -482,
+        291,
+        -482
+      ],
+      [
+        292,
+        -484,
+        292,
+        -484
+      ]
+    ],
+    "firmware_generated": true,
+    "physical_capture": false
+  },
+  {
+    "width": 19,
+    "notification_index": 97,
+    "notification_hex": "c5ffffe0000bffff80002ffffe0000bffff80002",
+    "kind": "compressed",
+    "expected_counts": [
+      [
+        293,
+        -486,
+        293,
+        -486
+      ],
+      [
+        294,
+        -488,
+        294,
+        -488
+      ]
+    ],
+    "firmware_generated": true,
+    "physical_capture": false
+  },
+  {
+    "width": 19,
+    "notification_index": 98,
+    "notification_hex": "c6ffffe0000bffff80002ffffe0000bffff80002",
+    "kind": "compressed",
+    "expected_counts": [
+      [
+        295,
+        -490,
+        295,
+        -490
+      ],
+      [
+        296,
+        -492,
+        296,
+        -492
+      ]
+    ],
+    "firmware_generated": true,
+    "physical_capture": false
+  },
+  {
+    "width": 19,
+    "notification_index": 99,
+    "notification_hex": "c7ffffe0000bffff80002ffffe0000bffff80002",
+    "kind": "compressed",
+    "expected_counts": [
+      [
+        297,
+        -494,
+        297,
+        -494
+      ],
+      [
+        298,
+        -496,
+        298,
+        -496
+      ]
+    ],
+    "firmware_generated": true,
+    "physical_capture": false
+  },
+  {
+    "width": 19,
+    "notification_index": 100,
+    "notification_hex": "c8ffffe0000bffff80002ffffe0000bffff80002",
+    "kind": "compressed",
+    "expected_counts": [
+      [
+        299,
+        -498,
+        299,
+        -498
+      ],
+      [
+        300,
+        -500,
+        300,
+        -500
+      ]
+    ],
+    "firmware_generated": true,
+    "physical_capture": false
+  },
+  {
+    "width": 19,
+    "notification_index": 101,
+    "notification_hex": "00000064ffff9c000064ffff9c41424344454647",
+    "kind": "raw",
+    "expected_counts": [
+      [
+        100,
+        -100,
+        100,
+        -100
+      ]
+    ],
+    "firmware_generated": true,
+    "physical_capture": false
+  }
+]

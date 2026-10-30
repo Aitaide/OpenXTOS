@@ -1,0 +1,638 @@
+[
+  {
+    "label": "18-signed24-extremes-raw",
+    "matches": true,
+    "firmware_hex": "008000007fffff000000ffffff41424344454647",
+    "oracle_hex": "008000007fffff000000ffffff41424344454647",
+    "true_input_deltas": [],
+    "expected_reconstructed_deltas": [],
+    "expected_reconstructed_counts_pair": [],
+    "comparison_bytes": 20,
+    "tail_explanation": "raw ASCII A..G padding"
+  },
+  {
+    "label": "18-signed24-extremes-compressed",
+    "matches": true,
+    "firmware_hex": "0100007fffe00003ffffffff8000100000000012",
+    "oracle_hex": "0100007fffe00003ffffffff8000100000000012",
+    "true_input_deltas": [
+      -16777215,
+      16777215,
+      0,
+      -1,
+      16777215,
+      -16777215,
+      1,
+      0
+    ],
+    "expected_reconstructed_deltas": [
+      -262143,
+      262142,
+      0,
+      -1,
+      262142,
+      -262143,
+      0,
+      0
+    ],
+    "expected_reconstructed_counts_pair": [
+      [
+        -8126465,
+        8126465,
+        0,
+        0
+      ],
+      [
+        -8388607,
+        8388608,
+        0,
+        0
+      ]
+    ],
+    "comparison_bytes": 20,
+    "tail_explanation": "axis byte for ring%10=1/2/3, otherwise retained raw G; not zero fill"
+  },
+  {
+    "label": "18-zero-channels-raw",
+    "matches": true,
+    "firmware_hex": "0000000000000000000000000041424344454647",
+    "oracle_hex": "0000000000000000000000000041424344454647",
+    "true_input_deltas": [],
+    "expected_reconstructed_deltas": [],
+    "expected_reconstructed_counts_pair": [],
+    "comparison_bytes": 20,
+    "tail_explanation": "raw ASCII A..G padding"
+  },
+  {
+    "label": "18-zero-channels-compressed",
+    "matches": true,
+    "firmware_hex": "02000000000000000000000000000000000000a5",
+    "oracle_hex": "02000000000000000000000000000000000000a5",
+    "true_input_deltas": [
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0
+    ],
+    "expected_reconstructed_deltas": [
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0
+    ],
+    "expected_reconstructed_counts_pair": [
+      [
+        0,
+        0,
+        0,
+        0
+      ],
+      [
+        0,
+        0,
+        0,
+        0
+      ]
+    ],
+    "comparison_bytes": 20,
+    "tail_explanation": "axis byte for ring%10=1/2/3, otherwise retained raw G; not zero fill"
+  },
+  {
+    "label": "18-even-signed-raw",
+    "matches": true,
+    "firmware_hex": "0000000000000000000000000041424344454647",
+    "oracle_hex": "0000000000000000000000000041424344454647",
+    "true_input_deltas": [],
+    "expected_reconstructed_deltas": [],
+    "expected_reconstructed_counts_pair": [],
+    "comparison_bytes": 20,
+    "tail_explanation": "raw ASCII A..G padding"
+  },
+  {
+    "label": "18-even-signed-compressed",
+    "matches": true,
+    "firmware_hex": "030000bffff00403ff01ffff40004ff0040400fe",
+    "oracle_hex": "030000bffff00403ff01ffff40004ff0040400fe",
+    "true_input_deltas": [
+      2,
+      -2,
+      256,
+      -256,
+      -4,
+      4,
+      -1024,
+      1024
+    ],
+    "expected_reconstructed_deltas": [
+      2,
+      -1,
+      256,
+      -255,
+      -3,
+      4,
+      -1023,
+      1024
+    ],
+    "expected_reconstructed_counts_pair": [
+      [
+        -2,
+        1,
+        -256,
+        255
+      ],
+      [
+        1,
+        -3,
+        767,
+        -769
+      ]
+    ],
+    "comparison_bytes": 20,
+    "tail_explanation": "axis byte for ring%10=1/2/3, otherwise retained raw G; not zero fill"
+  },
+  {
+    "label": "18-odd-signed-raw",
+    "matches": true,
+    "firmware_hex": "0000000000000000000000000041424344454647",
+    "oracle_hex": "0000000000000000000000000041424344454647",
+    "true_input_deltas": [],
+    "expected_reconstructed_deltas": [],
+    "expected_reconstructed_counts_pair": [],
+    "comparison_bytes": 20,
+    "tail_explanation": "raw ASCII A..G padding"
+  },
+  {
+    "label": "18-odd-signed-compressed",
+    "matches": true,
+    "firmware_hex": "0a00003ffff0000bfffdfffec0004ffbfc010047",
+    "oracle_hex": "0a00003ffff0000bfffdfffec0004ffbfc010047",
+    "true_input_deltas": [
+      1,
+      -1,
+      3,
+      -3,
+      -5,
+      5,
+      -257,
+      257
+    ],
+    "expected_reconstructed_deltas": [
+      0,
+      -1,
+      2,
+      -3,
+      -5,
+      4,
+      -257,
+      256
+    ],
+    "expected_reconstructed_counts_pair": [
+      [
+        0,
+        1,
+        -2,
+        3
+      ],
+      [
+        5,
+        -3,
+        255,
+        -253
+      ]
+    ],
+    "comparison_bytes": 20,
+    "tail_explanation": "axis byte for ring%10=1/2/3, otherwise retained raw G; not zero fill"
+  },
+  {
+    "label": "18-exact-width-boundaries-raw",
+    "matches": true,
+    "firmware_hex": "0000000000000000000000000041424344454647",
+    "oracle_hex": "0000000000000000000000000041424344454647",
+    "true_input_deltas": [],
+    "expected_reconstructed_deltas": [],
+    "expected_reconstructed_counts_pair": [],
+    "comparison_bytes": 20,
+    "tail_explanation": "raw ASCII A..G padding"
+  },
+  {
+    "label": "18-exact-width-boundaries-compressed",
+    "matches": true,
+    "firmware_hex": "64ffff80001ffff8000100003ffff00003ffff47",
+    "oracle_hex": "64ffff80001ffff8000100003ffff00003ffff47",
+    "true_input_deltas": [
+      262142,
+      -262144,
+      262143,
+      -262143,
+      262144,
+      -262145,
+      0,
+      -2
+    ],
+    "expected_reconstructed_deltas": [
+      262142,
+      -262143,
+      262142,
+      -262143,
+      0,
+      -1,
+      0,
+      -1
+    ],
+    "expected_reconstructed_counts_pair": [
+      [
+        -262142,
+        262143,
+        -262142,
+        262143
+      ],
+      [
+        -262142,
+        262144,
+        -262142,
+        262144
+      ]
+    ],
+    "comparison_bytes": 20,
+    "tail_explanation": "axis byte for ring%10=1/2/3, otherwise retained raw G; not zero fill"
+  },
+  {
+    "label": "18-cross-byte-patterns-raw",
+    "matches": true,
+    "firmware_hex": "000f4240f0bdc0061a80f9e58041424344454647",
+    "oracle_hex": "000f4240f0bdc0061a80f9e58041424344454647",
+    "true_input_deltas": [],
+    "expected_reconstructed_deltas": [],
+    "expected_reconstructed_counts_pair": [],
+    "comparison_bytes": 20,
+    "tail_explanation": "raw ASCII A..G padding"
+  },
+  {
+    "label": "18-cross-byte-patterns-compressed",
+    "matches": true,
+    "firmware_hex": "0155552aaabaaaa95555b72ed2344bfffd000012",
+    "oracle_hex": "0155552aaabaaaa95555b72ed2344bfffd000012",
+    "true_input_deltas": [
+      87380,
+      -87382,
+      174762,
+      -174764,
+      -74565,
+      74565,
+      -65537,
+      65537
+    ],
+    "expected_reconstructed_deltas": [
+      87380,
+      -87381,
+      174762,
+      -174763,
+      -74565,
+      74564,
+      -65537,
+      65536
+    ],
+    "expected_reconstructed_counts_pair": [
+      [
+        912620,
+        -912619,
+        225238,
+        -225237
+      ],
+      [
+        987185,
+        -987183,
+        290775,
+        -290773
+      ]
+    ],
+    "comparison_bytes": 20,
+    "tail_explanation": "axis byte for ring%10=1/2/3, otherwise retained raw G; not zero fill"
+  },
+  {
+    "label": "19-signed24-extremes-raw",
+    "matches": true,
+    "firmware_hex": "008000007fffff000000ffffff41424344454647",
+    "oracle_hex": "008000007fffff000000ffffff41424344454647",
+    "true_input_deltas": [],
+    "expected_reconstructed_deltas": [],
+    "expected_reconstructed_counts_pair": [],
+    "comparison_bytes": 20,
+    "tail_explanation": "raw ASCII A..G padding"
+  },
+  {
+    "label": "19-signed24-extremes-compressed",
+    "matches": true,
+    "firmware_hex": "6500003ffff800007ffffffffc00004000000000",
+    "oracle_hex": "6500003ffff800007ffffffffc00004000000000",
+    "true_input_deltas": [
+      -16777215,
+      16777215,
+      0,
+      -1,
+      16777215,
+      -16777215,
+      1,
+      0
+    ],
+    "expected_reconstructed_deltas": [
+      -524287,
+      524286,
+      0,
+      -1,
+      524286,
+      -524287,
+      0,
+      0
+    ],
+    "expected_reconstructed_counts_pair": [
+      [
+        -7864321,
+        7864321,
+        0,
+        0
+      ],
+      [
+        -8388607,
+        8388608,
+        0,
+        0
+      ]
+    ],
+    "comparison_bytes": 20,
+    "tail_explanation": "all 19 payload bytes are delta data; no accel tail"
+  },
+  {
+    "label": "19-zero-channels-raw",
+    "matches": true,
+    "firmware_hex": "0000000000000000000000000041424344454647",
+    "oracle_hex": "0000000000000000000000000041424344454647",
+    "true_input_deltas": [],
+    "expected_reconstructed_deltas": [],
+    "expected_reconstructed_counts_pair": [],
+    "comparison_bytes": 20,
+    "tail_explanation": "raw ASCII A..G padding"
+  },
+  {
+    "label": "19-zero-channels-compressed",
+    "matches": true,
+    "firmware_hex": "6600000000000000000000000000000000000000",
+    "oracle_hex": "6600000000000000000000000000000000000000",
+    "true_input_deltas": [
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0
+    ],
+    "expected_reconstructed_deltas": [
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0
+    ],
+    "expected_reconstructed_counts_pair": [
+      [
+        0,
+        0,
+        0,
+        0
+      ],
+      [
+        0,
+        0,
+        0,
+        0
+      ]
+    ],
+    "comparison_bytes": 20,
+    "tail_explanation": "all 19 payload bytes are delta data; no accel tail"
+  },
+  {
+    "label": "19-even-signed-raw",
+    "matches": true,
+    "firmware_hex": "0000000000000000000000000041424344454647",
+    "oracle_hex": "0000000000000000000000000041424344454647",
+    "true_input_deltas": [],
+    "expected_reconstructed_deltas": [],
+    "expected_reconstructed_counts_pair": [],
+    "comparison_bytes": 20,
+    "tail_explanation": "raw ASCII A..G padding"
+  },
+  {
+    "label": "19-even-signed-compressed",
+    "matches": true,
+    "firmware_hex": "6700005ffffc00807ff01ffffa00013fe0080400",
+    "oracle_hex": "6700005ffffc00807ff01ffffa00013fe0080400",
+    "true_input_deltas": [
+      2,
+      -2,
+      256,
+      -256,
+      -4,
+      4,
+      -1024,
+      1024
+    ],
+    "expected_reconstructed_deltas": [
+      2,
+      -1,
+      256,
+      -255,
+      -3,
+      4,
+      -1023,
+      1024
+    ],
+    "expected_reconstructed_counts_pair": [
+      [
+        -2,
+        1,
+        -256,
+        255
+      ],
+      [
+        1,
+        -3,
+        767,
+        -769
+      ]
+    ],
+    "comparison_bytes": 20,
+    "tail_explanation": "all 19 payload bytes are delta data; no accel tail"
+  },
+  {
+    "label": "19-odd-signed-raw",
+    "matches": true,
+    "firmware_hex": "0000000000000000000000000041424344454647",
+    "oracle_hex": "0000000000000000000000000041424344454647",
+    "true_input_deltas": [],
+    "expected_reconstructed_deltas": [],
+    "expected_reconstructed_counts_pair": [],
+    "comparison_bytes": 20,
+    "tail_explanation": "raw ASCII A..G padding"
+  },
+  {
+    "label": "19-odd-signed-compressed",
+    "matches": true,
+    "firmware_hex": "6e00001ffffc00017fffdffff600013ff7f80100",
+    "oracle_hex": "6e00001ffffc00017fffdffff600013ff7f80100",
+    "true_input_deltas": [
+      1,
+      -1,
+      3,
+      -3,
+      -5,
+      5,
+      -257,
+      257
+    ],
+    "expected_reconstructed_deltas": [
+      0,
+      -1,
+      2,
+      -3,
+      -5,
+      4,
+      -257,
+      256
+    ],
+    "expected_reconstructed_counts_pair": [
+      [
+        0,
+        1,
+        -2,
+        3
+      ],
+      [
+        5,
+        -3,
+        255,
+        -253
+      ]
+    ],
+    "comparison_bytes": 20,
+    "tail_explanation": "all 19 payload bytes are delta data; no accel tail"
+  },
+  {
+    "label": "19-exact-width-boundaries-raw",
+    "matches": true,
+    "firmware_hex": "0000000000000000000000000041424344454647",
+    "oracle_hex": "0000000000000000000000000041424344454647",
+    "true_input_deltas": [],
+    "expected_reconstructed_deltas": [],
+    "expected_reconstructed_counts_pair": [],
+    "comparison_bytes": 20,
+    "tail_explanation": "raw ASCII A..G padding"
+  },
+  {
+    "label": "19-exact-width-boundaries-compressed",
+    "matches": true,
+    "firmware_hex": "c8ffffc00007ffff0000100001ffffc00007ffff",
+    "oracle_hex": "c8ffffc00007ffff0000100001ffffc00007ffff",
+    "true_input_deltas": [
+      524286,
+      -524288,
+      524287,
+      -524287,
+      524288,
+      -524289,
+      0,
+      -2
+    ],
+    "expected_reconstructed_deltas": [
+      524286,
+      -524287,
+      524286,
+      -524287,
+      0,
+      -1,
+      0,
+      -1
+    ],
+    "expected_reconstructed_counts_pair": [
+      [
+        -524286,
+        524287,
+        -524286,
+        524287
+      ],
+      [
+        -524286,
+        524288,
+        -524286,
+        524288
+      ]
+    ],
+    "comparison_bytes": 20,
+    "tail_explanation": "all 19 payload bytes are delta data; no accel tail"
+  },
+  {
+    "label": "19-cross-byte-patterns-raw",
+    "matches": true,
+    "firmware_hex": "000f4240f0bdc0061a80f9e58041424344454647",
+    "oracle_hex": "000f4240f0bdc0061a80f9e58041424344454647",
+    "true_input_deltas": [],
+    "expected_reconstructed_deltas": [],
+    "expected_reconstructed_counts_pair": [],
+    "comparison_bytes": 20,
+    "tail_explanation": "raw ASCII A..G padding"
+  },
+  {
+    "label": "19-cross-byte-patterns-compressed",
+    "matches": true,
+    "firmware_hex": "652aaa9aaaad555555555db97648d137fff90000",
+    "oracle_hex": "652aaa9aaaad555555555db97648d137fff90000",
+    "true_input_deltas": [
+      87380,
+      -87382,
+      174762,
+      -174764,
+      -74565,
+      74565,
+      -65537,
+      65537
+    ],
+    "expected_reconstructed_deltas": [
+      87380,
+      -87381,
+      174762,
+      -174763,
+      -74565,
+      74564,
+      -65537,
+      65536
+    ],
+    "expected_reconstructed_counts_pair": [
+      [
+        912620,
+        -912619,
+        225238,
+        -225237
+      ],
+      [
+        987185,
+        -987183,
+        290775,
+        -290773
+      ]
+    ],
+    "comparison_bytes": 20,
+    "tail_explanation": "all 19 payload bytes are delta data; no accel tail"
+  }
+]

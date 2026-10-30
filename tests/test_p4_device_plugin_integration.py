@@ -16,6 +16,8 @@ class DevicePluginIntegrationTests(unittest.TestCase):
         runner = (ROOT / "scripts/test.sh").read_text()
         for name in ("test_xtos_devices.py", "test_xtos_serial_transport.py",
                      "test_xtos_cyton_protocol.py", "test_xtos_cyton_serial_plugin.py",
+                     "test_xtos_ganglion_protocol.py", "test_xtos_ganglion_plugin.py",
+                     "test_xtos_ganglion_stream.py",
                      "test_device_serial_install.py", "test_p4_device_plugin_integration.py"):
             self.assertEqual(runner.count(name), 1, name)
         self.assertIn("device_plugins=install_devices(runtime, ROOT)",
@@ -54,6 +56,7 @@ class DevicePluginIntegrationTests(unittest.TestCase):
     def test_plugin_readme_reflects_current_focused_scope_and_limits(self):
         text = README.read_text()
         for name in ("serial_transport.py", "cyton_protocol.py", "cyton_serial_plugin.py",
+                     "ganglion_protocol.py", "ganglion_plugin.py",
                      "openbci_cyton.CytonPacketParser"):
             self.assertIn(name, text)
         self.assertIn("fixture_replay", text)
@@ -62,7 +65,9 @@ class DevicePluginIntegrationTests(unittest.TestCase):
         self.assertIn("reset_defaults=True", text)
         self.assertIn("not phase acceptance", text)
         for suite in ("test_xtos_devices.py", "test_xtos_serial_transport.py",
-                      "test_xtos_cyton_protocol.py", "test_xtos_cyton_serial_plugin.py"):
+                      "test_xtos_cyton_protocol.py", "test_xtos_cyton_serial_plugin.py",
+                      "test_xtos_ganglion_protocol.py", "test_xtos_ganglion_plugin.py",
+                      "test_xtos_ganglion_stream.py"):
             self.assertIn(suite, text)
         self.assertNotIn("run_suite.py final-normal", text)
         self.assertNotIn("run_suite.py final-optimized", text)

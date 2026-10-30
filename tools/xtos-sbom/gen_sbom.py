@@ -173,11 +173,11 @@ COMPONENTS = [
         "name": "xtos-device-plugins",
         "version": "0.1.0",
         "license": LICENSE_APACHE,
-        "description": "Source-only fixture and Cyton serial plugin; Linux tty transport and canonical parser adapter, no hardware identity proof",
+        "description": "Source-only fixture, Cyton serial and version-pinned Ganglion v2 plugin adapters; no hardware identity proof",
         "scope": "required",
         "path": "tools/xtos-devices",
         "hash_globs": ["xtos_devices.py", "serial_transport.py", "cyton_protocol.py",
-                       "cyton_serial_plugin.py"],
+                       "cyton_serial_plugin.py", "ganglion_protocol.py", "ganglion_plugin.py"],
     },
     {
         "name": "xtos-eeg-loop",

@@ -1,10 +1,10 @@
 {
   "bomFormat": "CycloneDX",
   "specVersion": "1.5",
-  "serialNumber": "urn:uuid:4fb4fa355b9e5c3cacae65b8f3ce4a77327e",
+  "serialNumber": "urn:uuid:0208e94e01c2bcc72c8dda89da6ab69ffa71",
   "version": 1,
   "metadata": {
-    "timestamp": "2026-10-30T20:11:45.922506+00:00",
+    "timestamp": "2026-10-30T22:26:27.739164+00:00",
     "component": {
       "type": "application",
       "bom-ref": "xtos-component-xtos-system",
@@ -30,7 +30,7 @@
     "properties": [
       {
         "name": "xtos:git-commit",
-        "value": "c026f55ef1f405df151f2a318531063a1a890fa6"
+        "value": "47c8bc8299b7bc8e78672acd6035b6a94084284c"
       },
       {
         "name": "xtos:kernel-release",
@@ -624,7 +624,7 @@
           }
         }
       ],
-      "description": "Source-only fixture and Cyton serial plugin; Linux tty transport and canonical parser adapter, no hardware identity proof",
+      "description": "Source-only fixture, Cyton serial and version-pinned Ganglion v2 plugin adapters; no hardware identity proof",
       "scope": "required",
       "purl": "pkg:generic/xtos-device-plugins@0.1.0",
       "properties": [
@@ -649,6 +649,14 @@
         {
           "alg": "SHA-256",
           "content": "574a234104d0f15a788839e8fddac580fc5ff8cb4aedcbf003d1b736c23056f6"
+        },
+        {
+          "alg": "SHA-256",
+          "content": "956296041967e120d4923bac98901167f58b1528791b6204228321d2fda2a4c4"
+        },
+        {
+          "alg": "SHA-256",
+          "content": "b5e2b1a3773123fe2786724be0704b456fa45e8b4b1e70e76e905dc0dcabc78a"
         }
       ]
     },

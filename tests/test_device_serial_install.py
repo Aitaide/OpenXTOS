@@ -25,15 +25,19 @@ class DeviceSerialInstallTests(unittest.TestCase):
             self.assertFalse(result['physical_device_evidence'])
             self.assertFalse(result['fixture_or_test_sources_installed'])
             expected = {'xtos_devices.py', 'serial_transport.py', 'cyton_protocol.py',
-                        'cyton_serial_plugin.py', 'openbci_cyton.py'}
+                        'cyton_serial_plugin.py', 'ganglion_protocol.py',
+                        'ganglion_plugin.py', 'openbci_cyton.py'}
             package = stage/'usr/lib/xtos/devices'
             self.assertEqual({p.name for p in package.iterdir()}, expected)
             code = ('import sys; sys.path.insert(0, sys.argv[1]); '
                     'from cyton_serial_plugin import CytonSerialPlugin; '
+                    'from ganglion_plugin import GanglionPlugin; '
+                    'from ganglion_protocol import GanglionV2Decoder; '
                     'from serial_transport import LinuxSerialTransport; '
                     'from cyton_protocol import CytonProtocolError; '
                     '\nif LinuxSerialTransport("/dev/ttyUSB0").connected: '
                     'raise RuntimeError("constructor opened a tty")'
+                    '\nassert GanglionV2Decoder.profile == "openbci-ganglion-v2.0.1"; '
                     '\nprint("INSTALLED_DEVICE_API=PASS")')
             run = subprocess.run([sys.executable, '-I', '-B', '-c', code, str(package)],
                                  capture_output=True, text=True, timeout=15)

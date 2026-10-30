@@ -1,0 +1,32 @@
+{
+  "status": "PASS_HOST_METHOD_COMPOSITION",
+  "compile_command": [
+    "c++",
+    "-std=c++17",
+    "-O1",
+    "-g",
+    "-Wall",
+    "-Wextra",
+    "-Werror",
+    "-fsanitize=address,undefined",
+    "-fno-sanitize-recover=all",
+    "-fno-omit-frame-pointer",
+    "/root/xtos-development/xtos/.build/p4-ganglion-reference/continuous-vectors/encoder.cpp",
+    "-o",
+    "/root/xtos-development/xtos/.build/p4-ganglion-reference/continuous-vectors/encoder"
+  ],
+  "compile_exit": 0,
+  "execution_exit": 0,
+  "notifications": 204,
+  "decoded_sample_expectations": 404,
+  "oracle_matches": 204,
+  "official_method_count": 6,
+  "source_sha256": "8c6fec28fbf2a2801bda9ecdf2dd6812ec322dfc11e18af987376492eef83776",
+  "vectors_sha256": "cd2eb63af69d1b0c6da1430aee682da7e692fc6a0ea6d413ee896a5300ecb574",
+  "limitations": [
+    "Host method composition only: explicit raw after100 pairs does not execute firmware processData, ISR or GATT.",
+    "Fixed18 and fixed19 streams only, no live mode-transition or BLE evidence.",
+    "Counts are reconstructed lossy values, not asserted equal to true ADC input."
+  ],
+  "classification": "PARENT_VECTOR_VERIFICATION_NOT_DECODER_IMPLEMENTATION"
+}

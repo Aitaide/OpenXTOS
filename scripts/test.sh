@@ -17,6 +17,9 @@ python3 -B -m unittest discover -s "$ROOT/tests" -p 'test_xtos_devices.py' -v
 python3 -B -m unittest discover -s "$ROOT/tests" -p 'test_xtos_serial_transport.py' -v
 python3 -B -m unittest discover -s "$ROOT/tests" -p 'test_xtos_cyton_protocol.py' -v
 python3 -B -m unittest discover -s "$ROOT/tests" -p 'test_xtos_cyton_serial_plugin.py' -v
+python3 -B -m unittest discover -s "$ROOT/tests" -p 'test_xtos_ganglion_protocol.py' -v
+python3 -B -m unittest discover -s "$ROOT/tests" -p 'test_xtos_ganglion_plugin.py' -v
+python3 -B -m unittest discover -s "$ROOT/tests" -p 'test_xtos_ganglion_stream.py' -v
 python3 -B -m unittest discover -s "$ROOT/tests" -p 'test_device_serial_install.py' -v
 python3 -B -m unittest discover -s "$ROOT/tests" -p 'test_p4_device_plugin_integration.py' -v
 python3 "$ROOT/tests/test_cyton_runtime.py"
