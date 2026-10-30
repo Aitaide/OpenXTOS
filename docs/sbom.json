@@ -1,10 +1,10 @@
 {
   "bomFormat": "CycloneDX",
   "specVersion": "1.5",
-  "serialNumber": "urn:uuid:79b039656c52d8399084c76fbaef6922e5ee",
+  "serialNumber": "urn:uuid:4fb4fa355b9e5c3cacae65b8f3ce4a77327e",
   "version": 1,
   "metadata": {
-    "timestamp": "2026-10-30T12:25:26.970973+00:00",
+    "timestamp": "2026-10-30T20:11:45.922506+00:00",
     "component": {
       "type": "application",
       "bom-ref": "xtos-component-xtos-system",
@@ -30,7 +30,7 @@
     "properties": [
       {
         "name": "xtos:git-commit",
-        "value": "3f6d63e4b1518e5e923fdb77c90c0d73d8aba382"
+        "value": "c026f55ef1f405df151f2a318531063a1a890fa6"
       },
       {
         "name": "xtos:kernel-release",
@@ -624,8 +624,8 @@
           }
         }
       ],
-      "description": "Fixture-only multi-device plugin contract and canonical Cyton adapter; physical transports are not shipped",
-      "scope": "excluded",
+      "description": "Source-only fixture and Cyton serial plugin; Linux tty transport and canonical parser adapter, no hardware identity proof",
+      "scope": "required",
       "purl": "pkg:generic/xtos-device-plugins@0.1.0",
       "properties": [
         {
@@ -637,6 +637,18 @@
         {
           "alg": "SHA-256",
           "content": "d432a57fd2336cccc8b3e6b30efe4a5cbae952c7dcf1783aecfaf68ec600e3f1"
+        },
+        {
+          "alg": "SHA-256",
+          "content": "4e9e2d768f2e6ee84d2a18af3c4a7ac7d085dc059fcaf9909e179b400fe79f40"
+        },
+        {
+          "alg": "SHA-256",
+          "content": "1e5ace6023c7f0b96470b97285fc28d82aa74e82d95c8d45693a204486348344"
+        },
+        {
+          "alg": "SHA-256",
+          "content": "574a234104d0f15a788839e8fddac580fc5ff8cb4aedcbf003d1b736c23056f6"
         }
       ]
     },
@@ -971,6 +983,7 @@
         "xtos-component-xtos-eeg-stream",
         "xtos-component-xtos-signal-benchmark",
         "xtos-component-xtos-eeg-replay",
+        "xtos-component-xtos-device-plugins",
         "xtos-component-xtos-eeg-loop",
         "xtos-component-xtos-ai-runtime",
         "xtos-component-xtos-action-gate"
@@ -1029,7 +1042,9 @@
     },
     {
       "ref": "xtos-component-xtos-device-plugins",
-      "dependsOn": []
+      "dependsOn": [
+        "xtos-component-xtos-eeg-pipeline"
+      ]
     },
     {
       "ref": "xtos-component-xtos-eeg-loop",

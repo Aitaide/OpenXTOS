@@ -173,10 +173,11 @@ COMPONENTS = [
         "name": "xtos-device-plugins",
         "version": "0.1.0",
         "license": LICENSE_APACHE,
-        "description": "Fixture-only multi-device plugin contract and canonical Cyton adapter; physical transports are not shipped",
-        "scope": "excluded",
+        "description": "Source-only fixture and Cyton serial plugin; Linux tty transport and canonical parser adapter, no hardware identity proof",
+        "scope": "required",
         "path": "tools/xtos-devices",
-        "hash_globs": ["xtos_devices.py"],
+        "hash_globs": ["xtos_devices.py", "serial_transport.py", "cyton_protocol.py",
+                       "cyton_serial_plugin.py"],
     },
     {
         "name": "xtos-eeg-loop",
@@ -351,6 +352,8 @@ def main() -> int:
                                    if c["scope"] == "required"]}]
     for comp in components:
         requires = [component_ref(name) for name in ('libxtos-bci', 'libxtos-signal')] if comp['name'] == 'xtos-eeg-stream' else []
+        if comp['name'] == 'xtos-device-plugins':
+            requires = [component_ref('xtos-eeg-pipeline')]
         dependencies.append({"ref": comp["bom-ref"], "dependsOn": requires})
 
     bom = {

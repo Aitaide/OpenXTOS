@@ -1,6 +1,6 @@
 # XTOS 当前状态
 
-最后更新：2026-10-30
+最后更新：2026-10-31
 
 本文件保留各历史候选的验收范围。当前工作树的源码实现、维护测试、镜像验收和物理硬件验收分别记录；历史镜像的 PASS 不自动覆盖本次提交。
 
@@ -10,7 +10,7 @@
 
 当前已验证：
 
-- 本轮缺口闭环的本地交付为 M0 证据验证器、sched_class RFC/完整 callback 审查矩阵、EEG 设备报告契约和 OpenBCI Cyton 用户态串口切片（33-byte parser、115200 8N1 bounded capture、hash-bound raw/frame bundle、八通道滤波 replay）。system/Live 构建路径已接入这批用户态源文件；Live profile 声明 Python 运行时契约，system rootfs 明确不内置 Python。构建检查区分 source-staged 与运行时模式，Live 新构建强制执行 chroot 合成采集/回放烟测并记录构建清单；尚未重建或启动含该功能的新 ISO。代码路径由 PTY/合成包测试，不能算真实设备 adapter 通过；当前 scheduler acceptance 仍以 `.build/scheduler-gap-closure/acceptance-ledger.json` 绑定的候选源码哈希、独立审查和维护 attempt 为准。
+- 历史缺口闭环的本地交付为 M0 证据验证器、sched_class RFC/完整 callback 审查矩阵、EEG 设备报告契约和 OpenBCI Cyton 用户态串口切片（33-byte parser、115200 8N1 bounded capture、hash-bound raw/frame bundle、八通道滤波 replay）。system/Live 构建路径已接入这批用户态源文件；Live profile 声明 Python 运行时契约，system rootfs 明确不内置 Python。构建检查区分 source-staged 与运行时模式，Live 新构建强制执行 chroot 合成采集/回放烟测并记录构建清单。该切片当时尚未重建ISO，后续clean-source candidate-59的当前验收见下文阶段3记录。代码路径由PTY/合成包测试，真实设备验收仍待完成；scheduler acceptance以 `.build/scheduler-gap-closure/acceptance-ledger.json` 绑定的候选源码哈希、独立审查和维护 attempt 为准。
 - `m0_gate.py` 要求协议指定的原生策略组各至少 10 个不同执行、同条件、固定 CPU trace，拒绝诊断 DEADLINE、哈希漂移和不完整证据。最多返回 ready_for_independent_review，hardware_gate_accepted 固定 false；当前 `m0-target-intake.json` 仍是 `needs_operator_input`，因此 M0 实机门未关闭。
 - `device_contract.py` 与 Cyton capture/replay 验证器已覆盖样本序号/时间戳/单位/丢包/报告一致性；新增的 OpenBCI Cyton adapter 仅是通过 PTY 和合成协议帧验证的用户态代码。真实板卡身份、实际 gain/firmware、物理 USB/UART、断连恢复、DMA/内核 serdev 和端到端链路仍未验证。
 - `scripts/build_system.sh` 完成 x86_64 内核、模块、BusyBox 和 initramfs 构建。
@@ -49,9 +49,11 @@
 
 阶段2的精确冻结本地软件版本已验收，索引 `.build/xtos-roadmap-v1/phase2-acceptance.json` 为 `ACCEPTED_LOCAL_SOFTWARE`，绑定源码快照 `bf860f3b7a0c7d70b81502649e84dbb499b3edf58b9437d504030cd313f129a1` 和 candidate-57 ISO `936fbca0ae047f714135d8550dbf2d6d5ae7866bbf80d9a68fd3f8e1d74d16d0`。逐帧版本化 UAPI/SDK、独立帧 ring、配置/流代次与质量元数据、只读不可变帧快照以及旧 read/snapshot 兼容已完成组件和集成 SPEC/QUALITY。完整维护82组1139次执行、零失败/跳过（11项AI已包含），34个既有产物叶节点精确恢复；实际Linux VFS/VM合成设备、镜像内已安装SDK的逐帧读/映射/fork/解绑/重载、旧接口、三种PTY诊断和离线校准以及BIOS/UEFI×CD/USB四模式通过。独立收尾审计核验481项输入哈希。candidate-57继续为dirty源码私有诊断镜像，显式继承已锁定用户态与early initramfs，并重新构建当前内核/模块/SDK/CLI；不代表clean-source正式发布、真实32位compat syscall、当前ARM64/RISC-V运行或物理设备验收。
 
-阶段2的PASS仅覆盖索引记录的历史冻结源码和ISO；本次状态更新及P3新文件不继承该PASS。当前P3已实现固定容量C窗口/均值RMS特征、SDK安装、逐帧采集适配、版本化JSONL导出、特征/模型绑定、真实UDS协议往返、流生命周期控制和单次确认的无危险模拟反馈，相关源码测试已接入维护入口。合成输入始终保留 `no_action`，算术ONNX fixture不代表经训练的脑电识别模型。阶段3当前仍为 `in_progress`：源码测试与安装验证不等于新镜像、真实板卡或物理延迟验收，不借用阶段2或历史P3证据关闭当前版本的产物门。
+阶段2的PASS仅覆盖索引记录的历史冻结源码和ISO。阶段3已在精确 clean 提交 `c026f55ef1f405df151f2a318531063a1a890fa6` 关闭本地软件验收，索引 `.build/continuation-c026f55ef/acceptance-index.json` 为 `ACCEPTED_LOCAL_SOFTWARE`。完整维护99组1310次执行、零失败/跳过（11项AI已包含），新编译内核及31个模块、维护配置BusyBox、SDK和原生工具；明确复用并校验锁定用户态、私有CPU运行时和liblsl。candidate-59 ISO `9e9b24eb50076e3f700d2e61c4e635bed7ab9856c4ac011dec38e175369378cb` 已完成完整嵌入载荷读回、镜像内已安装SDK的旧/逐帧read与snapshot/mmap、9个窗口case、原生VFS导出到两个签名16特征CPU/UDS数值窗、13个生命周期/模拟反馈方法（零跳过），以及BIOS/UEFI×CD/USB四模式启动。持久镜像在 `.build/clean-source-c026f55ef/.build/retained-candidate-59-clean-eeg/images/`；独立收尾审计核验22条输入记录和10项关闭criteria后由父代理验收。合成输入始终 `no_action`，算术ONNX fixture不代表经训练的脑电识别模型；CLI终态失效测试不单独作为CLI端到端成功推理证据。
 
-多设备插件已加入同步、内存内的Cyton契约适配及生命周期测试，明确为 `fixture_replay`、`physical_device_evidence=false`，不包含真实USB/BLE/网络传输或物理身份认证。GPU、XR与调度类实机决策仍按计划保留；当前自定义 `sched_class` 尚未实现。
+上述P3 PASS仅绑定该提交与ISO；本状态更新和P4新改动不继承此PASS，真实板卡、物理延迟和公开发行仍单列。P4已进入真实Linux串口传输与受限Cyton默认配置接入开发；现有同步内存fixture适配保持兼容。P4在聚焦测试、独立审查、完整维护及安装产物门全部完成前保持 `in_progress`。
+
+多设备插件保留同步内存fixture接口，并新增Linux非阻塞串口传输、固定Cyton v3.1.2默认配置解析和复用canonical decoder的会话适配。串口及文本解析已完成聚焦测试与SPEC/QUALITY；会话审查发现的跨代取消、分片尾随字节和过期启动清理问题已修复，普通与优化模式各18项回归通过。source-only Live安装与维护测试入口已接入，当前P4源码、安装包与后续镜像的验收记录分别绑定，历史P3 PASS不覆盖这些改动。PTY输入保持 `fixture_replay`、`physical_device_evidence=false`，物理USB/UART、BLE/网络、Ganglion及物理身份认证尚未验收。GPU、XR与调度类实机决策仍按计划保留；当前自定义 `sched_class` 尚未实现。
 
 ## 历史状态记录
 

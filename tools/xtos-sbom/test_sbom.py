@@ -53,14 +53,19 @@ class SbomTests(unittest.TestCase):
             self.assertIn(required, names, f"{required} missing from SBOM")
         plugin = next(c for c in self.bom["components"]
                       if c["name"] == "xtos-device-plugins")
-        self.assertEqual(plugin["scope"], "excluded")
+        self.assertEqual(plugin["scope"], "required")
+        plugin_hashes = {h["content"] for h in plugin["hashes"]}
+        for name in ("xtos_devices.py", "serial_transport.py", "cyton_protocol.py",
+                     "cyton_serial_plugin.py"):
+            self.assertIn(hashlib.sha256((ROOT / "tools/xtos-devices" / name).read_bytes()).hexdigest(),
+                          plugin_hashes)
         kernel = next(c for c in self.bom["components"] if c["name"] == "xtos-linux-integration")
         props = {p["name"]: p["value"] for p in kernel["properties"]}
         self.assertEqual(props["openbci-cyton-packet.h"], hashlib.sha256(
             (ROOT / 'kernel/linux/drivers/xtos/bci/xtos_cyton_packet.h').read_bytes()).hexdigest())
         required_comps = [c for c in self.bom["components"]
                           if c.get("scope") == "required"]
-        self.assertEqual(len(required_comps), 16)  # system + 15 shipped
+        self.assertEqual(len(required_comps), 17)  # system + 16 shipped
 
     def test_runtime_build_inputs_are_completely_bound(self):
         inventories = {}

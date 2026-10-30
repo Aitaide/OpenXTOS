@@ -14,6 +14,10 @@ python3 "$ROOT/tests/test_scheduler_class_readiness.py"
 python3 "$ROOT/tests/test_sched_class_hooks.py"
 python3 "$ROOT/tests/test_eeg_device_contract.py"
 python3 -B -m unittest discover -s "$ROOT/tests" -p 'test_xtos_devices.py' -v
+python3 -B -m unittest discover -s "$ROOT/tests" -p 'test_xtos_serial_transport.py' -v
+python3 -B -m unittest discover -s "$ROOT/tests" -p 'test_xtos_cyton_protocol.py' -v
+python3 -B -m unittest discover -s "$ROOT/tests" -p 'test_xtos_cyton_serial_plugin.py' -v
+python3 -B -m unittest discover -s "$ROOT/tests" -p 'test_device_serial_install.py' -v
 python3 -B -m unittest discover -s "$ROOT/tests" -p 'test_p4_device_plugin_integration.py' -v
 python3 "$ROOT/tests/test_cyton_runtime.py"
 bash "$ROOT/scripts/test_cyton_kernel_parser.sh"

@@ -19,6 +19,7 @@ from userspace import resolve_root, verify_rootfs
 from userspace_root import open_owned_root
 from live_ai import install_runtime, validate_runtime
 from install_eeg_loop import install as install_eeg_loop
+from install_devices import install as install_devices
 
 REQUIRED_CONFIG=['CONFIG_PREEMPT_RT=y','CONFIG_SQUASHFS=y','CONFIG_SQUASHFS_ZLIB=y','CONFIG_OVERLAY_FS=y','CONFIG_BLK_DEV_LOOP=y','CONFIG_ISO9660_FS=y','CONFIG_USB_STORAGE=y','CONFIG_DEVTMPFS=y']
 REQUIRED_CONFIG += ['CONFIG_SECURITY=y','CONFIG_SECURITY_LANDLOCK=y','CONFIG_SECCOMP=y',
@@ -363,6 +364,7 @@ def build(args):
         if cyton_runtime.get('status')!='pass' or cyton_runtime.get('interpreter_runtime_smoke') is not True:
             raise ValueError('Cyton runtime smoke did not pass')
         cyton_runtime['profile_sha256']=sha(ROOT/'system/profiles/live-developer.json')
+        device_plugins=install_devices(runtime, ROOT)
         eeg_loop_sources = install_eeg_loop(runtime, ROOT)
         ai_runtime=install_runtime(runtime,ai_root,ai_descriptor,ROOT,ai_lock) if ai_root else None
         # liblsl (Lab Streaming Layer) from the pinned upstream build; the lock
@@ -481,6 +483,7 @@ def build(args):
         build_manifest={'schema_version':1,'status':'built-unverified-live-candidate','architecture':'x86_64','kernel_release':release,'kernel_sha256':sha(image),'kernel_config_sha256':sha(kernel/'.config'),'userspace_lock_sha256':manifest['lock_sha256'],'source_git_head':provenance['source_git_head'],'source_state':provenance['source_state'],'authorized_public_key_sha256':hashlib.sha256(key.encode()).hexdigest() if key else None,'rootfs_squashfs_sha256':sha(squash),'initramfs_sha256':sha(iso/'boot/initramfs.gz'),'iso_sha256':sha(product),'iso_bytes':product.stat().st_size,'epoch':epoch,'storage':live_storage,'ssh':'publickey only when provisioned','firewall':'implemented for private QEMU validation; physical policy deployment unverified','secure_boot':'unverified/unsupported','private_key_included':False}
         build_manifest['ai_runtime']=ai_runtime
         build_manifest['cyton_runtime']=cyton_runtime
+        build_manifest['device_plugins']=device_plugins
         build_manifest['native_bci_runtime']=native_bci_runtime
         build_manifest['eeg_loop_sources']=eeg_loop_sources
         build_manifest['eeg_stream_sources']=eeg_stream_sources
