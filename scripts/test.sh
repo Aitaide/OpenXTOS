@@ -15,6 +15,9 @@ python3 "$ROOT/tests/test_sched_class_hooks.py"
 python3 "$ROOT/tests/test_eeg_device_contract.py"
 python3 -B -m unittest discover -s "$ROOT/tests" -p 'test_xtos_devices.py' -v
 python3 -B -m unittest discover -s "$ROOT/tests" -p 'test_xtos_serial_transport.py' -v
+python3 -B -m unittest discover -s "$ROOT/tests" -p 'test_xtos_network_transport.py' -v
+python3 -B -m unittest discover -s "$ROOT/tests" -p 'test_device_network_install.py' -v
+python3 -B -m unittest discover -s "$ROOT/tests" -p 'test_device_network_integration.py' -v
 python3 -B -m unittest discover -s "$ROOT/tests" -p 'test_xtos_cyton_protocol.py' -v
 python3 -B -m unittest discover -s "$ROOT/tests" -p 'test_xtos_cyton_serial_plugin.py' -v
 python3 -B -m unittest discover -s "$ROOT/tests" -p 'test_xtos_ganglion_protocol.py' -v

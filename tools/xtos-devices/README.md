@@ -4,6 +4,7 @@ Status: focused software slices, not phase acceptance and not P4 phase acceptanc
 
 The installed source package is deliberately separate from the existing fixture-only `xtos_devices.py` contract. It contains:
 
+- `network_transport.py`: explicit numeric-IP TCP byte transport with nonblocking connect/read/write, absolute deadlines, owner-only operations and cross-thread cancellation. It performs no DNS, discovery, peer authentication or device-protocol decoding. Real loopback tests and installed-source checks are separate from ISO and physical-device acceptance. See [the TCP contract](../../docs/device-network-transport-v1.md).
 - `serial_transport.py`: explicit Linux tty path, nonblocking raw 115200 8N1, TIOCEXCL, absolute deadlines, bounded reads/writes, owner-only close, cross-thread cancellation wakeup, and full fd/termios cleanup.
 - `cyton_protocol.py`: text-only validation of the pinned Cyton v3.1.2 banner and the fixed default Board ADS register profile.
 - `cyton_serial_plugin.py`: explicit `reset_defaults=True` session, `s`/`v`/`?` profile readback before `b`, canonical `openbci_cyton.CytonPacketParser` reuse, generation fencing, cancellation, bounded lifecycle events, and fail-closed cleanup.
@@ -22,6 +23,9 @@ Focused commands:
 
 ```sh
 python3 -B -m unittest discover -s tests -p 'test_xtos_devices.py' -v
+python3 -B -m unittest discover -s tests -p 'test_xtos_network_transport.py' -v
+python3 -B -m unittest discover -s tests -p 'test_device_network_install.py' -v
+python3 -B -m unittest discover -s tests -p 'test_device_network_integration.py' -v
 python3 -B -m unittest discover -s tests -p 'test_xtos_serial_transport.py' -v
 python3 -B -m unittest discover -s tests -p 'test_xtos_cyton_protocol.py' -v
 python3 -B -m unittest discover -s tests -p 'test_xtos_cyton_serial_plugin.py' -v

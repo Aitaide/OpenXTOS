@@ -1,6 +1,6 @@
 # XTOS 当前状态
 
-最后更新：2026-10-31
+最后更新：2026-11-01
 
 本文件保留各历史候选的验收范围。当前工作树的源码实现、维护测试、镜像验收和物理硬件验收分别记录；历史镜像的 PASS 不自动覆盖本次提交。
 
@@ -57,9 +57,11 @@
 
 Ganglion Linux BLE 异步传输与会话的源码检查点 `894d7321f6412ac31b5299e4ec2e3345171bbc00` 已提交私有main。入口通知、跨线程投递、代次隔离与断连/reader竞争已完成独立SPEC增量和QUALITY复核；完整维护107组1435次执行、零失败/跳过（包含11项AI）。安装源码在私有CPython3.11.15执行36项fixture测试通过，真实Bleak3.0.1经独立D-Bus模拟服务完成XTOS会话；不代表无线或镜像验收。安装器只安装源码，不自动捆绑Bleak或修改CPU运行时/Live基础锁。
 
-当前开发可选 provider 实验切片：`tools/xtos-ai-provider-experiment/provider_experiment.py` 显式选择 CPU/CUDA/ROCm，拒绝缺失 provider 和静默回退，校验实际载入的不可变模型字节、张量和零输入 smoke，成功数值结果固定 `safe_action=no_action`。签名模型信任与生产 worker 仍严格 CPU-only；实验器为 SBOM excluded 开发源，不进入 Live 七文件 runtime。当前主机只观察到QEMU虚拟显示设备和ORT CPU/Azure provider，没有可验证的CUDA/ROCm设备；硬件执行、性能和实时性保持未验证。独立复核、当前完整维护与私有源码提交是后续单列门。
+可选 provider 实验器 `tools/xtos-ai-provider-experiment/provider_experiment.py` 已在源码检查点 `41683a1411d262ded48735f2978113fe66857f90` 完成独立复核及完整维护，并提交私有 main。显式选择 CPU/CUDA/ROCm，拒绝缺失 provider 和静默回退，校验实际载入的不可变模型字节、张量和零输入 smoke，成功数值结果固定 `safe_action=no_action`。签名模型信任与生产 worker 仍严格 CPU-only；实验器为 SBOM excluded 开发源，不进入 Live 七文件 runtime。主机仅完成实际 CPU 推理；CUDA/ROCm 实际执行、性能和实时性保持未验证。
 
-source-only安装、完整维护、新镜像及guest分别验收，当前没有P4 ISO验收。PTY和注入GATT client输入保持 `fixture_replay`、`physical_device_evidence=false`、`no_action`；显式真实I/O路径也不构成板卡/固件认证。物理USB/UART、BLE持续采样/断连恢复、设备身份、网络transport均尚未验收。GPU、XR与调度类实机决策仍按计划保留；当前自定义 `sched_class` 尚未实现。
+P4 已安装设备镜像切片已在准确 clean 提交 `41683a1411d262ded48735f2978113fe66857f90` 验收，索引 `.build/p4-image-41683a141/acceptance-index.json` 为 `ACCEPTED_LOCAL_SOFTWARE_IMAGE_SLICE`。完整维护108组1456次执行，零失败/跳过（含11项AI），另一次严格 clean-source 11项AI通过。candidate-60 ISO `72073a052bbfc8a60b1df3b7200fbfd2e51e502e205a1803723cd572b531638f` 完整嵌入载荷读回、八个已安装模块路径/哈希、普通xtos用户normal与优化模式各5项设备case、错误哈希导入前拒绝及BIOS/UEFI×CD/USB四模式均通过。SDK/原生工具为本提交重新编译，内核/31模块和BusyBox按未变相关源树及实际产物绑定复用c026f55ef原编译；不宣称fresh kernel。持久ISO位于 `.build/clean-source-41683a141/.build/retained-candidate-60-p4-devices/images/`，19项验收输入及9项保存文件已由父代理读回。四次测试端早期失败保留，最终a5通过后才写验收索引。
+
+该PASS仅绑定上述历史提交和ISO；本状态文件更新与后续网络源码不继承它。P4整体仍为 `in_progress`。当前按 `docs/device-network-transport-v1.md` 开发显式IP/端口TCP字节传输；协议插件、认证会话、完整维护、新镜像及物理设备分别验收。PTY和注入GATT输入保持 `fixture_replay`、`physical_device_evidence=false`、`no_action`；物理USB/UART、BLE持续采样/断连恢复、设备身份仍未验收。GPU、XR与调度类实机决策按计划保留，当前自定义 `sched_class` 尚未实现。
 
 ## 历史状态记录
 
