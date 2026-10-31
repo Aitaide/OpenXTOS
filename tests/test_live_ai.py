@@ -28,9 +28,12 @@ class LiveAiTests(unittest.TestCase):
         self.source = self.work / 'source'
         package = self.source / 'tools/xtos-ai-runtime/xtos_ai_runtime'
         package.mkdir(parents=True)
+        source_names = ('__init__.py', '__main__.py', 'client.py', 'protocol.py',
+                        'server.py', 'trust.py', 'worker.py')
         maintained = ROOT / 'tools/xtos-ai-runtime/xtos_ai_runtime'
-        for source in maintained.glob('*.py'):
-            (package / source.name).write_bytes(source.read_bytes())
+        for name in source_names:
+            path = maintained / name
+            (package / name).write_bytes(path.read_bytes())
         self.runtime = self.work / 'runtime'
         self.runtime.mkdir()
         (self.runtime / 'bin').mkdir()
@@ -79,6 +82,37 @@ class LiveAiTests(unittest.TestCase):
 
     def validate(self):
         return self.module.validate_runtime(self.runtime, self.descriptor, 'a' * 64)
+
+    def test_live_ai_source_inventory_is_an_explicit_cpu_production_allowlist(self):
+        sources = ROOT / 'tools/xtos-ai-runtime/xtos_ai_runtime'
+        expected = {'__init__.py', '__main__.py', 'client.py', 'protocol.py',
+                    'server.py', 'trust.py', 'worker.py'}
+        self.assertEqual(set(__import__('live_ai', fromlist=['LIVE_AI_SOURCE_NAMES']).LIVE_AI_SOURCE_NAMES), expected)
+        self.assertFalse((sources / 'provider_experiment.py').exists(),
+                         'experimental provider source must be outside trusted runtime package')
+
+    def test_extra_development_source_is_not_installed_or_advertised(self):
+        source = self.source / 'tools/xtos-ai-runtime/xtos_ai_runtime/extra_development.py'
+        source.write_text("raise RuntimeError('not production')\n")
+        stage = self.work / 'stage'
+        stage.mkdir()
+        report = self.module.install_runtime(stage, self.runtime, self.descriptor,
+                                             self.source, 'a' * 64)
+        package = stage / 'usr/lib/xtos/xtos_ai_runtime'
+        self.assertEqual({path.name for path in package.iterdir()},
+                         set(self.module.LIVE_AI_SOURCE_NAMES))
+        self.assertEqual(set(report['service_sources_sha256']),
+                         set(self.module.LIVE_AI_SOURCE_NAMES))
+        self.assertFalse((package / source.name).exists())
+
+    def test_missing_protocol_is_refused_before_live_publication(self):
+        (self.source / 'tools/xtos-ai-runtime/xtos_ai_runtime/protocol.py').unlink()
+        stage = self.work / 'stage'
+        stage.mkdir()
+        with self.assertRaisesRegex(ValueError, 'maintained AI service sources missing'):
+            self.module.install_runtime(stage, self.runtime, self.descriptor,
+                                        self.source, 'a' * 64)
+        self.assertEqual(list(stage.iterdir()), [])
 
     def test_complete_verified_runtime_is_copied_with_sources_and_launcher(self):
         result = self.validate()

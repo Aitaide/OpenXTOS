@@ -199,6 +199,24 @@ class CytonRuntimeTests(unittest.TestCase):
                     self.assertEqual(report["interpreter_runtime_smoke"], not mutate)
                     self.assertEqual(report["status"], "fail" if mutate else "pass")
 
+    def test_timeout_status_disappearance_during_read_is_not_a_live_descendant(self):
+        original_exists = Path.exists
+        original_read = Path.read_text
+        intercepted = []
+        def is_child_status(path):
+            return path.parent.parent == Path('/proc') and path.name == 'status'
+        def observed_present(path, *args, **kwargs):
+            return True if is_child_status(path) else original_exists(path, *args, **kwargs)
+        def vanished_during_read(path, *args, **kwargs):
+            if is_child_status(path):
+                intercepted.append(str(path))
+                raise FileNotFoundError(2, 'process exited while reading status', str(path))
+            return original_read(path, *args, **kwargs)
+        with mock.patch.object(Path, 'exists', observed_present), \
+             mock.patch.object(Path, 'read_text', vanished_during_read):
+            self.test_timeout_kills_real_process_group_and_reaps_parent()
+        self.assertTrue(intercepted, 'process-status disappearance boundary was not reached')
+
     def test_timeout_kills_real_process_group_and_reaps_parent(self):
         import time
         real_popen = subprocess.Popen
@@ -225,12 +243,16 @@ class CytonRuntimeTests(unittest.TestCase):
                 self.assertTrue(pidfile.is_file(), "descendant must exist before timeout")
                 child_pid = int(pidfile.read_text())
                 status = Path(f"/proc/{child_pid}/status")
+                stopped = False
                 for _ in range(20):
-                    if not status.exists() or "State:\tZ" in status.read_text():
+                    try:
+                        stopped = "State:\tZ" in status.read_text()
+                    except FileNotFoundError:
+                        stopped = True
+                    if stopped:
                         break
                     time.sleep(0.01)
-                self.assertTrue(not status.exists() or "State:\tZ" in status.read_text(),
-                                "smoke descendant remains live after verifier returned")
+                self.assertTrue(stopped, "smoke descendant remains live after verifier returned")
             finally:
                 for child in owned:
                     try:

@@ -1,10 +1,10 @@
 {
   "bomFormat": "CycloneDX",
   "specVersion": "1.5",
-  "serialNumber": "urn:uuid:4d433fc70c728826668e8ed0688be956bfdd",
+  "serialNumber": "urn:uuid:ec19587493c4922eb4ec14c6f25514e51106",
   "version": 1,
   "metadata": {
-    "timestamp": "2026-10-31T02:14:27.143180+00:00",
+    "timestamp": "2026-10-31T03:25:14.913421+00:00",
     "component": {
       "type": "application",
       "bom-ref": "xtos-component-xtos-system",
@@ -30,7 +30,7 @@
     "properties": [
       {
         "name": "xtos:git-commit",
-        "value": "0ab8a4cfd35c2f71e2e5b4753887c97421d57c8b"
+        "value": "894d7321f6412ac31b5299e4ec2e3345171bbc00"
       },
       {
         "name": "xtos:kernel-release",
@@ -770,6 +770,34 @@
     },
     {
       "type": "library",
+      "bom-ref": "xtos-component-xtos-ai-provider-experiment",
+      "name": "xtos-ai-provider-experiment",
+      "version": "0.1.0",
+      "licenses": [
+        {
+          "license": {
+            "id": "Apache-2.0"
+          }
+        }
+      ],
+      "description": "Explicit ONNX Runtime provider-selection experiment; no signed admission, action authority, or hardware claim",
+      "scope": "excluded",
+      "purl": "pkg:generic/xtos-ai-provider-experiment@0.1.0",
+      "properties": [
+        {
+          "name": "xtos:source-path",
+          "value": "tools/xtos-ai-provider-experiment"
+        }
+      ],
+      "hashes": [
+        {
+          "alg": "SHA-256",
+          "content": "22733bc83b89cb1ad90853e7f9f56515ef8fc84146c8de25a69844a15895b62d"
+        }
+      ]
+    },
+    {
+      "type": "library",
       "bom-ref": "xtos-component-xtos-action-gate",
       "name": "xtos-action-gate",
       "version": "1.0.1",
@@ -1064,6 +1092,10 @@
     },
     {
       "ref": "xtos-component-xtos-ai-runtime",
+      "dependsOn": []
+    },
+    {
+      "ref": "xtos-component-xtos-ai-provider-experiment",
       "dependsOn": []
     },
     {

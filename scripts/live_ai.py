@@ -14,6 +14,10 @@ from provision_ai_runtime import WRAPPER, _publish_noreplace
 
 VERSIONS = {'CPython': '3.11.15', 'onnxruntime': '1.23.2', 'numpy': '1.26.4'}
 HEX = re.compile(r'[0-9a-f]{64}')
+LIVE_AI_SOURCE_NAMES = ('__init__.py', '__main__.py', 'client.py', 'protocol.py',
+                        'server.py', 'trust.py', 'worker.py')
+
+
 
 
 def _sha(path):
@@ -160,9 +164,8 @@ def install_runtime(stage, root, descriptor, repo, lock_sha256):
     if stage.is_symlink() or not stage.is_dir() or stage.absolute() != stage.resolve(strict=True):
         raise ValueError('Live stage must be a canonical directory')
     sources = repo / 'tools/xtos-ai-runtime/xtos_ai_runtime'
-    files = sorted(sources.glob('*.py'))
-    required = {'__init__.py', '__main__.py', 'client.py', 'server.py', 'worker.py', 'trust.py'}
-    if not required.issubset({p.name for p in files}) or any(p.is_symlink() for p in files):
+    files = [sources / name for name in LIVE_AI_SOURCE_NAMES]
+    if any(not path.is_file() or path.is_symlink() for path in files):
         raise ValueError('maintained AI service sources missing')
     package = stage / 'usr/lib/xtos/xtos_ai_runtime'
     if package.exists() or package.is_symlink():

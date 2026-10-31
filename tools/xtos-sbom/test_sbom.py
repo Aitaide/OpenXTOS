@@ -212,6 +212,16 @@ class SbomTests(unittest.TestCase):
                          and c["bom-ref"] != system_ref}
         self.assertEqual(set(deps[system_ref]), required_refs)
 
+    def test_optional_provider_experiment_is_excluded_and_hash_bound(self):
+        component = next(item for item in self.bom['components']
+                         if item['name'] == 'xtos-ai-provider-experiment')
+        self.assertEqual(component['scope'], 'excluded')
+        self.assertIn(hashlib.sha256((ROOT / 'tools/xtos-ai-provider-experiment/provider_experiment.py').read_bytes()).hexdigest(),
+                      {row['content'] for row in component['hashes']})
+        system_ref = self.bom['metadata']['component']['bom-ref']
+        self.assertNotIn(component['bom-ref'], next(row for row in self.bom['dependencies']
+                                                   if row['ref'] == system_ref)['dependsOn'])
+
     def test_optional_ml_deps_are_excluded_scope(self):
         excluded = [c for c in self.bom["components"]
                     if c.get("scope") == "excluded"]

@@ -22,6 +22,16 @@ from xtos_ai_runtime.protocol import (  # noqa: E402
 
 
 class ManifestValidationTests(unittest.TestCase):
+    def test_production_manifest_and_signed_claim_provider_contract_remain_cpu_only(self):
+        runtime_source = (ROOT / 'tools/xtos-ai-runtime/xtos_ai_runtime/protocol.py').read_text()
+        trust_source = (ROOT / 'tools/xtos-ai-runtime/xtos_ai_runtime/trust.py').read_text()
+        example = json.loads((ROOT / 'tools/xtos-ai-runtime/model-manifest.example.json').read_text())
+        self.assertEqual(example['provider'], 'CPUExecutionProvider')
+        self.assertIn('if provider != "CPUExecutionProvider":', runtime_source)
+        self.assertIn('if claims["provider"] != "CPUExecutionProvider":', trust_source)
+        package = ROOT / 'tools/xtos-ai-runtime/xtos_ai_runtime'
+        self.assertFalse((package / 'provider_experiment.py').exists())
+
     def make_manifest(self, root: Path, payload: bytes) -> dict:
         model = root / "models" / "fixed.onnx"
         model.parent.mkdir(exist_ok=True)

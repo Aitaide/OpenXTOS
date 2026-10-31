@@ -55,7 +55,11 @@
 
 多设备插件保留同步内存fixture接口，并新增Linux非阻塞串口传输、固定Cyton v3.1.2默认配置解析和复用canonical decoder的会话适配。Cyton源码检查点 `47c8bc8299b7bc8e78672acd6035b6a94084284c` 已提交私有main，完整维护103组1374次执行、零失败/跳过。Ganglion v2.0.1离线codec及fixture-only适配器检查点 `0ab8a4cfd35c2f71e2e5b4753887c97421d57c8b` 已提交私有main；修复固件ASCII/LF/空207/严格206长度和跨代控制队列问题，独立增量SPEC/QUALITY通过，完整维护106组1396次执行、零失败/跳过（包含11项AI）。官方函数主机编译向量与204通知/404样本回放属于源码/合成证据，不是BLE抓包。
 
-当前新增可选 `ganglion_ble.py` Linux BlueZ/Bleak异步传输与会话，保持既有同步fixture API不变。新切片通过注入GATT client的聚焦验证，独立复核和本候选完整维护分别记录；不继承上述历史维护PASS。安装器只安装源码，不自动捆绑Bleak或修改CPU运行时/Live基础锁。source-only安装、完整维护、新镜像及guest分别验收，当前没有P4 ISO验收。PTY和注入GATT client输入保持 `fixture_replay`、`physical_device_evidence=false`、`no_action`；显式真实I/O路径也不构成板卡/固件认证。物理USB/UART、BLE持续采样/断连恢复、设备身份、网络transport均尚未验收。GPU、XR与调度类实机决策仍按计划保留；当前自定义 `sched_class` 尚未实现。
+Ganglion Linux BLE 异步传输与会话的源码检查点 `894d7321f6412ac31b5299e4ec2e3345171bbc00` 已提交私有main。入口通知、跨线程投递、代次隔离与断连/reader竞争已完成独立SPEC增量和QUALITY复核；完整维护107组1435次执行、零失败/跳过（包含11项AI）。安装源码在私有CPython3.11.15执行36项fixture测试通过，真实Bleak3.0.1经独立D-Bus模拟服务完成XTOS会话；不代表无线或镜像验收。安装器只安装源码，不自动捆绑Bleak或修改CPU运行时/Live基础锁。
+
+当前开发可选 provider 实验切片：`tools/xtos-ai-provider-experiment/provider_experiment.py` 显式选择 CPU/CUDA/ROCm，拒绝缺失 provider 和静默回退，校验实际载入的不可变模型字节、张量和零输入 smoke，成功数值结果固定 `safe_action=no_action`。签名模型信任与生产 worker 仍严格 CPU-only；实验器为 SBOM excluded 开发源，不进入 Live 七文件 runtime。当前主机只观察到QEMU虚拟显示设备和ORT CPU/Azure provider，没有可验证的CUDA/ROCm设备；硬件执行、性能和实时性保持未验证。独立复核、当前完整维护与私有源码提交是后续单列门。
+
+source-only安装、完整维护、新镜像及guest分别验收，当前没有P4 ISO验收。PTY和注入GATT client输入保持 `fixture_replay`、`physical_device_evidence=false`、`no_action`；显式真实I/O路径也不构成板卡/固件认证。物理USB/UART、BLE持续采样/断连恢复、设备身份、网络transport均尚未验收。GPU、XR与调度类实机决策仍按计划保留；当前自定义 `sched_class` 尚未实现。
 
 ## 历史状态记录
 

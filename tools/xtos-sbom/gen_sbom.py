@@ -200,6 +200,15 @@ COMPONENTS = [
         "hash_globs": ["__init__.py", "__main__.py", "client.py", "protocol.py", "server.py", "trust.py", "worker.py"],
     },
     {
+        "name": "xtos-ai-provider-experiment",
+        "version": "0.1.0",
+        "license": LICENSE_APACHE,
+        "description": "Explicit ONNX Runtime provider-selection experiment; no signed admission, action authority, or hardware claim",
+        "scope": "excluded",
+        "path": "tools/xtos-ai-provider-experiment",
+        "hash_globs": ["provider_experiment.py"],
+    },
+    {
         "name": "xtos-action-gate",
         "version": "1.0.1",
         "license": LICENSE_APACHE,
