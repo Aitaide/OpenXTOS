@@ -53,7 +53,9 @@
 
 上述P3 PASS仅绑定该提交与ISO；本状态更新和P4新改动不继承此PASS，真实板卡、物理延迟和公开发行仍单列。P4已进入真实Linux串口传输与受限Cyton默认配置接入开发；现有同步内存fixture适配保持兼容。P4在聚焦测试、独立审查、完整维护及安装产物门全部完成前保持 `in_progress`。
 
-多设备插件保留同步内存fixture接口，并新增Linux非阻塞串口传输、固定Cyton v3.1.2默认配置解析和复用canonical decoder的会话适配。串口及文本解析已完成聚焦测试与SPEC/QUALITY；会话审查发现的跨代取消、分片尾随字节和过期启动清理问题已修复，普通与优化模式各18项回归通过。source-only Live安装与维护测试入口已接入，当前P4源码、安装包与后续镜像的验收记录分别绑定，历史P3 PASS不覆盖这些改动。PTY输入保持 `fixture_replay`、`physical_device_evidence=false`，物理USB/UART、BLE/网络、Ganglion及物理身份认证尚未验收。GPU、XR与调度类实机决策仍按计划保留；当前自定义 `sched_class` 尚未实现。
+多设备插件保留同步内存fixture接口，并新增Linux非阻塞串口传输、固定Cyton v3.1.2默认配置解析和复用canonical decoder的会话适配。Cyton源码检查点 `47c8bc8299b7bc8e78672acd6035b6a94084284c` 已提交私有main，完整维护103组1374次执行、零失败/跳过。Ganglion v2.0.1离线codec及fixture-only适配器检查点 `0ab8a4cfd35c2f71e2e5b4753887c97421d57c8b` 已提交私有main；修复固件ASCII/LF/空207/严格206长度和跨代控制队列问题，独立增量SPEC/QUALITY通过，完整维护106组1396次执行、零失败/跳过（包含11项AI）。官方函数主机编译向量与204通知/404样本回放属于源码/合成证据，不是BLE抓包。
+
+当前新增可选 `ganglion_ble.py` Linux BlueZ/Bleak异步传输与会话，保持既有同步fixture API不变。新切片通过注入GATT client的聚焦验证，独立复核和本候选完整维护分别记录；不继承上述历史维护PASS。安装器只安装源码，不自动捆绑Bleak或修改CPU运行时/Live基础锁。source-only安装、完整维护、新镜像及guest分别验收，当前没有P4 ISO验收。PTY和注入GATT client输入保持 `fixture_replay`、`physical_device_evidence=false`、`no_action`；显式真实I/O路径也不构成板卡/固件认证。物理USB/UART、BLE持续采样/断连恢复、设备身份、网络transport均尚未验收。GPU、XR与调度类实机决策仍按计划保留；当前自定义 `sched_class` 尚未实现。
 
 ## 历史状态记录
 

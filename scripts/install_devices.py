@@ -14,6 +14,7 @@ SOURCES = {
     'cyton_serial_plugin.py': 'tools/xtos-devices/cyton_serial_plugin.py',
     'ganglion_protocol.py': 'tools/xtos-devices/ganglion_protocol.py',
     'ganglion_plugin.py': 'tools/xtos-devices/ganglion_plugin.py',
+    'ganglion_ble.py': 'tools/xtos-devices/ganglion_ble.py',
     'serial_transport.py': 'tools/xtos-devices/serial_transport.py',
     'xtos_devices.py': 'tools/xtos-devices/xtos_devices.py',
     'openbci_cyton.py': 'tools/xtos-eeg-pipeline/openbci_cyton.py',

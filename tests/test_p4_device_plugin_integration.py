@@ -12,6 +12,11 @@ README = ROOT / "tools/xtos-devices/README.md"
 
 
 class DevicePluginIntegrationTests(unittest.TestCase):
+    def test_shared_runner_executes_optional_ble_suite_once(self):
+        runner = (ROOT / "scripts/test.sh").read_text()
+        self.assertEqual(runner.count("test_xtos_ganglion_ble.py"), 1,
+                         "optional BLE lifecycle suite missing from maintained runner")
+
     def test_shared_runner_executes_plugin_and_its_integration_guard_once(self):
         runner = (ROOT / "scripts/test.sh").read_text()
         for name in ("test_xtos_devices.py", "test_xtos_serial_transport.py",
@@ -40,7 +45,8 @@ class DevicePluginIntegrationTests(unittest.TestCase):
         expected_hashes = {
             hashlib.sha256((ROOT / "tools/xtos-devices" / name).read_bytes()).hexdigest()
             for name in ("xtos_devices.py", "serial_transport.py", "cyton_protocol.py",
-                         "cyton_serial_plugin.py")
+                         "cyton_serial_plugin.py", "ganglion_protocol.py", "ganglion_plugin.py",
+                         "ganglion_ble.py")
         }
         self.assertTrue(expected_hashes.issubset(
             {entry["content"] for entry in plugin["hashes"]}))

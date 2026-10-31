@@ -27,6 +27,18 @@ def generate(out: Path) -> dict:
 
 
 class SbomTests(unittest.TestCase):
+    def test_optional_ble_source_is_declared_in_runtime_hash_inventory(self):
+        import importlib.util
+        spec = importlib.util.spec_from_file_location('sbom_ble_inventory', HERE / 'gen_sbom.py')
+        if spec is None or spec.loader is None:
+            self.fail('SBOM generator loader unavailable')
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        plugin = next(entry for entry in module.COMPONENTS
+                      if entry['name'] == 'xtos-device-plugins')
+        self.assertIn('ganglion_ble.py', plugin['hash_globs'],
+                      'installed optional BLE source is not bound by the SBOM')
+
     @classmethod
     def setUpClass(cls):
         cls.tmp = tempfile.TemporaryDirectory()
@@ -56,7 +68,8 @@ class SbomTests(unittest.TestCase):
         self.assertEqual(plugin["scope"], "required")
         plugin_hashes = {h["content"] for h in plugin["hashes"]}
         for name in ("xtos_devices.py", "serial_transport.py", "cyton_protocol.py",
-                     "cyton_serial_plugin.py", "ganglion_protocol.py", "ganglion_plugin.py"):
+                     "cyton_serial_plugin.py", "ganglion_protocol.py", "ganglion_plugin.py",
+                     "ganglion_ble.py"):
             self.assertIn(hashlib.sha256((ROOT / "tools/xtos-devices" / name).read_bytes()).hexdigest(),
                           plugin_hashes)
         kernel = next(c for c in self.bom["components"] if c["name"] == "xtos-linux-integration")
