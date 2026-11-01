@@ -103,6 +103,9 @@ python3 "$ROOT/tests/test_verify_xpkg.py"
 python3 "$ROOT/tests/test_make_xpkg.py"
 python3 -m unittest discover -s "$ROOT/tests" -p 'test_userspace_repo.py' -v
 python3 -m unittest discover -s "$ROOT/tests" -p 'test_release_index.py' -v
+for suite in test_xr_native.py test_xr_multimodal.py test_xr_feedback.py test_xr_runtime.py test_xr_install.py test_xr_integration.py; do
+    python3 -B -m unittest discover -s "$ROOT/tests" -p "$suite" -v
+done
 for suite in test_ai_runtime.py test_ai_provider_experiment.py test_ai_provider_trust.py test_ai_provider_client.py test_ai_provider_worker.py test_ai_recovery_budget.py test_ai_provider_install.py test_ai_provider_service_real.py test_ai_provider_integration.py test_ai_service.py test_ai_client.py test_ai_worker.py test_ai_service_real.py test_ai_model_trust.py test_ai_model_revocation.py test_ai_signed_lifecycle.py test_ai_ticket_lifecycle.py test_ai_runtime_bundle.py test_ai_runtime_assembly.py; do
     python3 -m unittest discover -s "$ROOT/tests" -p "$suite" -v
 done

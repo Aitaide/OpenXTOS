@@ -67,7 +67,9 @@ P4 已安装设备镜像切片已在准确 clean 提交 `41683a1411d262ded48735f
 
 P4已支持的本地软件交付矩阵在 `.build/p4-image-5cb533e4b/p4-delivery-matrix.json`；未知厂商网络线协议和认证会话仍是未实现项，不能改称只有硬件未验证。PTY、注入GATT和guest loopback保持 `fixture_replay`、`physical_device_evidence=false`、`no_action`。物理USB/UART、BLE持续采样/断连恢复、设备身份和物理时延未验收，P4整体不宣称完成。
 
-P5生产签名provider路径现按 `docs/ai-provider-runtime-v2.md` 实施：保留v1 CPU-only兼容，新增v2显式provider/依赖/CPU放置合同与有限恢复。签名/profile与客户端独立SPEC/QUALITY通过；合并后的实际签名CPU子进程和UDS数值、provider pin、缺失CUDA/MIGraphX拒绝、deadline/cancel kill+reap、两次恢复额度及reload重置聚焦回归通过，厂商API控制另以mock明确标注。worker/server及包装仍需最终独立审查、完整维护、准确提交和新安装产物验收，P5整体保持in_progress。candidate-61 PASS不覆盖P5和本状态更新。CUDA/MIGraphX实际推理、性能、外部驱动供应链与RT共存未验证；CPU依赖锁不变，不安装可选vendor包。XR应用层与调度类实机决策按计划保留，当前自定义 `sched_class` 尚未实现。
+P5生产签名provider的软件切片已在准确提交 `0ee8b87f367e1cd59e996d4d5bf0bf91ef0e2e21` 验收并私有推送，索引 `.build/p5-provider-next/acceptance-index.json`。保留v1 CPU-only，v2签名绑定显式CPU/CUDA/MIGraphX、runtime分发文件/ABI和子进程CPU放置；有限恢复每代次最多两次，缺GPU拒绝且不回退。组件和共享SPEC/QUALITY通过；完整维护118组1515次执行、零失败/错误/跳过（包含11项AI），另一次干净提交严格AI11项、安装副本实际签名CPU3项通过。source-only七模块归档已读回；本验收没有新整机ISO，candidate-61仍只绑定原提交。原worker/server/preflight失败与离线测试超时、后续真实回归和独立修复均保留；历史TDD限制未改写。CUDA/MIGraphX实际推理、性能、外部驱动供应链与RT共存未验证，CPU依赖锁不变。
+
+P6按 `docs/xr-multimodal-v1.md` 实现应用层OpenXR loader、逐点时钟转换、事件barrier和EEG/眼动/EMG有界多模态模拟确认流程。第三方头文件固定Khronos OpenXR-SDK release-1.1.57；不捆绑loader或vendor runtime。native清理/数值溢出及眼动样本时间域缺口已加入回归；安装副本demo、launcher解释器/argv、冲突保护和编译native事件到多模态撤销的聚焦执行通过。组件与共享独立审查、完整维护、准确提交及最终安装归档门完成前，P6保持in_progress，当前聚焦结果不是阶段验收。图形会话、眼动action/space的真实采集尚未实现；真实头显、设备时钟同步和物理时延未验证。所有模拟反馈保持no_action。自定义 `sched_class` 仍受物理前置决策门约束，尚未实现。
 
 ## 历史状态记录
 

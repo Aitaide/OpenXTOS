@@ -78,7 +78,7 @@ class SbomTests(unittest.TestCase):
             (ROOT / 'kernel/linux/drivers/xtos/bci/xtos_cyton_packet.h').read_bytes()).hexdigest())
         required_comps = [c for c in self.bom["components"]
                           if c.get("scope") == "required"]
-        self.assertEqual(len(required_comps), 17)  # system + 16 shipped
+        self.assertEqual(len(required_comps), 19)  # system + 18 shipped, including XR application/headers
 
     def test_runtime_build_inputs_are_completely_bound(self):
         inventories = {}

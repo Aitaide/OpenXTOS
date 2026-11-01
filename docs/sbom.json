@@ -1,10 +1,10 @@
 {
   "bomFormat": "CycloneDX",
   "specVersion": "1.5",
-  "serialNumber": "urn:uuid:68810acf006ccedaea5c35771895d48c504e",
+  "serialNumber": "urn:uuid:b5be1eb58d2f6af2ccefe7a87baa63ac8faa",
   "version": 1,
   "metadata": {
-    "timestamp": "2026-11-01T05:30:52.966820+00:00",
+    "timestamp": "2026-11-01T08:42:34.489471+00:00",
     "component": {
       "type": "application",
       "bom-ref": "xtos-component-xtos-system",
@@ -30,7 +30,7 @@
     "properties": [
       {
         "name": "xtos:git-commit",
-        "value": "5cb533e4be467dc7e93bec684aec1367a1bb1784"
+        "value": "0ee8b87f367e1cd59e996d4d5bf0bf91ef0e2e21"
       },
       {
         "name": "xtos:kernel-release",
@@ -57,6 +57,116 @@
       ],
       "description": "XTOS real-time operating system research build: Linux 6.6.0-rt15 kernel + XTOS BCI components + BusyBox userland + XTOS SDK",
       "scope": "required"
+    },
+    {
+      "type": "library",
+      "bom-ref": "xtos-component-xtos-xr",
+      "name": "xtos-xr",
+      "version": "0.1.0",
+      "licenses": [
+        {
+          "license": {
+            "id": "Apache-2.0"
+          }
+        }
+      ],
+      "description": "Application OpenXR loader/event/time adapter and bounded multimodal software-only confirmation; no rendering session or headset evidence",
+      "scope": "required",
+      "purl": "pkg:generic/xtos-xr@0.1.0",
+      "properties": [
+        {
+          "name": "xtos:source-path",
+          "value": "tools/xtos-xr"
+        }
+      ],
+      "hashes": [
+        {
+          "alg": "SHA-256",
+          "content": "1d089be62eb5867958c302c5ed80260d2cd469a65e4d114e7136fd4f8a3a4ceb"
+        },
+        {
+          "alg": "SHA-256",
+          "content": "91dcd9eded7628c9be6b110b58e35c438ce838c1f1e27858e442cf21c6778ca6"
+        },
+        {
+          "alg": "SHA-256",
+          "content": "dd65a1f5cbd29c9a9a9c7e95286ada9345fd58026d0228748761aec3a803a2cd"
+        },
+        {
+          "alg": "SHA-256",
+          "content": "afdf4deda50142d0661e0dfab95ab7b16b8dbb46ab11fa040e3da6d220254a95"
+        },
+        {
+          "alg": "SHA-256",
+          "content": "452f6f1c65016fe88bb5928672121b205dfee0712298331b3686c3e73ff0b055"
+        },
+        {
+          "alg": "SHA-256",
+          "content": "0c65eed6311f72747ec70a936da4af8403ce44cd973c80c7653c7f6bf13fea0e"
+        },
+        {
+          "alg": "SHA-256",
+          "content": "02b759e14f2dedea58442041613ebbe1a5d4ddfde262cf6792dc69e15d31ecc8"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "bom-ref": "xtos-component-openxr-headers",
+      "name": "openxr-headers",
+      "version": "1.1.57",
+      "licenses": [
+        {
+          "license": {
+            "id": "Apache-2.0"
+          }
+        }
+      ],
+      "description": "Pinned Khronos OpenXR-SDK headers under the Apache-2.0 option; no loader, compositor or vendor runtime included",
+      "scope": "required",
+      "purl": "pkg:generic/openxr-headers@1.1.57",
+      "externalReferences": [
+        {
+          "type": "distribution",
+          "url": "https://github.com/KhronosGroup/OpenXR-SDK/tree/release-1.1.57"
+        }
+      ],
+      "properties": [
+        {
+          "name": "xtos:source-path",
+          "value": "tools/xtos-xr/vendor/openxr"
+        }
+      ],
+      "hashes": [
+        {
+          "alg": "SHA-256",
+          "content": "fec1a3989472e5499d2f310787bb4d691fe45a3de15307f9fe17e79bacbf3f8e"
+        },
+        {
+          "alg": "SHA-256",
+          "content": "f17e6d752e0065ede9f2a4c8932155acff96462306a2468a67a6ad77484641d8"
+        },
+        {
+          "alg": "SHA-256",
+          "content": "a458ba5777415f2de518fdcdcc87fcf8651ba0468c9f69a101378672aad80946"
+        },
+        {
+          "alg": "SHA-256",
+          "content": "2fd738273dace4314bea8935c4332026138a1d7f9ecb5e66a284ffaeef73818a"
+        },
+        {
+          "alg": "SHA-256",
+          "content": "d3910dee6fe9fe134856d76268fe82adb1ade1ecf51b3568b7da6b94894b88f3"
+        },
+        {
+          "alg": "SHA-256",
+          "content": "8f25018489d6fe0dec34a352314c38dc146247b7de65735790f4398a92afa84b"
+        },
+        {
+          "alg": "SHA-256",
+          "content": "a5099390f698c8e93151ef38e1358d8399676f9f48606dc6c820fe066a1b1461"
+        }
+      ]
     },
     {
       "type": "library",
@@ -1015,6 +1125,8 @@
     {
       "ref": "xtos-component-xtos-system",
       "dependsOn": [
+        "xtos-component-xtos-xr",
+        "xtos-component-openxr-headers",
         "xtos-component-linux",
         "xtos-component-preempt-rt",
         "xtos-component-xtos-linux-integration",
@@ -1032,6 +1144,17 @@
         "xtos-component-xtos-ai-runtime",
         "xtos-component-xtos-action-gate"
       ]
+    },
+    {
+      "ref": "xtos-component-xtos-xr",
+      "dependsOn": [
+        "xtos-component-openxr-headers",
+        "xtos-component-xtos-action-gate"
+      ]
+    },
+    {
+      "ref": "xtos-component-openxr-headers",
+      "dependsOn": []
     },
     {
       "ref": "xtos-component-linux",

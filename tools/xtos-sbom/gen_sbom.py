@@ -44,6 +44,30 @@ LICENSE_APACHE = "Apache-2.0"
 # (name, version, purl-ish download, license, description, scope)
 COMPONENTS = [
     {
+        "name": "xtos-xr",
+        "version": "0.1.0",
+        "license": LICENSE_APACHE,
+        "description": "Application OpenXR loader/event/time adapter and bounded multimodal software-only confirmation; no rendering session or headset evidence",
+        "scope": "required",
+        "path": "tools/xtos-xr",
+        "requires": ["openxr-headers", "xtos-action-gate"],
+        "hash_globs": ["Makefile", "include/xtos_xr/runtime_adapter.h",
+                       "src/runtime_adapter.c", "src/xr_probe.c",
+                       "xtos_xr/__init__.py", "xtos_xr/__main__.py", "xtos_xr/runtime_events.py"],
+    },
+    {
+        "name": "openxr-headers",
+        "version": "1.1.57",
+        "license": LICENSE_APACHE,
+        "description": "Pinned Khronos OpenXR-SDK headers under the Apache-2.0 option; no loader, compositor or vendor runtime included",
+        "scope": "required",
+        "upstream": "https://github.com/KhronosGroup/OpenXR-SDK/tree/release-1.1.57",
+        "path": "tools/xtos-xr/vendor/openxr",
+        "hash_globs": ["include/openxr/openxr.h", "include/openxr/openxr_platform.h",
+                       "include/openxr/openxr_platform_defines.h", "COPYING.adoc",
+                       "LICENSES/Apache-2.0.txt", "LICENSES/MIT.txt", "provenance.json"],
+    },
+    {
         "name": "linux",
         "version": "6.6.0",
         "extra_version": "-rt15",
@@ -364,6 +388,8 @@ def main() -> int:
         requires = [component_ref(name) for name in ('libxtos-bci', 'libxtos-signal')] if comp['name'] == 'xtos-eeg-stream' else []
         if comp['name'] == 'xtos-device-plugins':
             requires = [component_ref('xtos-eeg-pipeline')]
+        if comp['name'] == 'xtos-xr':
+            requires = [component_ref(name) for name in ('openxr-headers', 'xtos-action-gate')]
         dependencies.append({"ref": comp["bom-ref"], "dependsOn": requires})
 
     bom = {
