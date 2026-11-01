@@ -24,8 +24,7 @@ const struct nla_policy nft_reject_policy[NFTA_REJECT_MAX + 1] = {
 EXPORT_SYMBOL_GPL(nft_reject_policy);
 
 int nft_reject_validate(const struct nft_ctx *ctx,
-			const struct nft_expr *expr,
-			const struct nft_data **data)
+			const struct nft_expr *expr)
 {
 	return nft_chain_validate_hooks(ctx->chain,
 					(1 << NF_INET_LOCAL_IN) |
@@ -103,8 +102,10 @@ static u8 icmp_code_v4[NFT_REJECT_ICMPX_MAX + 1] = {
 
 int nft_reject_icmp_code(u8 code)
 {
-	if (WARN_ON_ONCE(code > NFT_REJECT_ICMPX_MAX))
+	if (unlikely(code > NFT_REJECT_ICMPX_MAX)) {
+		DEBUG_NET_WARN_ON_ONCE(1);
 		return ICMP_NET_UNREACH;
+	}
 
 	return icmp_code_v4[code];
 }
@@ -121,8 +122,10 @@ static u8 icmp_code_v6[NFT_REJECT_ICMPX_MAX + 1] = {
 
 int nft_reject_icmpv6_code(u8 code)
 {
-	if (WARN_ON_ONCE(code > NFT_REJECT_ICMPX_MAX))
+	if (unlikely(code > NFT_REJECT_ICMPX_MAX)) {
+		DEBUG_NET_WARN_ON_ONCE(1);
 		return ICMPV6_NOROUTE;
+	}
 
 	return icmp_code_v6[code];
 }

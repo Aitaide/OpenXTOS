@@ -76,7 +76,7 @@ struct pfuze_chip {
 	struct device *dev;
 	struct pfuze_regulator regulator_descs[PFUZE100_MAX_REGULATOR];
 	struct regulator_dev *regulators[PFUZE100_MAX_REGULATOR];
-	struct pfuze_regulator *pfuze_regulators;
+	const struct pfuze_regulator *pfuze_regulators;
 };
 
 static const int pfuze100_swbst[] = {
@@ -158,6 +158,25 @@ static int pfuze100_set_ramp_delay(struct regulator_dev *rdev, int ramp_delay)
 	return ret;
 }
 
+static int pfuze100_ldo_set_suspend_disable(struct regulator_dev *rdev)
+{
+	struct pfuze_chip *pfuze100 = rdev_get_drvdata(rdev);
+	int id = rdev_get_id(rdev);
+	struct pfuze_regulator *desc = &pfuze100->regulator_descs[id];
+
+	/*
+	 * Set the standby bit so the LDO output is turned off when the PMIC
+	 * receives a STANDBY event, using the per-regulator stby_reg/stby_mask
+	 * that describe the standby control for each LDO.
+	 *
+	 * The stby_mask only covers the VGENxSTBY bit. The VGENxLPWR stays at
+	 * its reset value of 0, so the LDO is switched off rather than put
+	 * into low-power mode.
+	 */
+	return regmap_update_bits(pfuze100->regmap, desc->stby_reg,
+				  desc->stby_mask, desc->stby_mask);
+}
+
 static const struct regulator_ops pfuze100_ldo_regulator_ops = {
 	.enable = regulator_enable_regmap,
 	.disable = regulator_disable_regmap,
@@ -165,6 +184,7 @@ static const struct regulator_ops pfuze100_ldo_regulator_ops = {
 	.list_voltage = regulator_list_voltage_linear,
 	.set_voltage_sel = regulator_set_voltage_sel_regmap,
 	.get_voltage_sel = regulator_get_voltage_sel_regmap,
+	.set_suspend_disable = pfuze100_ldo_set_suspend_disable,
 };
 
 static const struct regulator_ops pfuze100_fixed_regulator_ops = {
@@ -367,7 +387,7 @@ static const struct regulator_ops pfuze3000_sw_regulator_ops = {
 }
 
 /* PFUZE100 */
-static struct pfuze_regulator pfuze100_regulators[] = {
+static const struct pfuze_regulator pfuze100_regulators[] = {
 	PFUZE100_SW_REG(PFUZE100, SW1AB, PFUZE100_SW1ABVOL, 300000, 1875000, 25000),
 	PFUZE100_SW_REG(PFUZE100, SW1C, PFUZE100_SW1CVOL, 300000, 1875000, 25000),
 	PFUZE100_SW_REG(PFUZE100, SW2, PFUZE100_SW2VOL, 400000, 1975000, 25000),
@@ -386,7 +406,7 @@ static struct pfuze_regulator pfuze100_regulators[] = {
 	PFUZE100_COIN_REG(PFUZE100, COIN, PFUZE100_COINVOL, 0x7, pfuze100_coin),
 };
 
-static struct pfuze_regulator pfuze200_regulators[] = {
+static const struct pfuze_regulator pfuze200_regulators[] = {
 	PFUZE100_SW_REG(PFUZE200, SW1AB, PFUZE100_SW1ABVOL, 300000, 1875000, 25000),
 	PFUZE100_SW_REG(PFUZE200, SW2, PFUZE100_SW2VOL, 400000, 1975000, 25000),
 	PFUZE100_SW_REG(PFUZE200, SW3A, PFUZE100_SW3AVOL, 400000, 1975000, 25000),
@@ -403,7 +423,7 @@ static struct pfuze_regulator pfuze200_regulators[] = {
 	PFUZE100_COIN_REG(PFUZE200, COIN, PFUZE100_COINVOL, 0x7, pfuze100_coin),
 };
 
-static struct pfuze_regulator pfuze3000_regulators[] = {
+static const struct pfuze_regulator pfuze3000_regulators[] = {
 	PFUZE3000_SW_REG(PFUZE3000, SW1A, PFUZE100_SW1ABVOL, 0x1f, pfuze3000_sw1a),
 	PFUZE100_SW_REG(PFUZE3000, SW1B, PFUZE100_SW1CVOL, 700000, 1475000, 25000),
 	PFUZE3000_SW_REG(PFUZE3000, SW2, PFUZE100_SW2VOL, 0x7, pfuze3000_sw2lo),
@@ -419,7 +439,7 @@ static struct pfuze_regulator pfuze3000_regulators[] = {
 	PFUZE100_VGEN_REG(PFUZE3000, VLDO4, PFUZE100_VGEN6VOL, 1800000, 3300000, 100000),
 };
 
-static struct pfuze_regulator pfuze3001_regulators[] = {
+static const struct pfuze_regulator pfuze3001_regulators[] = {
 	PFUZE3000_SW_REG(PFUZE3001, SW1, PFUZE100_SW1ABVOL, 0x1f, pfuze3000_sw1a),
 	PFUZE3000_SW_REG(PFUZE3001, SW2, PFUZE100_SW2VOL, 0x7, pfuze3000_sw2lo),
 	PFUZE3000_SW3_REG(PFUZE3001, SW3, PFUZE100_SW3AVOL, 900000, 1650000, 50000),
@@ -680,7 +700,7 @@ static const struct regmap_config pfuze_regmap_config = {
 	.reg_bits = 8,
 	.val_bits = 8,
 	.max_register = PFUZE_NUMREGS - 1,
-	.cache_type = REGCACHE_RBTREE,
+	.cache_type = REGCACHE_MAPLE,
 };
 
 static int pfuze100_regulator_probe(struct i2c_client *client)

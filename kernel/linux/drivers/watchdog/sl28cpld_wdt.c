@@ -6,7 +6,6 @@
  */
 
 #include <linux/kernel.h>
-#include <linux/mod_devicetable.h>
 #include <linux/module.h>
 #include <linux/platform_device.h>
 #include <linux/property.h>
@@ -198,10 +197,8 @@ static int sl28cpld_wdt_probe(struct platform_device *pdev)
 	}
 
 	ret = devm_watchdog_register_device(&pdev->dev, wdd);
-	if (ret < 0) {
-		dev_err(&pdev->dev, "failed to register watchdog device\n");
+	if (ret < 0)
 		return ret;
-	}
 
 	dev_info(&pdev->dev, "initial timeout %d sec%s\n",
 		 wdd->timeout, nowayout ? ", nowayout" : "");

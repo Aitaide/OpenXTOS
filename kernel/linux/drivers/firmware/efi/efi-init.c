@@ -12,17 +12,18 @@
 #include <linux/efi.h>
 #include <linux/fwnode.h>
 #include <linux/init.h>
+#include <linux/kexec_handover.h>
 #include <linux/memblock.h>
 #include <linux/mm_types.h>
 #include <linux/of.h>
 #include <linux/of_address.h>
 #include <linux/of_fdt.h>
 #include <linux/platform_device.h>
-#include <linux/screen_info.h>
+#include <linux/sysfb.h>
 
 #include <asm/efi.h>
 
-unsigned long __initdata screen_info_table = EFI_INVALID_TABLE_ADDR;
+unsigned long __initdata primary_display_table = EFI_INVALID_TABLE_ADDR;
 
 static int __init is_memory(efi_memory_desc_t *md)
 {
@@ -55,23 +56,32 @@ static phys_addr_t __init efi_to_phys(unsigned long addr)
 
 extern __weak const efi_config_table_type_t efi_arch_tables[];
 
-static void __init init_screen_info(void)
-{
-	struct screen_info *si;
+/*
+ * x86 defines its own instance of sysfb_primary_display and uses
+ * it even without EFI, everything else can get them from here.
+ */
+#if !defined(CONFIG_X86) && (defined(CONFIG_SYSFB) || defined(CONFIG_EFI_EARLYCON) || defined(CONFIG_FIRMWARE_EDID))
+struct sysfb_display_info sysfb_primary_display __section(".data");
+EXPORT_SYMBOL_GPL(sysfb_primary_display);
+#endif
 
-	if (screen_info_table != EFI_INVALID_TABLE_ADDR) {
-		si = early_memremap(screen_info_table, sizeof(*si));
-		if (!si) {
-			pr_err("Could not map screen_info config table\n");
+static void __init init_primary_display(void)
+{
+	struct sysfb_display_info *dpy;
+
+	if (primary_display_table != EFI_INVALID_TABLE_ADDR) {
+		dpy = early_memremap(primary_display_table, sizeof(*dpy));
+		if (!dpy) {
+			pr_err("Could not map primary_display config table\n");
 			return;
 		}
-		screen_info = *si;
-		memset(si, 0, sizeof(*si));
-		early_memunmap(si, sizeof(*si));
+		sysfb_primary_display = *dpy;
+		memset(dpy, 0, sizeof(*dpy));
+		early_memunmap(dpy, sizeof(*dpy));
 
-		if (memblock_is_map_memory(screen_info.lfb_base))
-			memblock_mark_nomap(screen_info.lfb_base,
-					    screen_info.lfb_size);
+		if (memblock_is_map_memory(sysfb_primary_display.screen.lfb_base))
+			memblock_mark_nomap(sysfb_primary_display.screen.lfb_base,
+					    sysfb_primary_display.screen.lfb_size);
 
 		if (IS_ENABLED(CONFIG_EFI_EARLYCON))
 			efi_earlycon_reprobe();
@@ -135,15 +145,6 @@ static __init int is_usable_memory(efi_memory_desc_t *md)
 	case EFI_CONVENTIONAL_MEMORY:
 	case EFI_PERSISTENT_MEMORY:
 		/*
-		 * Special purpose memory is 'soft reserved', which means it
-		 * is set aside initially, but can be hotplugged back in or
-		 * be assigned to the dax driver after boot.
-		 */
-		if (efi_soft_reserve_enabled() &&
-		    (md->attribute & EFI_MEMORY_SP))
-			return false;
-
-		/*
 		 * According to the spec, these regions are no longer reserved
 		 * after calling ExitBootServices(). However, we can only use
 		 * them as System RAM if they can be mapped writeback cacheable.
@@ -164,12 +165,32 @@ static __init void reserve_regions(void)
 		pr_info("Processing EFI memory map:\n");
 
 	/*
-	 * Discard memblocks discovered so far: if there are any at this
-	 * point, they originate from memory nodes in the DT, and UEFI
-	 * uses its own memory map instead.
+	 * Discard memblocks discovered so far except for KHO scratch
+	 * regions. Most memblocks at this point originate from memory nodes
+	 * in the DT and UEFI uses its own memory map instead. However, if
+	 * KHO is enabled, scratch regions, which are good known memory
+	 * must be preserved.
 	 */
 	memblock_dump_all();
-	memblock_remove(0, PHYS_ADDR_MAX);
+
+	if (is_kho_boot()) {
+		struct memblock_region *r;
+
+		/* Remove all non-KHO regions */
+		for_each_mem_region(r) {
+			if (!memblock_is_kho_scratch(r)) {
+				memblock_remove(r->base, r->size);
+				r--;
+			}
+		}
+	} else {
+		/*
+		 * KHO is disabled. Discard memblocks discovered so far:
+		 * if there are any at this point, they originate from memory
+		 * nodes in the DT, and UEFI uses its own memory map instead.
+		 */
+		memblock_remove(0, PHYS_ADDR_MAX);
+	}
 
 	for_each_efi_memory_desc(md) {
 		paddr = md->phys_addr;
@@ -187,6 +208,16 @@ static __init void reserve_regions(void)
 		size = npages << PAGE_SHIFT;
 
 		if (is_memory(md)) {
+			/*
+			 * Special purpose memory is 'soft reserved', which
+			 * means it is set aside initially. Don't add a memblock
+			 * for it now so that it can be hotplugged back in or
+			 * be assigned to the dax driver after boot.
+			 */
+			if (efi_soft_reserve_enabled() &&
+			    (md->attribute & EFI_MEMORY_SP))
+				continue;
+
 			early_init_dt_add_memory_arch(paddr, size);
 
 			if (!is_usable_memory(md))
@@ -240,5 +271,8 @@ void __init efi_init(void)
 	memblock_reserve(data.phys_map & PAGE_MASK,
 			 PAGE_ALIGN(data.size + (data.phys_map & ~PAGE_MASK)));
 
-	init_screen_info();
+	if (IS_ENABLED(CONFIG_X86) ||
+	    IS_ENABLED(CONFIG_SYSFB) ||
+	    IS_ENABLED(CONFIG_EFI_EARLYCON))
+		init_primary_display();
 }

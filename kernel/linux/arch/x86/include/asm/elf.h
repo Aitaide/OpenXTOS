@@ -7,6 +7,7 @@
  */
 #include <linux/thread_info.h>
 
+#include <asm/ia32.h>
 #include <asm/ptrace.h>
 #include <asm/user.h>
 #include <asm/auxvec.h>
@@ -74,12 +75,8 @@ typedef struct user_i387_struct elf_fpregset_t;
 
 #include <asm/vdso.h>
 
-#ifdef CONFIG_X86_64
 extern unsigned int vdso64_enabled;
-#endif
-#if defined(CONFIG_X86_32) || defined(CONFIG_IA32_EMULATION)
 extern unsigned int vdso32_enabled;
-#endif
 
 /*
  * This is used to ensure we don't load something for the wrong architecture.
@@ -149,7 +146,7 @@ do {						\
 	((x)->e_machine == EM_X86_64)
 
 #define compat_elf_check_arch(x)					\
-	(elf_check_arch_ia32(x) ||					\
+	((elf_check_arch_ia32(x) && ia32_enabled_verbose()) ||		\
 	 (IS_ENABLED(CONFIG_X86_X32_ABI) && (x)->e_machine == EM_X86_64))
 
 static inline void elf_common_init(struct thread_struct *t,
@@ -189,7 +186,6 @@ void set_personality_ia32(bool);
 
 #define ELF_CORE_COPY_REGS(pr_reg, regs)			\
 do {								\
-	unsigned v;						\
 	(pr_reg)[0] = (regs)->r15;				\
 	(pr_reg)[1] = (regs)->r14;				\
 	(pr_reg)[2] = (regs)->r13;				\
@@ -213,10 +209,10 @@ do {								\
 	(pr_reg)[20] = (regs)->ss;				\
 	(pr_reg)[21] = x86_fsbase_read_cpu();			\
 	(pr_reg)[22] = x86_gsbase_read_cpu_inactive();		\
-	asm("movl %%ds,%0" : "=r" (v)); (pr_reg)[23] = v;	\
-	asm("movl %%es,%0" : "=r" (v)); (pr_reg)[24] = v;	\
-	asm("movl %%fs,%0" : "=r" (v)); (pr_reg)[25] = v;	\
-	asm("movl %%gs,%0" : "=r" (v)); (pr_reg)[26] = v;	\
+	savesegment(ds, (pr_reg)[23]);				\
+	savesegment(es, (pr_reg)[24]);				\
+	savesegment(fs, (pr_reg)[25]);				\
+	savesegment(gs, (pr_reg)[26]);				\
 } while (0);
 
 /* I'm not sure if we can use '-' here */
@@ -326,7 +322,7 @@ extern unsigned long get_sigframe_size(void);
 
 #else /* CONFIG_X86_32 */
 
-/* 1GB for 64bit, 8MB for 32bit */
+/* 16GB for 64bit, 8MB for 32bit */
 #define __STACK_RND_MASK(is32bit) ((is32bit) ? 0x7ff : 0x3fffff)
 #define STACK_RND_MASK __STACK_RND_MASK(mmap_is_ia32())
 
@@ -363,7 +359,7 @@ else if (IS_ENABLED(CONFIG_IA32_EMULATION))				\
 
 #define VDSO_ENTRY							\
 	((unsigned long)current->mm->context.vdso +			\
-	 vdso_image_32.sym___kernel_vsyscall)
+	 vdso32_image.sym___kernel_vsyscall)
 
 struct linux_binprm;
 
@@ -391,5 +387,4 @@ struct va_alignment {
 } ____cacheline_aligned;
 
 extern struct va_alignment va_align;
-extern unsigned long align_vdso_addr(unsigned long);
 #endif /* _ASM_X86_ELF_H */

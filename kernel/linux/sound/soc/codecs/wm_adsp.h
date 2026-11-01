@@ -29,14 +29,17 @@ struct wm_adsp {
 	const char *part;
 	const char *fwf_name;
 	const char *system_name;
+	const char *fwf_suffix;
 	struct snd_soc_component *component;
 
 	unsigned int sys_config_size;
 
 	int fw;
 	bool wmfw_optional;
+	bool bin_mandatory;
 
 	struct work_struct boot_work;
+	int (*control_add)(struct wm_adsp *dsp, struct cs_dsp_coeff_ctl *cs_ctl);
 	int (*pre_run)(struct wm_adsp *dsp);
 
 	bool preloaded;
@@ -76,6 +79,16 @@ struct wm_adsp {
 	SOC_ENUM_EXT(dspname " Firmware", wm_adsp_fw_enum[num], \
 		     wm_adsp_fw_get, wm_adsp_fw_put)
 
+struct wm_adsp_fw_file {
+	const struct firmware *firmware;
+	char *filename;
+};
+
+struct wm_adsp_fw_files {
+	struct wm_adsp_fw_file wmfw;
+	struct wm_adsp_fw_file coeff;
+};
+
 extern const struct soc_enum wm_adsp_fw_enum[];
 
 int wm_adsp1_init(struct wm_adsp *dsp);
@@ -98,6 +111,9 @@ irqreturn_t wm_adsp2_bus_error(int irq, void *data);
 irqreturn_t wm_halo_bus_error(int irq, void *data);
 irqreturn_t wm_halo_wdt_expire(int irq, void *data);
 
+int wm_adsp_run(struct wm_adsp *dsp);
+void wm_adsp_stop(struct wm_adsp *dsp);
+void wm_adsp_hibernate(struct wm_adsp *dsp, bool hibernate);
 int wm_adsp_event(struct snd_soc_dapm_widget *w,
 		  struct snd_kcontrol *kcontrol, int event);
 
@@ -126,13 +142,24 @@ int wm_adsp_compr_trigger(struct snd_soc_component *component,
 int wm_adsp_compr_handle_irq(struct wm_adsp *dsp);
 int wm_adsp_compr_pointer(struct snd_soc_component *component,
 			  struct snd_compr_stream *stream,
-			  struct snd_compr_tstamp *tstamp);
+			  struct snd_compr_tstamp64 *tstamp);
 int wm_adsp_compr_copy(struct snd_soc_component *component,
 		       struct snd_compr_stream *stream,
 		       char __user *buf, size_t count);
+
+int wm_adsp_control_add(struct cs_dsp_coeff_ctl *cs_ctl);
 int wm_adsp_write_ctl(struct wm_adsp *dsp, const char *name,  int type,
 		      unsigned int alg, void *buf, size_t len);
 int wm_adsp_read_ctl(struct wm_adsp *dsp, const char *name,  int type,
 		      unsigned int alg, void *buf, size_t len);
+
+#if IS_ENABLED(CONFIG_KUNIT)
+const char *wm_adsp_get_fwf_name_by_index(int index);
+void wm_adsp_release_firmware_files(struct wm_adsp_fw_files *fw);
+int wm_adsp_firmware_request(const struct firmware **firmware,
+			     const char *filename,
+			     struct device *dev);
+int wm_adsp_request_firmware_files(struct wm_adsp *dsp, struct wm_adsp_fw_files *fw);
+#endif
 
 #endif

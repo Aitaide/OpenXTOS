@@ -36,16 +36,21 @@ static const union atom_voltage_object_v4 *pp_atomfwctrl_lookup_voltage_type_v4(
 			offsetof(struct atom_voltage_objects_info_v4_1, voltage_object[0]);
 	unsigned long start = (unsigned long)voltage_object_info_table;
 
-	while (offset < size) {
+	while (offset + sizeof(struct atom_voltage_object_header_v4) <= size) {
 		const union atom_voltage_object_v4 *voltage_object =
 			(const union atom_voltage_object_v4 *)(start + offset);
+		u16 obj_size;
+
+		obj_size = le16_to_cpu(voltage_object->gpio_voltage_obj.header.object_size);
+		if (obj_size < sizeof(voltage_object->gpio_voltage_obj.header) ||
+		    offset + obj_size > size)
+			break;
 
 		if (voltage_type == voltage_object->gpio_voltage_obj.header.voltage_type &&
 		    voltage_mode == voltage_object->gpio_voltage_obj.header.voltage_mode)
 			return voltage_object;
 
-		offset += le16_to_cpu(voltage_object->gpio_voltage_obj.header.object_size);
-
+		offset += obj_size;
 	}
 
 	return NULL;
@@ -158,84 +163,6 @@ int pp_atomfwctrl_get_voltage_table_v4(struct pp_hwmgr *hwmgr,
 	return result;
 }
 
- 
-static struct atom_gpio_pin_lut_v2_1 *pp_atomfwctrl_get_gpio_lookup_table(
-		struct pp_hwmgr *hwmgr)
-{
-	const void *table_address;
-	uint16_t idx;
-
-	idx = GetIndexIntoMasterDataTable(gpio_pin_lut);
-	table_address =	smu_atom_get_data_table(hwmgr->adev,
-			idx, NULL, NULL, NULL);
-	PP_ASSERT_WITH_CODE(table_address,
-			"Error retrieving BIOS Table Address!",
-			return NULL);
-
-	return (struct atom_gpio_pin_lut_v2_1 *)table_address;
-}
-
-static bool pp_atomfwctrl_lookup_gpio_pin(
-		struct atom_gpio_pin_lut_v2_1 *gpio_lookup_table,
-		const uint32_t pin_id,
-		struct pp_atomfwctrl_gpio_pin_assignment *gpio_pin_assignment)
-{
-	unsigned int size = le16_to_cpu(
-			gpio_lookup_table->table_header.structuresize);
-	unsigned int offset =
-			offsetof(struct atom_gpio_pin_lut_v2_1, gpio_pin[0]);
-	unsigned long start = (unsigned long)gpio_lookup_table;
-
-	while (offset < size) {
-		const struct  atom_gpio_pin_assignment *pin_assignment =
-				(const struct  atom_gpio_pin_assignment *)(start + offset);
-
-		if (pin_id == pin_assignment->gpio_id)  {
-			gpio_pin_assignment->uc_gpio_pin_bit_shift =
-					pin_assignment->gpio_bitshift;
-			gpio_pin_assignment->us_gpio_pin_aindex =
-					le16_to_cpu(pin_assignment->data_a_reg_index);
-			return true;
-		}
-		offset += offsetof(struct atom_gpio_pin_assignment, gpio_id) + 1;
-	}
-	return false;
-}
-
-/*
- * Returns TRUE if the given pin id find in lookup table.
- */
-bool pp_atomfwctrl_get_pp_assign_pin(struct pp_hwmgr *hwmgr,
-		const uint32_t pin_id,
-		struct pp_atomfwctrl_gpio_pin_assignment *gpio_pin_assignment)
-{
-	bool ret = false;
-	struct atom_gpio_pin_lut_v2_1 *gpio_lookup_table =
-			pp_atomfwctrl_get_gpio_lookup_table(hwmgr);
-
-	/* If we cannot find the table do NOT try to control this voltage. */
-	PP_ASSERT_WITH_CODE(gpio_lookup_table,
-			"Could not find GPIO lookup Table in BIOS.",
-			return false);
-
-	ret = pp_atomfwctrl_lookup_gpio_pin(gpio_lookup_table,
-			pin_id, gpio_pin_assignment);
-
-	return ret;
-}
-
-/*
- * Enter to SelfRefresh mode.
- * @param hwmgr
- */
-int pp_atomfwctrl_enter_self_refresh(struct pp_hwmgr *hwmgr)
-{
-	/* 0 - no action
-	 * 1 - leave power to video memory always on
-	 */
-	return 0;
-}
-
 /** pp_atomfwctrl_get_gpu_pll_dividers_vega10().
  *
  * @param hwmgr       input parameter: pointer to HwMgr
@@ -258,7 +185,7 @@ int pp_atomfwctrl_get_gpu_pll_dividers_vega10(struct pp_hwmgr *hwmgr,
 	idx = GetIndexIntoMasterCmdTable(computegpuclockparam);
 
 	if (amdgpu_atom_execute_table(
-		adev->mode_info.atom_context, idx, (uint32_t *)&pll_parameters))
+		adev->mode_info.atom_context, idx, (uint32_t *)&pll_parameters, sizeof(pll_parameters)))
 		return -EINVAL;
 
 	pll_output = (struct compute_gpu_clock_output_parameter_v1_8 *)
@@ -505,7 +432,7 @@ int pp_atomfwctrl_get_clk_information_by_clkid(struct pp_hwmgr *hwmgr,
 	ix = GetIndexIntoMasterCmdTable(getsmuclockinfo);
 
 	if (amdgpu_atom_execute_table(
-		adev->mode_info.atom_context, ix, (uint32_t *)&parameters))
+		adev->mode_info.atom_context, ix, (uint32_t *)&parameters, sizeof(parameters)))
 		return -EINVAL;
 
 	output = (struct atom_get_smu_clock_info_output_parameters_v3_1 *)&parameters;

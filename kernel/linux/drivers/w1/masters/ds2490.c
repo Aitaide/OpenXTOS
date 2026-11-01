@@ -7,7 +7,6 @@
 
 #include <linux/module.h>
 #include <linux/kernel.h>
-#include <linux/mod_devicetable.h>
 #include <linux/usb.h>
 #include <linux/slab.h>
 
@@ -98,6 +97,8 @@
 #define ST_EPOF				0x80
 /* Status transfer size, 16 bytes status, 16 byte result flags */
 #define ST_SIZE				0x20
+/* 1-wire data i/o fifo size, 128 bytes */
+#define FIFO_SIZE			0x80
 
 /* Result Register flags */
 #define RR_DETECT			0xA5 /* New device detected */
@@ -614,13 +615,10 @@ static int ds_read_byte(struct ds_device *dev, u8 *byte)
 	return 0;
 }
 
-static int ds_read_block(struct ds_device *dev, u8 *buf, int len)
+static int read_block_chunk(struct ds_device *dev, u8 *buf, int len)
 {
 	struct ds_status st;
 	int err;
-
-	if (len > 64*1024)
-		return -E2BIG;
 
 	memset(buf, 0xFF, len);
 
@@ -636,6 +634,24 @@ static int ds_read_block(struct ds_device *dev, u8 *buf, int len)
 
 	memset(buf, 0x00, len);
 	err = ds_recv_data(dev, buf, len);
+
+	return err;
+}
+
+static int ds_read_block(struct ds_device *dev, u8 *buf, int len)
+{
+	int err, to_read, rem = len;
+
+	if (len > 64 * 1024)
+		return -E2BIG;
+
+	do {
+		to_read = rem <= FIFO_SIZE ? rem : FIFO_SIZE;
+		err = read_block_chunk(dev, &buf[len - rem], to_read);
+		if (err < 0)
+			return err;
+		rem -= to_read;
+	} while (rem);
 
 	return err;
 }
@@ -1001,15 +1017,12 @@ static int ds_probe(struct usb_interface *intf,
 	struct ds_device *dev;
 	int i, err, alt;
 
-	dev = kzalloc(sizeof(struct ds_device), GFP_KERNEL);
+	dev = kzalloc_obj(struct ds_device);
 	if (!dev)
 		return -ENOMEM;
 
-	dev->udev = usb_get_dev(udev);
-	if (!dev->udev) {
-		err = -ENOMEM;
-		goto err_out_free;
-	}
+	dev->udev = udev;
+
 	memset(dev->ep, 0, sizeof(dev->ep));
 
 	usb_set_intfdata(intf, dev);
@@ -1068,9 +1081,8 @@ static int ds_probe(struct usb_interface *intf,
 
 err_out_clear:
 	usb_set_intfdata(intf, NULL);
-	usb_put_dev(dev->udev);
-err_out_free:
 	kfree(dev);
+
 	return err;
 }
 
@@ -1090,7 +1102,6 @@ static void ds_disconnect(struct usb_interface *intf)
 
 	usb_set_intfdata(intf, NULL);
 
-	usb_put_dev(dev->udev);
 	kfree(dev);
 }
 

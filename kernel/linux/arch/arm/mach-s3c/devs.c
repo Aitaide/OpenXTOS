@@ -5,7 +5,7 @@
 //
 // Base Samsung platform device definitions
 
-#include <linux/gpio.h>
+#include <linux/gpio/consumer.h>
 #include <linux/kernel.h>
 #include <linux/types.h>
 #include <linux/interrupt.h>
@@ -19,7 +19,6 @@
 #include <linux/slab.h>
 #include <linux/string.h>
 #include <linux/dma-mapping.h>
-#include <linux/fb.h>
 #include <linux/gfp.h>
 #include <linux/mmc/host.h>
 #include <linux/ioport.h>

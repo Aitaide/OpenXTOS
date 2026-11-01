@@ -29,10 +29,10 @@ static const struct snd_soc_pcm_stream codec_params = {
 static int gx_card_i2s_be_hw_params(struct snd_pcm_substream *substream,
 				    struct snd_pcm_hw_params *params)
 {
-	struct snd_soc_pcm_runtime *rtd = asoc_substream_to_rtd(substream);
+	struct snd_soc_pcm_runtime *rtd = snd_soc_substream_to_rtd(substream);
 	struct meson_card *priv = snd_soc_card_get_drvdata(rtd->card);
 	struct gx_dai_link_i2s_data *be =
-		(struct gx_dai_link_i2s_data *)priv->link_data[rtd->num];
+		(struct gx_dai_link_i2s_data *)priv->link_data[rtd->id];
 
 	return meson_card_i2s_set_sysclk(substream, params, be->mclk_fs);
 }
@@ -48,9 +48,10 @@ static int gx_card_parse_i2s(struct snd_soc_card *card,
 	struct meson_card *priv = snd_soc_card_get_drvdata(card);
 	struct snd_soc_dai_link *link = &card->dai_link[*index];
 	struct gx_dai_link_i2s_data *be;
+	struct device *dev = card->dev;
 
 	/* Allocate i2s link parameters */
-	be = devm_kzalloc(card->dev, sizeof(*be), GFP_KERNEL);
+	be = devm_kzalloc(dev, sizeof(*be), GFP_KERNEL);
 	if (!be)
 		return -ENOMEM;
 	priv->link_data[*index] = be;
@@ -81,9 +82,10 @@ static int gx_card_add_link(struct snd_soc_card *card, struct device_node *np,
 {
 	struct snd_soc_dai_link *dai_link = &card->dai_link[*index];
 	struct snd_soc_dai_link_component *cpu;
+	struct device *dev = card->dev;
 	int ret;
 
-	cpu = devm_kzalloc(card->dev, sizeof(*cpu), GFP_KERNEL);
+	cpu = devm_kzalloc(dev, sizeof(*cpu), GFP_KERNEL);
 	if (!cpu)
 		return -ENOMEM;
 
@@ -107,7 +109,6 @@ static int gx_card_add_link(struct snd_soc_card *card, struct device_node *np,
 		dai_link->num_c2c_params = 1;
 	} else {
 		dai_link->no_pcm = 1;
-		snd_soc_dai_link_set_capabilities(dai_link);
 		/* Check if the cpu is the i2s encoder and parse i2s data */
 		if (gx_card_cpu_identify(dai_link->cpus, "I2S Encoder"))
 			ret = gx_card_parse_i2s(card, np, index);

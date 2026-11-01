@@ -2,15 +2,6 @@
 /*
  * Support for Intel Camera Imaging ISP subsystem.
  * Copyright (c) 2015, Intel Corporation.
- *
- * This program is free software; you can redistribute it and/or modify it
- * under the terms and conditions of the GNU General Public License,
- * version 2, as published by the Free Software Foundation.
- *
- * This program is distributed in the hope it will be useful, but WITHOUT
- * ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
- * FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License for
- * more details.
  */
 
 #ifndef __IA_CSS_PIPE_PUBLIC_H
@@ -53,7 +44,7 @@ enum ia_css_pipe_mode {
 /* Temporary define  */
 #define IA_CSS_PIPE_MODE_NUM (IA_CSS_PIPE_MODE_YUVPP + 1)
 
-/**
+/*
  * Enumeration of pipe versions.
  * the order should match with definition in sh_css_defs.h
  */
@@ -64,7 +55,7 @@ enum ia_css_pipe_version {
 	IA_CSS_PIPE_VERSION_2_7 = 4		/** ISP2.7 pipe */
 };
 
-/**
+/*
  * Pipe configuration structure.
  * Resolution properties are filled by Driver, kernel configurations are
  * set by AIC
@@ -132,7 +123,7 @@ struct ia_css_pipe_config {
 		   to retrieve shading gains which correspond to bayer data. */
 };
 
-/**
+/*
  * Default settings for newly created pipe configurations.
  */
 #define DEFAULT_PIPE_CONFIG { \
@@ -184,7 +175,7 @@ struct ia_css_pipe_info {
 	     output at the first valid frame. */
 };
 
-/**
+/*
  * Defaults for ia_css_pipe_info structs.
  */
 #define DEFAULT_PIPE_INFO {\

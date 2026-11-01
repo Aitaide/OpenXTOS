@@ -13,13 +13,13 @@
  * https://www.ti.com/lit/ds/symlink/dac5573.pdf
  * https://www.ti.com/lit/ds/symlink/dac6573.pdf
  * https://www.ti.com/lit/ds/symlink/dac7573.pdf
+ * https://www.ti.com/lit/ds/symlink/dac081c081.pdf
  * https://www.ti.com/lit/ds/symlink/dac121c081.pdf
  */
 
 #include <linux/iio/iio.h>
 #include <linux/i2c.h>
 #include <linux/module.h>
-#include <linux/mod_devicetable.h>
 #include <linux/property.h>
 #include <linux/regulator/consumer.h>
 
@@ -44,7 +44,6 @@ static const struct dac5571_spec dac5571_spec[] = {
 
 struct dac5571_data {
 	struct i2c_client *client;
-	int id;
 	struct mutex lock;
 	struct regulator *vref;
 	u16 val[4];
@@ -215,7 +214,7 @@ static const struct iio_chan_spec_ext_info dac5571_ext_info[] = {
 	},
 	IIO_ENUM("powerdown_mode", IIO_SEPARATE, &dac5571_powerdown_mode),
 	IIO_ENUM_AVAILABLE("powerdown_mode", IIO_SHARED_BY_TYPE, &dac5571_powerdown_mode),
-	{},
+	{ }
 };
 
 #define dac5571_CHANNEL(chan, name) {				\
@@ -313,7 +312,6 @@ static int dac5571_probe(struct i2c_client *client)
 	const struct dac5571_spec *spec;
 	struct dac5571_data *data;
 	struct iio_dev *indio_dev;
-	enum chip_id chip_id;
 	int ret, i;
 
 	indio_dev = devm_iio_device_alloc(dev, sizeof(*data));
@@ -329,12 +327,7 @@ static int dac5571_probe(struct i2c_client *client)
 	indio_dev->modes = INDIO_DIRECT_MODE;
 	indio_dev->channels = dac5571_channels;
 
-	if (dev_fwnode(dev))
-		chip_id = (uintptr_t)device_get_match_data(dev);
-	else
-		chip_id = id->driver_data;
-
-	spec = &dac5571_spec[chip_id];
+	spec = i2c_get_match_data(client);
 
 	indio_dev->num_channels = spec->num_channels;
 	data->spec = spec;
@@ -392,32 +385,34 @@ static void dac5571_remove(struct i2c_client *i2c)
 }
 
 static const struct of_device_id dac5571_of_id[] = {
-	{.compatible = "ti,dac5571", .data = (void *)single_8bit},
-	{.compatible = "ti,dac6571", .data = (void *)single_10bit},
-	{.compatible = "ti,dac7571", .data = (void *)single_12bit},
-	{.compatible = "ti,dac5574", .data = (void *)quad_8bit},
-	{.compatible = "ti,dac6574", .data = (void *)quad_10bit},
-	{.compatible = "ti,dac7574", .data = (void *)quad_12bit},
-	{.compatible = "ti,dac5573", .data = (void *)quad_8bit},
-	{.compatible = "ti,dac6573", .data = (void *)quad_10bit},
-	{.compatible = "ti,dac7573", .data = (void *)quad_12bit},
-	{.compatible = "ti,dac121c081", .data = (void *)single_12bit},
-	{}
+	{.compatible = "ti,dac081c081", .data = &dac5571_spec[single_8bit] },
+	{.compatible = "ti,dac121c081", .data = &dac5571_spec[single_12bit] },
+	{.compatible = "ti,dac5571", .data = &dac5571_spec[single_8bit] },
+	{.compatible = "ti,dac6571", .data = &dac5571_spec[single_10bit] },
+	{.compatible = "ti,dac7571", .data = &dac5571_spec[single_12bit] },
+	{.compatible = "ti,dac5574", .data = &dac5571_spec[quad_8bit] },
+	{.compatible = "ti,dac6574", .data = &dac5571_spec[quad_10bit] },
+	{.compatible = "ti,dac7574", .data = &dac5571_spec[quad_12bit] },
+	{.compatible = "ti,dac5573", .data = &dac5571_spec[quad_8bit] },
+	{.compatible = "ti,dac6573", .data = &dac5571_spec[quad_10bit] },
+	{.compatible = "ti,dac7573", .data = &dac5571_spec[quad_12bit] },
+	{ }
 };
 MODULE_DEVICE_TABLE(of, dac5571_of_id);
 
 static const struct i2c_device_id dac5571_id[] = {
-	{"dac5571", single_8bit},
-	{"dac6571", single_10bit},
-	{"dac7571", single_12bit},
-	{"dac5574", quad_8bit},
-	{"dac6574", quad_10bit},
-	{"dac7574", quad_12bit},
-	{"dac5573", quad_8bit},
-	{"dac6573", quad_10bit},
-	{"dac7573", quad_12bit},
-	{"dac121c081", single_12bit},
-	{}
+	{ .name = "dac081c081", .driver_data = (kernel_ulong_t)&dac5571_spec[single_8bit] },
+	{ .name = "dac121c081", .driver_data = (kernel_ulong_t)&dac5571_spec[single_12bit] },
+	{ .name = "dac5571", .driver_data = (kernel_ulong_t)&dac5571_spec[single_8bit] },
+	{ .name = "dac6571", .driver_data = (kernel_ulong_t)&dac5571_spec[single_10bit] },
+	{ .name = "dac7571", .driver_data = (kernel_ulong_t)&dac5571_spec[single_12bit] },
+	{ .name = "dac5574", .driver_data = (kernel_ulong_t)&dac5571_spec[quad_8bit] },
+	{ .name = "dac6574", .driver_data = (kernel_ulong_t)&dac5571_spec[quad_10bit] },
+	{ .name = "dac7574", .driver_data = (kernel_ulong_t)&dac5571_spec[quad_12bit] },
+	{ .name = "dac5573", .driver_data = (kernel_ulong_t)&dac5571_spec[quad_8bit] },
+	{ .name = "dac6573", .driver_data = (kernel_ulong_t)&dac5571_spec[quad_10bit] },
+	{ .name = "dac7573", .driver_data = (kernel_ulong_t)&dac5571_spec[quad_12bit] },
+	{ }
 };
 MODULE_DEVICE_TABLE(i2c, dac5571_id);
 

@@ -132,8 +132,7 @@ static int brcmf_c_download_blob(struct brcmf_if *ifp,
 
 	brcmf_dbg(TRACE, "Enter\n");
 
-	chunk_buf = kzalloc(struct_size(chunk_buf, data, MAX_CHUNK_LEN),
-			    GFP_KERNEL);
+	chunk_buf = kzalloc_flex(*chunk_buf, data, MAX_CHUNK_LEN);
 	if (!chunk_buf) {
 		err = -ENOMEM;
 		return -ENOMEM;
@@ -266,7 +265,7 @@ static int brcmf_c_process_cal_blob(struct brcmf_if *ifp)
 int brcmf_c_preinit_dcmds(struct brcmf_if *ifp)
 {
 	struct brcmf_pub *drvr = ifp->drvr;
-	s8 eventmask[BRCMF_EVENTING_MASK_LEN];
+	struct brcmf_fweh_info *fweh = drvr->fweh;
 	u8 buf[BRCMF_DCMD_SMLEN];
 	struct brcmf_bus *bus;
 	struct brcmf_rev_info_le revinfo;
@@ -413,15 +412,21 @@ int brcmf_c_preinit_dcmds(struct brcmf_if *ifp)
 	brcmf_c_set_joinpref_default(ifp);
 
 	/* Setup event_msgs, enable E_IF */
-	err = brcmf_fil_iovar_data_get(ifp, "event_msgs", eventmask,
-				       BRCMF_EVENTING_MASK_LEN);
+	err = brcmf_fil_iovar_data_get(ifp, "event_msgs", fweh->event_mask,
+				       fweh->event_mask_len);
 	if (err) {
 		bphy_err(drvr, "Get event_msgs error (%d)\n", err);
 		goto done;
 	}
-	setbit(eventmask, BRCMF_E_IF);
-	err = brcmf_fil_iovar_data_set(ifp, "event_msgs", eventmask,
-				       BRCMF_EVENTING_MASK_LEN);
+	/*
+	 * BRCMF_E_IF can safely be used to set the appropriate bit
+	 * in the event_mask as the firmware event code is guaranteed
+	 * to match the value of BRCMF_E_IF because it is old cruft
+	 * that all vendors have.
+	 */
+	setbit(fweh->event_mask, BRCMF_E_IF);
+	err = brcmf_fil_iovar_data_set(ifp, "event_msgs", fweh->event_mask,
+				       fweh->event_mask_len);
 	if (err) {
 		bphy_err(drvr, "Set event_msgs error (%d)\n", err);
 		goto done;
@@ -485,6 +490,7 @@ void __brcmf_dbg(u32 level, const char *func, const char *fmt, ...)
 	trace_brcmf_dbg(level, func, &vaf);
 	va_end(args);
 }
+BRCMF_EXPORT_SYMBOL_GPL(__brcmf_dbg);
 #endif
 
 static void brcmf_mp_attach(void)
@@ -514,11 +520,11 @@ struct brcmf_mp_device *brcmf_get_module_param(struct device *dev,
 
 	brcmf_dbg(INFO, "Enter, bus=%d, chip=%d, rev=%d\n", bus_type, chip,
 		  chiprev);
-	settings = kzalloc(sizeof(*settings), GFP_ATOMIC);
+	settings = kzalloc_obj(*settings, GFP_ATOMIC);
 	if (!settings)
 		return NULL;
 
-	/* start by using the module paramaters */
+	/* start by using the module parameters */
 	settings->p2p_enable = !!brcmf_p2p_enable;
 	settings->feature_disable = brcmf_feature_disable;
 	settings->fcmode = brcmf_fcmode;
@@ -555,7 +561,10 @@ struct brcmf_mp_device *brcmf_get_module_param(struct device *dev,
 	if (!found) {
 		/* No platform data for this device, try OF and DMI data */
 		brcmf_dmi_probe(settings, chip, chiprev);
-		brcmf_of_probe(dev, bus_type, settings);
+		if (brcmf_of_probe(dev, bus_type, settings) == -EPROBE_DEFER) {
+			kfree(settings);
+			return ERR_PTR(-EPROBE_DEFER);
+		}
 		brcmf_acpi_probe(dev, bus_type, settings);
 	}
 	return settings;
@@ -578,14 +587,12 @@ static int __init brcmf_common_pd_probe(struct platform_device *pdev)
 	return 0;
 }
 
-static int brcmf_common_pd_remove(struct platform_device *pdev)
+static void brcmf_common_pd_remove(struct platform_device *pdev)
 {
 	brcmf_dbg(INFO, "Enter\n");
 
 	if (brcmfmac_pdata->power_off)
 		brcmfmac_pdata->power_off();
-
-	return 0;
 }
 
 static struct platform_driver brcmf_pd = {
@@ -604,7 +611,7 @@ static int __init brcmfmac_module_init(void)
 	if (err == -ENODEV)
 		brcmf_dbg(INFO, "No platform data available.\n");
 
-	/* Initialize global module paramaters */
+	/* Initialize global module parameters */
 	brcmf_mp_attach();
 
 	/* Continue the initialization by registering the different busses */

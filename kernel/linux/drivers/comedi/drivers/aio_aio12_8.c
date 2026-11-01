@@ -1,17 +1,17 @@
 // SPDX-License-Identifier: GPL-2.0+
 /*
  * aio_aio12_8.c
- * Driver for Access I/O Products PC-104 AIO12-8 Analog I/O Board
+ * Driver for ACCES I/O Products PC-104 AIO12-8 Analog I/O Board
  * Copyright (C) 2006 C&C Technologies, Inc.
  */
 
 /*
  * Driver: aio_aio12_8
- * Description: Access I/O Products PC-104 AIO12-8 Analog I/O Board
+ * Description: ACCES I/O Products PC-104 AIO12-8 Analog I/O Board
  * Author: Pablo Mejia <pablo.mejia@cctechnol.com>
- * Devices: [Access I/O] PC-104 AIO12-8 (aio_aio12_8),
- *   [Access I/O] PC-104 AI12-8 (aio_ai12_8),
- *   [Access I/O] PC-104 AO12-4 (aio_ao12_4)
+ * Devices: [ACCES I/O] PC-104 AIO12-8 (aio_aio12_8),
+ *   [ACCES I/O] PC-104 AI12-8 (aio_ai12_8),
+ *   [ACCES I/O] PC-104 AO12-4 (aio_ao12_4)
  * Status: experimental
  *
  * Configuration Options:
@@ -202,14 +202,15 @@ static int aio_aio12_8_attach(struct comedi_device *dev,
 	struct comedi_subdevice *s;
 	int ret;
 
-	ret = comedi_request_region(dev, it->options[0], 32);
+	ret = comedi_check_request_region(dev, it->options[0], 32,
+					  0x100, 0x3ff, 32);
 	if (ret)
 		return ret;
 
-	dev->pacer = comedi_8254_init(dev->iobase + AIO12_8_8254_BASE_REG,
-				      0, I8254_IO8, 0);
-	if (!dev->pacer)
-		return -ENOMEM;
+	dev->pacer = comedi_8254_io_alloc(dev->iobase + AIO12_8_8254_BASE_REG,
+					  0, I8254_IO8, 0);
+	if (IS_ERR(dev->pacer))
+		return PTR_ERR(dev->pacer);
 
 	ret = comedi_alloc_subdevices(dev, 4);
 	if (ret)
@@ -247,7 +248,7 @@ static int aio_aio12_8_attach(struct comedi_device *dev,
 
 	/* Digital I/O subdevice (8255) */
 	s = &dev->subdevices[2];
-	ret = subdev_8255_init(dev, s, NULL, AIO12_8_8255_BASE_REG);
+	ret = subdev_8255_io_init(dev, s, AIO12_8_8255_BASE_REG);
 	if (ret)
 		return ret;
 
@@ -272,5 +273,5 @@ static struct comedi_driver aio_aio12_8_driver = {
 module_comedi_driver(aio_aio12_8_driver);
 
 MODULE_AUTHOR("Comedi https://www.comedi.org");
-MODULE_DESCRIPTION("Comedi driver for Access I/O AIO12-8 Analog I/O Board");
+MODULE_DESCRIPTION("Comedi driver for ACCES I/O AIO12-8 Analog I/O Board");
 MODULE_LICENSE("GPL");

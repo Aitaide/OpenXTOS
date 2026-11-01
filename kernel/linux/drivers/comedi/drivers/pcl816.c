@@ -242,7 +242,7 @@ static irqreturn_t pcl816_interrupt(int irq, void *d)
 	struct comedi_subdevice *s = dev->read_subdev;
 	struct pcl816_private *devpriv = dev->private;
 	struct comedi_isadma *dma = devpriv->dma;
-	struct comedi_isadma_desc *desc = &dma->desc[dma->cur_dma];
+	struct comedi_isadma_desc *desc;
 	unsigned int nsamples;
 	unsigned int bufptr;
 
@@ -257,6 +257,7 @@ static irqreturn_t pcl816_interrupt(int irq, void *d)
 		return IRQ_HANDLED;
 	}
 
+	desc = &dma->desc[dma->cur_dma];
 	nsamples = comedi_bytes_to_samples(s, desc->size) -
 		   devpriv->ai_poll_ptr;
 	bufptr = devpriv->ai_poll_ptr;
@@ -608,17 +609,18 @@ static int pcl816_attach(struct comedi_device *dev, struct comedi_devconfig *it)
 	if (!devpriv)
 		return -ENOMEM;
 
-	ret = comedi_request_region(dev, it->options[0], 0x10);
+	ret = comedi_check_request_region(dev, it->options[0], 0x10,
+					  0, 0x3ff, 16);
 	if (ret)
 		return ret;
 
 	/* an IRQ and DMA are required to support async commands */
 	pcl816_alloc_irq_and_dma(dev, it);
 
-	dev->pacer = comedi_8254_init(dev->iobase + PCL816_TIMER_BASE,
-				      I8254_OSC_BASE_10MHZ, I8254_IO8, 0);
-	if (!dev->pacer)
-		return -ENOMEM;
+	dev->pacer = comedi_8254_io_alloc(dev->iobase + PCL816_TIMER_BASE,
+					  I8254_OSC_BASE_10MHZ, I8254_IO8, 0);
+	if (IS_ERR(dev->pacer))
+		return PTR_ERR(dev->pacer);
 
 	ret = comedi_alloc_subdevices(dev, 4);
 	if (ret)

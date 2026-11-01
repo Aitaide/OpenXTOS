@@ -9,7 +9,6 @@
 #include <linux/delay.h>
 #include <linux/device.h>
 #include <linux/i2c.h>
-#include <linux/mod_devicetable.h>
 #include <linux/module.h>
 #include <linux/of_graph.h>
 #include <linux/pm_runtime.h>
@@ -2304,14 +2303,6 @@ static int ov8865_state_configure(struct ov8865_sensor *sensor,
 	if (sensor->state.streaming)
 		return -EBUSY;
 
-	/* State will be configured at first power on otherwise. */
-	if (pm_runtime_enabled(sensor->dev) &&
-	    !pm_runtime_suspended(sensor->dev)) {
-		ret = ov8865_mode_configure(sensor, mode, mbus_code);
-		if (ret)
-			return ret;
-	}
-
 	ret = ov8865_state_mipi_configure(sensor, mode, mbus_code);
 	if (ret)
 		return ret;
@@ -2384,10 +2375,10 @@ static int ov8865_sensor_init(struct ov8865_sensor *sensor)
 	}
 
 	/* Configure current mode. */
-	ret = ov8865_state_configure(sensor, sensor->state.mode,
-				     sensor->state.mbus_code);
+	ret = ov8865_mode_configure(sensor, sensor->state.mode,
+				    sensor->state.mbus_code);
 	if (ret) {
-		dev_err(sensor->dev, "failed to configure state\n");
+		dev_err(sensor->dev, "failed to configure mode\n");
 		return ret;
 	}
 
@@ -2617,7 +2608,7 @@ static int ov8865_s_stream(struct v4l2_subdev *subdev, int enable)
 {
 	struct ov8865_sensor *sensor = ov8865_subdev_sensor(subdev);
 	struct ov8865_state *state = &sensor->state;
-	int ret;
+	int ret = 0;
 
 	if (enable) {
 		ret = pm_runtime_resume_and_get(sensor->dev);
@@ -2626,47 +2617,36 @@ static int ov8865_s_stream(struct v4l2_subdev *subdev, int enable)
 	}
 
 	mutex_lock(&sensor->mutex);
-	ret = ov8865_sw_standby(sensor, !enable);
+
+	/*
+	 * The sensor may have been kept powered by something else (e.g. the
+	 * VCM's runtime PM device link on IPU3 platforms), in which case
+	 * runtime resume did not run and the hardware may still be
+	 * configured for a previous mode. Always program the negotiated
+	 * configuration on stream start.
+	 */
+	if (enable) {
+		ret = ov8865_sensor_init(sensor);
+		if (!ret)
+			ret = __v4l2_ctrl_handler_setup(&sensor->ctrls.handler);
+	}
+
+	if (!ret)
+		ret = ov8865_sw_standby(sensor, !enable);
+
 	mutex_unlock(&sensor->mutex);
 
-	if (ret)
-		return ret;
-
-	state->streaming = !!enable;
-
-	if (!enable)
+	if (ret || !enable)
 		pm_runtime_put(sensor->dev);
 
-	return 0;
-}
+	if (!ret)
+		state->streaming = enable;
 
-static int ov8865_g_frame_interval(struct v4l2_subdev *subdev,
-				   struct v4l2_subdev_frame_interval *interval)
-{
-	struct ov8865_sensor *sensor = ov8865_subdev_sensor(subdev);
-	const struct ov8865_mode *mode;
-	unsigned int framesize;
-	unsigned int fps;
-
-	mutex_lock(&sensor->mutex);
-
-	mode = sensor->state.mode;
-	framesize = mode->hts * (mode->output_size_y +
-				 sensor->ctrls.vblank->val);
-	fps = DIV_ROUND_CLOSEST(sensor->ctrls.pixel_rate->val, framesize);
-
-	interval->interval.numerator = 1;
-	interval->interval.denominator = fps;
-
-	mutex_unlock(&sensor->mutex);
-
-	return 0;
+	return ret;
 }
 
 static const struct v4l2_subdev_video_ops ov8865_subdev_video_ops = {
 	.s_stream		= ov8865_s_stream,
-	.g_frame_interval	= ov8865_g_frame_interval,
-	.s_frame_interval	= ov8865_g_frame_interval,
 };
 
 /* Subdev Pad Operations */
@@ -2710,8 +2690,8 @@ static int ov8865_get_fmt(struct v4l2_subdev *subdev,
 	mutex_lock(&sensor->mutex);
 
 	if (format->which == V4L2_SUBDEV_FORMAT_TRY)
-		*mbus_format = *v4l2_subdev_get_try_format(subdev, sd_state,
-							   format->pad);
+		*mbus_format = *v4l2_subdev_state_get_format(sd_state,
+							     format->pad);
 	else
 		ov8865_mbus_format_fill(mbus_format, sensor->state.mbus_code,
 					sensor->state.mode);
@@ -2765,7 +2745,7 @@ static int ov8865_set_fmt(struct v4l2_subdev *subdev,
 	ov8865_mbus_format_fill(mbus_format, mbus_code, mode);
 
 	if (format->which == V4L2_SUBDEV_FORMAT_TRY)
-		*v4l2_subdev_get_try_format(subdev, sd_state, format->pad) =
+		*v4l2_subdev_state_get_format(sd_state, format->pad) =
 			*mbus_format;
 	else if (sensor->state.mode != mode ||
 		 sensor->state.mbus_code != mbus_code)
@@ -2818,7 +2798,7 @@ __ov8865_get_pad_crop(struct ov8865_sensor *sensor,
 
 	switch (which) {
 	case V4L2_SUBDEV_FORMAT_TRY:
-		*r = *v4l2_subdev_get_try_crop(&sensor->subdev, state, pad);
+		*r = *v4l2_subdev_state_get_crop(state, pad);
 		break;
 	case V4L2_SUBDEV_FORMAT_ACTIVE:
 		r->height = mode->output_size_y;
@@ -2862,6 +2842,37 @@ static int ov8865_get_selection(struct v4l2_subdev *subdev,
 	return 0;
 }
 
+static int ov8865_get_frame_interval(struct v4l2_subdev *subdev,
+				     struct v4l2_subdev_state *sd_state,
+				     struct v4l2_subdev_frame_interval *interval)
+{
+	struct ov8865_sensor *sensor = ov8865_subdev_sensor(subdev);
+	const struct ov8865_mode *mode;
+	unsigned int framesize;
+	unsigned int fps;
+
+	/*
+	 * FIXME: Implement support for V4L2_SUBDEV_FORMAT_TRY, using the V4L2
+	 * subdev active state API.
+	 */
+	if (interval->which != V4L2_SUBDEV_FORMAT_ACTIVE)
+		return -EINVAL;
+
+	mutex_lock(&sensor->mutex);
+
+	mode = sensor->state.mode;
+	framesize = mode->hts * (mode->output_size_y +
+				 sensor->ctrls.vblank->val);
+	fps = DIV_ROUND_CLOSEST(sensor->ctrls.pixel_rate->val, framesize);
+
+	interval->interval.numerator = 1;
+	interval->interval.denominator = fps;
+
+	mutex_unlock(&sensor->mutex);
+
+	return 0;
+}
+
 static const struct v4l2_subdev_pad_ops ov8865_subdev_pad_ops = {
 	.enum_mbus_code		= ov8865_enum_mbus_code,
 	.get_fmt		= ov8865_get_fmt,
@@ -2869,6 +2880,8 @@ static const struct v4l2_subdev_pad_ops ov8865_subdev_pad_ops = {
 	.enum_frame_size	= ov8865_enum_frame_size,
 	.get_selection		= ov8865_get_selection,
 	.set_selection		= ov8865_get_selection,
+	.get_frame_interval	= ov8865_get_frame_interval,
+	.set_frame_interval	= ov8865_get_frame_interval,
 };
 
 static const struct v4l2_subdev_ops ov8865_subdev_ops = {
@@ -2916,15 +2929,15 @@ static int ov8865_resume(struct device *dev)
 	if (ret)
 		goto complete;
 
-	ret = ov8865_sensor_init(sensor);
-	if (ret)
-		goto error_power;
-
-	ret = __v4l2_ctrl_handler_setup(&sensor->ctrls.handler);
-	if (ret)
-		goto error_power;
-
 	if (state->streaming) {
+		ret = ov8865_sensor_init(sensor);
+		if (ret)
+			goto error_power;
+
+		ret = __v4l2_ctrl_handler_setup(&sensor->ctrls.handler);
+		if (ret)
+			goto error_power;
+
 		ret = ov8865_sw_standby(sensor, false);
 		if (ret)
 			goto error_power;
@@ -2948,7 +2961,6 @@ static int ov8865_probe(struct i2c_client *client)
 	struct ov8865_sensor *sensor;
 	struct v4l2_subdev *subdev;
 	struct media_pad *pad;
-	unsigned int rate = 0;
 	unsigned int i;
 	int ret;
 
@@ -2983,7 +2995,8 @@ static int ov8865_probe(struct i2c_client *client)
 
 	handle = fwnode_graph_get_next_endpoint(dev_fwnode(dev), NULL);
 	if (!handle)
-		return -EPROBE_DEFER;
+		return dev_err_probe(dev, -EPROBE_DEFER,
+				     "waiting for fwnode graph endpoint\n");
 
 	sensor->endpoint.bus_type = V4L2_MBUS_CSI2_DPHY;
 
@@ -3011,39 +3024,14 @@ static int ov8865_probe(struct i2c_client *client)
 
 	/* External Clock */
 
-	sensor->extclk = devm_clk_get(dev, NULL);
-	if (PTR_ERR(sensor->extclk) == -ENOENT) {
-		dev_info(dev, "no external clock found, continuing...\n");
-		sensor->extclk = NULL;
-	} else if (IS_ERR(sensor->extclk)) {
-		dev_err(dev, "failed to get external clock\n");
-		ret = PTR_ERR(sensor->extclk);
+	sensor->extclk = devm_v4l2_sensor_clk_get(dev, NULL);
+	if (IS_ERR(sensor->extclk)) {
+		ret = dev_err_probe(dev, PTR_ERR(sensor->extclk),
+				    "failed to get external clock\n");
 		goto error_endpoint;
 	}
 
-	/*
-	 * We could have either a 24MHz or 19.2MHz clock rate from either dt or
-	 * ACPI...but we also need to support the weird IPU3 case which will
-	 * have an external clock AND a clock-frequency property. Check for the
-	 * clock-frequency property and if found, set that rate if we managed
-	 * to acquire a clock. This should cover the ACPI case. If the system
-	 * uses devicetree then the configured rate should already be set, so
-	 * we can just read it.
-	 */
-	ret = fwnode_property_read_u32(dev_fwnode(dev), "clock-frequency",
-				       &rate);
-	if (!ret && sensor->extclk) {
-		ret = clk_set_rate(sensor->extclk, rate);
-		if (ret) {
-			dev_err_probe(dev, ret, "failed to set clock rate\n");
-			goto error_endpoint;
-		}
-	} else if (ret && !sensor->extclk) {
-		dev_err_probe(dev, ret, "invalid clock config\n");
-		goto error_endpoint;
-	}
-
-	sensor->extclk_rate = rate ? rate : clk_get_rate(sensor->extclk);
+	sensor->extclk_rate = clk_get_rate(sensor->extclk);
 
 	for (i = 0; i < ARRAY_SIZE(supported_extclk_rates); i++) {
 		if (sensor->extclk_rate == supported_extclk_rates[i])

@@ -85,7 +85,7 @@ static int wf_max6690_probe(struct i2c_client *client)
 	else
 		return -ENXIO;
 
-	max = kzalloc(sizeof(struct wf_6690_sensor), GFP_KERNEL);
+	max = kzalloc_obj(struct wf_6690_sensor);
 	if (max == NULL) {
 		printk(KERN_ERR "windfarm: Couldn't create MAX6690 sensor: "
 		       "no memory\n");
@@ -112,7 +112,7 @@ static void wf_max6690_remove(struct i2c_client *client)
 }
 
 static const struct i2c_device_id wf_max6690_id[] = {
-	{ "MAC,max6690", 0 },
+	{ "MAC,max6690" },
 	{ }
 };
 MODULE_DEVICE_TABLE(i2c, wf_max6690_id);

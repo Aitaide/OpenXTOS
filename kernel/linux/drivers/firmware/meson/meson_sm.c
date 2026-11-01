@@ -13,9 +13,10 @@
 #include <linux/io.h>
 #include <linux/module.h>
 #include <linux/of.h>
-#include <linux/of_device.h>
+#include <linux/of_platform.h>
 #include <linux/platform_device.h>
 #include <linux/printk.h>
+#include <linux/property.h>
 #include <linux/types.h>
 #include <linux/sizes.h>
  #include <linux/slab.h>
@@ -40,12 +41,13 @@ static const struct meson_sm_chip gxbb_chip = {
 	.cmd_shmem_in_base	= 0x82000020,
 	.cmd_shmem_out_base	= 0x82000021,
 	.cmd = {
-		CMD(SM_EFUSE_READ,	0x82000030),
-		CMD(SM_EFUSE_WRITE,	0x82000031),
+		CMD(SM_EFUSE_READ,		0x82000030),
+		CMD(SM_EFUSE_WRITE,		0x82000031),
 		CMD(SM_EFUSE_USER_MAX,	0x82000033),
-		CMD(SM_GET_CHIP_ID,	0x82000044),
-		CMD(SM_A1_PWRC_SET,	0x82000093),
-		CMD(SM_A1_PWRC_GET,	0x82000095),
+		CMD(SM_GET_CHIP_ID,		0x82000044),
+		CMD(SM_THERMAL_CALIB_READ,	0x82000047),
+		CMD(SM_A1_PWRC_SET,		0x82000093),
+		CMD(SM_A1_PWRC_GET,		0x82000095),
 		{ /* sentinel */ },
 	},
 };
@@ -67,7 +69,7 @@ static u32 meson_sm_get_cmd(const struct meson_sm_chip *chip,
 	return cmd->smc_id;
 }
 
-static u32 __meson_sm_call(u32 cmd, u32 arg0, u32 arg1, u32 arg2,
+static s32 __meson_sm_call(u32 cmd, u32 arg0, u32 arg1, u32 arg2,
 			   u32 arg3, u32 arg4)
 {
 	struct arm_smccc_res res;
@@ -102,9 +104,10 @@ static void __iomem *meson_sm_map_shmem(u32 cmd_shmem, unsigned int size)
  * Return:	0 on success, a negative value on error
  */
 int meson_sm_call(struct meson_sm_firmware *fw, unsigned int cmd_index,
-		  u32 *ret, u32 arg0, u32 arg1, u32 arg2, u32 arg3, u32 arg4)
+		  s32 *ret, u32 arg0, u32 arg1, u32 arg2, u32 arg3, u32 arg4)
 {
-	u32 cmd, lret;
+	u32 cmd;
+	s32 lret;
 
 	if (!fw->chip)
 		return -ENOENT;
@@ -143,7 +146,7 @@ int meson_sm_call_read(struct meson_sm_firmware *fw, void *buffer,
 		       unsigned int bsize, unsigned int cmd_index, u32 arg0,
 		       u32 arg1, u32 arg2, u32 arg3, u32 arg4)
 {
-	u32 size;
+	s32 size;
 	int ret;
 
 	if (!fw->chip)
@@ -158,11 +161,16 @@ int meson_sm_call_read(struct meson_sm_firmware *fw, void *buffer,
 	if (meson_sm_call(fw, cmd_index, &size, arg0, arg1, arg2, arg3, arg4) < 0)
 		return -EINVAL;
 
-	if (size > bsize)
+	if (size < 0 || size > bsize)
 		return -EINVAL;
 
 	ret = size;
 
+	/* In some cases (for example GET_CHIP_ID command),
+	 * SMC doesn't return the number of bytes read, even
+	 * though the bytes were actually read into sm_shmem_out.
+	 * So this check is needed.
+	 */
 	if (!size)
 		size = bsize;
 
@@ -192,7 +200,7 @@ int meson_sm_call_write(struct meson_sm_firmware *fw, void *buffer,
 			unsigned int size, unsigned int cmd_index, u32 arg0,
 			u32 arg1, u32 arg2, u32 arg3, u32 arg4)
 {
-	u32 written;
+	s32 written;
 
 	if (!fw->chip)
 		return -ENOENT;
@@ -208,7 +216,7 @@ int meson_sm_call_write(struct meson_sm_firmware *fw, void *buffer,
 	if (meson_sm_call(fw, cmd_index, &written, arg0, arg1, arg2, arg3, arg4) < 0)
 		return -EINVAL;
 
-	if (!written)
+	if (written <= 0 || written > size)
 		return -EINVAL;
 
 	return written;
@@ -225,13 +233,35 @@ EXPORT_SYMBOL(meson_sm_call_write);
 struct meson_sm_firmware *meson_sm_get(struct device_node *sm_node)
 {
 	struct platform_device *pdev = of_find_device_by_node(sm_node);
+	struct meson_sm_firmware *fw;
 
 	if (!pdev)
 		return NULL;
 
-	return platform_get_drvdata(pdev);
+	fw = platform_get_drvdata(pdev);
+
+	put_device(&pdev->dev);
+
+	return fw;
 }
 EXPORT_SYMBOL_GPL(meson_sm_get);
+
+/**
+ * meson_sm_get_thermal_calib - Read thermal sensor calibration data.
+ * @fw:		Pointer to secure-monitor firmware.
+ * @trim_info:	Pointer to store the returned calibration data.
+ * @tsensor_id:	Sensor index to identify which sensor's calibration data
+ *		to retrieve
+ *
+ * Return: 0 on success, negative error code on failure.
+ */
+int meson_sm_get_thermal_calib(struct meson_sm_firmware *fw, u32 *trim_info,
+			       u32 tsensor_id)
+{
+	return meson_sm_call(fw, SM_THERMAL_CALIB_READ, trim_info, tsensor_id,
+			     0, 0, 0, 0);
+}
+EXPORT_SYMBOL_GPL(meson_sm_get_thermal_calib);
 
 #define SM_CHIP_ID_LENGTH	119
 #define SM_CHIP_ID_OFFSET	4
@@ -267,14 +297,11 @@ static ssize_t serial_show(struct device *dev, struct device_attribute *attr,
 
 static DEVICE_ATTR_RO(serial);
 
-static struct attribute *meson_sm_sysfs_attributes[] = {
+static struct attribute *meson_sm_sysfs_attrs[] = {
 	&dev_attr_serial.attr,
 	NULL,
 };
-
-static const struct attribute_group meson_sm_sysfs_attr_group = {
-	.attrs = meson_sm_sysfs_attributes,
-};
+ATTRIBUTE_GROUPS(meson_sm_sysfs);
 
 static const struct of_device_id meson_sm_ids[] = {
 	{ .compatible = "amlogic,meson-gxbb-sm", .data = &gxbb_chip },
@@ -291,7 +318,7 @@ static int __init meson_sm_probe(struct platform_device *pdev)
 	if (!fw)
 		return -ENOMEM;
 
-	chip = of_match_device(meson_sm_ids, dev)->data;
+	chip = device_get_match_data(dev);
 	if (!chip)
 		return -EINVAL;
 
@@ -306,7 +333,7 @@ static int __init meson_sm_probe(struct platform_device *pdev)
 		fw->sm_shmem_out_base = meson_sm_map_shmem(chip->cmd_shmem_out_base,
 							   chip->shmem_size);
 		if (WARN_ON(!fw->sm_shmem_out_base))
-			goto out_in_base;
+			goto unmap_in_base;
 	}
 
 	fw->chip = chip;
@@ -314,16 +341,15 @@ static int __init meson_sm_probe(struct platform_device *pdev)
 	platform_set_drvdata(pdev, fw);
 
 	if (devm_of_platform_populate(dev))
-		goto out_in_base;
-
-	if (sysfs_create_group(&pdev->dev.kobj, &meson_sm_sysfs_attr_group))
-		goto out_in_base;
+		goto unmap_out_base;
 
 	pr_info("secure-monitor enabled\n");
 
 	return 0;
 
-out_in_base:
+unmap_out_base:
+	iounmap(fw->sm_shmem_out_base);
+unmap_in_base:
 	iounmap(fw->sm_shmem_in_base);
 out:
 	return -EINVAL;
@@ -333,7 +359,9 @@ static struct platform_driver meson_sm_driver = {
 	.driver = {
 		.name = "meson-sm",
 		.of_match_table = of_match_ptr(meson_sm_ids),
+		.dev_groups = meson_sm_sysfs_groups,
 	},
 };
 module_platform_driver_probe(meson_sm_driver, meson_sm_probe);
+MODULE_DESCRIPTION("Amlogic Secure Monitor driver");
 MODULE_LICENSE("GPL v2");

@@ -279,14 +279,14 @@ out_free_inode:
 	return err;
 }
 
-static int omfs_mkdir(struct mnt_idmap *idmap, struct inode *dir,
-		      struct dentry *dentry, umode_t mode)
+static struct dentry *omfs_mkdir(struct mnt_idmap *idmap, struct inode *dir,
+				 struct dentry *dentry, umode_t mode)
 {
-	return omfs_add_node(dir, dentry, mode | S_IFDIR);
+	return ERR_PTR(omfs_add_node(dir, dentry, mode));
 }
 
 static int omfs_create(struct mnt_idmap *idmap, struct inode *dir,
-		       struct dentry *dentry, umode_t mode, bool excl)
+		       struct dentry *dentry, umode_t mode)
 {
 	return omfs_add_node(dir, dentry, mode | S_IFREG);
 }

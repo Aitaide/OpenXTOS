@@ -124,7 +124,7 @@ out:
 
 int wil_p2p_listen(struct wil6210_priv *wil, struct wireless_dev *wdev,
 		   unsigned int duration, struct ieee80211_channel *chan,
-		   u64 *cookie)
+		   u64 cookie)
 {
 	struct wil6210_vif *vif = wdev_to_vif(wil, wdev);
 	struct wil_p2p_info *p2p = &vif->p2p;
@@ -144,7 +144,7 @@ int wil_p2p_listen(struct wil6210_priv *wil, struct wireless_dev *wdev,
 	}
 
 	memcpy(&p2p->listen_chan, chan, sizeof(*chan));
-	*cookie = ++p2p->cookie;
+	p2p->cookie = cookie;
 	p2p->listen_duration = duration;
 
 	mutex_lock(&wil->vif_mutex);
@@ -166,7 +166,7 @@ int wil_p2p_listen(struct wil6210_priv *wil, struct wireless_dev *wdev,
 	if (vif->mid == 0)
 		wil->radio_wdev = wdev;
 
-	cfg80211_ready_on_channel(wdev, *cookie, chan, duration,
+	cfg80211_ready_on_channel(wdev, cookie, chan, duration,
 				  GFP_KERNEL);
 
 out:
@@ -184,7 +184,7 @@ u8 wil_p2p_stop_discovery(struct wil6210_vif *vif)
 			/* discovery not really started, only pending */
 			p2p->pending_listen_wdev = NULL;
 		} else {
-			del_timer_sync(&p2p->discovery_timer);
+			timer_delete_sync(&p2p->discovery_timer);
 			wmi_stop_discovery(vif);
 		}
 		p2p->discovery_started = 0;

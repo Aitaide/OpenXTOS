@@ -3,7 +3,7 @@
  *
  * Module Name: tbfadt   - FADT table utilities
  *
- * Copyright (C) 2000 - 2023, Intel Corp.
+ * Copyright (C) 2000 - 2026, Intel Corp.
  *
  *****************************************************************************/
 
@@ -315,23 +315,19 @@ void acpi_tb_parse_fadt(void)
 				       ACPI_TABLE_ORIGIN_INTERNAL_PHYSICAL,
 				       NULL, FALSE, TRUE, &acpi_gbl_dsdt_index);
 
-	/* If Hardware Reduced flag is set, there is no FACS */
-
-	if (!acpi_gbl_reduced_hardware) {
-		if (acpi_gbl_FADT.facs) {
-			acpi_tb_install_standard_table((acpi_physical_address)
-						       acpi_gbl_FADT.facs,
-						       ACPI_TABLE_ORIGIN_INTERNAL_PHYSICAL,
-						       NULL, FALSE, TRUE,
-						       &acpi_gbl_facs_index);
-		}
-		if (acpi_gbl_FADT.Xfacs) {
-			acpi_tb_install_standard_table((acpi_physical_address)
-						       acpi_gbl_FADT.Xfacs,
-						       ACPI_TABLE_ORIGIN_INTERNAL_PHYSICAL,
-						       NULL, FALSE, TRUE,
-						       &acpi_gbl_xfacs_index);
-		}
+	if (acpi_gbl_FADT.facs) {
+		acpi_tb_install_standard_table((acpi_physical_address)
+					       acpi_gbl_FADT.facs,
+					       ACPI_TABLE_ORIGIN_INTERNAL_PHYSICAL,
+					       NULL, FALSE, TRUE,
+					       &acpi_gbl_facs_index);
+	}
+	if (acpi_gbl_FADT.Xfacs) {
+		acpi_tb_install_standard_table((acpi_physical_address)
+					       acpi_gbl_FADT.Xfacs,
+					       ACPI_TABLE_ORIGIN_INTERNAL_PHYSICAL,
+					       NULL, FALSE, TRUE,
+					       &acpi_gbl_xfacs_index);
 	}
 }
 
@@ -557,8 +553,11 @@ static void acpi_tb_convert_fadt(void)
 				 * Note: If the legacy length field is > 0xFF bits, ignore
 				 * this check. (GPE registers can be larger than the
 				 * 64-bit GAS structure can accommodate, 0xFF bits).
+				 * Also skip if bit_width is 0, indicating the 64-bit field
+				 * was not populated - legacy length will be used instead.
 				 */
 				if ((ACPI_MUL_8(length) <= ACPI_UINT8_MAX) &&
+				    (address64->bit_width != 0) &&
 				    (address64->bit_width !=
 				     ACPI_MUL_8(length))) {
 					ACPI_BIOS_WARNING((AE_INFO,

@@ -145,7 +145,7 @@ static int adis16136_debugfs_init(struct iio_dev *indio_dev)
 	struct adis16136 *adis16136 = iio_priv(indio_dev);
 	struct dentry *d = iio_get_debugfs_dentry(indio_dev);
 
-	debugfs_create_file_unsafe("serial_number", 0400,
+	debugfs_create_file("serial_number", 0400,
 		d, adis16136, &adis16136_serial_fops);
 	debugfs_create_file_unsafe("product_id", 0400,
 		d, adis16136, &adis16136_product_id_fops);
@@ -221,13 +221,12 @@ static ssize_t adis16136_read_frequency(struct device *dev,
 	unsigned int freq;
 	int ret;
 
-	adis_dev_lock(&adis16136->adis);
+	adis_dev_auto_lock(&adis16136->adis);
 	ret = __adis16136_get_freq(adis16136, &freq);
-	adis_dev_unlock(&adis16136->adis);
 	if (ret)
 		return ret;
 
-	return sprintf(buf, "%d\n", freq);
+	return sysfs_emit(buf, "%d\n", freq);
 }
 
 static IIO_DEV_ATTR_SAMP_FREQ(S_IWUSR | S_IRUGO,
@@ -251,21 +250,17 @@ static int adis16136_set_filter(struct iio_dev *indio_dev, int val)
 	unsigned int freq;
 	int i, ret;
 
-	adis_dev_lock(&adis16136->adis);
+	adis_dev_auto_lock(&adis16136->adis);
 	ret = __adis16136_get_freq(adis16136, &freq);
 	if (ret)
-		goto out_unlock;
+		return ret;
 
 	for (i = ARRAY_SIZE(adis16136_3db_divisors) - 1; i >= 1; i--) {
 		if (freq / adis16136_3db_divisors[i] >= val)
 			break;
 	}
 
-	ret = __adis_write_reg_16(&adis16136->adis, ADIS16136_REG_AVG_CNT, i);
-out_unlock:
-	adis_dev_unlock(&adis16136->adis);
-
-	return ret;
+	return __adis_write_reg_16(&adis16136->adis, ADIS16136_REG_AVG_CNT, i);
 }
 
 static int adis16136_get_filter(struct iio_dev *indio_dev, int *val)
@@ -275,23 +270,20 @@ static int adis16136_get_filter(struct iio_dev *indio_dev, int *val)
 	uint16_t val16;
 	int ret;
 
-	adis_dev_lock(&adis16136->adis);
+	adis_dev_auto_lock(&adis16136->adis);
 
 	ret = __adis_read_reg_16(&adis16136->adis, ADIS16136_REG_AVG_CNT,
 				 &val16);
 	if (ret)
-		goto err_unlock;
+		return ret;
 
 	ret = __adis16136_get_freq(adis16136, &freq);
 	if (ret)
-		goto err_unlock;
+		return ret;
 
 	*val = freq / adis16136_3db_divisors[val16 & 0x07];
 
-err_unlock:
-	adis_dev_unlock(&adis16136->adis);
-
-	return ret ? ret : IIO_VAL_INT;
+	return IIO_VAL_INT;
 }
 
 static int adis16136_read_raw(struct iio_dev *indio_dev,
@@ -571,10 +563,10 @@ static int adis16136_probe(struct spi_device *spi)
 }
 
 static const struct spi_device_id adis16136_ids[] = {
-	{ "adis16133", ID_ADIS16133 },
-	{ "adis16135", ID_ADIS16135 },
-	{ "adis16136", ID_ADIS16136 },
-	{ "adis16137", ID_ADIS16137 },
+	{ .name = "adis16133", .driver_data = ID_ADIS16133 },
+	{ .name = "adis16135", .driver_data = ID_ADIS16135 },
+	{ .name = "adis16136", .driver_data = ID_ADIS16136 },
+	{ .name = "adis16137", .driver_data = ID_ADIS16137 },
 	{ }
 };
 MODULE_DEVICE_TABLE(spi, adis16136_ids);
@@ -591,4 +583,4 @@ module_spi_driver(adis16136_driver);
 MODULE_AUTHOR("Lars-Peter Clausen <lars@metafoo.de>");
 MODULE_DESCRIPTION("Analog Devices ADIS16133/ADIS16135/ADIS16136 gyroscope driver");
 MODULE_LICENSE("GPL v2");
-MODULE_IMPORT_NS(IIO_ADISLIB);
+MODULE_IMPORT_NS("IIO_ADISLIB");

@@ -106,7 +106,7 @@ static void rn_set_low_power_state(struct clk_mgr *clk_mgr_base)
 static void rn_update_clocks_update_dpp_dto(struct clk_mgr_internal *clk_mgr,
 		struct dc_state *context, int ref_dpp_clk, bool safe_to_lower)
 {
-	int i;
+	uint32_t i;
 
 	clk_mgr->dccg->ref_dppclk = ref_dpp_clk;
 
@@ -320,16 +320,16 @@ static void rn_dump_clk_registers(struct clk_state_registers_and_bypass *regs_an
 	regs_and_bypass->dppclk = internal.CLK1_CLK1_CURRENT_CNT / 10;
 
 	regs_and_bypass->dppclk_bypass = internal.CLK1_CLK1_BYPASS_CNTL & 0x0007;
-	if (regs_and_bypass->dppclk_bypass < 0 || regs_and_bypass->dppclk_bypass > 4)
+	if (regs_and_bypass->dppclk_bypass > 4)
 		regs_and_bypass->dppclk_bypass = 0;
 	regs_and_bypass->dcfclk_bypass = internal.CLK1_CLK3_BYPASS_CNTL & 0x0007;
-	if (regs_and_bypass->dcfclk_bypass < 0 || regs_and_bypass->dcfclk_bypass > 4)
+	if (regs_and_bypass->dcfclk_bypass > 4)
 		regs_and_bypass->dcfclk_bypass = 0;
 	regs_and_bypass->dispclk_bypass = internal.CLK1_CLK0_BYPASS_CNTL & 0x0007;
-	if (regs_and_bypass->dispclk_bypass < 0 || regs_and_bypass->dispclk_bypass > 4)
+	if (regs_and_bypass->dispclk_bypass > 4)
 		regs_and_bypass->dispclk_bypass = 0;
 	regs_and_bypass->dprefclk_bypass = internal.CLK1_CLK2_BYPASS_CNTL & 0x0007;
-	if (regs_and_bypass->dprefclk_bypass < 0 || regs_and_bypass->dprefclk_bypass > 4)
+	if (regs_and_bypass->dprefclk_bypass > 4)
 		regs_and_bypass->dprefclk_bypass = 0;
 
 	if (log_info->enabled) {
@@ -462,8 +462,10 @@ static void build_watermark_ranges(struct clk_bw_params *bw_params, struct pp_sm
 		if (!bw_params->wm_table.entries[i].valid)
 			continue;
 
-		ranges->reader_wm_sets[num_valid_sets].wm_inst = bw_params->wm_table.entries[i].wm_inst;
-		ranges->reader_wm_sets[num_valid_sets].wm_type = bw_params->wm_table.entries[i].wm_type;
+		ranges->reader_wm_sets[num_valid_sets].wm_inst =
+			(uint8_t)bw_params->wm_table.entries[i].wm_inst;
+		ranges->reader_wm_sets[num_valid_sets].wm_type =
+			(uint8_t)bw_params->wm_table.entries[i].wm_type;
 		/* We will not select WM based on fclk, so leave it as unconstrained */
 		ranges->reader_wm_sets[num_valid_sets].min_fill_clk_mhz = PP_SMU_WM_SET_RANGE_CLK_UNCONSTRAINED_MIN;
 		ranges->reader_wm_sets[num_valid_sets].max_fill_clk_mhz = PP_SMU_WM_SET_RANGE_CLK_UNCONSTRAINED_MAX;
@@ -474,9 +476,11 @@ static void build_watermark_ranges(struct clk_bw_params *bw_params, struct pp_sm
 				ranges->reader_wm_sets[num_valid_sets].min_drain_clk_mhz = 0;
 			else {
 				/* add 1 to make it non-overlapping with next lvl */
-				ranges->reader_wm_sets[num_valid_sets].min_drain_clk_mhz = bw_params->clk_table.entries[i - 1].dcfclk_mhz + 1;
+				ranges->reader_wm_sets[num_valid_sets].min_drain_clk_mhz =
+					(uint16_t)(bw_params->clk_table.entries[i - 1].dcfclk_mhz + 1);
 			}
-			ranges->reader_wm_sets[num_valid_sets].max_drain_clk_mhz = bw_params->clk_table.entries[i].dcfclk_mhz;
+			ranges->reader_wm_sets[num_valid_sets].max_drain_clk_mhz =
+				(uint16_t)bw_params->clk_table.entries[i].dcfclk_mhz;
 
 		} else {
 			/* unconstrained for memory retraining */
@@ -484,7 +488,8 @@ static void build_watermark_ranges(struct clk_bw_params *bw_params, struct pp_sm
 			ranges->reader_wm_sets[num_valid_sets].max_fill_clk_mhz = PP_SMU_WM_SET_RANGE_CLK_UNCONSTRAINED_MAX;
 
 			/* Modify previous watermark range to cover up to max */
-			ranges->reader_wm_sets[num_valid_sets - 1].max_fill_clk_mhz = PP_SMU_WM_SET_RANGE_CLK_UNCONSTRAINED_MAX;
+			if (num_valid_sets > 0)
+				ranges->reader_wm_sets[num_valid_sets - 1].max_fill_clk_mhz = PP_SMU_WM_SET_RANGE_CLK_UNCONSTRAINED_MAX;
 		}
 		num_valid_sets++;
 	}
@@ -548,7 +553,7 @@ static void rn_notify_link_rate_change(struct clk_mgr *clk_mgr_base, struct dc_l
 
 	clk_mgr->cur_phyclk_req_table[link->link_index] = link->cur_link_settings.link_rate * LINK_RATE_REF_FREQ_IN_KHZ;
 
-	for (i = 0; i < MAX_PIPES * 2; i++) {
+	for (i = 0; i < MAX_LINKS; i++) {
 		if (clk_mgr->cur_phyclk_req_table[i] > max_phyclk_req)
 			max_phyclk_req = clk_mgr->cur_phyclk_req_table[i];
 	}
@@ -639,10 +644,13 @@ static unsigned int find_dcfclk_for_voltage(struct dpm_clocks *clock_table, unsi
 static void rn_clk_mgr_helper_populate_bw_params(struct clk_bw_params *bw_params, struct dpm_clocks *clock_table, struct integrated_info *bios_info)
 {
 	int i, j = 0;
+	unsigned int entry_idx;
+	unsigned int wm_idx;
 
 	j = -1;
 
-	ASSERT(PP_SMU_NUM_FCLK_DPM_LEVELS <= MAX_NUM_DPM_LVL);
+	static_assert(PP_SMU_NUM_FCLK_DPM_LEVELS <= MAX_NUM_DPM_LVL,
+		"number of reported FCLK DPM levels exceed maximum");
 
 	/* Find lowest DPM, FCLK is filled in reverse order*/
 
@@ -661,28 +669,28 @@ static void rn_clk_mgr_helper_populate_bw_params(struct clk_bw_params *bw_params
 
 	bw_params->clk_table.num_entries = j + 1;
 
-	for (i = 0; i < bw_params->clk_table.num_entries; i++, j--) {
-		bw_params->clk_table.entries[i].fclk_mhz = clock_table->FClocks[j].Freq;
-		bw_params->clk_table.entries[i].memclk_mhz = clock_table->MemClocks[j].Freq;
-		bw_params->clk_table.entries[i].voltage = clock_table->FClocks[j].Vol;
-		bw_params->clk_table.entries[i].dcfclk_mhz = find_dcfclk_for_voltage(clock_table, clock_table->FClocks[j].Vol);
-		bw_params->clk_table.entries[i].socclk_mhz = find_socclk_for_voltage(clock_table,
-									bw_params->clk_table.entries[i].voltage);
+	for (entry_idx = 0; entry_idx < bw_params->clk_table.num_entries; entry_idx++, j--) {
+		bw_params->clk_table.entries[entry_idx].fclk_mhz = clock_table->FClocks[j].Freq;
+		bw_params->clk_table.entries[entry_idx].memclk_mhz = clock_table->MemClocks[j].Freq;
+		bw_params->clk_table.entries[entry_idx].voltage = clock_table->FClocks[j].Vol;
+		bw_params->clk_table.entries[entry_idx].dcfclk_mhz = find_dcfclk_for_voltage(clock_table, clock_table->FClocks[j].Vol);
+		bw_params->clk_table.entries[entry_idx].socclk_mhz = find_socclk_for_voltage(clock_table,
+									bw_params->clk_table.entries[entry_idx].voltage);
 	}
 
 	bw_params->vram_type = bios_info->memory_type;
 	bw_params->num_channels = bios_info->ma_channel_number;
 
-	for (i = 0; i < WM_SET_COUNT; i++) {
-		bw_params->wm_table.entries[i].wm_inst = i;
+	for (wm_idx = 0; wm_idx < (unsigned int)WM_SET_COUNT; wm_idx++) {
+		bw_params->wm_table.entries[wm_idx].wm_inst = wm_idx;
 
-		if (i >= bw_params->clk_table.num_entries) {
-			bw_params->wm_table.entries[i].valid = false;
+		if (wm_idx >= bw_params->clk_table.num_entries) {
+			bw_params->wm_table.entries[wm_idx].valid = false;
 			continue;
 		}
 
-		bw_params->wm_table.entries[i].wm_type = WM_TYPE_PSTATE_CHG;
-		bw_params->wm_table.entries[i].valid = true;
+		bw_params->wm_table.entries[wm_idx].wm_type = WM_TYPE_PSTATE_CHG;
+		bw_params->wm_table.entries[wm_idx].valid = true;
 	}
 
 	if (bw_params->vram_type == LpDdr4MemType) {
@@ -707,9 +715,7 @@ void rn_clk_mgr_construct(
 	int is_green_sardine = 0;
 	struct clk_log_info log_info = {0};
 
-#if defined(CONFIG_DRM_AMD_DC_FP)
 	is_green_sardine = ASICREV_IS_GREEN_SARDINE(ctx->asic_id.hw_internal_rev);
-#endif
 
 	clk_mgr->base.ctx = ctx;
 	clk_mgr->base.funcs = &dcn21_funcs;
@@ -740,7 +746,8 @@ void rn_clk_mgr_construct(
 	if (clk_mgr->base.dentist_vco_freq_khz == 0)
 		clk_mgr->base.dentist_vco_freq_khz = 3600000;
 
-	if (ctx->dc_bios->integrated_info->memory_type == LpDdr4MemType) {
+	if (ctx->dc_bios->integrated_info &&
+	    ctx->dc_bios->integrated_info->memory_type == LpDdr4MemType) {
 		if (clk_mgr->periodic_retraining_disabled) {
 			rn_bw_params.wm_table = lpddr4_wm_table_with_disabled_ppt;
 		} else {
@@ -772,7 +779,7 @@ void rn_clk_mgr_construct(
 		status = pp_smu->rn_funcs.get_dpm_clock_table(&pp_smu->rn_funcs.pp_smu, &clock_table);
 
 		if (status == PP_SMU_RESULT_OK &&
-		    ctx->dc_bios && ctx->dc_bios->integrated_info) {
+		    ctx->dc_bios->integrated_info) {
 			rn_clk_mgr_helper_populate_bw_params (clk_mgr->base.bw_params, &clock_table, ctx->dc_bios->integrated_info);
 			/* treat memory config as single channel if memory is asymmetrics. */
 			if (ctx->dc->config.is_asymmetric_memory)

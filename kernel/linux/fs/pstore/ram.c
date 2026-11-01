@@ -50,6 +50,10 @@ module_param_hw(mem_address, ullong, other, 0400);
 MODULE_PARM_DESC(mem_address,
 		"start of reserved RAM used to store oops/panic logs");
 
+static char *mem_name;
+module_param_named(mem_name, mem_name, charp, 0400);
+MODULE_PARM_DESC(mem_name, "name of kernel param that holds addr");
+
 static ulong mem_size;
 module_param(mem_size, ulong, 0400);
 MODULE_PARM_DESC(mem_size,
@@ -67,7 +71,7 @@ MODULE_PARM_DESC(max_reason,
 
 static int ramoops_ecc;
 module_param_named(ecc, ramoops_ecc, int, 0400);
-MODULE_PARM_DESC(ramoops_ecc,
+MODULE_PARM_DESC(ecc,
 		"if non-zero, the option enables ECC support and specifies "
 		"ECC buffer size in bytes (1 is a special value, means 16 "
 		"bytes ECC)");
@@ -228,8 +232,7 @@ static ssize_t ramoops_pstore_read(struct pstore_record *record)
 			 */
 			struct persistent_ram_zone *tmp_prz, *prz_next;
 
-			tmp_prz = kzalloc(sizeof(struct persistent_ram_zone),
-					  GFP_KERNEL);
+			tmp_prz = kzalloc_obj(struct persistent_ram_zone);
 			if (!tmp_prz)
 				return -ENOMEM;
 			prz = tmp_prz;
@@ -529,12 +532,13 @@ static int ramoops_init_przs(const char *name,
 	}
 
 	zone_sz = mem_sz / *cnt;
+	zone_sz = ALIGN_DOWN(zone_sz, 2);
 	if (!zone_sz) {
 		dev_err(dev, "%s zone size == 0\n", name);
 		goto fail;
 	}
 
-	prz_ar = kcalloc(*cnt, sizeof(**przs), GFP_KERNEL);
+	prz_ar = kzalloc_objs(**przs, *cnt);
 	if (!prz_ar)
 		goto fail;
 
@@ -859,6 +863,8 @@ static int ramoops_probe(struct platform_device *pdev)
 	ramoops_console_size = pdata->console_size;
 	ramoops_pmsg_size = pdata->pmsg_size;
 	ramoops_ftrace_size = pdata->ftrace_size;
+	mem_type = pdata->mem_type;
+	ramoops_ecc = pdata->ecc_info.ecc_size;
 
 	pr_info("using 0x%lx@0x%llx, ecc: %d\n",
 		cxt->size, (unsigned long long)cxt->phys_addr,
@@ -892,10 +898,11 @@ static const struct of_device_id dt_match[] = {
 	{ .compatible = "ramoops" },
 	{}
 };
+MODULE_DEVICE_TABLE(of, dt_match);
 
 static struct platform_driver ramoops_driver = {
 	.probe		= ramoops_probe,
-	.remove_new	= ramoops_remove,
+	.remove		= ramoops_remove,
 	.driver		= {
 		.name		= "ramoops",
 		.of_match_table	= dt_match,
@@ -911,6 +918,16 @@ static inline void ramoops_unregister_dummy(void)
 static void __init ramoops_register_dummy(void)
 {
 	struct ramoops_platform_data pdata;
+
+	if (mem_name) {
+		phys_addr_t start;
+		phys_addr_t size;
+
+		if (reserve_mem_find_by_name(mem_name, &start, &size)) {
+			mem_address = start;
+			mem_size = size;
+		}
+	}
 
 	/*
 	 * Prepare a dummy platform data structure to carry the module

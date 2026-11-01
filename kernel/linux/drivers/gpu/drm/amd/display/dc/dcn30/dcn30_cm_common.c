@@ -26,9 +26,9 @@
 #include "dm_services.h"
 #include "core_types.h"
 #include "reg_helper.h"
-#include "dcn30_dpp.h"
+#include "dcn30/dcn30_dpp.h"
 #include "basics/conversion.h"
-#include "dcn30_cm_common.h"
+#include "dcn30/dcn30_cm_common.h"
 #include "custom_float.h"
 
 #define REG(reg) reg
@@ -105,16 +105,18 @@ void cm_helper_program_gamcor_xfer_func(
 #define NUMBER_REGIONS     32
 #define NUMBER_SW_SEGMENTS 16
 
-bool cm3_helper_translate_curve_to_hw_format(
-				const struct dc_transfer_func *output_tf,
-				struct pwl_params *lut_params, bool fixpoint)
+#define DC_LOGGER \
+		ctx->logger
+
+bool cm3_helper_translate_curve_to_hw_format(struct dc_context *ctx,
+					     const struct dc_transfer_func *output_tf,
+					     struct pwl_params *lut_params, bool fixpoint)
 {
 	struct curve_points3 *corner_points;
 	struct pwl_result_data *rgb_resulted;
 	struct pwl_result_data *rgb;
 	struct pwl_result_data *rgb_plus_1;
 	struct pwl_result_data *rgb_minus_1;
-	struct fixed31_32 end_value;
 
 	int32_t region_start, region_end;
 	int32_t i;
@@ -141,43 +143,47 @@ bool cm3_helper_translate_curve_to_hw_format(
 		region_start = -MAX_LOW_POINT;
 		region_end   = NUMBER_REGIONS - MAX_LOW_POINT;
 	} else {
-		/* 11 segments
-		 * segment is from 2^-10 to 2^0
+		/* 13 segments
+		 * segment is from 2^-12 to 2^0
 		 * There are less than 256 points, for optimization
 		 */
-		seg_distr[0] = 3;
-		seg_distr[1] = 4;
-		seg_distr[2] = 4;
-		seg_distr[3] = 4;
-		seg_distr[4] = 4;
-		seg_distr[5] = 4;
-		seg_distr[6] = 4;
-		seg_distr[7] = 4;
-		seg_distr[8] = 4;
-		seg_distr[9] = 4;
-		seg_distr[10] = 1;
+		const uint8_t SEG_COUNT = 12;
 
-		region_start = -10;
+		for (i = 0; i < SEG_COUNT; i++)
+			seg_distr[i] = 4;
+
+		seg_distr[SEG_COUNT] = 1;
+
+		region_start = -SEG_COUNT;
 		region_end = 1;
 	}
 
 	for (i = region_end - region_start; i < MAX_REGIONS_NUMBER ; i++)
-		seg_distr[i] = -1;
+		seg_distr[i] = (uint32_t)-1;
 
 	for (k = 0; k < MAX_REGIONS_NUMBER; k++) {
-		if (seg_distr[k] != -1)
+		if (seg_distr[k] != (uint32_t)-1)
 			hw_points += (1 << seg_distr[k]);
 	}
 
+	// DCN3+ have 257 pts in lieu of no separate slope registers
+	// Prior HW had 256 base+slope pairs
+	// Shaper LUT (i.e. fixpoint == true) is still 256 bases and 256 deltas
+	hw_points = fixpoint ? (hw_points - 1) : hw_points;
+
 	j = 0;
-	for (k = 0; k < (region_end - region_start); k++) {
+	uint32_t region_span = (uint32_t)(region_end - region_start);
+	for (k = 0; k < region_span; k++) {
 		increment = NUMBER_SW_SEGMENTS / (1 << seg_distr[k]);
 		start_index = (region_start + k + MAX_LOW_POINT) *
 				NUMBER_SW_SEGMENTS;
-		for (i = start_index; i < start_index + NUMBER_SW_SEGMENTS;
+		int32_t index_end = (int32_t)(start_index + NUMBER_SW_SEGMENTS);
+		for (i = start_index; i < index_end;
 				i += increment) {
-			if (j == hw_points - 1)
+			if (j == hw_points)
 				break;
+			if (i >= TRANSFER_FUNC_POINTS)
+				return false;
 			rgb_resulted[j].red = output_tf->tf_pts.red[i];
 			rgb_resulted[j].green = output_tf->tf_pts.green[i];
 			rgb_resulted[j].blue = output_tf->tf_pts.blue[i];
@@ -187,13 +193,13 @@ bool cm3_helper_translate_curve_to_hw_format(
 
 	/* last point */
 	start_index = (region_end + MAX_LOW_POINT) * NUMBER_SW_SEGMENTS;
-	rgb_resulted[hw_points - 1].red = output_tf->tf_pts.red[start_index];
-	rgb_resulted[hw_points - 1].green = output_tf->tf_pts.green[start_index];
-	rgb_resulted[hw_points - 1].blue = output_tf->tf_pts.blue[start_index];
+	rgb_resulted[hw_points].red = output_tf->tf_pts.red[start_index];
+	rgb_resulted[hw_points].green = output_tf->tf_pts.green[start_index];
+	rgb_resulted[hw_points].blue = output_tf->tf_pts.blue[start_index];
 
-	rgb_resulted[hw_points].red = rgb_resulted[hw_points - 1].red;
-	rgb_resulted[hw_points].green = rgb_resulted[hw_points - 1].green;
-	rgb_resulted[hw_points].blue = rgb_resulted[hw_points - 1].blue;
+	rgb_resulted[hw_points+1].red = rgb_resulted[hw_points].red;
+	rgb_resulted[hw_points+1].green = rgb_resulted[hw_points].green;
+	rgb_resulted[hw_points+1].blue = rgb_resulted[hw_points].blue;
 
 	// All 3 color channels have same x
 	corner_points[0].red.x = dc_fixpt_pow(dc_fixpt_from_int(2),
@@ -220,34 +226,14 @@ bool cm3_helper_translate_curve_to_hw_format(
 	/* see comment above, m_arrPoints[1].y should be the Y value for the
 	 * region end (m_numOfHwPoints), not last HW point(m_numOfHwPoints - 1)
 	 */
-	corner_points[1].red.y = rgb_resulted[hw_points - 1].red;
-	corner_points[1].green.y = rgb_resulted[hw_points - 1].green;
-	corner_points[1].blue.y = rgb_resulted[hw_points - 1].blue;
+	corner_points[1].red.y = rgb_resulted[hw_points].red;
+	corner_points[1].green.y = rgb_resulted[hw_points].green;
+	corner_points[1].blue.y = rgb_resulted[hw_points].blue;
 	corner_points[1].red.slope = dc_fixpt_zero;
 	corner_points[1].green.slope = dc_fixpt_zero;
 	corner_points[1].blue.slope = dc_fixpt_zero;
 
-	if (output_tf->tf == TRANSFER_FUNCTION_PQ || output_tf->tf == TRANSFER_FUNCTION_HLG) {
-		/* for PQ/HLG, we want to have a straight line from last HW X point,
-		 * and the slope to be such that we hit 1.0 at 10000/1000 nits.
-		 */
-
-		if (output_tf->tf == TRANSFER_FUNCTION_PQ)
-			end_value = dc_fixpt_from_int(125);
-		else
-			end_value = dc_fixpt_from_fraction(125, 10);
-
-		corner_points[1].red.slope = dc_fixpt_div(
-			dc_fixpt_sub(dc_fixpt_one, corner_points[1].red.y),
-			dc_fixpt_sub(end_value, corner_points[1].red.x));
-		corner_points[1].green.slope = dc_fixpt_div(
-			dc_fixpt_sub(dc_fixpt_one, corner_points[1].green.y),
-			dc_fixpt_sub(end_value, corner_points[1].green.x));
-		corner_points[1].blue.slope = dc_fixpt_div(
-			dc_fixpt_sub(dc_fixpt_one, corner_points[1].blue.y),
-			dc_fixpt_sub(end_value, corner_points[1].blue.x));
-	}
-	lut_params->hw_points_num = hw_points;
+	lut_params->hw_points_num = hw_points + 1;
 
 	k = 0;
 	for (i = 1; i < MAX_REGIONS_NUMBER; i++) {
@@ -267,44 +253,74 @@ bool cm3_helper_translate_curve_to_hw_format(
 	rgb_plus_1 = rgb_resulted + 1;
 	rgb_minus_1 = rgb;
 
-	i = 1;
-	while (i != hw_points + 1) {
-		if (i >= hw_points - 1) {
-			if (dc_fixpt_lt(rgb_plus_1->red, rgb->red))
-				rgb_plus_1->red = dc_fixpt_add(rgb->red, rgb_minus_1->delta_red);
-			if (dc_fixpt_lt(rgb_plus_1->green, rgb->green))
-				rgb_plus_1->green = dc_fixpt_add(rgb->green, rgb_minus_1->delta_green);
-			if (dc_fixpt_lt(rgb_plus_1->blue, rgb->blue))
-				rgb_plus_1->blue = dc_fixpt_add(rgb->blue, rgb_minus_1->delta_blue);
-		}
+	if (fixpoint == true) {
+		i = 1;
+		while (i != hw_points + 2) {
+			uint32_t red_clamp;
+			uint32_t green_clamp;
+			uint32_t blue_clamp;
 
-		rgb->delta_red   = dc_fixpt_sub(rgb_plus_1->red,   rgb->red);
-		rgb->delta_green = dc_fixpt_sub(rgb_plus_1->green, rgb->green);
-		rgb->delta_blue  = dc_fixpt_sub(rgb_plus_1->blue,  rgb->blue);
+			if ((uint32_t)i >= hw_points) {
+				if (dc_fixpt_lt(rgb_plus_1->red, rgb->red))
+					rgb_plus_1->red = dc_fixpt_add(rgb->red,
+							rgb_minus_1->delta_red);
+				if (dc_fixpt_lt(rgb_plus_1->green, rgb->green))
+					rgb_plus_1->green = dc_fixpt_add(rgb->green,
+							rgb_minus_1->delta_green);
+				if (dc_fixpt_lt(rgb_plus_1->blue, rgb->blue))
+					rgb_plus_1->blue = dc_fixpt_add(rgb->blue,
+							rgb_minus_1->delta_blue);
+			}
 
-		if (fixpoint == true) {
-			rgb->delta_red_reg   = dc_fixpt_clamp_u0d10(rgb->delta_red);
-			rgb->delta_green_reg = dc_fixpt_clamp_u0d10(rgb->delta_green);
-			rgb->delta_blue_reg  = dc_fixpt_clamp_u0d10(rgb->delta_blue);
+			rgb->delta_red   = dc_fixpt_sub(rgb_plus_1->red,   rgb->red);
+			rgb->delta_green = dc_fixpt_sub(rgb_plus_1->green, rgb->green);
+			rgb->delta_blue  = dc_fixpt_sub(rgb_plus_1->blue,  rgb->blue);
+
+			red_clamp = dc_fixpt_clamp_u0d14(rgb->delta_red);
+			green_clamp = dc_fixpt_clamp_u0d14(rgb->delta_green);
+			blue_clamp = dc_fixpt_clamp_u0d14(rgb->delta_blue);
+
+			if (red_clamp >> 10 || green_clamp >> 10 || blue_clamp >> 10)
+				DC_LOG_ERROR("Losing delta precision while programming shaper LUT.");
+
+			rgb->delta_red_reg   = red_clamp & 0x3ff;
+			rgb->delta_green_reg = green_clamp & 0x3ff;
+			rgb->delta_blue_reg  = blue_clamp & 0x3ff;
 			rgb->red_reg         = dc_fixpt_clamp_u0d14(rgb->red);
 			rgb->green_reg       = dc_fixpt_clamp_u0d14(rgb->green);
 			rgb->blue_reg        = dc_fixpt_clamp_u0d14(rgb->blue);
-		}
 
-		++rgb_plus_1;
-		rgb_minus_1 = rgb;
-		++rgb;
-		++i;
+			++rgb_plus_1;
+			rgb_minus_1 = rgb;
+			++rgb;
+			++i;
+		}
 	}
 	cm3_helper_convert_to_custom_float(rgb_resulted,
 						lut_params->corner_points,
-						hw_points, fixpoint);
+						hw_points+1, fixpoint);
 
 	return true;
 }
 
-#define NUM_DEGAMMA_REGIONS    12
+/* Linear interpolation of tf_pts entries, where (i >> 4) is the integer tf_pts
+ * index, (i & 0xf) is the 1/16 sub-position.
+ */
+static struct fixed31_32 interp_tf_pts(const struct fixed31_32 *output_tf_channel, int i)
+{
+	struct fixed31_32 in_plus_one, in, value;
+	uint32_t t = i & 0xf;
 
+	in_plus_one = output_tf_channel[(i >> 4) + 1];
+	in = output_tf_channel[i >> 4];
+	value = dc_fixpt_sub(in_plus_one, in);
+	value = dc_fixpt_shr(dc_fixpt_mul_int(value, t), 4);
+	value = dc_fixpt_add(in, value);
+
+	return value;
+}
+
+#define NUM_DEGAMMA_REGIONS    9
 
 bool cm3_helper_translate_curve_to_degamma_hw_format(
 				const struct dc_transfer_func *output_tf,
@@ -329,17 +345,18 @@ bool cm3_helper_translate_curve_to_degamma_hw_format(
 	memset(lut_params, 0, sizeof(struct pwl_params));
 	memset(seg_distr, 0, sizeof(seg_distr));
 
-	region_start = -NUM_DEGAMMA_REGIONS;
-	region_end   = 0;
+	/* 9 segments
+	 * segments are from 2^-9 to 2^0
+	 */
+	seg_distr[0] = 0; // Since we only have one point in darkest region
+	for (k = 1; k < NUM_DEGAMMA_REGIONS; k++)
+		seg_distr[k] = k - 1; // 2^(k-1) points per region; halves as k decreases
 
+	region_start = -NUM_DEGAMMA_REGIONS;
+	region_end = 0;
 
 	for (i = region_end - region_start; i < MAX_REGIONS_NUMBER ; i++)
 		seg_distr[i] = -1;
-	/* 12 segments
-	 * segments are from 2^-12 to 0
-	 */
-	for (i = 0; i < NUM_DEGAMMA_REGIONS ; i++)
-		seg_distr[i] = 4;
 
 	for (k = 0; k < MAX_REGIONS_NUMBER; k++) {
 		if (seg_distr[k] != -1)
@@ -348,16 +365,20 @@ bool cm3_helper_translate_curve_to_degamma_hw_format(
 
 	j = 0;
 	for (k = 0; k < (region_end - region_start); k++) {
-		increment = NUMBER_SW_SEGMENTS / (1 << seg_distr[k]);
+		increment = (NUMBER_SW_SEGMENTS << 4) / (1 << seg_distr[k]);
 		start_index = (region_start + k + MAX_LOW_POINT) *
 				NUMBER_SW_SEGMENTS;
-		for (i = start_index; i < start_index + NUMBER_SW_SEGMENTS;
-				i += increment) {
+		for (i = (start_index << 4);
+		     i < (start_index << 4) + (NUMBER_SW_SEGMENTS << 4);
+		     i += increment) {
 			if (j == hw_points - 1)
 				break;
-			rgb_resulted[j].red = output_tf->tf_pts.red[i];
-			rgb_resulted[j].green = output_tf->tf_pts.green[i];
-			rgb_resulted[j].blue = output_tf->tf_pts.blue[i];
+			if ((i >> 4) + 1 >= TRANSFER_FUNC_POINTS)
+				return false;
+
+			rgb_resulted[j].red = interp_tf_pts(output_tf->tf_pts.red, i);
+			rgb_resulted[j].green = interp_tf_pts(output_tf->tf_pts.green, i);
+			rgb_resulted[j].blue = interp_tf_pts(output_tf->tf_pts.blue, i);
 			j++;
 		}
 	}
@@ -599,24 +620,6 @@ bool cm3_helper_convert_to_custom_float(
 
 		if (!convert_to_custom_float_format(rgb->blue, &fmt,
 						    &rgb->blue_reg)) {
-			BREAK_TO_DEBUGGER();
-			return false;
-		}
-
-		if (!convert_to_custom_float_format(rgb->delta_red, &fmt,
-						    &rgb->delta_red_reg)) {
-			BREAK_TO_DEBUGGER();
-			return false;
-		}
-
-		if (!convert_to_custom_float_format(rgb->delta_green, &fmt,
-						    &rgb->delta_green_reg)) {
-			BREAK_TO_DEBUGGER();
-			return false;
-		}
-
-		if (!convert_to_custom_float_format(rgb->delta_blue, &fmt,
-						    &rgb->delta_blue_reg)) {
 			BREAK_TO_DEBUGGER();
 			return false;
 		}

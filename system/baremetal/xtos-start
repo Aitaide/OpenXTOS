@@ -6,7 +6,8 @@ mountpoint -q /dev/shm || mount -t tmpfs -o mode=1777 tmpfs /dev/shm
 chmod 1777 /tmp
 ln -sf /proc/mounts /etc/mtab
 printf '\nXTOS baremetal system\nkernel='; uname -r
-printf 'realtime='; cat /sys/kernel/realtime
+realtime=$(/usr/bin/xtos-rt-status) || realtime=${realtime:-unknown}
+printf 'realtime=%s\n' "$realtime"
 if [ -s /root/.ssh/authorized_keys ]; then
     chmod 700 /root/.ssh; chmod 600 /root/.ssh/authorized_keys
     [ -s /etc/dropbear/dropbear_ed25519_host_key ] || dropbearkey -t ed25519 -f /etc/dropbear/dropbear_ed25519_host_key >/dev/null 2>&1

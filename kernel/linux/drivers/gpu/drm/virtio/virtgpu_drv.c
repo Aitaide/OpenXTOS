@@ -26,19 +26,24 @@
  * OTHER DEALINGS IN THE SOFTWARE.
  */
 
+#include <linux/aperture.h>
 #include <linux/module.h>
 #include <linux/pci.h>
 #include <linux/poll.h>
+#include <linux/vgaarb.h>
 #include <linux/wait.h>
 
+#include <drm/clients/drm_client_setup.h>
 #include <drm/drm.h>
-#include <drm/drm_aperture.h>
 #include <drm/drm_atomic_helper.h>
 #include <drm/drm_drv.h>
-#include <drm/drm_fbdev_generic.h>
+#include <drm/drm_fbdev_shmem.h>
 #include <drm/drm_file.h>
+#include <drm/drm_print.h>
 
 #include "virtgpu_drv.h"
+
+#define PCI_DEVICE_ID_VIRTIO_GPU 0x1050
 
 static const struct drm_driver driver;
 
@@ -51,14 +56,14 @@ static int virtio_gpu_pci_quirk(struct drm_device *dev)
 {
 	struct pci_dev *pdev = to_pci_dev(dev->dev);
 	const char *pname = dev_name(&pdev->dev);
-	bool vga = (pdev->class >> 8) == PCI_CLASS_DISPLAY_VGA;
+	bool vga = pci_is_vga(pdev);
 	int ret;
 
 	DRM_INFO("pci: %s detected at %s\n",
 		 vga ? "virtio-vga" : "virtio-gpu-pci",
 		 pname);
 	if (vga) {
-		ret = drm_aperture_remove_conflicting_pci_framebuffers(pdev, &driver);
+		ret = aperture_remove_conflicting_pci_devices(pdev, driver.name);
 		if (ret)
 			return ret;
 	}
@@ -94,6 +99,7 @@ static int virtio_gpu_probe(struct virtio_device *vdev)
 			goto err_free;
 	}
 
+	dma_set_max_seg_size(dev->dev, dma_max_mapping_size(dev->dev) ?: UINT_MAX);
 	ret = virtio_gpu_init(vdev, dev);
 	if (ret)
 		goto err_free;
@@ -102,7 +108,8 @@ static int virtio_gpu_probe(struct virtio_device *vdev)
 	if (ret)
 		goto err_deinit;
 
-	drm_fbdev_generic_setup(vdev->priv, 32);
+	drm_client_setup(vdev->priv, NULL);
+
 	return 0;
 
 err_deinit:
@@ -112,14 +119,40 @@ err_free:
 	return ret;
 }
 
+/*
+ * Release pending virtqueue waits so the drm_dev_enter/exit() critical
+ * sections complete before drm_dev_unplug() blocks on synchronize_srcu().
+ */
+static void virtio_gpu_release_vqs(struct drm_device *dev)
+{
+	struct virtio_gpu_device *vgdev = dev->dev_private;
+
+	vgdev->vqs_released = true;
+	wake_up_all(&vgdev->ctrlq.ack_queue);
+	wake_up_all(&vgdev->cursorq.ack_queue);
+}
+
 static void virtio_gpu_remove(struct virtio_device *vdev)
 {
 	struct drm_device *dev = vdev->priv;
 
+	virtio_gpu_release_vqs(dev);
 	drm_dev_unplug(dev);
-	drm_atomic_helper_shutdown(dev);
+
+	if (drm_core_check_feature(dev, DRIVER_ATOMIC))
+		drm_atomic_helper_shutdown(dev);
+
 	virtio_gpu_deinit(dev);
 	drm_dev_put(dev);
+}
+
+static void virtio_gpu_shutdown(struct virtio_device *vdev)
+{
+	struct drm_device *dev = vdev->priv;
+
+	virtio_gpu_release_vqs(dev);
+	/* stop talking to the device */
+	drm_dev_unplug(dev);
 }
 
 static void virtio_gpu_config_changed(struct virtio_device *vdev)
@@ -148,19 +181,141 @@ static unsigned int features[] = {
 	VIRTIO_GPU_F_RESOURCE_UUID,
 	VIRTIO_GPU_F_RESOURCE_BLOB,
 	VIRTIO_GPU_F_CONTEXT_INIT,
+	VIRTIO_GPU_F_BLOB_ALIGNMENT,
 };
+
+#ifdef CONFIG_PM_SLEEP
+static void virtgpu_hibernation_restore(struct virtio_gpu_device *vgdev)
+{
+	if (vgdev->hibernated) {
+		vgdev->hibernated = false;
+		virtio_gpu_object_restore_all(vgdev);
+	}
+}
+
+static int virtgpu_freeze(struct virtio_device *vdev)
+{
+	struct drm_device *dev = vdev->priv;
+	struct virtio_gpu_device *vgdev = dev->dev_private;
+	int error;
+
+	error = drm_mode_config_helper_suspend(dev);
+	if (error) {
+		DRM_ERROR("suspend error: %d\n", error);
+		return error;
+	}
+
+	if (vgdev->hibernated)
+		virtio_gpu_object_unref_all(vgdev);
+
+	flush_work(&vgdev->obj_free_work);
+	flush_work(&vgdev->ctrlq.dequeue_work);
+	flush_work(&vgdev->cursorq.dequeue_work);
+	flush_work(&vgdev->config_changed_work);
+
+	error = virtio_gpu_wait_queue(&vgdev->ctrlq, vgdev->ctrlq.vq->num_max);
+	if (error) {
+		DRM_ERROR("ctrlq wait failed: %d\n", error);
+		goto err_resume;
+	}
+
+	error = virtio_gpu_wait_queue(&vgdev->cursorq, vgdev->cursorq.vq->num_max);
+	if (error) {
+		DRM_ERROR("cursorq wait failed: %d\n", error);
+		goto err_resume;
+	}
+
+	virtio_reset_device(vdev);
+	vdev->config->del_vqs(vdev);
+
+	return 0;
+
+err_resume:
+	virtgpu_hibernation_restore(vgdev);
+
+	drm_mode_config_helper_resume(dev);
+
+	return error;
+}
+
+static int virtgpu_restore(struct virtio_device *vdev)
+{
+	struct drm_device *dev = vdev->priv;
+	struct virtio_gpu_device *vgdev = dev->dev_private;
+	int error;
+
+	error = virtio_gpu_find_vqs(vgdev);
+	if (error) {
+		DRM_ERROR("failed to find virt queues\n");
+		return error;
+	}
+
+	virtio_device_ready(vdev);
+
+	virtgpu_hibernation_restore(vgdev);
+
+	error = drm_mode_config_helper_resume(dev);
+	if (error) {
+		DRM_ERROR("resume error: %d\n", error);
+		return error;
+	}
+
+	return 0;
+}
+#endif
+
 static struct virtio_driver virtio_gpu_driver = {
 	.feature_table = features,
 	.feature_table_size = ARRAY_SIZE(features),
 	.driver.name = KBUILD_MODNAME,
-	.driver.owner = THIS_MODULE,
 	.id_table = id_table,
 	.probe = virtio_gpu_probe,
 	.remove = virtio_gpu_remove,
-	.config_changed = virtio_gpu_config_changed
+	.shutdown = virtio_gpu_shutdown,
+	.config_changed = virtio_gpu_config_changed,
+#ifdef CONFIG_PM_SLEEP
+	.freeze = virtgpu_freeze,
+	.restore = virtgpu_restore,
+#endif
 };
 
-module_virtio_driver(virtio_gpu_driver);
+static int __init virtio_gpu_driver_init(void)
+{
+	struct pci_dev *pdev;
+	int ret;
+
+	pdev = pci_get_device(PCI_VENDOR_ID_REDHAT_QUMRANET,
+			      PCI_DEVICE_ID_VIRTIO_GPU,
+			      NULL);
+	if (pdev && pci_is_vga(pdev)) {
+		ret = vga_get_interruptible(pdev,
+			VGA_RSRC_LEGACY_IO | VGA_RSRC_LEGACY_MEM);
+		if (ret) {
+			pci_dev_put(pdev);
+			return ret;
+		}
+	}
+
+	ret = register_virtio_driver(&virtio_gpu_driver);
+
+	if (pdev) {
+		if (pci_is_vga(pdev))
+			vga_put(pdev,
+				VGA_RSRC_LEGACY_IO | VGA_RSRC_LEGACY_MEM);
+
+		pci_dev_put(pdev);
+	}
+
+	return ret;
+}
+
+static void __exit virtio_gpu_driver_exit(void)
+{
+	unregister_virtio_driver(&virtio_gpu_driver);
+}
+
+module_init(virtio_gpu_driver_init);
+module_exit(virtio_gpu_driver_exit);
 
 MODULE_DEVICE_TABLE(virtio, id_table);
 MODULE_DESCRIPTION("Virtio GPU driver");
@@ -177,12 +332,13 @@ static const struct drm_driver driver = {
 	 * out via drm_device::driver_features:
 	 */
 	.driver_features = DRIVER_MODESET | DRIVER_GEM | DRIVER_RENDER | DRIVER_ATOMIC |
-			   DRIVER_SYNCOBJ | DRIVER_SYNCOBJ_TIMELINE,
+			   DRIVER_SYNCOBJ | DRIVER_SYNCOBJ_TIMELINE | DRIVER_CURSOR_HOTSPOT,
 	.open = virtio_gpu_driver_open,
 	.postclose = virtio_gpu_driver_postclose,
 
 	.dumb_create = virtio_gpu_mode_dumb_create,
-	.dumb_map_offset = virtio_gpu_mode_dumb_mmap,
+
+	DRM_FBDEV_SHMEM_DRIVER_OPS,
 
 #if defined(CONFIG_DEBUG_FS)
 	.debugfs_init = virtio_gpu_debugfs_init,
@@ -198,7 +354,6 @@ static const struct drm_driver driver = {
 
 	.name = DRIVER_NAME,
 	.desc = DRIVER_DESC,
-	.date = DRIVER_DATE,
 	.major = DRIVER_MAJOR,
 	.minor = DRIVER_MINOR,
 	.patchlevel = DRIVER_PATCHLEVEL,

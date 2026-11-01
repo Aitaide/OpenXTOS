@@ -69,7 +69,7 @@ struct mtk_spi_slave {
 	struct clk *spi_clk;
 	struct completion xfer_done;
 	struct spi_transfer *cur_transfer;
-	bool slave_aborted;
+	bool target_aborted;
 	const struct mtk_spi_compatible *dev_comp;
 };
 
@@ -118,7 +118,7 @@ static void mtk_spi_slave_disable_xfer(struct mtk_spi_slave *mdata)
 static int mtk_spi_slave_wait_for_completion(struct mtk_spi_slave *mdata)
 {
 	if (wait_for_completion_interruptible(&mdata->xfer_done) ||
-	    mdata->slave_aborted) {
+	    mdata->target_aborted) {
 		dev_err(mdata->dev, "interrupted\n");
 		return -EINTR;
 	}
@@ -286,7 +286,7 @@ static int mtk_spi_slave_transfer_one(struct spi_controller *ctlr,
 	struct mtk_spi_slave *mdata = spi_controller_get_devdata(ctlr);
 
 	reinit_completion(&mdata->xfer_done);
-	mdata->slave_aborted = false;
+	mdata->target_aborted = false;
 	mdata->cur_transfer = xfer;
 
 	if (xfer->len > mdata->dev_comp->max_fifo_size)
@@ -297,7 +297,7 @@ static int mtk_spi_slave_transfer_one(struct spi_controller *ctlr,
 
 static int mtk_spi_slave_setup(struct spi_device *spi)
 {
-	struct mtk_spi_slave *mdata = spi_controller_get_devdata(spi->master);
+	struct mtk_spi_slave *mdata = spi_controller_get_devdata(spi->controller);
 	u32 reg_val;
 
 	reg_val = DMA_DONE_EN | DATA_DONE_EN |
@@ -314,11 +314,11 @@ static int mtk_spi_slave_setup(struct spi_device *spi)
 	return 0;
 }
 
-static int mtk_slave_abort(struct spi_controller *ctlr)
+static int mtk_target_abort(struct spi_controller *ctlr)
 {
 	struct mtk_spi_slave *mdata = spi_controller_get_devdata(ctlr);
 
-	mdata->slave_aborted = true;
+	mdata->target_aborted = true;
 	complete(&mdata->xfer_done);
 
 	return 0;
@@ -388,27 +388,23 @@ static int mtk_spi_slave_probe(struct platform_device *pdev)
 	int irq, ret;
 	const struct of_device_id *of_id;
 
-	ctlr = spi_alloc_slave(&pdev->dev, sizeof(*mdata));
-	if (!ctlr) {
-		dev_err(&pdev->dev, "failed to alloc spi slave\n");
+	ctlr = devm_spi_alloc_target(&pdev->dev, sizeof(*mdata));
+	if (!ctlr)
 		return -ENOMEM;
-	}
 
 	ctlr->auto_runtime_pm = true;
-	ctlr->dev.of_node = pdev->dev.of_node;
 	ctlr->mode_bits = SPI_CPOL | SPI_CPHA;
 	ctlr->mode_bits |= SPI_LSB_FIRST;
 
 	ctlr->prepare_message = mtk_spi_slave_prepare_message;
 	ctlr->transfer_one = mtk_spi_slave_transfer_one;
 	ctlr->setup = mtk_spi_slave_setup;
-	ctlr->slave_abort = mtk_slave_abort;
+	ctlr->target_abort = mtk_target_abort;
 
 	of_id = of_match_node(mtk_spi_slave_of_match, pdev->dev.of_node);
 	if (!of_id) {
 		dev_err(&pdev->dev, "failed to probe of_node\n");
-		ret = -EINVAL;
-		goto err_put_ctlr;
+		return -EINVAL;
 	}
 	mdata = spi_controller_get_devdata(ctlr);
 	mdata->dev_comp = of_id->data;
@@ -421,65 +417,60 @@ static int mtk_spi_slave_probe(struct platform_device *pdev)
 	init_completion(&mdata->xfer_done);
 	mdata->dev = &pdev->dev;
 	mdata->base = devm_platform_ioremap_resource(pdev, 0);
-	if (IS_ERR(mdata->base)) {
-		ret = PTR_ERR(mdata->base);
-		goto err_put_ctlr;
-	}
+	if (IS_ERR(mdata->base))
+		return PTR_ERR(mdata->base);
 
 	irq = platform_get_irq(pdev, 0);
-	if (irq < 0) {
-		ret = irq;
-		goto err_put_ctlr;
-	}
+	if (irq < 0)
+		return irq;
 
 	ret = devm_request_irq(&pdev->dev, irq, mtk_spi_slave_interrupt,
 			       IRQF_TRIGGER_NONE, dev_name(&pdev->dev), ctlr);
 	if (ret) {
 		dev_err(&pdev->dev, "failed to register irq (%d)\n", ret);
-		goto err_put_ctlr;
+		return ret;
 	}
 
 	mdata->spi_clk = devm_clk_get(&pdev->dev, "spi");
 	if (IS_ERR(mdata->spi_clk)) {
 		ret = PTR_ERR(mdata->spi_clk);
 		dev_err(&pdev->dev, "failed to get spi-clk: %d\n", ret);
-		goto err_put_ctlr;
+		return ret;
 	}
 
 	ret = clk_prepare_enable(mdata->spi_clk);
 	if (ret < 0) {
 		dev_err(&pdev->dev, "failed to enable spi_clk (%d)\n", ret);
-		goto err_put_ctlr;
+		return ret;
 	}
 
 	pm_runtime_enable(&pdev->dev);
 
-	ret = devm_spi_register_controller(&pdev->dev, ctlr);
+	ret = spi_register_controller(ctlr);
+	clk_disable_unprepare(mdata->spi_clk);
 	if (ret) {
 		dev_err(&pdev->dev,
 			"failed to register slave controller(%d)\n", ret);
-		clk_disable_unprepare(mdata->spi_clk);
 		goto err_disable_runtime_pm;
 	}
-
-	clk_disable_unprepare(mdata->spi_clk);
 
 	return 0;
 
 err_disable_runtime_pm:
 	pm_runtime_disable(&pdev->dev);
-err_put_ctlr:
-	spi_controller_put(ctlr);
 
 	return ret;
 }
 
 static void mtk_spi_slave_remove(struct platform_device *pdev)
 {
+	struct spi_controller *ctlr = platform_get_drvdata(pdev);
+
+	spi_unregister_controller(ctlr);
+
 	pm_runtime_disable(&pdev->dev);
 }
 
-#ifdef CONFIG_PM_SLEEP
 static int mtk_spi_slave_suspend(struct device *dev)
 {
 	struct spi_controller *ctlr = dev_get_drvdata(dev);
@@ -516,9 +507,7 @@ static int mtk_spi_slave_resume(struct device *dev)
 
 	return ret;
 }
-#endif /* CONFIG_PM_SLEEP */
 
-#ifdef CONFIG_PM
 static int mtk_spi_slave_runtime_suspend(struct device *dev)
 {
 	struct spi_controller *ctlr = dev_get_drvdata(dev);
@@ -543,22 +532,21 @@ static int mtk_spi_slave_runtime_resume(struct device *dev)
 
 	return 0;
 }
-#endif /* CONFIG_PM */
 
 static const struct dev_pm_ops mtk_spi_slave_pm = {
-	SET_SYSTEM_SLEEP_PM_OPS(mtk_spi_slave_suspend, mtk_spi_slave_resume)
-	SET_RUNTIME_PM_OPS(mtk_spi_slave_runtime_suspend,
-			   mtk_spi_slave_runtime_resume, NULL)
+	SYSTEM_SLEEP_PM_OPS(mtk_spi_slave_suspend, mtk_spi_slave_resume)
+	RUNTIME_PM_OPS(mtk_spi_slave_runtime_suspend,
+		       mtk_spi_slave_runtime_resume, NULL)
 };
 
 static struct platform_driver mtk_spi_slave_driver = {
 	.driver = {
 		.name = "mtk-spi-slave",
-		.pm	= &mtk_spi_slave_pm,
+		.pm	= pm_ptr(&mtk_spi_slave_pm),
 		.of_match_table = mtk_spi_slave_of_match,
 	},
 	.probe = mtk_spi_slave_probe,
-	.remove_new = mtk_spi_slave_remove,
+	.remove = mtk_spi_slave_remove,
 };
 
 module_platform_driver(mtk_spi_slave_driver);

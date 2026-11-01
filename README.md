@@ -8,13 +8,13 @@
 
 ### Overview
 
-XTOS is a research-grade real-time operating system designed for brain-computer interface (BCI) and signal processing applications. Built on Linux 6.6.0 with the PREEMPT_RT patch (rt15), XTOS provides deterministic scheduling, low-latency signal processing, and a complete development environment for real-time systems research.
+XTOS is a research-grade real-time Linux system for brain-computer interface (BCI) and signal processing applications. The current source targets signed upstream Linux 7.3.1 with mainline PREEMPT_RT. Kernel migration, complete-system acceptance and physical timing are separate gates; see `docs/kernel-7.3.1-migration.md` for current evidence and limits.
 
 ### System Architecture
 
 **Core Components:**
 
-- **Real-Time Kernel**: Linux 6.6.0 + PREEMPT_RT rt15
+- **Real-Time Kernel**: Linux 7.3.1 + mainline PREEMPT_RT
   - Full preemption support (`CONFIG_PREEMPT_RT=y`)
   - High-resolution timers (1000 Hz)
   - Optional XTOS scheduler helper (`CONFIG_XTOS_SCHED`); it is not a Linux `sched_class` and does not replace normal Linux task selection
@@ -22,7 +22,7 @@ XTOS is a research-grade real-time operating system designed for brain-computer 
 - **BCI Framework**: Kernel-space BCI subsystem
   - XTOS BCI core (`CONFIG_XTOS_BCI=m`)
   - OpenBCI Cyton driver (`CONFIG_XTOS_BCI_OPENBCI=m`)
-  - Serial device bus support (`CONFIG_SERIAL_DEV_BUS=m`)
+  - Serial device bus and tty controller built in (`CONFIG_SERIAL_DEV_BUS=y`)
 
 - **User-Space Runtime**:
   - BusyBox 1.37.0 static userland
@@ -113,7 +113,7 @@ After a successful build:
 **Source Tree:**
 ```
 xtos/
-├── kernel/           # Linux 6.6.0 + PREEMPT_RT + XTOS integration
+├── kernel/           # Linux 7.3.1 + mainline PREEMPT_RT + XTOS integration
 ├── drivers/xtos/     # BCI core, buffer, and device drivers
 ├── userspace/busybox/ # BusyBox 1.37.0 source
 ├── system/           # System configuration and rootfs
@@ -149,13 +149,13 @@ See [STATUS.md](STATUS.md) for detailed verification results.
 
 ### 概述
 
-XTOS 是面向脑机接口（BCI）和信号处理应用的研究级实时操作系统。基于 Linux 6.6.0 及 PREEMPT_RT 补丁（rt15），XTOS 提供确定性调度、低延迟信号处理和完整的实时系统开发环境。
+XTOS 是面向脑机接口（BCI）和信号处理应用的研究级实时 Linux 系统。当前源码采用经官方签名核验的 Linux 7.3.1 与主线 PREEMPT_RT。内核移植、完整系统验收和物理时延分别验证；当前证据与边界见 `docs/kernel-7.3.1-migration.md`。
 
 ### 系统架构
 
 **核心组件：**
 
-- **实时内核**：Linux 6.6.0 + PREEMPT_RT rt15
+- **实时内核**：Linux 7.3.1 + 主线 PREEMPT_RT
   - 完全抢占支持（`CONFIG_PREEMPT_RT=y`）
   - 高精度定时器（1000 Hz）
   - 可选 XTOS 调度辅助层（`CONFIG_XTOS_SCHED`）；它不是 Linux `sched_class`，不会替换 Linux 正常任务选择
@@ -163,7 +163,7 @@ XTOS 是面向脑机接口（BCI）和信号处理应用的研究级实时操作
 - **BCI 框架**：内核空间 BCI 子系统
   - XTOS BCI 核心（`CONFIG_XTOS_BCI=m`）
   - OpenBCI Cyton 驱动（`CONFIG_XTOS_BCI_OPENBCI=m`）
-  - 串行设备总线支持（`CONFIG_SERIAL_DEV_BUS=m`）
+  - 内置串行设备总线及 tty 控制器（`CONFIG_SERIAL_DEV_BUS=y`）
 
 - **用户态运行时**：
   - BusyBox 1.37.0 静态用户空间
@@ -237,7 +237,7 @@ XTOS_TORCH_ROOT=/path/to/torch \
 **源码树：**
 ```
 xtos/
-├── kernel/           # Linux 6.6.0 + PREEMPT_RT + XTOS 集成
+├── kernel/           # Linux 7.3.1 + 主线 PREEMPT_RT + XTOS 集成
 ├── drivers/xtos/     # BCI 核心、缓冲区和设备驱动
 ├── userspace/busybox/ # BusyBox 1.37.0 源码
 ├── system/           # 系统配置和根文件系统

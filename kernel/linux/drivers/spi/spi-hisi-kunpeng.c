@@ -151,8 +151,6 @@ static const struct debugfs_reg32 hisi_spi_regs[] = {
 	HISI_SPI_DBGFS_REG("ENR", HISI_SPI_ENR),
 	HISI_SPI_DBGFS_REG("FIFOC", HISI_SPI_FIFOC),
 	HISI_SPI_DBGFS_REG("IMR", HISI_SPI_IMR),
-	HISI_SPI_DBGFS_REG("DIN", HISI_SPI_DIN),
-	HISI_SPI_DBGFS_REG("DOUT", HISI_SPI_DOUT),
 	HISI_SPI_DBGFS_REG("SR", HISI_SPI_SR),
 	HISI_SPI_DBGFS_REG("RISR", HISI_SPI_RISR),
 	HISI_SPI_DBGFS_REG("ISR", HISI_SPI_ISR),
@@ -163,10 +161,8 @@ static const struct debugfs_reg32 hisi_spi_regs[] = {
 static int hisi_spi_debugfs_init(struct hisi_spi *hs)
 {
 	char name[32];
+	struct spi_controller *host = dev_get_drvdata(hs->dev);
 
-	struct spi_controller *host;
-
-	host = container_of(hs->dev, struct spi_controller, dev);
 	snprintf(name, 32, "hisi_spi%d", host->bus_num);
 	hs->debugfs = debugfs_create_dir(name, NULL);
 	if (IS_ERR(hs->debugfs))
@@ -200,9 +196,22 @@ static void hisi_spi_flush_fifo(struct hisi_spi *hs)
 	unsigned long limit = loops_per_jiffy << 1;
 
 	do {
-		while (hisi_spi_rx_not_empty(hs))
+		unsigned long inner_limit = loops_per_jiffy;
+
+		while (hisi_spi_rx_not_empty(hs) && --inner_limit) {
 			readl(hs->regs + HISI_SPI_DOUT);
-	} while (hisi_spi_busy(hs) && limit--);
+			cpu_relax();
+		}
+
+		if (!inner_limit) {
+			dev_warn_ratelimited(hs->dev, "RX FIFO flush timeout\n");
+			break;
+		}
+
+	} while (hisi_spi_busy(hs) && --limit);
+
+	if (!limit)
+		dev_warn_ratelimited(hs->dev, "SPI busy timeout\n");
 }
 
 /* Disable the controller and all interrupts */
@@ -430,7 +439,7 @@ static int hisi_spi_setup(struct spi_device *spi)
 	/* Only alloc on first setup */
 	chip = spi_get_ctldata(spi);
 	if (!chip) {
-		chip = kzalloc(sizeof(*chip), GFP_KERNEL);
+		chip = kzalloc_obj(*chip);
 		if (!chip)
 			return -ENOMEM;
 		spi_set_ctldata(spi, chip);
@@ -454,6 +463,7 @@ static int hisi_spi_probe(struct platform_device *pdev)
 	struct device *dev = &pdev->dev;
 	struct spi_controller *host;
 	struct hisi_spi *hs;
+	u32 num_cs;
 	int ret, irq;
 
 	irq = platform_get_irq(pdev, 0);
@@ -483,10 +493,14 @@ static int hisi_spi_probe(struct platform_device *pdev)
 		return -EINVAL;
 	}
 
-	ret = device_property_read_u16(dev, "num-cs",
-					&host->num_chipselect);
+	if (host->max_speed_hz == 0)
+		return dev_err_probe(dev, -EINVAL, "spi-max-frequency can't be 0\n");
+
+	ret = device_property_read_u32(dev, "num-cs", &num_cs);
 	if (ret)
 		host->num_chipselect = DEFAULT_NUM_CS;
+	else
+		host->num_chipselect = num_cs;
 
 	host->use_gpio_descriptors = true;
 	host->mode_bits = SPI_CPOL | SPI_CPHA | SPI_CS_HIGH | SPI_LOOP;
@@ -496,7 +510,7 @@ static int hisi_spi_probe(struct platform_device *pdev)
 	host->cleanup = hisi_spi_cleanup;
 	host->transfer_one = hisi_spi_transfer_one;
 	host->handle_err = hisi_spi_handle_err;
-	host->dev.fwnode = dev->fwnode;
+	host->min_speed_hz = DIV_ROUND_UP(host->max_speed_hz, CLK_DIV_MAX);
 
 	hisi_spi_hw_init(hs);
 
@@ -508,10 +522,8 @@ static int hisi_spi_probe(struct platform_device *pdev)
 	}
 
 	ret = spi_register_controller(host);
-	if (ret) {
-		dev_err(dev, "failed to register spi host, ret=%d\n", ret);
-		return ret;
-	}
+	if (ret)
+		return dev_err_probe(dev, ret, "failed to register spi host\n");
 
 	if (hisi_spi_debugfs_init(hs))
 		dev_info(dev, "failed to create debugfs dir\n");
@@ -540,7 +552,7 @@ MODULE_DEVICE_TABLE(acpi, hisi_spi_acpi_match);
 
 static struct platform_driver hisi_spi_driver = {
 	.probe		= hisi_spi_probe,
-	.remove_new	= hisi_spi_remove,
+	.remove		= hisi_spi_remove,
 	.driver		= {
 		.name	= "hisi-kunpeng-spi",
 		.acpi_match_table = hisi_spi_acpi_match,

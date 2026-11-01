@@ -6,7 +6,9 @@ Security Documentation
    :maxdepth: 1
 
    credentials
+   snp-tdx-threat-model
    IMA-templates
+   IMA-export-delete
    keys/index
    lsm
    lsm-development
@@ -18,3 +20,4 @@ Security Documentation
    digsig
    landlock
    secrets/index
+   ipe

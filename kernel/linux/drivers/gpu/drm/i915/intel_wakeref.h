@@ -13,20 +13,24 @@
 #include <linux/lockdep.h>
 #include <linux/mutex.h>
 #include <linux/refcount.h>
-#include <linux/stackdepot.h>
+#include <linux/ref_tracker.h>
 #include <linux/timer.h>
 #include <linux/workqueue.h>
+
+struct drm_printer;
+struct intel_runtime_pm;
+struct intel_wakeref;
+
+typedef struct ref_tracker *intel_wakeref_t;
+
+#define INTEL_REFTRACK_DEAD_COUNT 16
+#define INTEL_REFTRACK_PRINT_LIMIT 16
 
 #if IS_ENABLED(CONFIG_DRM_I915_DEBUG)
 #define INTEL_WAKEREF_BUG_ON(expr) BUG_ON(expr)
 #else
 #define INTEL_WAKEREF_BUG_ON(expr) BUILD_BUG_ON_INVALID(expr)
 #endif
-
-struct intel_runtime_pm;
-struct intel_wakeref;
-
-typedef depot_stack_handle_t intel_wakeref_t;
 
 struct intel_wakeref_ops {
 	int (*get)(struct intel_wakeref *wf);
@@ -43,6 +47,10 @@ struct intel_wakeref {
 	const struct intel_wakeref_ops *ops;
 
 	struct delayed_work work;
+
+#if IS_ENABLED(CONFIG_DRM_I915_DEBUG_WAKEREF)
+	struct ref_tracker_dir debug;
+#endif
 };
 
 struct intel_wakeref_lockclass {
@@ -53,11 +61,12 @@ struct intel_wakeref_lockclass {
 void __intel_wakeref_init(struct intel_wakeref *wf,
 			  struct drm_i915_private *i915,
 			  const struct intel_wakeref_ops *ops,
-			  struct intel_wakeref_lockclass *key);
-#define intel_wakeref_init(wf, i915, ops) do {				\
+			  struct intel_wakeref_lockclass *key,
+			  const char *name);
+#define intel_wakeref_init(wf, i915, ops, name) do {			\
 	static struct intel_wakeref_lockclass __key;			\
 									\
-	__intel_wakeref_init((wf), (i915), (ops), &__key);		\
+	__intel_wakeref_init((wf), (i915), (ops), &__key, name);	\
 } while (0)
 
 int __intel_wakeref_get_first(struct intel_wakeref *wf);
@@ -119,16 +128,15 @@ intel_wakeref_get_if_active(struct intel_wakeref *wf)
 	return atomic_inc_not_zero(&wf->count);
 }
 
-enum {
-	INTEL_WAKEREF_PUT_ASYNC_BIT = 0,
-	__INTEL_WAKEREF_PUT_LAST_BIT__
-};
-
 static inline void
 intel_wakeref_might_get(struct intel_wakeref *wf)
 {
 	might_lock(&wf->mutex);
 }
+
+/* flags for __intel_wakeref_put() and __intel_wakeref_put_last */
+#define INTEL_WAKEREF_PUT_ASYNC		BIT(0)
+#define INTEL_WAKEREF_PUT_DELAY_MASK	GENMASK(BITS_PER_LONG - 1, 1)
 
 /**
  * __intel_wakeref_put: Release the wakeref
@@ -145,9 +153,6 @@ intel_wakeref_might_get(struct intel_wakeref *wf)
  */
 static inline void
 __intel_wakeref_put(struct intel_wakeref *wf, unsigned long flags)
-#define INTEL_WAKEREF_PUT_ASYNC BIT(INTEL_WAKEREF_PUT_ASYNC_BIT)
-#define INTEL_WAKEREF_PUT_DELAY \
-	GENMASK(BITS_PER_LONG - 1, __INTEL_WAKEREF_PUT_LAST_BIT__)
 {
 	INTEL_WAKEREF_BUG_ON(atomic_read(&wf->count) <= 0);
 	if (unlikely(!atomic_add_unless(&wf->count, -1, 1)))
@@ -172,7 +177,7 @@ intel_wakeref_put_delay(struct intel_wakeref *wf, unsigned long delay)
 {
 	__intel_wakeref_put(wf,
 			    INTEL_WAKEREF_PUT_ASYNC |
-			    FIELD_PREP(INTEL_WAKEREF_PUT_DELAY, delay));
+			    FIELD_PREP(INTEL_WAKEREF_PUT_DELAY_MASK, delay));
 }
 
 static inline void
@@ -260,6 +265,59 @@ __intel_wakeref_defer_park(struct intel_wakeref *wf)
  * Return: 0 on success, error code if killed.
  */
 int intel_wakeref_wait_for_idle(struct intel_wakeref *wf);
+
+#define INTEL_WAKEREF_DEF ERR_PTR(-ENOENT)
+
+static inline intel_wakeref_t intel_ref_tracker_alloc(struct ref_tracker_dir *dir)
+{
+	struct ref_tracker *user = NULL;
+
+	ref_tracker_alloc(dir, &user, GFP_NOWAIT);
+
+	return user ?: INTEL_WAKEREF_DEF;
+}
+
+static inline void intel_ref_tracker_free(struct ref_tracker_dir *dir,
+					  intel_wakeref_t wakeref)
+{
+	if (wakeref == INTEL_WAKEREF_DEF)
+		wakeref = NULL;
+
+	if (WARN_ON(IS_ERR(wakeref)))
+		return;
+
+	ref_tracker_free(dir, &wakeref);
+}
+
+void intel_ref_tracker_show(struct ref_tracker_dir *dir,
+			    struct drm_printer *p);
+
+#if IS_ENABLED(CONFIG_DRM_I915_DEBUG_WAKEREF)
+
+static inline intel_wakeref_t intel_wakeref_track(struct intel_wakeref *wf)
+{
+	return intel_ref_tracker_alloc(&wf->debug);
+}
+
+static inline void intel_wakeref_untrack(struct intel_wakeref *wf,
+					 intel_wakeref_t handle)
+{
+	intel_ref_tracker_free(&wf->debug, handle);
+}
+
+#else
+
+static inline intel_wakeref_t intel_wakeref_track(struct intel_wakeref *wf)
+{
+	return INTEL_WAKEREF_DEF;
+}
+
+static inline void intel_wakeref_untrack(struct intel_wakeref *wf,
+					 intel_wakeref_t handle)
+{
+}
+
+#endif
 
 struct intel_wakeref_auto {
 	struct drm_i915_private *i915;

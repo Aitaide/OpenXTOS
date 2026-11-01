@@ -32,6 +32,9 @@ Interrupts
 .. kernel-doc:: drivers/gpu/drm/amd/display/amdgpu_dm/amdgpu_dm.c
    :functions: register_hpd_handlers dm_crtc_high_irq dm_pflip_high_irq
 
+.. kernel-doc:: drivers/gpu/drm/amd/amdgpu/amdgpu_display.c
+   :functions: amdgpu_display_hotplug_work_func
+
 Atomic Implementation
 =====================
 
@@ -132,10 +135,7 @@ The DRM blend mode and its elements are then mapped by AMDGPU display manager
 (MPC), as follows:
 
 .. kernel-doc:: drivers/gpu/drm/amd/display/dc/inc/hw/mpc.h
-   :doc: mpc-overview
-
-.. kernel-doc:: drivers/gpu/drm/amd/display/dc/inc/hw/mpc.h
-   :functions: mpcc_blnd_cfg
+   :identifiers: mpcc_blnd_cfg
 
 Therefore, the blending configuration for a single MPCC instance on the MPC
 tree is defined by :c:type:`mpcc_blnd_cfg`, where
@@ -147,7 +147,7 @@ alpha and plane alpha values. It sets one of the three modes for
 :c:type:`MPCC_ALPHA_BLND_MODE`, as described below.
 
 .. kernel-doc:: drivers/gpu/drm/amd/display/dc/inc/hw/mpc.h
-   :functions: mpcc_alpha_blend_mode
+   :identifiers: mpcc_alpha_blend_mode
 
 DM then maps the elements of `enum mpcc_alpha_blend_mode` to those in the DRM
 blend formula, as follows:
@@ -181,3 +181,9 @@ following path:
 2. On DC interface, :c:type:`struct mpcc_blnd_cfg <mpcc_blnd_cfg>` programs the
    MPCC blend configuration considering the :c:type:`dc_plane_info
    <dc_plane_info>` input from DPP.
+
+Display Properties
+==================
+
+.. kernel-doc:: drivers/gpu/drm/amd/amdgpu/amdgpu_display.c
+   :doc: property for adaptive backlight modulation

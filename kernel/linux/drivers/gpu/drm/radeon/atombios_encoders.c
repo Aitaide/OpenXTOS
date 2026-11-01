@@ -29,6 +29,7 @@
 #include <linux/pci.h>
 
 #include <drm/drm_crtc_helper.h>
+#include <drm/drm_edid.h>
 #include <drm/drm_file.h>
 #include <drm/drm_modeset_helper_vtables.h>
 #include <drm/radeon_drm.h>
@@ -118,12 +119,12 @@ atombios_set_backlight_level(struct radeon_encoder *radeon_encoder, u8 level)
 			index = GetIndexIntoMasterTable(COMMAND, LCD1OutputControl);
 			if (dig->backlight_level == 0) {
 				args.ucAction = ATOM_LCD_BLOFF;
-				atom_execute_table(rdev->mode_info.atom_context, index, (uint32_t *)&args);
+				atom_execute_table(rdev->mode_info.atom_context, index, (uint32_t *)&args, sizeof(args));
 			} else {
 				args.ucAction = ATOM_LCD_BL_BRIGHTNESS_CONTROL;
-				atom_execute_table(rdev->mode_info.atom_context, index, (uint32_t *)&args);
+				atom_execute_table(rdev->mode_info.atom_context, index, (uint32_t *)&args, sizeof(args));
 				args.ucAction = ATOM_LCD_BLON;
-				atom_execute_table(rdev->mode_info.atom_context, index, (uint32_t *)&args);
+				atom_execute_table(rdev->mode_info.atom_context, index, (uint32_t *)&args, sizeof(args));
 			}
 			break;
 		case ENCODER_OBJECT_ID_INTERNAL_UNIPHY:
@@ -200,7 +201,7 @@ void radeon_atom_backlight_init(struct radeon_encoder *radeon_encoder,
 	 */
 	if ((rdev->pdev->subsystem_vendor == PCI_VENDOR_ID_APPLE) &&
 	    (rdev->pdev->device == 0x6741) &&
-	    !dmi_match(DMI_PRODUCT_NAME, "iMac12,1"))
+	    !(dmi_match(DMI_PRODUCT_NAME, "iMac12,1") || dmi_match(DMI_PRODUCT_NAME, "iMac12,2")))
 		return;
 
 	if (!radeon_encoder->enc_priv)
@@ -217,7 +218,7 @@ void radeon_atom_backlight_init(struct radeon_encoder *radeon_encoder,
 		return;
 	}
 
-	pdata = kmalloc(sizeof(struct radeon_backlight_privdata), GFP_KERNEL);
+	pdata = kmalloc_obj(struct radeon_backlight_privdata);
 	if (!pdata) {
 		DRM_ERROR("Memory allocation failed\n");
 		goto error;
@@ -248,7 +249,7 @@ void radeon_atom_backlight_init(struct radeon_encoder *radeon_encoder,
 	 */
 	if (bd->props.brightness == 0)
 		bd->props.brightness = RADEON_MAX_BL_LEVEL;
-	bd->props.power = FB_BLANK_UNBLANK;
+	bd->props.power = BACKLIGHT_POWER_ON;
 	backlight_update_status(bd);
 
 	DRM_INFO("radeon atom DIG backlight initialized\n");
@@ -388,7 +389,7 @@ atombios_dac_setup(struct drm_encoder *encoder, int action)
 	}
 	args.usPixelClock = cpu_to_le16(radeon_encoder->pixel_clock / 10);
 
-	atom_execute_table(rdev->mode_info.atom_context, index, (uint32_t *)&args);
+	atom_execute_table(rdev->mode_info.atom_context, index, (uint32_t *)&args, sizeof(args));
 
 }
 
@@ -444,7 +445,7 @@ atombios_tv_setup(struct drm_encoder *encoder, int action)
 
 	args.sTVEncoder.usPixelClock = cpu_to_le16(radeon_encoder->pixel_clock / 10);
 
-	atom_execute_table(rdev->mode_info.atom_context, index, (uint32_t *)&args);
+	atom_execute_table(rdev->mode_info.atom_context, index, (uint32_t *)&args, sizeof(args));
 
 }
 
@@ -545,7 +546,7 @@ atombios_dvo_setup(struct drm_encoder *encoder, int action)
 		break;
 	}
 
-	atom_execute_table(rdev->mode_info.atom_context, index, (uint32_t *)&args);
+	atom_execute_table(rdev->mode_info.atom_context, index, (uint32_t *)&args, sizeof(args));
 }
 
 union lvds_encoder_control {
@@ -663,7 +664,7 @@ atombios_digital_setup(struct drm_encoder *encoder, int action)
 		break;
 	}
 
-	atom_execute_table(rdev->mode_info.atom_context, index, (uint32_t *)&args);
+	atom_execute_table(rdev->mode_info.atom_context, index, (uint32_t *)&args, sizeof(args));
 }
 
 int
@@ -700,7 +701,7 @@ atombios_get_encoder_mode(struct drm_encoder *encoder)
 			if (radeon_connector->use_digital &&
 			    (radeon_connector->audio == RADEON_AUDIO_ENABLE))
 				return ATOM_ENCODER_MODE_HDMI;
-			else if (drm_detect_hdmi_monitor(radeon_connector_edid(connector)) &&
+			else if (connector->display_info.is_hdmi &&
 				 (radeon_connector->audio == RADEON_AUDIO_AUTO))
 				return ATOM_ENCODER_MODE_HDMI;
 			else if (radeon_connector->use_digital)
@@ -719,7 +720,7 @@ atombios_get_encoder_mode(struct drm_encoder *encoder)
 		if (radeon_audio != 0) {
 			if (radeon_connector->audio == RADEON_AUDIO_ENABLE)
 				return ATOM_ENCODER_MODE_HDMI;
-			else if (drm_detect_hdmi_monitor(radeon_connector_edid(connector)) &&
+			else if (connector->display_info.is_hdmi &&
 				 (radeon_connector->audio == RADEON_AUDIO_AUTO))
 				return ATOM_ENCODER_MODE_HDMI;
 			else
@@ -736,14 +737,14 @@ atombios_get_encoder_mode(struct drm_encoder *encoder)
 		if ((dig_connector->dp_sink_type == CONNECTOR_OBJECT_ID_DISPLAYPORT) ||
 		    (dig_connector->dp_sink_type == CONNECTOR_OBJECT_ID_eDP)) {
 			if (radeon_audio != 0 &&
-			    drm_detect_monitor_audio(radeon_connector_edid(connector)) &&
+			    connector->display_info.has_audio &&
 			    ASIC_IS_DCE4(rdev) && !ASIC_IS_DCE5(rdev))
 				return ATOM_ENCODER_MODE_DP_AUDIO;
 			return ATOM_ENCODER_MODE_DP;
 		} else if (radeon_audio != 0) {
 			if (radeon_connector->audio == RADEON_AUDIO_ENABLE)
 				return ATOM_ENCODER_MODE_HDMI;
-			else if (drm_detect_hdmi_monitor(radeon_connector_edid(connector)) &&
+			else if (connector->display_info.is_hdmi &&
 				 (radeon_connector->audio == RADEON_AUDIO_AUTO))
 				return ATOM_ENCODER_MODE_HDMI;
 			else
@@ -754,7 +755,7 @@ atombios_get_encoder_mode(struct drm_encoder *encoder)
 		break;
 	case DRM_MODE_CONNECTOR_eDP:
 		if (radeon_audio != 0 &&
-		    drm_detect_monitor_audio(radeon_connector_edid(connector)) &&
+		    connector->display_info.has_audio &&
 		    ASIC_IS_DCE4(rdev) && !ASIC_IS_DCE5(rdev))
 			return ATOM_ENCODER_MODE_DP_AUDIO;
 		return ATOM_ENCODER_MODE_DP;
@@ -978,7 +979,7 @@ atombios_dig_encoder_setup2(struct drm_encoder *encoder, int action, int panel_m
 		break;
 	}
 
-	atom_execute_table(rdev->mode_info.atom_context, index, (uint32_t *)&args);
+	atom_execute_table(rdev->mode_info.atom_context, index, (uint32_t *)&args, sizeof(args));
 
 }
 
@@ -1360,7 +1361,7 @@ atombios_dig_transmitter_setup2(struct drm_encoder *encoder, int action, uint8_t
 		break;
 	}
 
-	atom_execute_table(rdev->mode_info.atom_context, index, (uint32_t *)&args);
+	atom_execute_table(rdev->mode_info.atom_context, index, (uint32_t *)&args, sizeof(args));
 }
 
 void
@@ -1396,7 +1397,7 @@ atombios_set_edp_panel_power(struct drm_connector *connector, int action)
 
 	args.v1.ucAction = action;
 
-	atom_execute_table(rdev->mode_info.atom_context, index, (uint32_t *)&args);
+	atom_execute_table(rdev->mode_info.atom_context, index, (uint32_t *)&args, sizeof(args));
 
 	/* wait for the panel to power up */
 	if (action == ATOM_TRANSMITTER_ACTION_POWER_ON) {
@@ -1518,7 +1519,7 @@ atombios_external_encoder_setup(struct drm_encoder *encoder,
 		DRM_ERROR("Unknown table version: %d, %d\n", frev, crev);
 		return;
 	}
-	atom_execute_table(rdev->mode_info.atom_context, index, (uint32_t *)&args);
+	atom_execute_table(rdev->mode_info.atom_context, index, (uint32_t *)&args, sizeof(args));
 }
 
 static void
@@ -1553,7 +1554,7 @@ atombios_yuv_setup(struct drm_encoder *encoder, bool enable)
 		args.ucEnable = ATOM_ENABLE;
 	args.ucCRTC = radeon_crtc->crtc_id;
 
-	atom_execute_table(rdev->mode_info.atom_context, index, (uint32_t *)&args);
+	atom_execute_table(rdev->mode_info.atom_context, index, (uint32_t *)&args, sizeof(args));
 
 	WREG32(reg, temp);
 }
@@ -1617,10 +1618,10 @@ radeon_atom_encoder_dpms_avivo(struct drm_encoder *encoder, int mode)
 		if (radeon_encoder->encoder_id == ENCODER_OBJECT_ID_INTERNAL_DDI) {
 			u32 reg = RREG32(RADEON_BIOS_3_SCRATCH);
 			WREG32(RADEON_BIOS_3_SCRATCH, reg & ~ATOM_S3_DFP2I_ACTIVE);
-			atom_execute_table(rdev->mode_info.atom_context, index, (uint32_t *)&args);
+			atom_execute_table(rdev->mode_info.atom_context, index, (uint32_t *)&args, sizeof(args));
 			WREG32(RADEON_BIOS_3_SCRATCH, reg);
 		} else
-			atom_execute_table(rdev->mode_info.atom_context, index, (uint32_t *)&args);
+			atom_execute_table(rdev->mode_info.atom_context, index, (uint32_t *)&args, sizeof(args));
 		if (radeon_encoder->devices & (ATOM_DEVICE_LCD_SUPPORT)) {
 			if (rdev->mode_info.bl_encoder) {
 				struct radeon_encoder_atom_dig *dig = radeon_encoder->enc_priv;
@@ -1628,7 +1629,7 @@ radeon_atom_encoder_dpms_avivo(struct drm_encoder *encoder, int mode)
 				atombios_set_backlight_level(radeon_encoder, dig->backlight_level);
 			} else {
 				args.ucAction = ATOM_LCD_BLON;
-				atom_execute_table(rdev->mode_info.atom_context, index, (uint32_t *)&args);
+				atom_execute_table(rdev->mode_info.atom_context, index, (uint32_t *)&args, sizeof(args));
 			}
 		}
 		break;
@@ -1636,10 +1637,10 @@ radeon_atom_encoder_dpms_avivo(struct drm_encoder *encoder, int mode)
 	case DRM_MODE_DPMS_SUSPEND:
 	case DRM_MODE_DPMS_OFF:
 		args.ucAction = ATOM_DISABLE;
-		atom_execute_table(rdev->mode_info.atom_context, index, (uint32_t *)&args);
+		atom_execute_table(rdev->mode_info.atom_context, index, (uint32_t *)&args, sizeof(args));
 		if (radeon_encoder->devices & (ATOM_DEVICE_LCD_SUPPORT)) {
 			args.ucAction = ATOM_LCD_BLOFF;
-			atom_execute_table(rdev->mode_info.atom_context, index, (uint32_t *)&args);
+			atom_execute_table(rdev->mode_info.atom_context, index, (uint32_t *)&args, sizeof(args));
 		}
 		break;
 	}
@@ -1706,7 +1707,7 @@ radeon_atom_encoder_dpms_dig(struct drm_encoder *encoder, int mode)
 		if (ENCODER_MODE_IS_DP(atombios_get_encoder_mode(encoder)) && connector) {
 			/* DP_SET_POWER_D0 is set in radeon_dp_link_train */
 			radeon_dp_link_train(encoder, connector);
-			if (ASIC_IS_DCE4(rdev))
+			if (ASIC_IS_DCE4(rdev) || dmi_match(DMI_PRODUCT_NAME, "iMac11,1"))
 				atombios_dig_encoder_setup(encoder, ATOM_ENCODER_CMD_DP_VIDEO_ON, 0);
 		}
 		if (radeon_encoder->devices & (ATOM_DEVICE_LCD_SUPPORT)) {
@@ -1831,7 +1832,7 @@ radeon_atom_encoder_dpms(struct drm_encoder *encoder, int mode)
 		return;
 	}
 
-	radeon_atombios_encoder_dpms_scratch_regs(encoder, (mode == DRM_MODE_DPMS_ON) ? true : false);
+	radeon_atombios_encoder_dpms_scratch_regs(encoder, mode == DRM_MODE_DPMS_ON);
 
 }
 
@@ -1982,7 +1983,7 @@ atombios_set_encoder_crtc_source(struct drm_encoder *encoder)
 		return;
 	}
 
-	atom_execute_table(rdev->mode_info.atom_context, index, (uint32_t *)&args);
+	atom_execute_table(rdev->mode_info.atom_context, index, (uint32_t *)&args, sizeof(args));
 
 	/* update scratch regs with new routing */
 	radeon_atombios_encoder_crtc_scratch_regs(encoder, radeon_crtc->crtc_id);
@@ -2122,17 +2123,20 @@ int radeon_atom_pick_dig_encoder(struct drm_encoder *encoder, int fe_idx)
 	}
 
 	/*
-	 * On DCE32 any encoder can drive any block so usually just use crtc id,
-	 * but Apple thinks different at least on iMac10,1 and iMac11,2, so there use linkb,
-	 * otherwise the internal eDP panel will stay dark.
+	 * Apple routes the internal eDP panel through Link B of the DIG encoder
+	 * instead of Link A on the iMac10,1, iMac11,1 and iMac11,2.
+	 * Use linkb to avoid a dark display.
 	 */
-	if (ASIC_IS_DCE32(rdev)) {
-		if (dmi_match(DMI_PRODUCT_NAME, "iMac10,1") ||
-		    dmi_match(DMI_PRODUCT_NAME, "iMac11,2"))
-			enc_idx = (dig->linkb) ? 1 : 0;
-		else
-			enc_idx = radeon_crtc->crtc_id;
+	if (dmi_match(DMI_PRODUCT_NAME, "iMac10,1") ||
+	    dmi_match(DMI_PRODUCT_NAME, "iMac11,1") ||
+	    dmi_match(DMI_PRODUCT_NAME, "iMac11,2")) {
+		enc_idx = (dig->linkb) ? 1 : 0;
+		goto assigned;
+	}
 
+	/* on DCE32 and encoder can driver any block so just crtc id */
+	if (ASIC_IS_DCE32(rdev)) {
+		enc_idx = radeon_crtc->crtc_id;
 		goto assigned;
 	}
 
@@ -2178,7 +2182,7 @@ assigned:
 void
 radeon_atom_encoder_init(struct radeon_device *rdev)
 {
-	struct drm_device *dev = rdev->ddev;
+	struct drm_device *dev = rdev_to_drm(rdev);
 	struct drm_encoder *encoder;
 
 	list_for_each_entry(encoder, &dev->mode_config.encoder_list, head) {
@@ -2310,7 +2314,7 @@ atombios_dac_load_detect(struct drm_encoder *encoder, struct drm_connector *conn
 				args.sDacload.ucMisc = DAC_LOAD_MISC_YPrPb;
 		}
 
-		atom_execute_table(rdev->mode_info.atom_context, index, (uint32_t *)&args);
+		atom_execute_table(rdev->mode_info.atom_context, index, (uint32_t *)&args, sizeof(args));
 
 		return true;
 	} else
@@ -2624,7 +2628,7 @@ radeon_atombios_set_dac_info(struct radeon_encoder *radeon_encoder)
 {
 	struct drm_device *dev = radeon_encoder->base.dev;
 	struct radeon_device *rdev = dev->dev_private;
-	struct radeon_encoder_atom_dac *dac = kzalloc(sizeof(struct radeon_encoder_atom_dac), GFP_KERNEL);
+	struct radeon_encoder_atom_dac *dac = kzalloc_obj(struct radeon_encoder_atom_dac);
 
 	if (!dac)
 		return NULL;
@@ -2637,7 +2641,7 @@ static struct radeon_encoder_atom_dig *
 radeon_atombios_set_dig_info(struct radeon_encoder *radeon_encoder)
 {
 	int encoder_enum = (radeon_encoder->encoder_enum & ENUM_ID_MASK) >> ENUM_ID_SHIFT;
-	struct radeon_encoder_atom_dig *dig = kzalloc(sizeof(struct radeon_encoder_atom_dig), GFP_KERNEL);
+	struct radeon_encoder_atom_dig *dig = kzalloc_obj(struct radeon_encoder_atom_dig);
 
 	if (!dig)
 		return NULL;
@@ -2675,7 +2679,7 @@ radeon_add_atom_encoder(struct drm_device *dev,
 	}
 
 	/* add a new one */
-	radeon_encoder = kzalloc(sizeof(struct radeon_encoder), GFP_KERNEL);
+	radeon_encoder = kzalloc_obj(struct radeon_encoder);
 	if (!radeon_encoder)
 		return;
 

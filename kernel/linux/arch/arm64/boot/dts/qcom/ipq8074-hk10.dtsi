@@ -16,7 +16,7 @@
 		stdout-path = "serial0";
 	};
 
-	memory {
+	memory@40000000 {
 		device_type = "memory";
 		reg = <0x0 0x40000000 0x0 0x20000000>;
 	};
@@ -40,12 +40,18 @@
 
 &pcie0 {
 	status = "okay";
-	perst-gpios = <&tlmm 58 GPIO_ACTIVE_LOW>;
+};
+
+&pcie0_port0 {
+	reset-gpios = <&tlmm 58 GPIO_ACTIVE_LOW>;
 };
 
 &pcie1 {
 	status = "okay";
-	perst-gpios = <&tlmm 61 GPIO_ACTIVE_LOW>;
+};
+
+&pcie1_port0 {
+	reset-gpios = <&tlmm 61 GPIO_ACTIVE_LOW>;
 };
 
 &pcie_qmp0 {

@@ -248,6 +248,7 @@ CLOCK
   devm_clk_put()
   devm_clk_bulk_get()
   devm_clk_bulk_get_all()
+  devm_clk_bulk_get_enable()
   devm_clk_bulk_get_optional()
   devm_get_clk_from_child()
   devm_clk_hw_register()
@@ -275,7 +276,6 @@ GPIO
   devm_gpiod_put()
   devm_gpiod_unhinge()
   devm_gpiochip_add_data()
-  devm_gpio_request()
   devm_gpio_request_one()
 
 I2C
@@ -322,10 +322,8 @@ IOMAP
   devm_platform_ioremap_resource_byname()
   devm_platform_get_and_ioremap_resource()
   devm_iounmap()
-  pcim_iomap()
-  pcim_iomap_regions()	: do request_region() and iomap() on multiple BARs
-  pcim_iomap_table()	: array of mapped addresses indexed by BAR
-  pcim_iounmap()
+
+  Note: For the PCI devices the specific pcim_*() functions may be used, see below.
 
 IRQ
   devm_free_irq()
@@ -386,20 +384,24 @@ NET
 
 PER-CPU MEM
   devm_alloc_percpu()
-  devm_free_percpu()
 
 PCI
   devm_pci_alloc_host_bridge()  : managed PCI host bridge allocation
   devm_pci_remap_cfgspace()	: ioremap PCI configuration space
   devm_pci_remap_cfg_resource()	: ioremap PCI configuration space resource
-  pcim_enable_device()		: after success, all PCI ops become managed
+
+  pcim_enable_device()		: after success, the PCI device gets disabled automatically on driver detach
+  pcim_iomap()			: do iomap() on a single BAR
+  pcim_iomap_regions()		: do request_region() and iomap() on multiple BARs
+  pcim_iomap_table()		: array of mapped addresses indexed by BAR
+  pcim_iounmap()		: do iounmap() on a single BAR
   pcim_pin_device()		: keep PCI device enabled after release
+  pcim_set_mwi()		: enable Memory-Write-Invalidate PCI transaction
 
 PHY
   devm_usb_get_phy()
   devm_usb_get_phy_by_node()
   devm_usb_get_phy_by_phandle()
-  devm_usb_put_phy()
 
 PINCTRL
   devm_pinctrl_get()
@@ -407,13 +409,13 @@ PINCTRL
   devm_pinctrl_get_select()
   devm_pinctrl_register()
   devm_pinctrl_register_and_init()
-  devm_pinctrl_unregister()
 
 POWER
   devm_reboot_mode_register()
   devm_reboot_mode_unregister()
 
 PWM
+  devm_pwmchip_alloc()
   devm_pwmchip_add()
   devm_pwm_get()
   devm_fwnode_pwm_get()
@@ -426,6 +428,7 @@ REGULATOR
   devm_regulator_bulk_put()
   devm_regulator_get()
   devm_regulator_get_enable()
+  devm_regulator_get_enable_read_voltage()
   devm_regulator_get_enable_optional()
   devm_regulator_get_exclusive()
   devm_regulator_get_optional()
@@ -451,12 +454,18 @@ SERDEV
 
 SLAVE DMA ENGINE
   devm_acpi_dma_controller_register()
-  devm_acpi_dma_controller_free()
 
 SPI
-  devm_spi_alloc_master()
-  devm_spi_alloc_slave()
-  devm_spi_register_master()
+  devm_spi_alloc_host()
+  devm_spi_alloc_target()
+  devm_spi_optimize_message()
+  devm_spi_register_controller()
+  devm_spi_register_host()
+  devm_spi_register_target()
 
 WATCHDOG
   devm_watchdog_register_device()
+
+WORKQUEUE
+  devm_alloc_workqueue()
+  devm_alloc_ordered_workqueue()

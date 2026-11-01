@@ -6,19 +6,20 @@
  *                         Cirrus Logic International Semiconductor Ltd.
  */
 
-#include <linux/completion.h>
-#include <linux/device.h>
-#include <linux/gpio/consumer.h>
-#include <linux/mutex.h>
-#include <linux/regmap.h>
-#include <linux/regulator/consumer.h>
-#include <linux/soundwire/sdw.h>
-#include <linux/workqueue.h>
-
 #ifndef CS42L43_CORE_EXT_H
 #define CS42L43_CORE_EXT_H
 
+#include <linux/completion.h>
+#include <linux/mutex.h>
+#include <linux/regmap.h>
+#include <linux/regulator/consumer.h>
+#include <linux/workqueue.h>
+
 #define CS42L43_N_SUPPLIES		3
+
+struct device;
+struct gpio_desc;
+struct sdw_slave;
 
 enum cs42l43_irq_numbers {
 	CS42L43_PLL_LOST_LOCK,
@@ -85,7 +86,6 @@ struct cs42l43 {
 	struct regmap_irq_chip_data *irq_data;
 
 	struct work_struct boot_work;
-	struct completion device_attach;
 	struct completion device_detach;
 	struct completion firmware_download;
 	int firmware_error;
@@ -95,8 +95,8 @@ struct cs42l43 {
 	struct mutex pll_lock;
 
 	bool sdw_pll_active;
-	bool attached;
 	bool hw_lock;
+	long variant_id;
 };
 
 #endif /* CS42L43_CORE_EXT_H */

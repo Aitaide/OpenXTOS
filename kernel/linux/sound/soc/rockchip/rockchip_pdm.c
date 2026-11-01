@@ -8,7 +8,6 @@
 #include <linux/module.h>
 #include <linux/clk.h>
 #include <linux/of.h>
-#include <linux/of_device.h>
 #include <linux/pm_runtime.h>
 #include <linux/rational.h>
 #include <linux/regmap.h>
@@ -322,6 +321,7 @@ static int rockchip_pdm_set_fmt(struct snd_soc_dai *cpu_dai,
 {
 	struct rk_pdm_dev *pdm = to_info(cpu_dai);
 	unsigned int mask = 0, val = 0;
+	int ret;
 
 	mask = PDM_CKP_MSK;
 	switch (fmt & SND_SOC_DAIFMT_INV_MASK) {
@@ -335,7 +335,10 @@ static int rockchip_pdm_set_fmt(struct snd_soc_dai *cpu_dai,
 		return -EINVAL;
 	}
 
-	pm_runtime_get_sync(cpu_dai->dev);
+	ret = pm_runtime_resume_and_get(cpu_dai->dev);
+	if (ret)
+		return ret;
+
 	regmap_update_bits(pdm->regmap, PDM_CLK_CTRL, mask, val);
 	pm_runtime_put(cpu_dai->dev);
 
@@ -423,16 +426,16 @@ static int rockchip_pdm_runtime_resume(struct device *dev)
 	struct rk_pdm_dev *pdm = dev_get_drvdata(dev);
 	int ret;
 
-	ret = clk_prepare_enable(pdm->clk);
+	ret = clk_prepare_enable(pdm->hclk);
 	if (ret) {
-		dev_err(pdm->dev, "clock enable failed %d\n", ret);
+		dev_err(pdm->dev, "hclock enable failed %d\n", ret);
 		return ret;
 	}
 
-	ret = clk_prepare_enable(pdm->hclk);
+	ret = clk_prepare_enable(pdm->clk);
 	if (ret) {
-		clk_disable_unprepare(pdm->clk);
-		dev_err(pdm->dev, "hclock enable failed %d\n", ret);
+		clk_disable_unprepare(pdm->hclk);
+		dev_err(pdm->dev, "clock enable failed %d\n", ret);
 		return ret;
 	}
 
@@ -572,7 +575,6 @@ static int rockchip_pdm_path_parse(struct rk_pdm_dev *pdm, struct device_node *n
 static int rockchip_pdm_probe(struct platform_device *pdev)
 {
 	struct device_node *node = pdev->dev.of_node;
-	const struct of_device_id *match;
 	struct rk_pdm_dev *pdm;
 	struct resource *res;
 	void __iomem *regs;
@@ -582,10 +584,7 @@ static int rockchip_pdm_probe(struct platform_device *pdev)
 	if (!pdm)
 		return -ENOMEM;
 
-	match = of_match_device(rockchip_pdm_match, &pdev->dev);
-	if (match)
-		pdm->version = (uintptr_t)match->data;
-
+	pdm->version = (unsigned long)device_get_match_data(&pdev->dev);
 	if (pdm->version == RK_PDM_RK3308) {
 		pdm->reset = devm_reset_control_get(&pdev->dev, "pdm-m");
 		if (IS_ERR(pdm->reset))
@@ -631,10 +630,8 @@ static int rockchip_pdm_probe(struct platform_device *pdev)
 					      &rockchip_pdm_component,
 					      &rockchip_pdm_dai, 1);
 
-	if (ret) {
-		dev_err(&pdev->dev, "could not register dai: %d\n", ret);
+	if (ret)
 		goto err_suspend;
-	}
 
 	rockchip_pdm_rxctrl(pdm, 0);
 
@@ -643,10 +640,8 @@ static int rockchip_pdm_probe(struct platform_device *pdev)
 		goto err_suspend;
 
 	ret = devm_snd_dmaengine_pcm_register(&pdev->dev, NULL, 0);
-	if (ret) {
-		dev_err(&pdev->dev, "could not register pcm: %d\n", ret);
+	if (ret)
 		goto err_suspend;
-	}
 
 	return 0;
 
@@ -673,7 +668,6 @@ static void rockchip_pdm_remove(struct platform_device *pdev)
 	clk_disable_unprepare(pdm->hclk);
 }
 
-#ifdef CONFIG_PM_SLEEP
 static int rockchip_pdm_suspend(struct device *dev)
 {
 	struct rk_pdm_dev *pdm = dev_get_drvdata(dev);
@@ -698,21 +692,20 @@ static int rockchip_pdm_resume(struct device *dev)
 
 	return ret;
 }
-#endif
 
 static const struct dev_pm_ops rockchip_pdm_pm_ops = {
-	SET_RUNTIME_PM_OPS(rockchip_pdm_runtime_suspend,
-			   rockchip_pdm_runtime_resume, NULL)
-	SET_SYSTEM_SLEEP_PM_OPS(rockchip_pdm_suspend, rockchip_pdm_resume)
+	RUNTIME_PM_OPS(rockchip_pdm_runtime_suspend,
+		       rockchip_pdm_runtime_resume, NULL)
+	SYSTEM_SLEEP_PM_OPS(rockchip_pdm_suspend, rockchip_pdm_resume)
 };
 
 static struct platform_driver rockchip_pdm_driver = {
 	.probe  = rockchip_pdm_probe,
-	.remove_new = rockchip_pdm_remove,
+	.remove = rockchip_pdm_remove,
 	.driver = {
 		.name = "rockchip-pdm",
 		.of_match_table = of_match_ptr(rockchip_pdm_match),
-		.pm = &rockchip_pdm_pm_ops,
+		.pm = pm_ptr(&rockchip_pdm_pm_ops),
 	},
 };
 

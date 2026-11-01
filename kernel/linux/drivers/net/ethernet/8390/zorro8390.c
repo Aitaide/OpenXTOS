@@ -262,9 +262,9 @@ static void zorro8390_remove_one(struct zorro_dev *z)
 }
 
 static struct zorro_device_id zorro8390_zorro_tbl[] = {
-	{ ZORRO_PROD_VILLAGE_TRONIC_ARIADNE2, },
-	{ ZORRO_PROD_INDIVIDUAL_COMPUTERS_X_SURF, },
-	{ 0 }
+	{ .id = ZORRO_PROD_VILLAGE_TRONIC_ARIADNE2 },
+	{ .id = ZORRO_PROD_INDIVIDUAL_COMPUTERS_X_SURF },
+	{ }
 };
 MODULE_DEVICE_TABLE(zorro, zorro8390_zorro_tbl);
 
@@ -443,4 +443,5 @@ static void __exit zorro8390_cleanup_module(void)
 module_init(zorro8390_init_module);
 module_exit(zorro8390_cleanup_module);
 
+MODULE_DESCRIPTION("Zorro NS8390-based ethernet driver");
 MODULE_LICENSE("GPL");

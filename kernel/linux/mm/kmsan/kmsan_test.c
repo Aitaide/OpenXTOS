@@ -67,6 +67,17 @@ static bool report_available(void)
 	return READ_ONCE(observed.available);
 }
 
+/* Reset observed.available, so that the test can trigger another report. */
+static void report_reset(void)
+{
+	unsigned long flags;
+
+	spin_lock_irqsave(&observed.lock, flags);
+	WRITE_ONCE(observed.available, false);
+	observed.ignore = false;
+	spin_unlock_irqrestore(&observed.lock, flags);
+}
+
 /* Information we expect in a report. */
 struct expect_report {
 	const char *error_type; /* Error type. */
@@ -94,7 +105,7 @@ static bool report_matches(const struct expect_report *r)
 
 	/* Title */
 	cur = expected_header;
-	end = &expected_header[sizeof(expected_header) - 1];
+	end = ARRAY_END(expected_header);
 
 	cur += scnprintf(cur, end - cur, "BUG: KMSAN: %s", r->error_type);
 
@@ -157,7 +168,7 @@ static void test_uninit_kmalloc(struct kunit *test)
 	int *ptr;
 
 	kunit_info(test, "uninitialized kmalloc test (UMR report)\n");
-	ptr = kmalloc(sizeof(*ptr), GFP_KERNEL);
+	ptr = kmalloc_obj(*ptr);
 	USE(*ptr);
 	KUNIT_EXPECT_TRUE(test, report_matches(&expect));
 }
@@ -171,7 +182,7 @@ static void test_init_kmalloc(struct kunit *test)
 	int *ptr;
 
 	kunit_info(test, "initialized kmalloc test (no reports)\n");
-	ptr = kmalloc(sizeof(*ptr), GFP_KERNEL);
+	ptr = kmalloc_obj(*ptr);
 	memset(ptr, 0, sizeof(*ptr));
 	USE(*ptr);
 	KUNIT_EXPECT_TRUE(test, report_matches(&expect));
@@ -184,7 +195,7 @@ static void test_init_kzalloc(struct kunit *test)
 	int *ptr;
 
 	kunit_info(test, "initialized kzalloc test (no reports)\n");
-	ptr = kzalloc(sizeof(*ptr), GFP_KERNEL);
+	ptr = kzalloc_obj(*ptr);
 	USE(*ptr);
 	KUNIT_EXPECT_TRUE(test, report_matches(&expect));
 }
@@ -311,7 +322,7 @@ static void test_init_kmsan_vmap_vunmap(struct kunit *test)
 
 	kunit_info(test, "pages initialized via vmap (no reports)\n");
 
-	pages = kmalloc_array(npages, sizeof(*pages), GFP_KERNEL);
+	pages = kmalloc_objs(*pages, npages);
 	for (int i = 0; i < npages; i++)
 		pages[i] = alloc_page(GFP_KERNEL);
 	vbuf = vmap(pages, npages, VM_MAP, PAGE_KERNEL);
@@ -350,7 +361,7 @@ static void test_init_vmalloc(struct kunit *test)
 	KUNIT_EXPECT_TRUE(test, report_matches(&expect));
 }
 
-/* Test case: ensure that use-after-free reporting works. */
+/* Test case: ensure that use-after-free reporting works for kmalloc. */
 static void test_uaf(struct kunit *test)
 {
 	EXPECTATION_USE_AFTER_FREE(expect);
@@ -364,6 +375,65 @@ static void test_uaf(struct kunit *test)
 	/* Copy the invalid value before checking it. */
 	value = var[3];
 	USE(value);
+	KUNIT_EXPECT_TRUE(test, report_matches(&expect));
+}
+
+static void test_uninit_page(struct kunit *test)
+{
+	EXPECTATION_UNINIT_VALUE(expect);
+	struct page *page;
+	int *ptr;
+
+	kunit_info(test, "uninitialized page allocation (UMR report)\n");
+	page = alloc_pages(GFP_KERNEL, 0);
+	ptr = page_address(page);
+	USE(*ptr);
+	__free_pages(page, 0);
+	KUNIT_EXPECT_TRUE(test, report_matches(&expect));
+}
+
+static volatile char *test_uaf_pages_helper(int order, int offset)
+{
+	struct page *page;
+	volatile char *var;
+
+	/* Memory is initialized up until __free_pages() thanks to __GFP_ZERO. */
+	page = alloc_pages(GFP_KERNEL | __GFP_ZERO, order);
+	var = page_address(page) + offset;
+	__free_pages(page, order);
+
+	return var;
+}
+
+/* Test case: ensure that use-after-free reporting works for a freed page. */
+static void test_uaf_pages(struct kunit *test)
+{
+	EXPECTATION_USE_AFTER_FREE(expect);
+	volatile char value;
+
+	kunit_info(test, "use-after-free on a freed page (UMR report)\n");
+	/* Allocate a single page, free it, then try to access it. */
+	value = *test_uaf_pages_helper(0, 3);
+	USE(value);
+
+	KUNIT_EXPECT_TRUE(test, report_matches(&expect));
+}
+
+/* Test case: ensure that UAF reporting works for high order pages. */
+static void test_uaf_high_order_pages(struct kunit *test)
+{
+	EXPECTATION_USE_AFTER_FREE(expect);
+	volatile char value;
+
+	kunit_info(test,
+		   "use-after-free on a freed high-order page (UMR report)\n");
+	/*
+	 * Create a high-order non-compound page, free it, then try to access
+	 * its tail page.
+	 */
+	value = *test_uaf_pages_helper(1, PAGE_SIZE + 3);
+	USE(value);
+
 	KUNIT_EXPECT_TRUE(test, report_matches(&expect));
 }
 
@@ -407,33 +477,25 @@ static void test_printk(struct kunit *test)
 	KUNIT_EXPECT_TRUE(test, report_matches(&expect));
 }
 
-/*
- * Prevent the compiler from optimizing @var away. Without this, Clang may
- * notice that @var is uninitialized and drop memcpy() calls that use it.
- *
- * There is OPTIMIZER_HIDE_VAR() in linux/compier.h that we cannot use here,
- * because it is implemented as inline assembly receiving @var as a parameter
- * and will enforce a KMSAN check. Same is true for e.g. barrier_data(var).
- */
-#define DO_NOT_OPTIMIZE(var) barrier()
+/* Prevent the compiler from inlining a memcpy() call. */
+static noinline void *memcpy_noinline(volatile void *dst,
+				      const volatile void *src, size_t size)
+{
+	return memcpy((void *)dst, (const void *)src, size);
+}
 
-/*
- * Test case: ensure that memcpy() correctly copies initialized values.
- * Also serves as a regression test to ensure DO_NOT_OPTIMIZE() does not cause
- * extra checks.
- */
+/* Test case: ensure that memcpy() correctly copies initialized values. */
 static void test_init_memcpy(struct kunit *test)
 {
 	EXPECTATION_NO_REPORT(expect);
-	volatile int src;
-	volatile int dst = 0;
+	volatile long long src;
+	volatile long long dst = 0;
 
-	DO_NOT_OPTIMIZE(src);
 	src = 1;
 	kunit_info(
 		test,
 		"memcpy()ing aligned initialized src to aligned dst (no reports)\n");
-	memcpy((void *)&dst, (void *)&src, sizeof(src));
+	memcpy_noinline((void *)&dst, (void *)&src, sizeof(src));
 	kmsan_check_memory((void *)&dst, sizeof(dst));
 	KUNIT_EXPECT_TRUE(test, report_matches(&expect));
 }
@@ -451,8 +513,7 @@ static void test_memcpy_aligned_to_aligned(struct kunit *test)
 	kunit_info(
 		test,
 		"memcpy()ing aligned uninit src to aligned dst (UMR report)\n");
-	DO_NOT_OPTIMIZE(uninit_src);
-	memcpy((void *)&dst, (void *)&uninit_src, sizeof(uninit_src));
+	memcpy_noinline((void *)&dst, (void *)&uninit_src, sizeof(uninit_src));
 	kmsan_check_memory((void *)&dst, sizeof(dst));
 	KUNIT_EXPECT_TRUE(test, report_matches(&expect));
 }
@@ -463,7 +524,7 @@ static void test_memcpy_aligned_to_aligned(struct kunit *test)
  *
  * Copying aligned 4-byte value to an unaligned one leads to touching two
  * aligned 4-byte values. This test case checks that KMSAN correctly reports an
- * error on the first of the two values.
+ * error on the mentioned two values.
  */
 static void test_memcpy_aligned_to_unaligned(struct kunit *test)
 {
@@ -474,33 +535,65 @@ static void test_memcpy_aligned_to_unaligned(struct kunit *test)
 	kunit_info(
 		test,
 		"memcpy()ing aligned uninit src to unaligned dst (UMR report)\n");
-	DO_NOT_OPTIMIZE(uninit_src);
-	memcpy((void *)&dst[1], (void *)&uninit_src, sizeof(uninit_src));
+	kmsan_check_memory((void *)&uninit_src, sizeof(uninit_src));
+	memcpy_noinline((void *)&dst[1], (void *)&uninit_src,
+			sizeof(uninit_src));
 	kmsan_check_memory((void *)dst, 4);
+	KUNIT_EXPECT_TRUE(test, report_matches(&expect));
+	report_reset();
+	kmsan_check_memory((void *)&dst[4], sizeof(uninit_src));
 	KUNIT_EXPECT_TRUE(test, report_matches(&expect));
 }
 
 /*
- * Test case: ensure that memcpy() correctly copies uninitialized values between
- * aligned `src` and unaligned `dst`.
+ * Test case: ensure that origin slots do not accidentally get overwritten with
+ * zeroes during memcpy().
  *
- * Copying aligned 4-byte value to an unaligned one leads to touching two
- * aligned 4-byte values. This test case checks that KMSAN correctly reports an
- * error on the second of the two values.
+ * Previously, when copying memory from an aligned buffer to an unaligned one,
+ * if there were zero origins corresponding to zero shadow values in the source
+ * buffer, they could have ended up being copied to nonzero shadow values in the
+ * destination buffer:
+ *
+ *  memcpy(0xffff888080a00000, 0xffff888080900002, 8)
+ *
+ *  src (0xffff888080900002): ..xx .... xx..
+ *  src origins:              o111 0000 o222
+ *  dst (0xffff888080a00000): xx.. ..xx
+ *  dst origins:              o111 0000
+ *                        (or 0000 o222)
+ *
+ * (here . stands for an initialized byte, and x for an uninitialized one.
+ *
+ * Ensure that this does not happen anymore, and for both destination bytes
+ * the origin is nonzero (i.e. KMSAN reports an error).
  */
-static void test_memcpy_aligned_to_unaligned2(struct kunit *test)
+static void test_memcpy_initialized_gap(struct kunit *test)
 {
-	EXPECTATION_UNINIT_VALUE_FN(expect,
-				    "test_memcpy_aligned_to_unaligned2");
-	volatile int uninit_src;
+	EXPECTATION_UNINIT_VALUE_FN(expect, "test_memcpy_initialized_gap");
+	volatile char uninit_src[12];
 	volatile char dst[8] = { 0 };
 
 	kunit_info(
 		test,
-		"memcpy()ing aligned uninit src to unaligned dst - part 2 (UMR report)\n");
-	DO_NOT_OPTIMIZE(uninit_src);
-	memcpy((void *)&dst[1], (void *)&uninit_src, sizeof(uninit_src));
-	kmsan_check_memory((void *)&dst[4], sizeof(uninit_src));
+		"unaligned 4-byte initialized value gets a nonzero origin after memcpy() - (2 UMR reports)\n");
+
+	uninit_src[0] = 42;
+	uninit_src[1] = 42;
+	uninit_src[4] = 42;
+	uninit_src[5] = 42;
+	uninit_src[6] = 42;
+	uninit_src[7] = 42;
+	uninit_src[10] = 42;
+	uninit_src[11] = 42;
+	memcpy_noinline((void *)&dst[0], (void *)&uninit_src[2], 8);
+
+	kmsan_check_memory((void *)&dst[0], 4);
+	KUNIT_EXPECT_TRUE(test, report_matches(&expect));
+	report_reset();
+	kmsan_check_memory((void *)&dst[2], 4);
+	KUNIT_EXPECT_FALSE(test, report_matches(&expect));
+	report_reset();
+	kmsan_check_memory((void *)&dst[4], 4);
 	KUNIT_EXPECT_TRUE(test, report_matches(&expect));
 }
 
@@ -513,7 +606,6 @@ static void test_memcpy_aligned_to_unaligned2(struct kunit *test)
                                                                             \
 		kunit_info(test,                                            \
 			   "memset" #size "() should initialize memory\n"); \
-		DO_NOT_OPTIMIZE(uninit);                                    \
 		memset##size((uint##size##_t *)&uninit, 0, 1);              \
 		kmsan_check_memory((void *)&uninit, sizeof(uninit));        \
 		KUNIT_EXPECT_TRUE(test, report_matches(&expect));           \
@@ -522,6 +614,21 @@ static void test_memcpy_aligned_to_unaligned2(struct kunit *test)
 DEFINE_TEST_MEMSETXX(16)
 DEFINE_TEST_MEMSETXX(32)
 DEFINE_TEST_MEMSETXX(64)
+
+/* Test case: ensure that KMSAN does not access shadow memory out of bounds. */
+static void test_memset_on_guarded_buffer(struct kunit *test)
+{
+	void *buf = vmalloc(PAGE_SIZE);
+
+	kunit_info(test,
+		   "memset() on ends of guarded buffer should not crash\n");
+
+	for (size_t size = 0; size <= 128; size++) {
+		memset(buf, 0xff, size);
+		memset(buf + PAGE_SIZE - size, 0xff, size);
+	}
+	vfree(buf);
+}
 
 static noinline void fibonacci(int *array, int size, int start)
 {
@@ -581,6 +688,48 @@ static void test_stackdepot_roundtrip(struct kunit *test)
 	KUNIT_EXPECT_TRUE(test, report_matches(&expect));
 }
 
+/*
+ * Test case: ensure that kmsan_unpoison_memory() and the instrumentation work
+ * the same.
+ */
+static void test_unpoison_memory(struct kunit *test)
+{
+	EXPECTATION_UNINIT_VALUE_FN(expect, "test_unpoison_memory");
+	volatile char a[4], b[4];
+
+	kunit_info(
+		test,
+		"unpoisoning via the instrumentation vs. kmsan_unpoison_memory() (2 UMR reports)\n");
+
+	/* Initialize a[0] and check a[1]--a[3]. */
+	a[0] = 0;
+	kmsan_check_memory((char *)&a[1], 3);
+	KUNIT_EXPECT_TRUE(test, report_matches(&expect));
+
+	report_reset();
+
+	/* Initialize b[0] and check b[1]--b[3]. */
+	kmsan_unpoison_memory((char *)&b[0], 1);
+	kmsan_check_memory((char *)&b[1], 3);
+	KUNIT_EXPECT_TRUE(test, report_matches(&expect));
+}
+
+static void test_copy_from_kernel_nofault(struct kunit *test)
+{
+	long ret;
+	char buf[4], src[4];
+	size_t size = sizeof(buf);
+
+	EXPECTATION_UNINIT_VALUE_FN(expect, "copy_from_kernel_nofault");
+	kunit_info(
+		test,
+		"testing copy_from_kernel_nofault with uninitialized memory\n");
+
+	ret = copy_from_kernel_nofault((char *)&buf[0], (char *)&src[0], size);
+	USE(ret);
+	KUNIT_EXPECT_TRUE(test, report_matches(&expect));
+}
+
 static struct kunit_case kmsan_test_cases[] = {
 	KUNIT_CASE(test_uninit_kmalloc),
 	KUNIT_CASE(test_init_kmalloc),
@@ -592,18 +741,24 @@ static struct kunit_case kmsan_test_cases[] = {
 	KUNIT_CASE(test_uninit_kmsan_check_memory),
 	KUNIT_CASE(test_init_kmsan_vmap_vunmap),
 	KUNIT_CASE(test_init_vmalloc),
+	KUNIT_CASE(test_uninit_page),
 	KUNIT_CASE(test_uaf),
+	KUNIT_CASE(test_uaf_pages),
+	KUNIT_CASE(test_uaf_high_order_pages),
 	KUNIT_CASE(test_percpu_propagate),
 	KUNIT_CASE(test_printk),
 	KUNIT_CASE(test_init_memcpy),
 	KUNIT_CASE(test_memcpy_aligned_to_aligned),
 	KUNIT_CASE(test_memcpy_aligned_to_unaligned),
-	KUNIT_CASE(test_memcpy_aligned_to_unaligned2),
+	KUNIT_CASE(test_memcpy_initialized_gap),
 	KUNIT_CASE(test_memset16),
 	KUNIT_CASE(test_memset32),
 	KUNIT_CASE(test_memset64),
+	KUNIT_CASE(test_memset_on_guarded_buffer),
 	KUNIT_CASE(test_long_origin_chain),
 	KUNIT_CASE(test_stackdepot_roundtrip),
+	KUNIT_CASE(test_unpoison_memory),
+	KUNIT_CASE(test_copy_from_kernel_nofault),
 	{},
 };
 
@@ -626,9 +781,13 @@ static void test_exit(struct kunit *test)
 {
 }
 
+static int orig_panic_on_kmsan;
+
 static int kmsan_suite_init(struct kunit_suite *suite)
 {
 	register_trace_console(probe_console, NULL);
+	orig_panic_on_kmsan = panic_on_kmsan;
+	panic_on_kmsan = 0;
 	return 0;
 }
 
@@ -636,6 +795,7 @@ static void kmsan_suite_exit(struct kunit_suite *suite)
 {
 	unregister_trace_console(probe_console, NULL);
 	tracepoint_synchronize_unregister();
+	panic_on_kmsan = orig_panic_on_kmsan;
 }
 
 static struct kunit_suite kmsan_test_suite = {
@@ -650,3 +810,4 @@ kunit_test_suites(&kmsan_test_suite);
 
 MODULE_LICENSE("GPL");
 MODULE_AUTHOR("Alexander Potapenko <glider@google.com>");
+MODULE_DESCRIPTION("Test cases for KMSAN");

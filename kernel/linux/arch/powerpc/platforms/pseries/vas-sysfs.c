@@ -10,6 +10,7 @@
 #include <linux/miscdevice.h>
 #include <linux/kobject.h>
 #include <linux/slab.h>
+#include <linux/sysfs.h>
 #include <linux/mm.h>
 
 #include "vas.h"
@@ -58,7 +59,7 @@ static ssize_t update_total_credits_store(struct vas_cop_feat_caps *caps,
 #define sysfs_caps_entry_read(_name)					\
 static ssize_t _name##_show(struct vas_cop_feat_caps *caps, char *buf) 	\
 {									\
-	return sprintf(buf, "%d\n", atomic_read(&caps->_name));	\
+	return sysfs_emit(buf, "%d\n", atomic_read(&caps->_name));	\
 }
 
 struct vas_sysfs_entry {
@@ -162,13 +163,13 @@ static const struct sysfs_ops vas_sysfs_ops = {
 	.store	=	vas_type_store,
 };
 
-static struct kobj_type vas_def_attr_type = {
+static const struct kobj_type vas_def_attr_type = {
 		.release	=	vas_type_release,
 		.sysfs_ops      =       &vas_sysfs_ops,
 		.default_groups	=	vas_def_capab_groups,
 };
 
-static struct kobj_type vas_qos_attr_type = {
+static const struct kobj_type vas_qos_attr_type = {
 		.release	=	vas_type_release,
 		.sysfs_ops	=	&vas_sysfs_ops,
 		.default_groups	=	vas_qos_capab_groups,
@@ -202,7 +203,7 @@ int sysfs_add_vas_caps(struct vas_cop_feat_caps *caps)
 	int ret = 0;
 	char *name;
 
-	centry = kzalloc(sizeof(*centry), GFP_KERNEL);
+	centry = kzalloc_obj(*centry);
 	if (!centry)
 		return -ENOMEM;
 

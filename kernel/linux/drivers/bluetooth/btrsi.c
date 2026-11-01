@@ -1,23 +1,13 @@
+// SPDX-License-Identifier: ISC
 /*
  * Copyright (c) 2017 Redpine Signals Inc.
  *
- * Permission to use, copy, modify, and/or distribute this software for any
- * purpose with or without fee is hereby granted, provided that the above
- * copyright notice and this permission notice appear in all copies.
- *
- * THE SOFTWARE IS PROVIDED "AS IS" AND THE AUTHOR DISCLAIMS ALL WARRANTIES
- * WITH REGARD TO THIS SOFTWARE INCLUDING ALL IMPLIED WARRANTIES OF
- * MERCHANTABILITY AND FITNESS. IN NO EVENT SHALL THE AUTHOR BE LIABLE FOR
- * ANY SPECIAL, DIRECT, INDIRECT, OR CONSEQUENTIAL DAMAGES OR ANY DAMAGES
- * WHATSOEVER RESULTING FROM LOSS OF USE, DATA OR PROFITS, WHETHER IN AN
- * ACTION OF CONTRACT, NEGLIGENCE OR OTHER TORTIOUS ACTION, ARISING OUT OF
- * OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
  */
 #include <linux/module.h>
 #include <linux/kernel.h>
 #include <net/bluetooth/bluetooth.h>
 #include <net/bluetooth/hci_core.h>
-#include <asm/unaligned.h>
+#include <linux/unaligned.h>
 #include <net/rsi_91x.h>
 
 #define RSI_DMA_ALIGN	8
@@ -112,12 +102,11 @@ static int rsi_hci_attach(void *priv, struct rsi_proto_ops *ops)
 	struct hci_dev *hdev;
 	int err = 0;
 
-	h_adapter = kzalloc(sizeof(*h_adapter), GFP_KERNEL);
+	h_adapter = kzalloc_obj(*h_adapter);
 	if (!h_adapter)
 		return -ENOMEM;
 
 	h_adapter->priv = priv;
-	ops->set_bt_context(priv, h_adapter);
 	h_adapter->proto_ops = ops;
 
 	hdev = hci_alloc_dev();
@@ -134,7 +123,6 @@ static int rsi_hci_attach(void *priv, struct rsi_proto_ops *ops)
 		hdev->bus = HCI_USB;
 
 	hci_set_drvdata(hdev, h_adapter);
-	hdev->dev_type = HCI_PRIMARY;
 	hdev->open = rsi_hci_open;
 	hdev->close = rsi_hci_close;
 	hdev->flush = rsi_hci_flush;
@@ -146,6 +134,8 @@ static int rsi_hci_attach(void *priv, struct rsi_proto_ops *ops)
 		hci_free_dev(hdev);
 		goto err;
 	}
+
+	ops->set_bt_context(priv, h_adapter);
 
 	return 0;
 err:

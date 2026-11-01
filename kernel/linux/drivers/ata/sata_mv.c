@@ -672,8 +672,8 @@ static const struct scsi_host_template mv6_sht = {
 	.dma_boundary		= MV_DMA_BOUNDARY,
 	.sdev_groups		= ata_ncq_sdev_groups,
 	.change_queue_depth	= ata_scsi_change_queue_depth,
-	.tag_alloc_policy	= BLK_TAG_ALLOC_RR,
-	.slave_configure	= ata_scsi_slave_config
+	.tag_alloc_policy_rr	= true,
+	.sdev_configure		= ata_scsi_sdev_configure
 };
 
 static struct ata_port_operations mv5_ops = {
@@ -687,7 +687,7 @@ static struct ata_port_operations mv5_ops = {
 
 	.freeze			= mv_eh_freeze,
 	.thaw			= mv_eh_thaw,
-	.hardreset		= mv_hardreset,
+	.reset.hardreset	= mv_hardreset,
 
 	.scr_read		= mv5_scr_read,
 	.scr_write		= mv5_scr_write,
@@ -709,10 +709,10 @@ static struct ata_port_operations mv6_ops = {
 
 	.freeze			= mv_eh_freeze,
 	.thaw			= mv_eh_thaw,
-	.hardreset		= mv_hardreset,
-	.softreset		= mv_softreset,
-	.pmp_hardreset		= mv_pmp_hardreset,
-	.pmp_softreset		= mv_softreset,
+	.reset.hardreset	= mv_hardreset,
+	.reset.softreset	= mv_softreset,
+	.pmp_reset.hardreset	= mv_pmp_hardreset,
+	.pmp_reset.softreset	= mv_softreset,
 	.error_handler		= mv_pmp_error_handler,
 
 	.scr_read		= mv_scr_read,
@@ -785,37 +785,6 @@ static const struct ata_port_info mv_port_info[] = {
 		.udma_mask	= ATA_UDMA6,
 		.port_ops	= &mv_iie_ops,
 	},
-};
-
-static const struct pci_device_id mv_pci_tbl[] = {
-	{ PCI_VDEVICE(MARVELL, 0x5040), chip_504x },
-	{ PCI_VDEVICE(MARVELL, 0x5041), chip_504x },
-	{ PCI_VDEVICE(MARVELL, 0x5080), chip_5080 },
-	{ PCI_VDEVICE(MARVELL, 0x5081), chip_508x },
-	/* RocketRAID 1720/174x have different identifiers */
-	{ PCI_VDEVICE(TTI, 0x1720), chip_6042 },
-	{ PCI_VDEVICE(TTI, 0x1740), chip_6042 },
-	{ PCI_VDEVICE(TTI, 0x1742), chip_6042 },
-
-	{ PCI_VDEVICE(MARVELL, 0x6040), chip_604x },
-	{ PCI_VDEVICE(MARVELL, 0x6041), chip_604x },
-	{ PCI_VDEVICE(MARVELL, 0x6042), chip_6042 },
-	{ PCI_VDEVICE(MARVELL, 0x6080), chip_608x },
-	{ PCI_VDEVICE(MARVELL, 0x6081), chip_608x },
-
-	{ PCI_VDEVICE(ADAPTEC2, 0x0241), chip_604x },
-
-	/* Adaptec 1430SA */
-	{ PCI_VDEVICE(ADAPTEC2, 0x0243), chip_7042 },
-
-	/* Marvell 7042 support */
-	{ PCI_VDEVICE(MARVELL, 0x7042), chip_7042 },
-
-	/* Highpoint RocketRAID PCIe series */
-	{ PCI_VDEVICE(TTI, 0x2300), chip_7042 },
-	{ PCI_VDEVICE(TTI, 0x2310), chip_7042 },
-
-	{ }			/* terminate list */
 };
 
 static const struct mv_hw_ops mv5xxx_ops = {
@@ -2429,6 +2398,7 @@ static struct ata_queued_cmd *mv_get_active_qc(struct ata_port *ap)
 }
 
 static void mv_pmp_error_handler(struct ata_port *ap)
+	__must_hold(&ap->host->eh_mutex)
 {
 	unsigned int pmp, pmp_map;
 	struct mv_port_priv *pp = ap->private_data;
@@ -4057,7 +4027,7 @@ static int mv_platform_probe(struct platform_device *pdev)
 	/*
 	 * Simple resource validation ..
 	 */
-	if (unlikely(pdev->num_resources != 1)) {
+	if (unlikely(pdev->num_resources != 1 && pdev->num_resources != 2)) {
 		dev_err(&pdev->dev, "invalid number of resources\n");
 		return -EINVAL;
 	}
@@ -4084,17 +4054,13 @@ static int mv_platform_probe(struct platform_device *pdev)
 				n_ports);
 			return -EINVAL;
 		}
-
-		irq = irq_of_parse_and_map(pdev->dev.of_node, 0);
 	} else {
 		mv_platform_data = dev_get_platdata(&pdev->dev);
 		n_ports = mv_platform_data->n_ports;
-		irq = platform_get_irq(pdev, 0);
 	}
+	irq = platform_get_irq(pdev, 0);
 	if (irq < 0)
 		return irq;
-	if (!irq)
-		return -EINVAL;
 
 	host = ata_host_alloc_pinfo(&pdev->dev, ppi, n_ports);
 	hpriv = devm_kzalloc(&pdev->dev, sizeof(*hpriv), GFP_KERNEL);
@@ -4122,18 +4088,19 @@ static int mv_platform_probe(struct platform_device *pdev)
 
 	hpriv->base -= SATAHC0_REG_BASE;
 
-	hpriv->clk = clk_get(&pdev->dev, NULL);
+	hpriv->clk = devm_clk_get_optional_enabled(&pdev->dev, NULL);
 	if (IS_ERR(hpriv->clk))
-		dev_notice(&pdev->dev, "cannot get optional clkdev\n");
-	else
-		clk_prepare_enable(hpriv->clk);
+		return PTR_ERR(hpriv->clk);
 
 	for (port = 0; port < n_ports; port++) {
 		char port_number[16];
 		sprintf(port_number, "%d", port);
-		hpriv->port_clks[port] = clk_get(&pdev->dev, port_number);
-		if (!IS_ERR(hpriv->port_clks[port]))
-			clk_prepare_enable(hpriv->port_clks[port]);
+		hpriv->port_clks[port] = devm_clk_get_optional_enabled(&pdev->dev, port_number);
+		if (IS_ERR(hpriv->port_clks[port])) {
+			rc = PTR_ERR(hpriv->port_clks[port]);
+			hpriv->n_ports = port;
+			goto err;
+		}
 
 		sprintf(port_number, "port%d", port);
 		hpriv->port_phys[port] = devm_phy_optional_get(&pdev->dev,
@@ -4147,8 +4114,8 @@ static int mv_platform_probe(struct platform_device *pdev)
 			/* Cleanup only the initialized ports */
 			hpriv->n_ports = port;
 			goto err;
-		} else
-			phy_power_on(hpriv->port_phys[port]);
+		}
+		phy_power_on(hpriv->port_phys[port]);
 	}
 
 	/* All the ports have been initialized */
@@ -4187,17 +4154,8 @@ static int mv_platform_probe(struct platform_device *pdev)
 		return 0;
 
 err:
-	if (!IS_ERR(hpriv->clk)) {
-		clk_disable_unprepare(hpriv->clk);
-		clk_put(hpriv->clk);
-	}
-	for (port = 0; port < hpriv->n_ports; port++) {
-		if (!IS_ERR(hpriv->port_clks[port])) {
-			clk_disable_unprepare(hpriv->port_clks[port]);
-			clk_put(hpriv->port_clks[port]);
-		}
+	for (port = 0; port < hpriv->n_ports; port++)
 		phy_power_off(hpriv->port_phys[port]);
-	}
 
 	return rc;
 }
@@ -4217,17 +4175,8 @@ static void mv_platform_remove(struct platform_device *pdev)
 	int port;
 	ata_host_detach(host);
 
-	if (!IS_ERR(hpriv->clk)) {
-		clk_disable_unprepare(hpriv->clk);
-		clk_put(hpriv->clk);
-	}
-	for (port = 0; port < host->n_ports; port++) {
-		if (!IS_ERR(hpriv->port_clks[port])) {
-			clk_disable_unprepare(hpriv->port_clks[port]);
-			clk_put(hpriv->port_clks[port]);
-		}
+	for (port = 0; port < host->n_ports; port++)
 		phy_power_off(hpriv->port_phys[port]);
-	}
 }
 
 #ifdef CONFIG_PM_SLEEP
@@ -4283,7 +4232,7 @@ MODULE_DEVICE_TABLE(of, mv_sata_dt_ids);
 
 static struct platform_driver mv_platform_driver = {
 	.probe		= mv_platform_probe,
-	.remove_new	= mv_platform_remove,
+	.remove		= mv_platform_remove,
 	.suspend	= mv_platform_suspend,
 	.resume		= mv_platform_resume,
 	.driver		= {
@@ -4300,6 +4249,36 @@ static int mv_pci_init_one(struct pci_dev *pdev,
 static int mv_pci_device_resume(struct pci_dev *pdev);
 #endif
 
+static const struct pci_device_id mv_pci_tbl[] = {
+	{ PCI_VDEVICE(MARVELL, 0x5040), .driver_data = chip_504x },
+	{ PCI_VDEVICE(MARVELL, 0x5041), .driver_data = chip_504x },
+	{ PCI_VDEVICE(MARVELL, 0x5080), .driver_data = chip_5080 },
+	{ PCI_VDEVICE(MARVELL, 0x5081), .driver_data = chip_508x },
+	/* RocketRAID 1720/174x have different identifiers */
+	{ PCI_VDEVICE(TTI, 0x1720), .driver_data = chip_6042 },
+	{ PCI_VDEVICE(TTI, 0x1740), .driver_data = chip_6042 },
+	{ PCI_VDEVICE(TTI, 0x1742), .driver_data = chip_6042 },
+
+	{ PCI_VDEVICE(MARVELL, 0x6040), .driver_data = chip_604x },
+	{ PCI_VDEVICE(MARVELL, 0x6041), .driver_data = chip_604x },
+	{ PCI_VDEVICE(MARVELL, 0x6042), .driver_data = chip_6042 },
+	{ PCI_VDEVICE(MARVELL, 0x6080), .driver_data = chip_608x },
+	{ PCI_VDEVICE(MARVELL, 0x6081), .driver_data = chip_608x },
+
+	{ PCI_VDEVICE(ADAPTEC2, 0x0241), .driver_data = chip_604x },
+
+	/* Adaptec 1430SA */
+	{ PCI_VDEVICE(ADAPTEC2, 0x0243), .driver_data = chip_7042 },
+
+	/* Marvell 7042 support */
+	{ PCI_VDEVICE(MARVELL, 0x7042), .driver_data = chip_7042 },
+
+	/* Highpoint RocketRAID PCIe series */
+	{ PCI_VDEVICE(TTI, 0x2300), .driver_data = chip_7042 },
+	{ PCI_VDEVICE(TTI, 0x2310), .driver_data = chip_7042 },
+
+	{ }			/* terminate list */
+};
 
 static struct pci_driver mv_pci_driver = {
 	.name			= DRV_NAME,
@@ -4312,6 +4291,7 @@ static struct pci_driver mv_pci_driver = {
 #endif
 
 };
+MODULE_DEVICE_TABLE(pci, mv_pci_tbl);
 
 /**
  *      mv_print_info - Dump key info to kernel log for perusal.
@@ -4484,7 +4464,6 @@ static void __exit mv_exit(void)
 MODULE_AUTHOR("Brett Russ");
 MODULE_DESCRIPTION("SCSI low-level driver for Marvell SATA controllers");
 MODULE_LICENSE("GPL v2");
-MODULE_DEVICE_TABLE(pci, mv_pci_tbl);
 MODULE_VERSION(DRV_VERSION);
 MODULE_ALIAS("platform:" DRV_NAME);
 

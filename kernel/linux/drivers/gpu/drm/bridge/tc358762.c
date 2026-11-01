@@ -12,7 +12,6 @@
 
 #include <linux/delay.h>
 #include <linux/gpio/consumer.h>
-#include <linux/mod_devicetable.h>
 #include <linux/module.h>
 #include <linux/of_graph.h>
 #include <linux/regulator/consumer.h>
@@ -20,10 +19,10 @@
 #include <video/mipi_display.h>
 
 #include <drm/drm_atomic_helper.h>
+#include <drm/drm_bridge.h>
 #include <drm/drm_crtc.h>
 #include <drm/drm_mipi_dsi.h>
 #include <drm/drm_of.h>
-#include <drm/drm_panel.h>
 #include <drm/drm_print.h>
 #include <drm/drm_probe_helper.h>
 
@@ -149,7 +148,8 @@ static int tc358762_init(struct tc358762 *ctx)
 	return tc358762_clear_error(ctx);
 }
 
-static void tc358762_post_disable(struct drm_bridge *bridge, struct drm_bridge_state *state)
+static void tc358762_post_disable(struct drm_bridge *bridge,
+				  struct drm_atomic_commit *state)
 {
 	struct tc358762 *ctx = bridge_to_tc358762(bridge);
 	int ret;
@@ -171,7 +171,8 @@ static void tc358762_post_disable(struct drm_bridge *bridge, struct drm_bridge_s
 		dev_err(ctx->dev, "error disabling regulators (%d)\n", ret);
 }
 
-static void tc358762_pre_enable(struct drm_bridge *bridge, struct drm_bridge_state *state)
+static void tc358762_pre_enable(struct drm_bridge *bridge,
+				struct drm_atomic_commit *state)
 {
 	struct tc358762 *ctx = bridge_to_tc358762(bridge);
 	int ret;
@@ -188,7 +189,8 @@ static void tc358762_pre_enable(struct drm_bridge *bridge, struct drm_bridge_sta
 	ctx->pre_enabled = true;
 }
 
-static void tc358762_enable(struct drm_bridge *bridge, struct drm_bridge_state *state)
+static void tc358762_enable(struct drm_bridge *bridge,
+			    struct drm_atomic_commit *state)
 {
 	struct tc358762 *ctx = bridge_to_tc358762(bridge);
 	int ret;
@@ -199,11 +201,12 @@ static void tc358762_enable(struct drm_bridge *bridge, struct drm_bridge_state *
 }
 
 static int tc358762_attach(struct drm_bridge *bridge,
+			   struct drm_encoder *encoder,
 			   enum drm_bridge_attach_flags flags)
 {
 	struct tc358762 *ctx = bridge_to_tc358762(bridge);
 
-	return drm_bridge_attach(bridge->encoder, ctx->panel_bridge,
+	return drm_bridge_attach(encoder, ctx->panel_bridge,
 				 bridge, flags);
 }
 
@@ -222,7 +225,7 @@ static const struct drm_bridge_funcs tc358762_bridge_funcs = {
 	.atomic_enable = tc358762_enable,
 	.atomic_duplicate_state = drm_atomic_helper_bridge_duplicate_state,
 	.atomic_destroy_state = drm_atomic_helper_bridge_destroy_state,
-	.atomic_reset = drm_atomic_helper_bridge_reset,
+	.atomic_create_state = drm_atomic_helper_bridge_create_state,
 	.attach = tc358762_attach,
 	.mode_set = tc358762_bridge_mode_set,
 };
@@ -261,9 +264,10 @@ static int tc358762_probe(struct mipi_dsi_device *dsi)
 	struct tc358762 *ctx;
 	int ret;
 
-	ctx = devm_kzalloc(dev, sizeof(struct tc358762), GFP_KERNEL);
-	if (!ctx)
-		return -ENOMEM;
+	ctx = devm_drm_bridge_alloc(dev, struct tc358762, bridge,
+				    &tc358762_bridge_funcs);
+	if (IS_ERR(ctx))
+		return PTR_ERR(ctx);
 
 	mipi_dsi_set_drvdata(dsi, ctx);
 
@@ -284,28 +288,19 @@ static int tc358762_probe(struct mipi_dsi_device *dsi)
 	if (ret < 0)
 		return ret;
 
-	ctx->bridge.funcs = &tc358762_bridge_funcs;
 	ctx->bridge.type = DRM_MODE_CONNECTOR_DPI;
 	ctx->bridge.of_node = dev->of_node;
 	ctx->bridge.pre_enable_prev_first = true;
 
-	drm_bridge_add(&ctx->bridge);
+	ret = devm_drm_bridge_add(dev, &ctx->bridge);
+	if (ret < 0)
+		return ret;
 
-	ret = mipi_dsi_attach(dsi);
-	if (ret < 0) {
-		drm_bridge_remove(&ctx->bridge);
+	ret = devm_mipi_dsi_attach(dev, dsi);
+	if (ret < 0)
 		dev_err(dev, "failed to attach dsi\n");
-	}
 
 	return ret;
-}
-
-static void tc358762_remove(struct mipi_dsi_device *dsi)
-{
-	struct tc358762 *ctx = mipi_dsi_get_drvdata(dsi);
-
-	mipi_dsi_detach(dsi);
-	drm_bridge_remove(&ctx->bridge);
 }
 
 static const struct of_device_id tc358762_of_match[] = {
@@ -316,7 +311,6 @@ MODULE_DEVICE_TABLE(of, tc358762_of_match);
 
 static struct mipi_dsi_driver tc358762_driver = {
 	.probe = tc358762_probe,
-	.remove = tc358762_remove,
 	.driver = {
 		.name = "tc358762",
 		.of_match_table = tc358762_of_match,

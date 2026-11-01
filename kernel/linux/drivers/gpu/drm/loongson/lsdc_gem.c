@@ -6,9 +6,11 @@
 #include <linux/dma-buf.h>
 
 #include <drm/drm_debugfs.h>
+#include <drm/drm_dumb_buffers.h>
 #include <drm/drm_file.h>
 #include <drm/drm_gem.h>
 #include <drm/drm_prime.h>
+#include <drm/drm_print.h>
 
 #include "lsdc_drv.h"
 #include "lsdc_gem.h"
@@ -19,15 +21,11 @@ static int lsdc_gem_prime_pin(struct drm_gem_object *obj)
 	struct lsdc_bo *lbo = gem_to_lsdc_bo(obj);
 	int ret;
 
-	ret = lsdc_bo_reserve(lbo);
-	if (unlikely(ret))
-		return ret;
+	dma_resv_assert_held(obj->resv);
 
 	ret = lsdc_bo_pin(lbo, LSDC_GEM_DOMAIN_GTT, NULL);
 	if (likely(ret == 0))
 		lbo->sharing_count++;
-
-	lsdc_bo_unreserve(lbo);
 
 	return ret;
 }
@@ -35,17 +33,12 @@ static int lsdc_gem_prime_pin(struct drm_gem_object *obj)
 static void lsdc_gem_prime_unpin(struct drm_gem_object *obj)
 {
 	struct lsdc_bo *lbo = gem_to_lsdc_bo(obj);
-	int ret;
 
-	ret = lsdc_bo_reserve(lbo);
-	if (unlikely(ret))
-		return;
+	dma_resv_assert_held(obj->resv);
 
 	lsdc_bo_unpin(lbo);
 	if (lbo->sharing_count)
 		lbo->sharing_count--;
-
-	lsdc_bo_unreserve(lbo);
 }
 
 static struct sg_table *lsdc_gem_prime_get_sg_table(struct drm_gem_object *obj)
@@ -66,7 +59,7 @@ static void lsdc_gem_object_free(struct drm_gem_object *obj)
 	struct ttm_buffer_object *tbo = to_ttm_bo(obj);
 
 	if (tbo)
-		ttm_bo_put(tbo);
+		ttm_bo_fini(tbo);
 }
 
 static int lsdc_gem_object_vmap(struct drm_gem_object *obj, struct iosys_map *map)
@@ -213,63 +206,34 @@ int lsdc_dumb_create(struct drm_file *file, struct drm_device *ddev,
 	const struct lsdc_desc *descp = ldev->descp;
 	u32 domain = LSDC_GEM_DOMAIN_VRAM;
 	struct drm_gem_object *gobj;
-	size_t size;
-	u32 pitch;
-	u32 handle;
 	int ret;
 
-	if (!args->width || !args->height)
-		return -EINVAL;
-
-	if (args->bpp != 32 && args->bpp != 16)
-		return -EINVAL;
-
-	pitch = args->width * args->bpp / 8;
-	pitch = ALIGN(pitch, descp->pitch_align);
-	size = pitch * args->height;
-	size = ALIGN(size, PAGE_SIZE);
+	ret = drm_mode_size_dumb(ddev, args, descp->pitch_align, 0);
+	if (ret)
+		return ret;
 
 	/* Maximum single bo size allowed is the half vram size available */
-	if (size > ldev->vram_size / 2) {
-		drm_err(ddev, "Requesting(%zuMiB) failed\n", size >> 20);
+	if (args->size > ldev->vram_size / 2) {
+		drm_err(ddev, "Requesting(%zuMiB) failed\n", (size_t)(args->size >> PAGE_SHIFT));
 		return -ENOMEM;
 	}
 
-	gobj = lsdc_gem_object_create(ddev, domain, size, false, NULL, NULL);
+	gobj = lsdc_gem_object_create(ddev, domain, args->size, false, NULL, NULL);
 	if (IS_ERR(gobj)) {
 		drm_err(ddev, "Failed to create gem object\n");
 		return PTR_ERR(gobj);
 	}
 
-	ret = drm_gem_handle_create(file, gobj, &handle);
+	ret = drm_gem_handle_create(file, gobj, &args->handle);
 
 	/* drop reference from allocate, handle holds it now */
 	drm_gem_object_put(gobj);
 	if (ret)
 		return ret;
 
-	args->pitch = pitch;
-	args->size = size;
-	args->handle = handle;
-
 	return 0;
 }
 
-int lsdc_dumb_map_offset(struct drm_file *filp, struct drm_device *ddev,
-			 u32 handle, uint64_t *offset)
-{
-	struct drm_gem_object *gobj;
-
-	gobj = drm_gem_object_lookup(filp, handle);
-	if (!gobj)
-		return -ENOENT;
-
-	*offset = drm_vma_node_offset_addr(&gobj->vma_node);
-
-	drm_gem_object_put(gobj);
-
-	return 0;
-}
 
 void lsdc_gem_init(struct drm_device *ddev)
 {

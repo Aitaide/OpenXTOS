@@ -11,10 +11,10 @@ ACPI Support
    dsd/graph
    dsd/data-node-references
    dsd/leds
+   dsd/motorcomm-yt8xxx-phy
    dsd/phy
    enumeration
    osi
-   method-customizing
    method-tracing
    DSD-properties-rules
    debug

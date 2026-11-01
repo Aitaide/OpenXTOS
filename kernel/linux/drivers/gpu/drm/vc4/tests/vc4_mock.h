@@ -21,13 +21,8 @@ struct drm_crtc *vc4_find_crtc_for_encoder(struct kunit *test,
 	return NULL;
 }
 
-struct vc4_dummy_plane {
-	struct vc4_plane plane;
-};
-
-struct vc4_dummy_plane *vc4_dummy_plane(struct kunit *test,
-					struct drm_device *drm,
-					enum drm_plane_type type);
+struct drm_plane *vc4_dummy_plane(struct kunit *test, struct drm_device *drm,
+				  enum drm_plane_type type);
 
 struct vc4_dummy_crtc {
 	struct vc4_crtc crtc;
@@ -57,10 +52,10 @@ struct vc4_dev *vc4_mock_device(struct kunit *test);
 struct vc4_dev *vc5_mock_device(struct kunit *test);
 
 int vc4_mock_atomic_add_output(struct kunit *test,
-			       struct drm_atomic_state *state,
+			       struct drm_atomic_commit *state,
 			       enum vc4_encoder_type type);
 int vc4_mock_atomic_del_output(struct kunit *test,
-			       struct drm_atomic_state *state,
+			       struct drm_atomic_commit *state,
 			       enum vc4_encoder_type type);
 
 #endif // VC4_MOCK_H_

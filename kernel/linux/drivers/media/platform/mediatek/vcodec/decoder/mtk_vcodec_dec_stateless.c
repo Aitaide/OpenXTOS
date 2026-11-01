@@ -58,6 +58,15 @@ static const struct mtk_stateless_control mtk_stateless_controls[] = {
 	},
 	{
 		.cfg = {
+			.id = V4L2_CID_MPEG_VIDEO_H264_LEVEL,
+			.min = V4L2_MPEG_VIDEO_H264_LEVEL_1_0,
+			.def = V4L2_MPEG_VIDEO_H264_LEVEL_4_1,
+			.max = V4L2_MPEG_VIDEO_H264_LEVEL_4_2,
+		},
+		.codec_type = V4L2_PIX_FMT_H264_SLICE,
+	},
+	{
+		.cfg = {
 			.id = V4L2_CID_STATELESS_H264_DECODE_MODE,
 			.min = V4L2_STATELESS_H264_DECODE_MODE_FRAME_BASED,
 			.def = V4L2_STATELESS_H264_DECODE_MODE_FRAME_BASED,
@@ -100,7 +109,17 @@ static const struct mtk_stateless_control mtk_stateless_controls[] = {
 			.id = V4L2_CID_MPEG_VIDEO_VP9_PROFILE,
 			.min = V4L2_MPEG_VIDEO_VP9_PROFILE_0,
 			.def = V4L2_MPEG_VIDEO_VP9_PROFILE_0,
-			.max = V4L2_MPEG_VIDEO_VP9_PROFILE_3,
+			.max = V4L2_MPEG_VIDEO_VP9_PROFILE_2,
+			.menu_skip_mask = BIT(V4L2_MPEG_VIDEO_VP9_PROFILE_1),
+		},
+		.codec_type = V4L2_PIX_FMT_VP9_FRAME,
+	},
+	{
+		.cfg = {
+			.id = V4L2_CID_MPEG_VIDEO_VP9_LEVEL,
+			.min = V4L2_MPEG_VIDEO_VP9_LEVEL_1_0,
+			.def = V4L2_MPEG_VIDEO_VP9_LEVEL_4_0,
+			.max = V4L2_MPEG_VIDEO_VP9_LEVEL_4_1,
 		},
 		.codec_type = V4L2_PIX_FMT_VP9_FRAME,
 	},
@@ -133,11 +152,19 @@ static const struct mtk_stateless_control mtk_stateless_controls[] = {
 			.id = V4L2_CID_MPEG_VIDEO_HEVC_PROFILE,
 			.def = V4L2_MPEG_VIDEO_HEVC_PROFILE_MAIN,
 			.max = V4L2_MPEG_VIDEO_HEVC_PROFILE_MAIN_10,
-			.menu_skip_mask =
-				BIT(V4L2_MPEG_VIDEO_HEVC_PROFILE_MAIN_STILL_PICTURE),
 		},
 		.codec_type = V4L2_PIX_FMT_HEVC_SLICE,
 	},
+	{
+		.cfg = {
+			.id = V4L2_CID_MPEG_VIDEO_HEVC_LEVEL,
+			.min = V4L2_MPEG_VIDEO_HEVC_LEVEL_1,
+			.def = V4L2_MPEG_VIDEO_HEVC_LEVEL_4,
+			.max = V4L2_MPEG_VIDEO_HEVC_LEVEL_4_1,
+		},
+		.codec_type = V4L2_PIX_FMT_HEVC_SLICE,
+	},
+
 	{
 		.cfg = {
 			.id = V4L2_CID_STATELESS_HEVC_DECODE_MODE,
@@ -215,10 +242,18 @@ static const struct v4l2_frmsize_stepwise stepwise_fhd = {
 	.step_height = 16
 };
 
-static void mtk_vdec_stateless_cap_to_disp(struct mtk_vcodec_dec_ctx *ctx, int error,
-					   struct media_request *src_buf_req)
+static void mtk_vcodec_dec_request_release(struct kref *ref)
 {
-	struct vb2_v4l2_buffer *vb2_dst;
+	struct mtk_vcodec_dec_request *req =
+		container_of(ref, struct mtk_vcodec_dec_request, refcount);
+	media_request_manual_complete(&req->req);
+}
+
+static void mtk_vdec_stateless_cap_to_disp(struct mtk_vcodec_dec_ctx *ctx, int error,
+					   struct media_request *mreq)
+{
+	struct mtk_vcodec_dec_request *req = req_to_dec_req(mreq);
+	struct vb2_v4l2_buffer *dst_buf;
 	enum vb2_buffer_state state;
 
 	if (error)
@@ -226,17 +261,9 @@ static void mtk_vdec_stateless_cap_to_disp(struct mtk_vcodec_dec_ctx *ctx, int e
 	else
 		state = VB2_BUF_STATE_DONE;
 
-	vb2_dst = v4l2_m2m_dst_buf_remove(ctx->m2m_ctx);
-	if (vb2_dst) {
-		v4l2_m2m_buf_done(vb2_dst, state);
-		mtk_v4l2_vdec_dbg(2, ctx, "free frame buffer id:%d to done list",
-				  vb2_dst->vb2_buf.index);
-	} else {
-		mtk_v4l2_vdec_err(ctx, "dst buffer is NULL");
-	}
-
-	if (src_buf_req)
-		v4l2_ctrl_request_complete(src_buf_req, &ctx->ctrl_hdl);
+	dst_buf = v4l2_m2m_dst_buf_remove(ctx->m2m_ctx);
+	v4l2_m2m_buf_done(dst_buf, state);
+	kref_put(&req->refcount, mtk_vcodec_dec_request_release);
 }
 
 static struct vdec_fb *vdec_get_cap_buffer(struct mtk_vcodec_dec_ctx *ctx)
@@ -279,6 +306,7 @@ static void vb2ops_vdec_buf_request_complete(struct vb2_buffer *vb)
 	struct mtk_vcodec_dec_ctx *ctx = vb2_get_drv_priv(vb->vb2_queue);
 
 	v4l2_ctrl_request_complete(vb->req_obj.req, &ctx->ctrl_hdl);
+	media_request_manual_complete(vb->req_obj.req);
 }
 
 static void mtk_vdec_worker(struct work_struct *work)
@@ -290,8 +318,9 @@ static void mtk_vdec_worker(struct work_struct *work)
 	struct vb2_buffer *vb2_src;
 	struct mtk_vcodec_mem *bs_src;
 	struct mtk_video_dec_buf *dec_buf_src;
-	struct media_request *src_buf_req;
-	enum vb2_buffer_state state;
+	struct media_request *mreq;
+	struct mtk_vcodec_dec_request *req;
+	enum vb2_buffer_state buf_state;
 	bool res_chg = false;
 	int ret;
 
@@ -323,14 +352,26 @@ static void mtk_vdec_worker(struct work_struct *work)
 	mtk_v4l2_vdec_dbg(3, ctx, "[%d] Bitstream VA=%p DMA=%pad Size=%zx vb=%p",
 			  ctx->id, bs_src->va, &bs_src->dma_addr, bs_src->size, vb2_src);
 	/* Apply request controls. */
-	src_buf_req = vb2_src->req_obj.req;
-	if (src_buf_req)
-		v4l2_ctrl_request_setup(src_buf_req, &ctx->ctrl_hdl);
-	else
+	mreq = vb2_src->req_obj.req;
+	if (WARN_ON(!mreq)) {
+		v4l2_m2m_job_finish(dev->m2m_dev_dec, ctx->m2m_ctx);
 		mtk_v4l2_vdec_err(ctx, "vb2 buffer media request is NULL");
+		return;
+	}
+
+	v4l2_ctrl_request_setup(mreq, &ctx->ctrl_hdl);
+
+	/* Keep a reference so that if the processing completes before this function
+	 * ends, we won't accidently update a freshly queued request.
+	 */
+	req = req_to_dec_req(mreq);
+	kref_get(&req->refcount);
 
 	ret = vdec_if_decode(ctx, bs_src, NULL, &res_chg);
-	if (ret && ret != -EAGAIN) {
+	if (ret == -EAGAIN)
+		goto done;
+
+	if (ret) {
 		mtk_v4l2_vdec_err(ctx,
 				  "[%d] decode src_buf[%d] sz=0x%zx pts=%llu ret=%d res_chg=%d",
 				  ctx->id, vb2_src->index, bs_src->size,
@@ -340,21 +381,23 @@ static void mtk_vdec_worker(struct work_struct *work)
 			dec_buf_src->error = true;
 			mutex_unlock(&ctx->lock);
 		}
+
+		buf_state = VB2_BUF_STATE_ERROR;
+	} else {
+		buf_state = VB2_BUF_STATE_DONE;
 	}
 
-	state = ret ? VB2_BUF_STATE_ERROR : VB2_BUF_STATE_DONE;
-	if (!IS_VDEC_LAT_ARCH(dev->vdec_pdata->hw_arch) ||
-	    ctx->current_codec == V4L2_PIX_FMT_VP8_FRAME) {
-		v4l2_m2m_buf_done_and_job_finish(dev->m2m_dev_dec, ctx->m2m_ctx, state);
-		if (src_buf_req)
-			v4l2_ctrl_request_complete(src_buf_req, &ctx->ctrl_hdl);
-	} else {
-		if (ret != -EAGAIN) {
-			v4l2_m2m_src_buf_remove(ctx->m2m_ctx);
-			v4l2_m2m_buf_done(vb2_v4l2_src, state);
-		}
-		v4l2_m2m_job_finish(dev->m2m_dev_dec, ctx->m2m_ctx);
-	}
+	v4l2_ctrl_request_complete(mreq, &ctx->ctrl_hdl);
+	v4l2_m2m_src_buf_remove(ctx->m2m_ctx);
+	v4l2_m2m_buf_done(vb2_v4l2_src, buf_state);
+
+	if (ret || !IS_VDEC_LAT_ARCH(dev->vdec_pdata->hw_arch) ||
+	    ctx->current_codec == V4L2_PIX_FMT_VP8_FRAME)
+		mtk_vdec_stateless_cap_to_disp(ctx, ret, mreq);
+
+done:
+	kref_put(&req->refcount, mtk_vcodec_dec_request_release);
+	v4l2_m2m_job_finish(dev->m2m_dev_dec, ctx->m2m_ctx);
 }
 
 static void vb2ops_vdec_stateless_buf_queue(struct vb2_buffer *vb)
@@ -475,6 +518,12 @@ static int mtk_vdec_s_ctrl(struct v4l2_ctrl *ctrl)
 			mtk_v4l2_vdec_err(ctx, "VP9: bit_depth:%d", frame->bit_depth);
 			return -EINVAL;
 		}
+
+		if (!(frame->flags & V4L2_VP9_FRAME_FLAG_X_SUBSAMPLING) ||
+		    !(frame->flags & V4L2_VP9_FRAME_FLAG_Y_SUBSAMPLING)) {
+			mtk_v4l2_vdec_err(ctx, "VP9: only 420 subsampling is supported");
+			return -EINVAL;
+		}
 		break;
 	case V4L2_CID_STATELESS_AV1_SEQUENCE:
 		seq = (struct v4l2_ctrl_av1_sequence *)hdr_ctrl->p_new.p;
@@ -519,6 +568,141 @@ static const struct v4l2_ctrl_ops mtk_vcodec_dec_ctrl_ops = {
 	.s_ctrl = mtk_vdec_s_ctrl,
 };
 
+static void mtk_vcodec_dec_fill_h264_level(struct v4l2_ctrl_config *cfg,
+					   struct mtk_vcodec_dec_ctx *ctx)
+{
+	switch (ctx->dev->chip_name) {
+	case MTK_VDEC_MT8192:
+	case MTK_VDEC_MT8188:
+		cfg->max = V4L2_MPEG_VIDEO_H264_LEVEL_5_2;
+		break;
+	case MTK_VDEC_MT8195:
+		cfg->max = V4L2_MPEG_VIDEO_H264_LEVEL_6_0;
+		break;
+	case MTK_VDEC_MT8183:
+	case MTK_VDEC_MT8186:
+		cfg->max = V4L2_MPEG_VIDEO_H264_LEVEL_4_2;
+		break;
+	default:
+		cfg->max = V4L2_MPEG_VIDEO_H264_LEVEL_4_1;
+		break;
+	}
+}
+
+static void mtk_vcodec_dec_fill_h264_profile(struct v4l2_ctrl_config *cfg,
+					     struct mtk_vcodec_dec_ctx *ctx)
+{
+	switch (ctx->dev->chip_name) {
+	case MTK_VDEC_MT8188:
+	case MTK_VDEC_MT8195:
+		cfg->max = V4L2_MPEG_VIDEO_H264_PROFILE_HIGH_10;
+		break;
+	default:
+		cfg->max = V4L2_MPEG_VIDEO_H264_PROFILE_HIGH;
+		break;
+	}
+}
+
+static void mtk_vcodec_dec_fill_h265_level(struct v4l2_ctrl_config *cfg,
+					   struct mtk_vcodec_dec_ctx *ctx)
+{
+	switch (ctx->dev->chip_name) {
+	case MTK_VDEC_MT8188:
+		cfg->max = V4L2_MPEG_VIDEO_HEVC_LEVEL_5_1;
+		break;
+	case MTK_VDEC_MT8195:
+		cfg->max = V4L2_MPEG_VIDEO_HEVC_LEVEL_5_2;
+		break;
+	default:
+		cfg->max = V4L2_MPEG_VIDEO_HEVC_LEVEL_4;
+		break;
+	}
+}
+
+static void mtk_vcodec_dec_fill_h265_profile(struct v4l2_ctrl_config *cfg,
+					     struct mtk_vcodec_dec_ctx *ctx)
+{
+	switch (ctx->dev->chip_name) {
+	case MTK_VDEC_MT8188:
+	case MTK_VDEC_MT8195:
+		cfg->max = V4L2_MPEG_VIDEO_HEVC_PROFILE_MAIN_10;
+		break;
+	default:
+		cfg->max = V4L2_MPEG_VIDEO_HEVC_PROFILE_MAIN_STILL_PICTURE;
+		break;
+	}
+}
+
+static void mtk_vcodec_dec_fill_vp9_level(struct v4l2_ctrl_config *cfg,
+					  struct mtk_vcodec_dec_ctx *ctx)
+{
+	switch (ctx->dev->chip_name) {
+	case MTK_VDEC_MT8192:
+	case MTK_VDEC_MT8188:
+		cfg->max = V4L2_MPEG_VIDEO_VP9_LEVEL_5_1;
+		break;
+	case MTK_VDEC_MT8195:
+		cfg->max = V4L2_MPEG_VIDEO_VP9_LEVEL_5_2;
+		break;
+	case MTK_VDEC_MT8186:
+		cfg->max = V4L2_MPEG_VIDEO_VP9_LEVEL_4_1;
+		break;
+	default:
+		cfg->max = V4L2_MPEG_VIDEO_VP9_LEVEL_4_0;
+		break;
+	}
+}
+
+static void mtk_vcodec_dec_fill_vp9_profile(struct v4l2_ctrl_config *cfg,
+					    struct mtk_vcodec_dec_ctx *ctx)
+{
+	switch (ctx->dev->chip_name) {
+	case MTK_VDEC_MT8188:
+	case MTK_VDEC_MT8195:
+		cfg->max = V4L2_MPEG_VIDEO_VP9_PROFILE_2;
+		break;
+	default:
+		cfg->max = V4L2_MPEG_VIDEO_VP9_PROFILE_1;
+		break;
+	}
+}
+
+static void mtk_vcodec_dec_reset_controls(struct v4l2_ctrl_config *cfg,
+					  struct mtk_vcodec_dec_ctx *ctx)
+{
+	switch (cfg->id) {
+	case V4L2_CID_MPEG_VIDEO_H264_LEVEL:
+		mtk_vcodec_dec_fill_h264_level(cfg, ctx);
+		mtk_v4l2_vdec_dbg(3, ctx, "h264 supported level: %lld %lld", cfg->max, cfg->def);
+		break;
+	case V4L2_CID_MPEG_VIDEO_HEVC_LEVEL:
+		mtk_vcodec_dec_fill_h265_level(cfg, ctx);
+		mtk_v4l2_vdec_dbg(3, ctx, "h265 supported level: %lld %lld", cfg->max, cfg->def);
+		break;
+	case V4L2_CID_MPEG_VIDEO_VP9_LEVEL:
+		mtk_vcodec_dec_fill_vp9_level(cfg, ctx);
+		mtk_v4l2_vdec_dbg(3, ctx, "vp9 supported level: %lld %lld", cfg->max, cfg->def);
+		break;
+	case V4L2_CID_MPEG_VIDEO_H264_PROFILE:
+		mtk_vcodec_dec_fill_h264_profile(cfg, ctx);
+		mtk_v4l2_vdec_dbg(3, ctx, "h264 supported profile: %lld %lld", cfg->max,
+				  cfg->menu_skip_mask);
+		break;
+	case V4L2_CID_MPEG_VIDEO_HEVC_PROFILE:
+		mtk_vcodec_dec_fill_h265_profile(cfg, ctx);
+		mtk_v4l2_vdec_dbg(3, ctx, "h265 supported profile: %lld %lld", cfg->max,
+				  cfg->menu_skip_mask);
+		break;
+	case V4L2_CID_MPEG_VIDEO_VP9_PROFILE:
+		mtk_vcodec_dec_fill_vp9_profile(cfg, ctx);
+		mtk_v4l2_vdec_dbg(3, ctx, "vp9 supported profile: %lld %lld", cfg->max,
+				  cfg->menu_skip_mask);
+		break;
+	default:
+		break;
+	}
+}
+
 static int mtk_vcodec_dec_ctrls_setup(struct mtk_vcodec_dec_ctx *ctx)
 {
 	unsigned int i;
@@ -532,6 +716,8 @@ static int mtk_vcodec_dec_ctrls_setup(struct mtk_vcodec_dec_ctx *ctx)
 	for (i = 0; i < NUM_CTRLS; i++) {
 		struct v4l2_ctrl_config cfg = mtk_stateless_controls[i].cfg;
 		cfg.ops = &mtk_vcodec_dec_ctrl_ops;
+
+		mtk_vcodec_dec_reset_controls(&cfg, ctx);
 		v4l2_ctrl_new_custom(&ctx->ctrl_hdl, &cfg, NULL);
 		if (ctx->ctrl_hdl.error) {
 			mtk_v4l2_vdec_err(ctx, "Adding control %d failed %d", i,
@@ -543,6 +729,22 @@ static int mtk_vcodec_dec_ctrls_setup(struct mtk_vcodec_dec_ctx *ctx)
 	v4l2_ctrl_handler_setup(&ctx->ctrl_hdl);
 
 	return 0;
+}
+
+static struct media_request *fops_media_request_alloc(struct media_device *mdev)
+{
+	struct mtk_vcodec_dec_request *req;
+
+	req = kzalloc_obj(*req);
+
+	return &req->req;
+}
+
+static void fops_media_request_free(struct media_request *mreq)
+{
+	struct mtk_vcodec_dec_request *req = req_to_dec_req(mreq);
+
+	kfree(req);
 }
 
 static int fops_media_request_validate(struct media_request *mreq)
@@ -565,9 +767,20 @@ static int fops_media_request_validate(struct media_request *mreq)
 	return vb2_request_validate(mreq);
 }
 
+static void fops_media_request_queue(struct media_request *mreq)
+{
+	struct mtk_vcodec_dec_request *req = req_to_dec_req(mreq);
+
+	media_request_mark_manual_completion(mreq);
+	kref_init(&req->refcount);
+	v4l2_m2m_request_queue(mreq);
+}
+
 const struct media_device_ops mtk_vcodec_media_ops = {
+	.req_alloc      = fops_media_request_alloc,
+	.req_free      = fops_media_request_free,
 	.req_validate	= fops_media_request_validate,
-	.req_queue	= v4l2_m2m_request_queue,
+	.req_queue	= fops_media_request_queue,
 };
 
 static void mtk_vcodec_add_formats(unsigned int fourcc,
@@ -688,10 +901,8 @@ static int vb2ops_vdec_out_buf_validate(struct vb2_buffer *vb)
 	return 0;
 }
 
-static struct vb2_ops mtk_vdec_request_vb2_ops = {
+static const struct vb2_ops mtk_vdec_request_vb2_ops = {
 	.queue_setup	= vb2ops_vdec_queue_setup,
-	.wait_prepare	= vb2_ops_wait_prepare,
-	.wait_finish	= vb2_ops_wait_finish,
 	.start_streaming	= vb2ops_vdec_start_streaming,
 	.stop_streaming	= vb2ops_vdec_stop_streaming,
 

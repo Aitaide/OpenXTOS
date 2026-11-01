@@ -11,8 +11,6 @@
 #include "imx8-isi-core.h"
 #include "imx8-isi-regs.h"
 
-#define	ISI_DOWNSCALE_THRESHOLD		0x4000
-
 static inline u32 mxc_isi_read(struct mxc_isi_pipe *pipe, u32 reg)
 {
 	return readl(pipe->regs + reg);
@@ -112,7 +110,13 @@ static u32 mxc_isi_channel_scaling_ratio(unsigned int from, unsigned int to,
 	else
 		*dec = 8;
 
-	return min_t(u32, from * 0x1000 / (to * *dec), ISI_DOWNSCALE_THRESHOLD);
+	/*
+	 * The ISI rounds output dimensions up to the next integer (i.MX93 RM
+	 * section 57.7.8). Calculate the scale factor such that the theoretical
+	 * output (input / scale_factor) rounds up to exactly the desired
+	 * output.
+	 */
+	return DIV_ROUND_UP(from * 0x1000, to * *dec);
 }
 
 static void mxc_isi_channel_set_scaling(struct mxc_isi_pipe *pipe,
@@ -215,8 +219,7 @@ static void mxc_isi_channel_set_csc(struct mxc_isi_pipe *pipe,
 		[MXC_ISI_ENC_RGB] = "RGB",
 		[MXC_ISI_ENC_YUV] = "YUV",
 	};
-	const u32 *coeffs;
-	bool cscen = true;
+	const u32 *coeffs = NULL;
 	u32 val;
 
 	val = mxc_isi_read(pipe, CHNL_IMG_CTRL);
@@ -235,14 +238,13 @@ static void mxc_isi_channel_set_csc(struct mxc_isi_pipe *pipe,
 		val |= CHNL_IMG_CTRL_CSC_MODE(CHNL_IMG_CTRL_CSC_MODE_RGB2YCBCR);
 	} else {
 		/* Bypass CSC */
-		cscen = false;
 		val |= CHNL_IMG_CTRL_CSC_BYPASS;
 	}
 
 	dev_dbg(pipe->isi->dev, "CSC: %s -> %s\n",
 		encodings[in_encoding], encodings[out_encoding]);
 
-	if (cscen) {
+	if (coeffs) {
 		mxc_isi_write(pipe, CHNL_CSC_COEFF0, coeffs[0]);
 		mxc_isi_write(pipe, CHNL_CSC_COEFF1, coeffs[1]);
 		mxc_isi_write(pipe, CHNL_CSC_COEFF2, coeffs[2]);
@@ -253,7 +255,7 @@ static void mxc_isi_channel_set_csc(struct mxc_isi_pipe *pipe,
 
 	mxc_isi_write(pipe, CHNL_IMG_CTRL, val);
 
-	*bypass = !cscen;
+	*bypass = !coeffs;
 }
 
 void mxc_isi_channel_set_alpha(struct mxc_isi_pipe *pipe, u8 alpha)
@@ -303,6 +305,7 @@ static void mxc_isi_channel_set_panic_threshold(struct mxc_isi_pipe *pipe)
 
 static void mxc_isi_channel_set_control(struct mxc_isi_pipe *pipe,
 					enum mxc_isi_input_id input,
+					unsigned int vc,
 					bool bypass)
 {
 	u32 val;
@@ -311,8 +314,12 @@ static void mxc_isi_channel_set_control(struct mxc_isi_pipe *pipe,
 
 	val = mxc_isi_read(pipe, CHNL_CTRL);
 	val &= ~(CHNL_CTRL_CHNL_BYPASS | CHNL_CTRL_CHAIN_BUF_MASK |
-		 CHNL_CTRL_BLANK_PXL_MASK | CHNL_CTRL_SRC_TYPE_MASK |
-		 CHNL_CTRL_MIPI_VC_ID_MASK | CHNL_CTRL_SRC_INPUT_MASK);
+		 CHNL_CTRL_SRC_TYPE_MASK | CHNL_CTRL_MIPI_VC_ID_MASK |
+		 CHNL_CTRL_SRC_INPUT_MASK);
+
+	/* Clear the VC_ID_1 bit on platforms supporting more than 4 VCs. */
+	if (pipe->isi->pdata->num_vc > 4)
+		val &= ~CHNL_CTRL_VC_ID_1_MASK;
 
 	/*
 	 * If no scaling or color space conversion is needed, bypass the
@@ -324,8 +331,6 @@ static void mxc_isi_channel_set_control(struct mxc_isi_pipe *pipe,
 	/* Chain line buffers if needed. */
 	if (pipe->chained)
 		val |= CHNL_CTRL_CHAIN_BUF(CHNL_CTRL_CHAIN_BUF_2_CHAIN);
-
-	val |= CHNL_CTRL_BLANK_PXL(0xff);
 
 	/* Input source (including VC configuration for CSI-2) */
 	if (input == MXC_ISI_INPUT_MEM) {
@@ -342,7 +347,14 @@ static void mxc_isi_channel_set_control(struct mxc_isi_pipe *pipe,
 	} else {
 		val |= CHNL_CTRL_SRC_TYPE(CHNL_CTRL_SRC_TYPE_DEVICE);
 		val |= CHNL_CTRL_SRC_INPUT(input);
-		val |= CHNL_CTRL_MIPI_VC_ID(0); /* FIXME: For CSI-2 only */
+		val |= CHNL_CTRL_MIPI_VC_ID(vc); /* FIXME: For CSI-2 only */
+
+		/*
+		 * On platforms with more than 4 VCs (i.MX95), the VC ID is
+		 * split across VC_ID_0 (bits 7:6) and VC_ID_1 (bit 16).
+		 */
+		if (pipe->isi->pdata->num_vc > 4)
+			val |= CHNL_CTRL_VC_ID_1(vc >> 2);
 	}
 
 	mxc_isi_write(pipe, CHNL_CTRL, val);
@@ -352,6 +364,7 @@ static void mxc_isi_channel_set_control(struct mxc_isi_pipe *pipe,
 
 void mxc_isi_channel_config(struct mxc_isi_pipe *pipe,
 			    enum mxc_isi_input_id input,
+			    unsigned int vc,
 			    const struct v4l2_area *in_size,
 			    const struct v4l2_area *scale,
 			    const struct v4l2_rect *crop,
@@ -378,7 +391,7 @@ void mxc_isi_channel_config(struct mxc_isi_pipe *pipe,
 	mxc_isi_channel_set_panic_threshold(pipe);
 
 	/* Channel control */
-	mxc_isi_channel_set_control(pipe, input, csc_bypass && scaler_bypass);
+	mxc_isi_channel_set_control(pipe, input, vc, csc_bypass && scaler_bypass);
 }
 
 void mxc_isi_channel_set_input_format(struct mxc_isi_pipe *pipe,
@@ -589,7 +602,7 @@ void mxc_isi_channel_release(struct mxc_isi_pipe *pipe)
  *
  * TODO: Support secondary line buffer for downscaling YUV420 images.
  */
-int mxc_isi_channel_chain(struct mxc_isi_pipe *pipe, bool bypass)
+int mxc_isi_channel_chain(struct mxc_isi_pipe *pipe)
 {
 	/* Channel chaining requires both line and output buffer. */
 	const u8 resources = MXC_ISI_CHANNEL_RES_OUTPUT_BUF

@@ -205,7 +205,7 @@ static int rtc_read_alarm_internal(struct rtc_device *rtc,
 
 	mutex_unlock(&rtc->ops_lock);
 
-	trace_rtc_read_alarm(rtc_tm_to_time64(&alarm->time), err);
+	trace_rtc_read_alarm(err?0:rtc_tm_to_time64(&alarm->time), err);
 	return err;
 }
 
@@ -274,10 +274,9 @@ int __rtc_read_alarm(struct rtc_device *rtc, struct rtc_wkalrm *alarm)
 			return err;
 
 		/* full-function RTCs won't have such missing fields */
-		if (rtc_valid_tm(&alarm->time) == 0) {
-			rtc_add_offset(rtc, &alarm->time);
-			return 0;
-		}
+		err = rtc_valid_tm(&alarm->time);
+		if (!err)
+			goto done;
 
 		/* get the "after" timestamp, to detect wrapped fields */
 		err = rtc_read_time(rtc, &now);
@@ -379,9 +378,51 @@ done:
 	if (err && alarm->enabled)
 		dev_warn(&rtc->dev, "invalid alarm value: %ptR\n",
 			 &alarm->time);
+	else
+		rtc_add_offset(rtc, &alarm->time);
 
 	return err;
 }
+
+/**
+ * rtc_read_next_alarm - read the next expiring alarm
+ * @rtc: RTC device
+ * @alarm: storage for the alarm information
+ *
+ * Read the next expiring alarm from the RTC timerqueue. This returns
+ * the alarm that will actually fire next, which may be different from
+ * rtc_read_alarm() if multiple timers are queued (e.g., alarmtimer
+ * and wakealarm sysfs both active).
+ *
+ * Returns: 0 on success, -ENOENT if no alarm is pending, or other error.
+ */
+int rtc_read_next_alarm(struct rtc_device *rtc, struct rtc_wkalrm *alarm)
+{
+	struct timerqueue_node *next;
+	int err;
+
+	if (!rtc || !alarm)
+		return -EINVAL;
+
+	err = mutex_lock_interruptible(&rtc->ops_lock);
+	if (err)
+		return err;
+
+	next = timerqueue_getnext(&rtc->timerqueue);
+	if (!next) {
+		err = -ENOENT;
+		goto unlock;
+	}
+
+	memset(alarm, 0, sizeof(struct rtc_wkalrm));
+	alarm->time = rtc_ktime_to_tm(next->expires);
+	alarm->enabled = 1;
+
+unlock:
+	mutex_unlock(&rtc->ops_lock);
+	return err;
+}
+EXPORT_SYMBOL_GPL(rtc_read_next_alarm);
 
 int rtc_read_alarm(struct rtc_device *rtc, struct rtc_wkalrm *alarm)
 {
@@ -441,6 +482,29 @@ static int __rtc_set_alarm(struct rtc_device *rtc, struct rtc_wkalrm *alarm)
 		err = -EINVAL;
 	else
 		err = rtc->ops->set_alarm(rtc->dev.parent, alarm);
+
+	/*
+	 * Check for potential race described above. If the waiting for next
+	 * second, and the second just ticked since the check above, either
+	 *
+	 * 1) It ticked after the alarm was set, and an alarm irq should be
+	 *    generated.
+	 *
+	 * 2) It ticked before the alarm was set, and alarm irq most likely will
+	 * not be generated.
+	 *
+	 * While we cannot easily check for which of these two scenarios we
+	 * are in, we can return -ETIME to signal that the timer has already
+	 * expired, which is true in both cases.
+	 */
+	if (!err && (scheduled - now) <= 1) {
+		err = __rtc_read_time(rtc, &tm);
+		if (err)
+			return err;
+		now = rtc_tm_to_time64(&tm);
+		if (scheduled <= now)
+			return -ETIME;
+	}
 
 	trace_rtc_set_alarm(rtc_tm_to_time64(&alarm->time), err);
 	return err;
@@ -593,6 +657,10 @@ int rtc_update_irq_enable(struct rtc_device *rtc, unsigned int enabled)
 		rtc->uie_rtctimer.node.expires = ktime_add(now, onesec);
 		rtc->uie_rtctimer.period = ktime_set(1, 0);
 		err = rtc_timer_enqueue(rtc, &rtc->uie_rtctimer);
+		if (!err && rtc->ops && rtc->ops->alarm_irq_enable)
+			err = rtc->ops->alarm_irq_enable(rtc->dev.parent, 1);
+		if (err)
+			goto out;
 	} else {
 		rtc_timer_remove(rtc, &rtc->uie_rtctimer);
 	}
@@ -607,8 +675,8 @@ EXPORT_SYMBOL_GPL(rtc_update_irq_enable);
 /**
  * rtc_handle_legacy_irq - AIE, UIE and PIE event hook
  * @rtc: pointer to the rtc device
- * @num: number of occurence of the event
- * @mode: type of the event, RTC_AF, RTC_UF of RTC_PF
+ * @num: number of occurrence of the event
+ * @mode: type of the event, RTC_AF, RTC_UF or RTC_PF
  *
  * This function is called when an AIE, UIE or PIE mode interrupt
  * has occurred (or been emulated).
@@ -696,7 +764,7 @@ struct rtc_device *rtc_class_open(const char *name)
 	struct device *dev;
 	struct rtc_device *rtc = NULL;
 
-	dev = class_find_device_by_name(rtc_class, name);
+	dev = class_find_device_by_name(&rtc_class, name);
 	if (dev)
 		rtc = to_rtc_device(dev);
 
@@ -903,13 +971,18 @@ void rtc_timer_do_work(struct work_struct *work)
 	struct timerqueue_node *next;
 	ktime_t now;
 	struct rtc_time tm;
+	int err;
 
 	struct rtc_device *rtc =
 		container_of(work, struct rtc_device, irqwork);
 
 	mutex_lock(&rtc->ops_lock);
 again:
-	__rtc_read_time(rtc, &tm);
+	err = __rtc_read_time(rtc, &tm);
+	if (err) {
+		mutex_unlock(&rtc->ops_lock);
+		return;
+	}
 	now = rtc_tm_to_ktime(tm);
 	while ((next = timerqueue_getnext(&rtc->timerqueue))) {
 		if (next->expires > now)

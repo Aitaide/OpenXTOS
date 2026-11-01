@@ -147,12 +147,13 @@ static bool valid_kwork_class_type(enum kwork_class_type type)
 
 static int setup_filters(struct perf_kwork *kwork)
 {
-	u8 val = 1;
-	int i, nr_cpus, key, fd;
-	struct perf_cpu_map *map;
-
 	if (kwork->cpu_list != NULL) {
-		fd = bpf_map__fd(skel->maps.perf_kwork_cpu_filter);
+		unsigned int idx;
+		int nr_cpus;
+		struct perf_cpu_map *map;
+		struct perf_cpu cpu;
+		int fd = bpf_map__fd(skel->maps.perf_kwork_cpu_filter);
+
 		if (fd < 0) {
 			pr_debug("Invalid cpu filter fd\n");
 			return -1;
@@ -165,8 +166,8 @@ static int setup_filters(struct perf_kwork *kwork)
 		}
 
 		nr_cpus = libbpf_num_possible_cpus();
-		for (i = 0; i < perf_cpu_map__nr(map); i++) {
-			struct perf_cpu cpu = perf_cpu_map__cpu(map, i);
+		perf_cpu_map__for_each_cpu(cpu, idx, map) {
+			u8 val = 1;
 
 			if (cpu.cpu >= nr_cpus) {
 				perf_cpu_map__put(map);
@@ -176,11 +177,11 @@ static int setup_filters(struct perf_kwork *kwork)
 			bpf_map_update_elem(fd, &cpu.cpu, &val, BPF_ANY);
 		}
 		perf_cpu_map__put(map);
-
-		skel->bss->has_cpu_filter = 1;
 	}
 
 	if (kwork->profile_name != NULL) {
+		int key, fd;
+
 		if (strlen(kwork->profile_name) >= MAX_KWORKNAME) {
 			pr_err("Requested name filter %s too large, limit to %d\n",
 			       kwork->profile_name, MAX_KWORKNAME - 1);
@@ -195,8 +196,6 @@ static int setup_filters(struct perf_kwork *kwork)
 
 		key = 0;
 		bpf_map_update_elem(fd, &key, kwork->profile_name, BPF_ANY);
-
-		skel->bss->has_name_filter = 1;
 	}
 
 	return 0;
@@ -237,6 +236,11 @@ int perf_kwork__trace_prepare_bpf(struct perf_kwork *kwork)
 			class_bpf->load_prepare(kwork);
 	}
 
+	if (kwork->cpu_list != NULL)
+		skel->rodata->has_cpu_filter = 1;
+	if (kwork->profile_name != NULL)
+		skel->rodata->has_name_filter = 1;
+
 	if (kwork_trace_bpf__load(skel)) {
 		pr_debug("Failed to load kwork trace skeleton\n");
 		goto out;
@@ -269,6 +273,7 @@ static int add_work(struct perf_kwork *kwork,
 		.cpu = key->cpu,
 	};
 	enum kwork_class_type type = key->type;
+	int ret = 0;
 
 	if (!valid_kwork_class_type(type)) {
 		pr_debug("Invalid class type %d to add work\n", type);
@@ -282,9 +287,11 @@ static int add_work(struct perf_kwork *kwork,
 	    (bpf_trace->get_work_name(key, &tmp.name)))
 		return -1;
 
-	work = perf_kwork_add_work(kwork, tmp.class, &tmp);
-	if (work == NULL)
-		return -1;
+	work = kwork->add_work(kwork, tmp.class, &tmp);
+	if (work == NULL) {
+		ret = -1;
+		goto out;
+	}
 
 	if (kwork->report == KWORK_REPORT_RUNTIME) {
 		work->nr_atoms = data->nr;
@@ -300,13 +307,16 @@ static int add_work(struct perf_kwork *kwork,
 		work->max_latency_end = data->max_time_end;
 	} else {
 		pr_debug("Invalid bpf report type %d\n", kwork->report);
-		return -1;
+		ret = -1;
+		goto out;
 	}
 
 	kwork->timestart = (u64)ts_start.tv_sec * NSEC_PER_SEC + ts_start.tv_nsec;
 	kwork->timeend = (u64)ts_end.tv_sec * NSEC_PER_SEC + ts_end.tv_nsec;
 
-	return 0;
+out:
+	work_exit(&tmp);
+	return ret;
 }
 
 int perf_kwork__report_read_bpf(struct perf_kwork *kwork)

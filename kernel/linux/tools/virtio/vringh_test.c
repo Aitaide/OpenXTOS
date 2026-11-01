@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: GPL-2.0
-/* Simple test of virtio code, entirely in userpsace. */
+/* Simple test of virtio code, entirely in userspace. */
 #define _GNU_SOURCE
 #include <sched.h>
 #include <err.h>
@@ -139,7 +139,7 @@ static int parallel_test(u64 features,
 			 bool fast_vringh)
 {
 	void *host_map, *guest_map;
-	int fd, mapsize, to_guest[2], to_host[2];
+	int pipe_ret, fd, mapsize, to_guest[2], to_host[2];
 	unsigned long xfers = 0, notifies = 0, receives = 0;
 	unsigned int first_cpu, last_cpu;
 	cpu_set_t cpu_set;
@@ -159,10 +159,18 @@ static int parallel_test(u64 features,
 
 	/* Parent and child use separate addresses, to check our mapping logic! */
 	host_map = mmap(NULL, mapsize, PROT_READ|PROT_WRITE, MAP_SHARED, fd, 0);
-	guest_map = mmap(NULL, mapsize, PROT_READ|PROT_WRITE, MAP_SHARED, fd, 0);
+	if (host_map == MAP_FAILED)
+		err(1, "mmap host_map");
 
-	pipe(to_guest);
-	pipe(to_host);
+	guest_map = mmap(NULL, mapsize, PROT_READ|PROT_WRITE, MAP_SHARED, fd, 0);
+	if (guest_map == MAP_FAILED)
+		err(1, "mmap guest_map");
+
+	pipe_ret = pipe(to_guest);
+	assert(!pipe_ret);
+
+	pipe_ret = pipe(to_host);
+	assert(!pipe_ret);
 
 	CPU_ZERO(&cpu_set);
 	find_cpus(&first_cpu, &last_cpu);
@@ -516,7 +524,7 @@ int main(int argc, char *argv[])
 		errx(1, "virtqueue_add_sgs: %i", err);
 	__kmalloc_fake = NULL;
 
-	/* Host retreives it. */
+	/* Host retrieves it. */
 	vringh_iov_init(&riov, host_riov, ARRAY_SIZE(host_riov));
 	vringh_iov_init(&wiov, host_wiov, ARRAY_SIZE(host_wiov));
 

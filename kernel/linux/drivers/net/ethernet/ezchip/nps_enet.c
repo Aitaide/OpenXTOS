@@ -6,7 +6,6 @@
 #include <linux/module.h>
 #include <linux/etherdevice.h>
 #include <linux/interrupt.h>
-#include <linux/mod_devicetable.h>
 #include <linux/of_net.h>
 #include <linux/platform_device.h>
 #include "nps_enet.h"
@@ -198,7 +197,7 @@ static int nps_enet_poll(struct napi_struct *napi, int budget)
 		 */
 		if (nps_enet_is_tx_pending(priv)) {
 			nps_enet_reg_set(priv, NPS_ENET_REG_BUF_INT_ENABLE, 0);
-			napi_reschedule(napi);
+			napi_schedule(napi);
 		}
 	}
 
@@ -633,7 +632,7 @@ out_netdev:
 	return err;
 }
 
-static s32 nps_enet_remove(struct platform_device *pdev)
+static void nps_enet_remove(struct platform_device *pdev)
 {
 	struct net_device *ndev = platform_get_drvdata(pdev);
 	struct nps_enet_priv *priv = netdev_priv(ndev);
@@ -641,8 +640,6 @@ static s32 nps_enet_remove(struct platform_device *pdev)
 	unregister_netdev(ndev);
 	netif_napi_del(&priv->napi);
 	free_netdev(ndev);
-
-	return 0;
 }
 
 static const struct of_device_id nps_enet_dt_ids[] = {
@@ -663,4 +660,5 @@ static struct platform_driver nps_enet_driver = {
 module_platform_driver(nps_enet_driver);
 
 MODULE_AUTHOR("EZchip Semiconductor");
+MODULE_DESCRIPTION("EZchip NPS Ethernet driver");
 MODULE_LICENSE("GPL v2");

@@ -1,5 +1,5 @@
 /*
- * Copyright 2012-15 Advanced Micro Devices, Inc.
+ * Copyright 2012-2026 Advanced Micro Devices, Inc.
  *
  * Permission is hereby granted, free of charge, to any person obtaining a
  * copy of this software and associated documentation files (the "Software"),
@@ -27,6 +27,31 @@
 #ifndef __DAL_DPP_H__
 #define __DAL_DPP_H__
 
+/**
+ * DOC: overview
+ *
+ * The DPP (Display Pipe and Plane) block is the unified display data
+ * processing engine in DCN for processing graphic or video data on per DPP
+ * rectangle base. This rectangle can be a part of SLS (Single Large Surface),
+ * or a layer to be blended with other DPP, or a rectangle associated with a
+ * display tile.
+ *
+ * It provides various functions including:
+ * - graphic color keyer
+ * - graphic cursor compositing
+ * - graphic or video image source to destination scaling
+ * - image sharping
+ * - video format conversion from 4:2:0 or 4:2:2 to 4:4:4
+ * - Color Space Conversion
+ * - Host LUT gamma adjustment
+ * - Color Gamut Remap
+ * - brightness and contrast adjustment.
+ *
+ * DPP pipe consists of Converter and Cursor (CNVC), Scaler (DSCL), Color
+ * Management (CM), Output Buffer (OBUF) and Digital Bypass (DPB) module
+ * connected in a video/graphics pipeline.
+ */
+
 #include "transform.h"
 #include "cursor_reg_cache.h"
 
@@ -40,7 +65,6 @@ union defer_reg_writes {
 	} bits;
 	uint32_t raw;
 };
-
 struct dpp {
 	const struct dpp_funcs *funcs;
 	struct dc_context *ctx;
@@ -59,6 +83,7 @@ struct dpp {
 
 	struct pwl_params shaper_params;
 	bool cm_bypass_mode;
+	bool cursor_offload;
 
 	struct cursor_position_cache_dpp  pos;
 	struct cursor_attribute_cache_dpp att;
@@ -94,10 +119,14 @@ static const struct dpp_input_csc_matrix __maybe_unused dpp_input_csc_matrix[] =
 		{ 0x39a6, 0x2568, 0,      0xe0d6,
 		  0xeedd, 0x2568, 0xf925, 0x9a8,
 		  0,      0x2568, 0x43ee, 0xdbb2 } },
-	{ COLOR_SPACE_2020_YCBCR,
+	{ COLOR_SPACE_2020_YCBCR_FULL,
 		{ 0x2F30, 0x2000, 0,      0xE869,
 		  0xEDB7, 0x2000, 0xFABC, 0xBC6,
 		  0,      0x2000, 0x3C34, 0xE1E6 } },
+	{ COLOR_SPACE_2020_YCBCR_LIMITED,
+		{ 0x35B9, 0x2543, 0,      0xE2B2,
+		  0xEB2F, 0x2543, 0xFA01, 0x0B1F,
+		  0,      0x2543, 0x4489, 0xDB42 } },
 	{ COLOR_SPACE_2020_RGB_LIMITEDRANGE,
 		{ 0x35E0, 0x255F, 0,      0xE2B3,
 		  0xEB20, 0x255F, 0xF9FD, 0xB1E,
@@ -122,16 +151,28 @@ struct cnv_color_keyer_params {
 	int color_keyer_blue_high;
 };
 
-/* new for dcn2: set the 8bit alpha values based on the 2 bit alpha
- *ALPHA_2BIT_LUT. ALPHA_2BIT_LUT0   default: 0b00000000
- *ALPHA_2BIT_LUT. ALPHA_2BIT_LUT1   default: 0b01010101
- *ALPHA_2BIT_LUT. ALPHA_2BIT_LUT2   default: 0b10101010
- *ALPHA_2BIT_LUT. ALPHA_2BIT_LUT3   default: 0b11111111
+/**
+ * struct cnv_alpha_2bit_lut - Set the 8bit alpha values based on the 2 bit alpha
  */
 struct cnv_alpha_2bit_lut {
+	/**
+	* @lut0: ALPHA_2BIT_LUT. ALPHA_2BIT_LUT0. Default: 0b00000000
+	*/
 	int lut0;
+
+	/**
+	 * @lut1: ALPHA_2BIT_LUT. ALPHA_2BIT_LUT1. Default: 0b01010101
+	 */
 	int lut1;
+
+	/**
+	 * @lut2: ALPHA_2BIT_LUT. ALPHA_2BIT_LUT2. Default: 0b10101010
+	 */
 	int lut2;
+
+	/**
+	 * @lut3: ALPHA_2BIT_LUT. ALPHA_2BIT_LUT3. Default: 0b11111111
+	 */
 	int lut3;
 };
 
@@ -141,6 +182,7 @@ struct dcn_dpp_state {
 	uint32_t igam_input_format;
 	uint32_t dgam_lut_mode;
 	uint32_t rgam_lut_mode;
+	// gamut_remap data for dcn10_get_cm_states()
 	uint32_t gamut_remap_mode;
 	uint32_t gamut_remap_c11_c12;
 	uint32_t gamut_remap_c13_c14;
@@ -148,6 +190,29 @@ struct dcn_dpp_state {
 	uint32_t gamut_remap_c23_c24;
 	uint32_t gamut_remap_c31_c32;
 	uint32_t gamut_remap_c33_c34;
+	// gamut_remap data for dcn*_log_color_state()
+	struct dpp_grph_csc_adjustment gamut_remap;
+	uint32_t shaper_lut_mode;
+	uint32_t lut3d_mode;
+	uint32_t lut3d_bit_depth;
+	uint32_t lut3d_size;
+	uint32_t blnd_lut_mode;
+	uint32_t pre_dgam_mode;
+	uint32_t pre_dgam_select;
+	uint32_t gamcor_mode;
+};
+
+struct dcn_dpp_reg_state {
+	uint32_t recout_start;
+	uint32_t recout_size;
+	uint32_t scl_horz_filter_scale_ratio;
+	uint32_t scl_vert_filter_scale_ratio;
+	uint32_t scl_mode;
+	uint32_t cm_control;
+	uint32_t dpp_control;
+	uint32_t dscl_control;
+	uint32_t obuf_control;
+	uint32_t mpc_size;
 };
 
 struct CM_bias_params {
@@ -172,6 +237,8 @@ struct dpp_funcs {
 		struct CM_bias_params *bias_params);
 
 	void (*dpp_read_state)(struct dpp *dpp, struct dcn_dpp_state *s);
+
+	void (*dpp_read_reg_state)(struct dpp *dpp, struct dcn_dpp_reg_state *dpp_reg_state);
 
 	void (*dpp_reset)(struct dpp *dpp);
 
@@ -286,10 +353,35 @@ struct dpp_funcs {
 			const struct pwl_params *params);
 	bool (*dpp_program_3dlut)(
 			struct dpp *dpp,
-			struct tetrahedral_params *params);
+			const struct tetrahedral_params *params);
 	void (*dpp_cnv_set_alpha_keyer)(
 			struct dpp *dpp_base,
 			struct cnv_color_keyer_params *color_keyer);
+
+	void (*dpp_get_gamut_remap)(struct dpp *dpp_base,
+				    struct dpp_grph_csc_adjustment *adjust);
+	void (*set_cursor_matrix)(
+		struct dpp *dpp_base,
+		enum dc_color_space color_space,
+		struct dc_csc_transform cursor_csc_color_matrix);
+
+	void (*dpp_force_disable_cursor)(struct dpp *dpp_base);
+
+	void (*dpp_cm_hist_control)(
+		struct dpp *dpp_base,
+		struct cm_hist_control cm_hist_control,
+		enum dc_color_space color_space);
+
+	bool (*dpp_cm_hist_read)(
+		struct dpp *dpp_base,
+		struct cm_hist *cm_hist);
+	void (*dpp_set_pregam_state)(
+			struct dpp *dpp_base,
+			enum dc_transfer_func_predefined tr,
+			enum dc_scaling_linearity scaling);
+	void (*dpp_program_upsp)(
+			struct dpp *dpp_base,
+			const struct dscl_prog_data *dscl_prog_data);
 };
 
 

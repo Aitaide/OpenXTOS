@@ -14,20 +14,18 @@
 #include <asm/syscall.h>
 #include <asm/thread_info.h>
 #include <asm/unistd.h>
+#include <asm/unistd_compat_32.h>
 
 long compat_arm_syscall(struct pt_regs *regs, int scno);
 long sys_ni_syscall(void);
 
 static long do_ni_syscall(struct pt_regs *regs, int scno)
 {
-#ifdef CONFIG_COMPAT
-	long ret;
 	if (is_compat_task()) {
-		ret = compat_arm_syscall(regs, scno);
+		long ret = compat_arm_syscall(regs, scno);
 		if (ret != -ENOSYS)
 			return ret;
 	}
-#endif
 
 	return sys_ni_syscall();
 }
@@ -45,7 +43,7 @@ static void invoke_syscall(struct pt_regs *regs, unsigned int scno,
 
 	add_random_kstack_offset();
 
-	if (scno < sc_nr) {
+	if (likely(scno < sc_nr)) {
 		syscall_fn_t syscall_fn;
 		syscall_fn = syscall_table[array_index_nospec(scno, sc_nr)];
 		ret = __invoke_syscall(regs, syscall_fn);
@@ -54,19 +52,6 @@ static void invoke_syscall(struct pt_regs *regs, unsigned int scno,
 	}
 
 	syscall_set_return_value(current, regs, 0, ret);
-
-	/*
-	 * Ultimately, this value will get limited by KSTACK_OFFSET_MAX(),
-	 * but not enough for arm64 stack utilization comfort. To keep
-	 * reasonable stack head room, reduce the maximum offset to 9 bits.
-	 *
-	 * The actual entropy will be further reduced by the compiler when
-	 * applying stack alignment constraints: the AAPCS mandates a
-	 * 16-byte (i.e. 4-bit) aligned SP at function boundaries.
-	 *
-	 * The resulting 5 bits of entropy is seen in SP[8:4].
-	 */
-	choose_random_kstack_offset(get_random_u16() & 0x1FF);
 }
 
 static inline bool has_syscall_work(unsigned long flags)
@@ -100,7 +85,7 @@ static void el0_svc_common(struct pt_regs *regs, int scno, int sc_nr,
 	 * (Similarly for HVC and SMC elsewhere.)
 	 */
 
-	if (flags & _TIF_MTE_ASYNC_FAULT) {
+	if (unlikely(flags & _TIF_MTE_ASYNC_FAULT)) {
 		/*
 		 * Process the asynchronous tag check fault before the actual
 		 * syscall. do_notify_resume() will send a signal to userspace
@@ -158,7 +143,7 @@ void do_el0_svc(struct pt_regs *regs)
 #ifdef CONFIG_COMPAT
 void do_el0_svc_compat(struct pt_regs *regs)
 {
-	el0_svc_common(regs, regs->regs[7], __NR_compat_syscalls,
+	el0_svc_common(regs, regs->regs[7], __NR_compat32_syscalls,
 		       compat_sys_call_table);
 }
 #endif

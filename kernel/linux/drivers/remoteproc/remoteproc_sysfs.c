@@ -168,7 +168,6 @@ static const char * const rproc_state_string[] = {
 	[RPROC_SUSPENDED]	= "suspended",
 	[RPROC_RUNNING]		= "running",
 	[RPROC_CRASHED]		= "crashed",
-	[RPROC_DELETED]		= "deleted",
 	[RPROC_ATTACHED]	= "attached",
 	[RPROC_DETACHED]	= "detached",
 	[RPROC_LAST]		= "invalid",
@@ -254,7 +253,7 @@ static const struct attribute_group *rproc_devgroups[] = {
 	NULL
 };
 
-struct class rproc_class = {
+const struct class rproc_class = {
 	.name		= "remoteproc",
 	.dev_groups	= rproc_devgroups,
 };

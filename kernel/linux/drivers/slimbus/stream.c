@@ -18,15 +18,17 @@
  *		and the first slot of the next  consecutive Segment.
  * @segdist_code: Segment Distribution Code SD[11:0]
  * @seg_offset_mask: Segment offset mask in SD[11:0]
- * @segdist_codes: List of all possible Segmet Distribution codes.
  */
-static const struct segdist_code {
+struct segdist_code {
 	int ratem;
 	int seg_interval;
 	int segdist_code;
 	u32 seg_offset_mask;
 
-} segdist_codes[] = {
+};
+
+/* segdist_codes - List of all possible Segment Distribution codes. */
+static const struct segdist_code segdist_codes[] = {
 	{1,	1536,	0x200,	 0xdff},
 	{2,	768,	0x100,	 0xcff},
 	{4,	384,	0x080,	 0xc7f},
@@ -101,7 +103,7 @@ struct slim_stream_runtime *slim_stream_allocate(struct slim_device *dev,
 {
 	struct slim_stream_runtime *rt;
 
-	rt = kzalloc(sizeof(*rt), GFP_KERNEL);
+	rt = kzalloc_obj(*rt);
 	if (!rt)
 		return ERR_PTR(-ENOMEM);
 
@@ -212,7 +214,7 @@ int slim_stream_prepare(struct slim_stream_runtime *rt,
 	}
 
 	num_ports = hweight32(cfg->port_mask);
-	rt->ports = kcalloc(num_ports, sizeof(*port), GFP_KERNEL);
+	rt->ports = kzalloc_objs(*port, num_ports);
 	if (!rt->ports)
 		return -ENOMEM;
 

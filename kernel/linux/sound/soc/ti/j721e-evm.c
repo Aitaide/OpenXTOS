@@ -4,6 +4,7 @@
  *  Author: Peter Ujfalusi <peter.ujfalusi@ti.com>
  */
 
+#include <linux/cleanup.h>
 #include <linux/clk.h>
 #include <linux/module.h>
 #include <linux/of.h>
@@ -37,7 +38,7 @@ enum j721e_audio_domain_id {
 
 #define J721E_DAI_FMT		(SND_SOC_DAIFMT_RIGHT_J | \
 				 SND_SOC_DAIFMT_NB_NF |   \
-				 SND_SOC_DAIFMT_CBS_CFS)
+				 SND_SOC_DAIFMT_CBC_CFC)
 
 enum j721e_board_type {
 	J721E_BOARD_CPB = 1,
@@ -74,7 +75,6 @@ struct j721e_audio_domain {
 struct j721e_priv {
 	struct device *dev;
 	struct snd_soc_card card;
-	struct snd_soc_dai_link *dai_links;
 	struct snd_soc_codec_conf codec_conf[J721E_CODEC_CONF_COUNT];
 	struct snd_interval rate_range;
 	const struct j721e_audio_match_data *match_data;
@@ -84,6 +84,7 @@ struct j721e_priv {
 	struct j721e_audio_domain audio_domains[J721E_AUDIO_DOMAIN_LAST];
 
 	struct mutex mutex;
+	struct snd_soc_dai_link dai_links[];
 };
 
 static const struct snd_soc_dapm_widget j721e_cpb_dapm_widgets[] = {
@@ -182,6 +183,8 @@ static int j721e_configure_refclk(struct j721e_priv *priv,
 		clk_id = J721E_CLK_PARENT_48000;
 	else if (!(rate % 11025) && priv->pll_rates[J721E_CLK_PARENT_44100])
 		clk_id = J721E_CLK_PARENT_44100;
+	else if (!(rate % 11025) && priv->pll_rates[J721E_CLK_PARENT_48000])
+		clk_id = J721E_CLK_PARENT_48000;
 	else
 		return ret;
 
@@ -251,11 +254,11 @@ static int j721e_rule_rate(struct snd_pcm_hw_params *params,
 
 static int j721e_audio_startup(struct snd_pcm_substream *substream)
 {
-	struct snd_soc_pcm_runtime *rtd = asoc_substream_to_rtd(substream);
+	struct snd_soc_pcm_runtime *rtd = snd_soc_substream_to_rtd(substream);
 	struct j721e_priv *priv = snd_soc_card_get_drvdata(rtd->card);
 	unsigned int domain_id = rtd->dai_link->id;
 	struct j721e_audio_domain *domain = &priv->audio_domains[domain_id];
-	struct snd_soc_dai *cpu_dai = asoc_rtd_to_cpu(rtd, 0);
+	struct snd_soc_dai *cpu_dai = snd_soc_rtd_to_cpu(rtd, 0);
 	struct snd_soc_dai *codec_dai;
 	unsigned int active_rate;
 	int ret = 0;
@@ -309,42 +312,40 @@ out:
 static int j721e_audio_hw_params(struct snd_pcm_substream *substream,
 				 struct snd_pcm_hw_params *params)
 {
-	struct snd_soc_pcm_runtime *rtd = asoc_substream_to_rtd(substream);
+	struct snd_soc_pcm_runtime *rtd = snd_soc_substream_to_rtd(substream);
 	struct snd_soc_card *card = rtd->card;
 	struct j721e_priv *priv = snd_soc_card_get_drvdata(card);
 	unsigned int domain_id = rtd->dai_link->id;
 	struct j721e_audio_domain *domain = &priv->audio_domains[domain_id];
-	struct snd_soc_dai *cpu_dai = asoc_rtd_to_cpu(rtd, 0);
+	struct snd_soc_dai *cpu_dai = snd_soc_rtd_to_cpu(rtd, 0);
 	struct snd_soc_dai *codec_dai;
 	unsigned int sysclk_rate;
 	int slot_width = 32;
 	int ret;
 	int i;
 
-	mutex_lock(&priv->mutex);
+	guard(mutex)(&priv->mutex);
 
-	if (domain->rate && domain->rate != params_rate(params)) {
-		ret = -EINVAL;
-		goto out;
-	}
+	if (domain->rate && domain->rate != params_rate(params))
+		return -EINVAL;
 
 	if (params_width(params) == 16)
 		slot_width = 16;
 
 	ret = snd_soc_dai_set_tdm_slot(cpu_dai, 0x3, 0x3, 2, slot_width);
 	if (ret && ret != -ENOTSUPP)
-		goto out;
+		return ret;
 
 	for_each_rtd_codec_dais(rtd, i, codec_dai) {
 		ret = snd_soc_dai_set_tdm_slot(codec_dai, 0x3, 0x3, 2,
 					       slot_width);
 		if (ret && ret != -ENOTSUPP)
-			goto out;
+			return ret;
 	}
 
 	ret = j721e_configure_refclk(priv, domain_id, params_rate(params));
 	if (ret)
-		goto out;
+		return ret;
 
 	sysclk_rate = priv->hsdiv_rates[domain->parent_clk_id];
 	for_each_rtd_codec_dais(rtd, i, codec_dai) {
@@ -354,7 +355,7 @@ static int j721e_audio_hw_params(struct snd_pcm_substream *substream,
 			dev_err(priv->dev,
 				"codec set_sysclk failed for %u Hz\n",
 				sysclk_rate);
-			goto out;
+			return ret;
 		}
 	}
 
@@ -369,27 +370,23 @@ static int j721e_audio_hw_params(struct snd_pcm_substream *substream,
 		ret = 0;
 	}
 
-out:
-	mutex_unlock(&priv->mutex);
 	return ret;
 }
 
 static void j721e_audio_shutdown(struct snd_pcm_substream *substream)
 {
-	struct snd_soc_pcm_runtime *rtd = asoc_substream_to_rtd(substream);
+	struct snd_soc_pcm_runtime *rtd = snd_soc_substream_to_rtd(substream);
 	struct j721e_priv *priv = snd_soc_card_get_drvdata(rtd->card);
 	unsigned int domain_id = rtd->dai_link->id;
 	struct j721e_audio_domain *domain = &priv->audio_domains[domain_id];
 
-	mutex_lock(&priv->mutex);
+	guard(mutex)(&priv->mutex);
 
 	domain->active--;
 	if (!domain->active) {
 		domain->rate = 0;
 		domain->active_link = 0;
 	}
-
-	mutex_unlock(&priv->mutex);
 }
 
 static const struct snd_soc_ops j721e_audio_ops = {
@@ -403,7 +400,7 @@ static int j721e_audio_init(struct snd_soc_pcm_runtime *rtd)
 	struct j721e_priv *priv = snd_soc_card_get_drvdata(rtd->card);
 	unsigned int domain_id = rtd->dai_link->id;
 	struct j721e_audio_domain *domain = &priv->audio_domains[domain_id];
-	struct snd_soc_dai *cpu_dai = asoc_rtd_to_cpu(rtd, 0);
+	struct snd_soc_dai *cpu_dai = snd_soc_rtd_to_cpu(rtd, 0);
 	struct snd_soc_dai *codec_dai;
 	unsigned int sysclk_rate;
 	int i, ret;
@@ -442,7 +439,7 @@ static int j721e_audio_init(struct snd_soc_pcm_runtime *rtd)
 
 static int j721e_audio_init_ivi(struct snd_soc_pcm_runtime *rtd)
 {
-	struct snd_soc_dapm_context *dapm = &rtd->card->dapm;
+	struct snd_soc_dapm_context *dapm = snd_soc_card_to_dapm(rtd->card);
 
 	snd_soc_dapm_new_controls(dapm, j721e_ivi_codec_a_dapm_widgets,
 				  ARRAY_SIZE(j721e_ivi_codec_a_dapm_widgets));
@@ -649,7 +646,7 @@ static int j721e_soc_probe_cpb(struct j721e_priv *priv, int *link_idx,
 	 * Link 2: McASP10 <- pcm3168a_1 ADC
 	 */
 	comp_count = 6;
-	compnent = devm_kzalloc(priv->dev, comp_count * sizeof(*compnent),
+	compnent = devm_kcalloc(priv->dev, comp_count, sizeof(*compnent),
 				GFP_KERNEL);
 	if (!compnent) {
 		ret = -ENOMEM;
@@ -763,7 +760,7 @@ static int j721e_soc_probe_ivi(struct j721e_priv *priv, int *link_idx,
 	 *		   \ pcm3168a_b ADC
 	 */
 	comp_count = 8;
-	compnent = devm_kzalloc(priv->dev, comp_count * sizeof(*compnent),
+	compnent = devm_kcalloc(priv->dev, comp_count, sizeof(*compnent),
 				GFP_KERNEL);
 	if (!compnent) {
 		ret = -ENOMEM;
@@ -842,33 +839,23 @@ put_dai_node:
 
 static int j721e_soc_probe(struct platform_device *pdev)
 {
-	struct device_node *node = pdev->dev.of_node;
+	const struct j721e_audio_match_data *match;
 	struct snd_soc_card *card;
-	const struct of_device_id *match;
 	struct j721e_priv *priv;
 	int link_cnt, conf_cnt, ret, i;
 
-	if (!node) {
-		dev_err(&pdev->dev, "of node is missing.\n");
-		return -ENODEV;
-	}
-
-	match = of_match_node(j721e_audio_of_match, node);
+	match = of_device_get_match_data(&pdev->dev);
 	if (!match) {
 		dev_err(&pdev->dev, "No compatible match found\n");
 		return -ENODEV;
 	}
 
-	priv = devm_kzalloc(&pdev->dev, sizeof(*priv), GFP_KERNEL);
+	priv = devm_kzalloc(&pdev->dev,
+			struct_size(priv, dai_links, match->num_links), GFP_KERNEL);
 	if (!priv)
 		return -ENOMEM;
 
-	priv->match_data = match->data;
-
-	priv->dai_links = devm_kcalloc(&pdev->dev, priv->match_data->num_links,
-				       sizeof(*priv->dai_links), GFP_KERNEL);
-	if (!priv->dai_links)
-		return -ENOMEM;
+	priv->match_data = match;
 
 	for (i = 0; i < J721E_AUDIO_DOMAIN_LAST; i++)
 		priv->audio_domains[i].parent_clk_id = -1;
@@ -883,10 +870,9 @@ static int j721e_soc_probe(struct platform_device *pdev)
 	card->num_dapm_routes = ARRAY_SIZE(j721e_cpb_dapm_routes);
 	card->fully_routed = 1;
 
-	if (snd_soc_of_parse_card_name(card, "model")) {
-		dev_err(&pdev->dev, "Card name is not provided\n");
-		return -ENODEV;
-	}
+	ret = snd_soc_of_parse_card_name(card, "model");
+	if (ret)
+		return ret;
 
 	link_cnt = 0;
 	conf_cnt = 0;
@@ -913,8 +899,9 @@ static int j721e_soc_probe(struct platform_device *pdev)
 	mutex_init(&priv->mutex);
 	ret = devm_snd_soc_register_card(&pdev->dev, card);
 	if (ret)
-		dev_err(&pdev->dev, "devm_snd_soc_register_card() failed: %d\n",
-			ret);
+		dev_err_probe(&pdev->dev, ret,
+			      "devm_snd_soc_register_card() failed: %d\n",
+			      ret);
 
 	return ret;
 }

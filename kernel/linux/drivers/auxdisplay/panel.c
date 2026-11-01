@@ -831,18 +831,12 @@ static void lcd_init(void)
 	struct charlcd *charlcd;
 	struct hd44780_common *hdc;
 
-	hdc = hd44780_common_alloc();
-	if (!hdc)
+	charlcd = hd44780_common_alloc();
+	if (!charlcd)
 		return;
 
-	charlcd = charlcd_alloc();
-	if (!charlcd) {
-		kfree(hdc);
-		return;
-	}
-
+	hdc = charlcd->drvdata;
 	hdc->hd44780 = &lcd;
-	charlcd->drvdata = hdc;
 
 	/*
 	 * Init lcd struct with load-time values to preserve exact
@@ -1434,7 +1428,7 @@ static struct logical_input *panel_bind_key(const char *name, const char *press,
 {
 	struct logical_input *key;
 
-	key = kzalloc(sizeof(*key), GFP_KERNEL);
+	key = kzalloc_obj(*key);
 	if (!key)
 		return NULL;
 
@@ -1449,50 +1443,12 @@ static struct logical_input *panel_bind_key(const char *name, const char *press,
 	key->rise_time = 1;
 	key->fall_time = 1;
 
-	strncpy(key->u.kbd.press_str, press, sizeof(key->u.kbd.press_str));
-	strncpy(key->u.kbd.repeat_str, repeat, sizeof(key->u.kbd.repeat_str));
-	strncpy(key->u.kbd.release_str, release,
-		sizeof(key->u.kbd.release_str));
+	strtomem_pad(key->u.kbd.press_str, press, '\0');
+	strtomem_pad(key->u.kbd.repeat_str, repeat, '\0');
+	strtomem_pad(key->u.kbd.release_str, release, '\0');
 	list_add(&key->list, &logical_inputs);
 	return key;
 }
-
-#if 0
-/* tries to bind a callback function to the signal name <name>. The function
- * <press_fct> will be called with the <press_data> arg when the signal is
- * activated, and so on for <release_fct>/<release_data>
- * Returns the pointer to the new signal if ok, NULL if the signal could not
- * be bound.
- */
-static struct logical_input *panel_bind_callback(char *name,
-						 void (*press_fct)(int),
-						 int press_data,
-						 void (*release_fct)(int),
-						 int release_data)
-{
-	struct logical_input *callback;
-
-	callback = kmalloc(sizeof(*callback), GFP_KERNEL);
-	if (!callback)
-		return NULL;
-
-	memset(callback, 0, sizeof(struct logical_input));
-	if (!input_name2mask(name, &callback->mask, &callback->value,
-			     &scan_mask_i, &scan_mask_o))
-		return NULL;
-
-	callback->type = INPUT_TYPE_STD;
-	callback->state = INPUT_ST_LOW;
-	callback->rise_time = 1;
-	callback->fall_time = 1;
-	callback->u.std.press_fct = press_fct;
-	callback->u.std.press_data = press_data;
-	callback->u.std.release_fct = release_fct;
-	callback->u.std.release_data = release_data;
-	list_add(&callback->list, &logical_inputs);
-	return callback;
-}
-#endif
 
 static void keypad_init(void)
 {
@@ -1520,105 +1476,8 @@ static void keypad_init(void)
 
 static void panel_attach(struct parport *port)
 {
+	int selected_keypad_type = NOT_SET;
 	struct pardev_cb panel_cb;
-
-	if (port->number != parport)
-		return;
-
-	if (pprt) {
-		pr_err("%s: port->number=%d parport=%d, already registered!\n",
-		       __func__, port->number, parport);
-		return;
-	}
-
-	memset(&panel_cb, 0, sizeof(panel_cb));
-	panel_cb.private = &pprt;
-	/* panel_cb.flags = 0 should be PARPORT_DEV_EXCL? */
-
-	pprt = parport_register_dev_model(port, "panel", &panel_cb, 0);
-	if (!pprt) {
-		pr_err("%s: port->number=%d parport=%d, parport_register_device() failed\n",
-		       __func__, port->number, parport);
-		return;
-	}
-
-	if (parport_claim(pprt)) {
-		pr_err("could not claim access to parport%d. Aborting.\n",
-		       parport);
-		goto err_unreg_device;
-	}
-
-	/* must init LCD first, just in case an IRQ from the keypad is
-	 * generated at keypad init
-	 */
-	if (lcd.enabled) {
-		lcd_init();
-		if (!lcd.charlcd || charlcd_register(lcd.charlcd))
-			goto err_unreg_device;
-	}
-
-	if (keypad.enabled) {
-		keypad_init();
-		if (misc_register(&keypad_dev))
-			goto err_lcd_unreg;
-	}
-	return;
-
-err_lcd_unreg:
-	if (scan_timer.function)
-		del_timer_sync(&scan_timer);
-	if (lcd.enabled)
-		charlcd_unregister(lcd.charlcd);
-err_unreg_device:
-	kfree(lcd.charlcd);
-	lcd.charlcd = NULL;
-	parport_unregister_device(pprt);
-	pprt = NULL;
-}
-
-static void panel_detach(struct parport *port)
-{
-	if (port->number != parport)
-		return;
-
-	if (!pprt) {
-		pr_err("%s: port->number=%d parport=%d, nothing to unregister.\n",
-		       __func__, port->number, parport);
-		return;
-	}
-	if (scan_timer.function)
-		del_timer_sync(&scan_timer);
-
-	if (keypad.enabled) {
-		misc_deregister(&keypad_dev);
-		keypad_initialized = 0;
-	}
-
-	if (lcd.enabled) {
-		charlcd_unregister(lcd.charlcd);
-		lcd.initialized = false;
-		kfree(lcd.charlcd->drvdata);
-		kfree(lcd.charlcd);
-		lcd.charlcd = NULL;
-	}
-
-	/* TODO: free all input signals */
-	parport_release(pprt);
-	parport_unregister_device(pprt);
-	pprt = NULL;
-}
-
-static struct parport_driver panel_driver = {
-	.name = "panel",
-	.match_port = panel_attach,
-	.detach = panel_detach,
-	.devmodel = true,
-};
-
-/* init function */
-static int __init panel_init_module(void)
-{
-	int selected_keypad_type = NOT_SET, err;
 
 	/* take care of an eventual profile */
 	switch (profile) {
@@ -1711,29 +1570,100 @@ static int __init panel_init_module(void)
 	if (!lcd.enabled && !keypad.enabled) {
 		/* no device enabled, let's exit */
 		pr_err("panel driver disabled.\n");
-		return -ENODEV;
+		return;
 	}
 
-	err = parport_register_driver(&panel_driver);
-	if (err) {
-		pr_err("could not register with parport. Aborting.\n");
-		return err;
+	if (port->number != parport)
+		return;
+
+	if (pprt) {
+		pr_err("%s: port->number=%d parport=%d, already registered!\n",
+		       __func__, port->number, parport);
+		return;
 	}
 
-	if (pprt)
-		pr_info("panel driver registered on parport%d (io=0x%lx).\n",
-			parport, pprt->port->base);
-	else
-		pr_info("panel driver not yet registered\n");
-	return 0;
+	memset(&panel_cb, 0, sizeof(panel_cb));
+	panel_cb.private = &pprt;
+	/* panel_cb.flags = 0 should be PARPORT_DEV_EXCL? */
+
+	pprt = parport_register_dev_model(port, "panel", &panel_cb, 0);
+	if (!pprt) {
+		pr_err("%s: port->number=%d parport=%d, parport_register_device() failed\n",
+		       __func__, port->number, parport);
+		return;
+	}
+
+	if (parport_claim(pprt)) {
+		pr_err("could not claim access to parport%d. Aborting.\n",
+		       parport);
+		goto err_unreg_device;
+	}
+
+	/* must init LCD first, just in case an IRQ from the keypad is
+	 * generated at keypad init
+	 */
+	if (lcd.enabled) {
+		lcd_init();
+		if (!lcd.charlcd || charlcd_register(lcd.charlcd))
+			goto err_unreg_device;
+	}
+
+	if (keypad.enabled) {
+		keypad_init();
+		if (misc_register(&keypad_dev))
+			goto err_lcd_unreg;
+	}
+	return;
+
+err_lcd_unreg:
+	if (scan_timer.function)
+		timer_delete_sync(&scan_timer);
+	if (lcd.enabled)
+		charlcd_unregister(lcd.charlcd);
+err_unreg_device:
+	hd44780_common_free(lcd.charlcd);
+	lcd.charlcd = NULL;
+	parport_unregister_device(pprt);
+	pprt = NULL;
 }
 
-static void __exit panel_cleanup_module(void)
+static void panel_detach(struct parport *port)
 {
-	parport_unregister_driver(&panel_driver);
+	if (port->number != parport)
+		return;
+
+	if (!pprt) {
+		pr_err("%s: port->number=%d parport=%d, nothing to unregister.\n",
+		       __func__, port->number, parport);
+		return;
+	}
+	if (scan_timer.function)
+		timer_delete_sync(&scan_timer);
+
+	if (keypad.enabled) {
+		misc_deregister(&keypad_dev);
+		keypad_initialized = 0;
+	}
+
+	if (lcd.enabled) {
+		charlcd_unregister(lcd.charlcd);
+		lcd.initialized = false;
+		hd44780_common_free(lcd.charlcd);
+		lcd.charlcd = NULL;
+	}
+
+	/* TODO: free all input signals */
+	parport_release(pprt);
+	parport_unregister_device(pprt);
+	pprt = NULL;
 }
 
-module_init(panel_init_module);
-module_exit(panel_cleanup_module);
+static struct parport_driver panel_driver = {
+	.name = "panel",
+	.match_port = panel_attach,
+	.detach = panel_detach,
+};
+module_parport_driver(panel_driver);
+
 MODULE_AUTHOR("Willy Tarreau");
 MODULE_LICENSE("GPL");

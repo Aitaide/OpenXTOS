@@ -9,6 +9,7 @@
 #include <linux/dma/imx-dma.h>
 #include <sound/dmaengine_pcm.h>
 
+#define FAL_SAI_NUM_RATES  20
 #define FSL_SAI_FORMATS (SNDRV_PCM_FMTBIT_S16_LE |\
 			 SNDRV_PCM_FMTBIT_S20_3LE |\
 			 SNDRV_PCM_FMTBIT_S24_LE |\
@@ -117,6 +118,7 @@
 
 /* SAI Transmit and Receive Configuration 2 Register */
 #define FSL_SAI_CR2_SYNC	BIT(30)
+#define FSL_SAI_CR2_BCS		BIT(29)
 #define FSL_SAI_CR2_BCI		BIT(28)
 #define FSL_SAI_CR2_MSEL_MASK	(0x3 << 26)
 #define FSL_SAI_CR2_MSEL_BUS	0
@@ -137,6 +139,7 @@
 
 /* SAI Transmit and Receive Configuration 4 Register */
 
+#define FSL_SAI_CR4_FCONT_MASK	BIT(28)
 #define FSL_SAI_CR4_FCONT	BIT(28)
 #define FSL_SAI_CR4_FCOMB_SHIFT BIT(26)
 #define FSL_SAI_CR4_FCOMB_SOFT  BIT(27)
@@ -194,9 +197,13 @@
 #define FSL_SAI_MDIV_MASK	    0xFFFFF
 
 /* SAI timestamp and bitcounter */
+#define FSL_SAI_xTCTL_TSEN_SHIFT   0
 #define FSL_SAI_xTCTL_TSEN         BIT(0)
+#define FSL_SAI_xTCTL_TSINC_SHIFT  1
 #define FSL_SAI_xTCTL_TSINC        BIT(1)
+#define FSL_SAI_xTCTL_RTSC_SHIFT   8
 #define FSL_SAI_xTCTL_RTSC         BIT(8)
+#define FSL_SAI_xTCTL_RBC_SHIFT    9
 #define FSL_SAI_xTCTL_RBC          BIT(9)
 
 /* SAI type */
@@ -227,6 +234,10 @@
 #define FSL_SAI_DL_DEFAULT	(0)
 #define FSL_SAI_DL_I2S		BIT(0)
 #define FSL_SAI_DL_PDM		BIT(1)
+
+#define FSL_SAI_AMIX_BYPASS	0
+#define FSL_SAI_AMIX_AUDMIX	1
+#define FSL_SAI_AMIX_NONE	2
 
 struct fsl_sai_soc_data {
 	bool use_imx_pcm;
@@ -282,24 +293,25 @@ struct fsl_sai {
 	struct clk *pll11k_clk;
 	struct resource *res;
 
-	bool is_consumer_mode;
+	bool is_consumer_mode[2];
 	bool is_lsb_first;
-	bool is_dsp_mode;
+	bool is_dsp_mode[2];
 	bool is_pdm_mode;
 	bool is_multi_fifo_dma;
 	bool synchronous[2];
 	struct fsl_sai_dl_cfg *dl_cfg;
 	unsigned int dl_cfg_cnt;
 	bool mclk_direction_output;
+	bool is_bit_clock_swap;
 
 	unsigned int mclk_id[2];
 	unsigned int mclk_streams;
-	unsigned int slots;
-	unsigned int slot_width;
+	unsigned int slots[2];
+	unsigned int slot_width[2];
 	unsigned int bclk_ratio;
 
 	const struct fsl_sai_soc_data *soc_data;
-	struct snd_soc_dai_driver cpu_dai_drv;
+	struct snd_soc_dai_driver cpu_dai_drv[3];
 	struct snd_dmaengine_dai_dma_data dma_params_rx;
 	struct snd_dmaengine_dai_dma_data dma_params_tx;
 	struct fsl_sai_verid verid;
@@ -308,6 +320,8 @@ struct fsl_sai {
 	struct pinctrl *pinctrl;
 	struct pinctrl_state *pins_state;
 	struct sdma_peripheral_config audio_config[2];
+	struct snd_pcm_hw_constraint_list constraint_rates;
+	unsigned int constraint_rates_list[FAL_SAI_NUM_RATES];
 };
 
 #define TX 1

@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-2.0+
+// SPDX-License-Identifier: GPL-2.0-only
 /*
  * Machine driver for AMD Pink Sardine platform using DMIC
  *
@@ -45,7 +45,6 @@ static struct snd_soc_card acp63_card = {
 
 static int acp63_probe(struct platform_device *pdev)
 {
-	struct acp63_pdm *machine = NULL;
 	struct snd_soc_card *card;
 	int ret;
 
@@ -53,7 +52,6 @@ static int acp63_probe(struct platform_device *pdev)
 	card = platform_get_drvdata(pdev);
 	acp63_card.dev = &pdev->dev;
 
-	snd_soc_card_set_drvdata(card, machine);
 	ret = devm_snd_soc_register_card(&pdev->dev, card);
 	if (ret) {
 		return dev_err_probe(&pdev->dev, ret,
@@ -75,5 +73,6 @@ static struct platform_driver acp63_mach_driver = {
 module_platform_driver(acp63_mach_driver);
 
 MODULE_AUTHOR("Syed.SabaKareem@amd.com");
+MODULE_DESCRIPTION("AMD Pink Sardine support for DMIC");
 MODULE_LICENSE("GPL v2");
 MODULE_ALIAS("platform:" DRV_NAME);

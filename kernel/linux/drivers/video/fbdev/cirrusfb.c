@@ -253,7 +253,7 @@ static const struct cirrusfb_board_info_rec {
 
 #ifdef CONFIG_PCI
 #define CHIP(id, btype) \
-	{ PCI_VENDOR_ID_CIRRUS, id, PCI_ANY_ID, PCI_ANY_ID, 0, 0, (btype) }
+	{ PCI_VDEVICE(CIRRUS, id), .driver_data = (btype) }
 
 static struct pci_device_id cirrusfb_pci_table[] = {
 	CHIP(PCI_DEVICE_ID_CIRRUS_5436, BT_ALPINE),
@@ -1961,6 +1961,7 @@ static const struct fb_ops cirrusfb_ops = {
 	.owner		= THIS_MODULE,
 	.fb_open	= cirrusfb_open,
 	.fb_release	= cirrusfb_release,
+	__FB_DEFAULT_IOMEM_OPS_RDWR,
 	.fb_setcolreg	= cirrusfb_setcolreg,
 	.fb_check_var	= cirrusfb_check_var,
 	.fb_set_par	= cirrusfb_set_par,
@@ -1970,6 +1971,7 @@ static const struct fb_ops cirrusfb_ops = {
 	.fb_copyarea	= cirrusfb_copyarea,
 	.fb_sync	= cirrusfb_sync,
 	.fb_imageblit	= cirrusfb_imageblit,
+	__FB_DEFAULT_IOMEM_OPS_MMAP,
 };
 
 static int cirrusfb_set_fbinfo(struct fb_info *info)

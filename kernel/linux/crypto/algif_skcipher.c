@@ -32,7 +32,26 @@
 #include <linux/mm.h>
 #include <linux/module.h>
 #include <linux/net.h>
+#include <linux/string.h>
 #include <net/sock.h>
+
+static const struct af_alg_allowlist_entry skcipher_allowlist[] = {
+	{ "adiantum(xchacha12,aes)", AF_ALG_UNPRIVILEGED }, /* cryptsetup */
+	{ "adiantum(xchacha20,aes)", AF_ALG_UNPRIVILEGED }, /* cryptsetup */
+	{ "cbc(aes)" }, /* iwd */
+	{ "cbc(des)" }, /* iwd */
+	{ "cbc(des3_ede)" }, /* iwd */
+	{ "cbc(paes)" }, /* caam and others */
+	{ "ctr(aes)" }, /* iwd */
+	{ "ecb(aes)" }, /* iwd, bluez */
+	{ "ecb(des)" }, /* iwd */
+	{ "hctr2(aes)", AF_ALG_UNPRIVILEGED }, /* cryptsetup */
+	{ "xts(aes)", AF_ALG_UNPRIVILEGED }, /* cryptsetup benchmark */
+	{ "xts(camellia)", AF_ALG_UNPRIVILEGED }, /* cryptsetup */
+	{ "xts(serpent)", AF_ALG_UNPRIVILEGED }, /* cryptsetup */
+	{ "xts(twofish)", AF_ALG_UNPRIVILEGED }, /* cryptsetup */
+	{},
+};
 
 static int skcipher_sendmsg(struct socket *sock, struct msghdr *msg,
 			    size_t size)
@@ -47,6 +66,38 @@ static int skcipher_sendmsg(struct socket *sock, struct msghdr *msg,
 	return af_alg_sendmsg(sock, msg, size, ivsize);
 }
 
+static int algif_skcipher_export(struct sock *sk, struct skcipher_request *req)
+{
+	struct alg_sock *ask = alg_sk(sk);
+	struct crypto_skcipher *tfm;
+	struct af_alg_ctx *ctx;
+	struct alg_sock *pask;
+	unsigned statesize;
+	struct sock *psk;
+	int err;
+
+	if (!(req->base.flags & CRYPTO_SKCIPHER_REQ_NOTFINAL))
+		return 0;
+
+	ctx = ask->private;
+	psk = ask->parent;
+	pask = alg_sk(psk);
+	tfm = pask->private;
+
+	statesize = crypto_skcipher_statesize(tfm);
+	ctx->state = sock_kmalloc(sk, statesize, GFP_ATOMIC);
+	if (!ctx->state)
+		return -ENOMEM;
+
+	err = crypto_skcipher_export(req, ctx->state);
+	if (err) {
+		sock_kzfree_s(sk, ctx->state, statesize);
+		ctx->state = NULL;
+	}
+
+	return err;
+}
+
 static int _skcipher_recvmsg(struct socket *sock, struct msghdr *msg,
 			     size_t ignored, int flags)
 {
@@ -58,6 +109,7 @@ static int _skcipher_recvmsg(struct socket *sock, struct msghdr *msg,
 	struct crypto_skcipher *tfm = pask->private;
 	unsigned int bs = crypto_skcipher_chunksize(tfm);
 	struct af_alg_async_req *areq;
+	unsigned cflags = 0;
 	int err = 0;
 	size_t len = 0;
 
@@ -82,14 +134,21 @@ static int _skcipher_recvmsg(struct socket *sock, struct msghdr *msg,
 	 * If more buffers are to be expected to be processed, process only
 	 * full block size buffers.
 	 */
-	if (ctx->more || len < ctx->used)
+	if (ctx->more || len < ctx->used) {
+		if (len < bs) {
+			err = -EINVAL;
+			goto free;
+		}
+
 		len -= len % bs;
+		cflags |= CRYPTO_SKCIPHER_REQ_NOTFINAL;
+	}
 
 	/*
 	 * Create a per request TX SGL for this request which tracks the
 	 * SG entries from the global TX SGL.
 	 */
-	areq->tsgl_entries = af_alg_count_tsgl(sk, len, 0);
+	areq->tsgl_entries = af_alg_count_tsgl(sk, len);
 	if (!areq->tsgl_entries)
 		areq->tsgl_entries = 1;
 	areq->tsgl = sock_kmalloc(sk, array_size(sizeof(*areq->tsgl),
@@ -100,45 +159,36 @@ static int _skcipher_recvmsg(struct socket *sock, struct msghdr *msg,
 		goto free;
 	}
 	sg_init_table(areq->tsgl, areq->tsgl_entries);
-	af_alg_pull_tsgl(sk, len, areq->tsgl, 0);
+	af_alg_pull_tsgl(sk, len, areq->tsgl);
 
 	/* Initialize the crypto operation */
 	skcipher_request_set_tfm(&areq->cra_u.skcipher_req, tfm);
 	skcipher_request_set_crypt(&areq->cra_u.skcipher_req, areq->tsgl,
 				   areq->first_rsgl.sgl.sgt.sgl, len, ctx->iv);
 
-	if (msg->msg_iocb && !is_sync_kiocb(msg->msg_iocb)) {
-		/* AIO operation */
-		sock_hold(sk);
-		areq->iocb = msg->msg_iocb;
-
-		/* Remember output size that will be generated. */
-		areq->outlen = len;
-
-		skcipher_request_set_callback(&areq->cra_u.skcipher_req,
-					      CRYPTO_TFM_REQ_MAY_SLEEP,
-					      af_alg_async_cb, areq);
-		err = ctx->enc ?
-			crypto_skcipher_encrypt(&areq->cra_u.skcipher_req) :
-			crypto_skcipher_decrypt(&areq->cra_u.skcipher_req);
-
-		/* AIO operation in progress */
-		if (err == -EINPROGRESS)
-			return -EIOCBQUEUED;
-
-		sock_put(sk);
-	} else {
-		/* Synchronous operation */
-		skcipher_request_set_callback(&areq->cra_u.skcipher_req,
-					      CRYPTO_TFM_REQ_MAY_SLEEP |
-					      CRYPTO_TFM_REQ_MAY_BACKLOG,
-					      crypto_req_done, &ctx->wait);
-		err = crypto_wait_req(ctx->enc ?
-			crypto_skcipher_encrypt(&areq->cra_u.skcipher_req) :
-			crypto_skcipher_decrypt(&areq->cra_u.skcipher_req),
-						 &ctx->wait);
+	if (ctx->state) {
+		err = crypto_skcipher_import(&areq->cra_u.skcipher_req,
+					     ctx->state);
+		sock_kzfree_s(sk, ctx->state, crypto_skcipher_statesize(tfm));
+		ctx->state = NULL;
+		if (err)
+			goto free;
+		cflags |= CRYPTO_SKCIPHER_REQ_CONT;
 	}
 
+	skcipher_request_set_callback(&areq->cra_u.skcipher_req,
+				      cflags |
+				      CRYPTO_TFM_REQ_MAY_SLEEP |
+				      CRYPTO_TFM_REQ_MAY_BACKLOG,
+				      crypto_req_done, &ctx->wait);
+	err = crypto_wait_req(ctx->enc ?
+		crypto_skcipher_encrypt(&areq->cra_u.skcipher_req) :
+		crypto_skcipher_decrypt(&areq->cra_u.skcipher_req),
+					 &ctx->wait);
+
+	if (!err)
+		err = algif_skcipher_export(
+			sk, &areq->cra_u.skcipher_req);
 
 free:
 	af_alg_free_resources(areq);
@@ -276,9 +326,19 @@ static struct proto_ops algif_skcipher_ops_nokey = {
 	.poll		=	af_alg_poll,
 };
 
-static void *skcipher_bind(const char *name, u32 type, u32 mask)
+static void *skcipher_bind(const char *name)
 {
-	return crypto_alloc_skcipher(name, type, mask);
+	u32 mask = AF_ALG_CRYPTOAPI_MASK;
+	int err;
+
+	err = af_alg_check_restriction(name, skcipher_allowlist);
+	if (err)
+		return ERR_PTR(err);
+
+	if (strcmp(name, "cbc(paes)") == 0)
+		mask = 0;
+
+	return crypto_alloc_skcipher(name, 0, mask);
 }
 
 static void skcipher_release(void *private)
@@ -299,8 +359,10 @@ static void skcipher_sock_destruct(struct sock *sk)
 	struct alg_sock *pask = alg_sk(psk);
 	struct crypto_skcipher *tfm = pask->private;
 
-	af_alg_pull_tsgl(sk, ctx->used, NULL, 0);
+	af_alg_pull_tsgl(sk, ctx->used, NULL);
 	sock_kzfree_s(sk, ctx->iv, crypto_skcipher_ivsize(tfm));
+	if (ctx->state)
+		sock_kzfree_s(sk, ctx->state, crypto_skcipher_statesize(tfm));
 	sock_kfree_s(sk, ctx, ctx->len);
 	af_alg_release_parent(sk);
 }
@@ -371,4 +433,5 @@ static void __exit algif_skcipher_exit(void)
 
 module_init(algif_skcipher_init);
 module_exit(algif_skcipher_exit);
+MODULE_DESCRIPTION("Userspace interface for skcipher algorithms");
 MODULE_LICENSE("GPL");

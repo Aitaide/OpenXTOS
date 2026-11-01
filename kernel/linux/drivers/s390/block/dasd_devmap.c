@@ -13,19 +13,17 @@
  *
  */
 
-#define KMSG_COMPONENT "dasd"
-
+#include <linux/export.h>
 #include <linux/ctype.h>
 #include <linux/init.h>
 #include <linux/module.h>
 #include <linux/slab.h>
 
+#include <asm/machine.h>
 #include <asm/debug.h>
 #include <linux/uaccess.h>
 #include <asm/ipl.h>
 
-/* This is ugly... */
-#define PRINTK_HEADER "dasd_devmap:"
 #define DASD_MAX_PARAMS 256
 
 #include "dasd_int.h"
@@ -238,7 +236,7 @@ static int __init dasd_parse_keyword(char *keyword)
 		return 0;
         }
 	if (strncmp("nopav", keyword, length) == 0) {
-		if (MACHINE_IS_VM)
+		if (machine_is_vm())
 			pr_info("'nopav' is not supported on z/VM\n");
 		else {
 			dasd_nopav = 1;
@@ -357,7 +355,8 @@ static int __init dasd_parse_range(const char *range)
 	/* each device in dasd= parameter should be set initially online */
 	features |= DASD_FEATURE_INITIAL_ONLINE;
 	while (from <= to) {
-		sprintf(bus_id, "%01x.%01x.%04x", from_id0, from_id1, from++);
+		scnprintf(bus_id, sizeof(bus_id),
+			  "%01x.%01x.%04x", from_id0, from_id1, from++);
 		devmap = dasd_add_busid(bus_id, features);
 		if (IS_ERR(devmap)) {
 			rc = PTR_ERR(devmap);
@@ -413,7 +412,7 @@ dasd_add_busid(const char *bus_id, int features)
 	struct dasd_devmap *devmap, *new, *tmp;
 	int hash;
 
-	new = kzalloc(sizeof(struct dasd_devmap), GFP_KERNEL);
+	new = kzalloc_obj(struct dasd_devmap);
 	if (!new)
 		return ERR_PTR(-ENOMEM);
 	spin_lock(&dasd_devmap_lock);
@@ -606,7 +605,7 @@ static int dasd_devmap_get_pprc_status(struct dasd_device *device,
 		dev_warn(&device->cdev->dev, "Unable to query copy relation status\n");
 		return -EOPNOTSUPP;
 	}
-	temp = kzalloc(sizeof(*temp), GFP_KERNEL);
+	temp = kzalloc_obj(*temp);
 	if (!temp)
 		return -ENOMEM;
 
@@ -859,7 +858,7 @@ dasd_delete_device(struct dasd_device *device)
 	dev_set_drvdata(&device->cdev->dev, NULL);
 	spin_unlock_irqrestore(get_ccwdev_lock(device->cdev), flags);
 
-	/* Removve copy relation */
+	/* Remove copy relation */
 	dasd_devmap_delete_copy_relation_device(device);
 	/*
 	 * Drop ref_count by 3, one for the devmap reference, one for
@@ -1114,7 +1113,7 @@ dasd_use_diag_show(struct device *dev, struct device_attribute *attr, char *buf)
 		use_diag = (devmap->features & DASD_FEATURE_USEDIAG) != 0;
 	else
 		use_diag = (DASD_FEATURE_DEFAULT & DASD_FEATURE_USEDIAG) != 0;
-	return sprintf(buf, use_diag ? "1\n" : "0\n");
+	return sysfs_emit(buf, use_diag ? "1\n" : "0\n");
 }
 
 static ssize_t
@@ -1163,7 +1162,7 @@ dasd_use_raw_show(struct device *dev, struct device_attribute *attr, char *buf)
 		use_raw = (devmap->features & DASD_FEATURE_USERAW) != 0;
 	else
 		use_raw = (DASD_FEATURE_DEFAULT & DASD_FEATURE_USERAW) != 0;
-	return sprintf(buf, use_raw ? "1\n" : "0\n");
+	return sysfs_emit(buf, use_raw ? "1\n" : "0\n");
 }
 
 static ssize_t
@@ -1259,7 +1258,7 @@ dasd_access_show(struct device *dev, struct device_attribute *attr,
 	if (count < 0)
 		return count;
 
-	return sprintf(buf, "%d\n", count);
+	return sysfs_emit(buf, "%d\n", count);
 }
 
 static DEVICE_ATTR(host_access_count, 0444, dasd_access_show, NULL);
@@ -1338,19 +1337,19 @@ static ssize_t dasd_alias_show(struct device *dev,
 
 	device = dasd_device_from_cdev(to_ccwdev(dev));
 	if (IS_ERR(device))
-		return sprintf(buf, "0\n");
+		return sysfs_emit(buf, "0\n");
 
 	if (device->discipline && device->discipline->get_uid &&
 	    !device->discipline->get_uid(device, &uid)) {
 		if (uid.type == UA_BASE_PAV_ALIAS ||
 		    uid.type == UA_HYPER_PAV_ALIAS) {
 			dasd_put_device(device);
-			return sprintf(buf, "1\n");
+			return sysfs_emit(buf, "1\n");
 		}
 	}
 	dasd_put_device(device);
 
-	return sprintf(buf, "0\n");
+	return sysfs_emit(buf, "0\n");
 }
 
 static DEVICE_ATTR(alias, 0444, dasd_alias_show, NULL);
@@ -1412,15 +1411,9 @@ dasd_uid_show(struct device *dev, struct device_attribute *attr, char *buf)
 			break;
 		}
 
-		if (strlen(uid.vduit) > 0)
-			snprintf(uid_string, sizeof(uid_string),
-				 "%s.%s.%04x.%s.%s",
-				 uid.vendor, uid.serial, uid.ssid, ua_string,
-				 uid.vduit);
-		else
-			snprintf(uid_string, sizeof(uid_string),
-				 "%s.%s.%04x.%s",
-				 uid.vendor, uid.serial, uid.ssid, ua_string);
+		snprintf(uid_string, sizeof(uid_string), "%s.%s.%04x.%s%s%s",
+			 uid.vendor, uid.serial, uid.ssid, ua_string,
+			 uid.vduit[0] ? "." : "", uid.vduit);
 	}
 	dasd_put_device(device);
 
@@ -1636,6 +1629,88 @@ dasd_expires_store(struct device *dev, struct device_attribute *attr,
 }
 
 static DEVICE_ATTR(expires, 0644, dasd_expires_show, dasd_expires_store);
+
+/* ESE fulltrack write aggressiveness knob (0..100, see DASD_FT_BIAS_*) */
+static ssize_t
+full_track_bias_show(struct device *dev, struct device_attribute *attr, char *buf)
+{
+	struct dasd_device *device;
+	int len;
+
+	device = dasd_device_from_cdev(to_ccwdev(dev));
+	if (IS_ERR(device))
+		return -ENODEV;
+	len = sysfs_emit(buf, "%u\n", device->ft_bias);
+	dasd_put_device(device);
+	return len;
+}
+
+static ssize_t full_track_bias_store(struct device *dev,
+				     struct device_attribute *attr,
+				     const char *buf, size_t count)
+{
+	struct dasd_device *device;
+	unsigned int val;
+
+	if (kstrtouint(buf, 0, &val) || val > DASD_FT_BIAS_MAX)
+		return -EINVAL;
+
+	device = dasd_device_from_cdev(to_ccwdev(dev));
+	if (IS_ERR(device))
+		return -ENODEV;
+
+	/*
+	 * ft_bias is the tuning target; fulltrack is a best-effort mode hint
+	 * that the per-IO heuristic also updates locklessly. A racing writer can
+	 * at most leave a transient mismatch that self-corrects on the next IO,
+	 * never corruption, so the update is left unlocked.
+	 */
+	device->ft_bias = val;
+	dasd_ft_bias_apply(device);
+
+	dasd_put_device(device);
+	return count;
+}
+
+static DEVICE_ATTR_RW(full_track_bias);
+
+static const char * const dasd_ese_heu_state_names[] = {
+	[DASD_ESE_HEU_FT1_ACTIVE] = "fulltrack active",
+	[DASD_ESE_HEU_PROBING]    = "probing",
+	[DASD_ESE_HEU_FT0_STABLE] = "fulltrack inactive",
+};
+
+/* read-only: current full-track mode / adaptive FSM state, for observability */
+static ssize_t
+ese_heuristic_state_show(struct device *dev, struct device_attribute *attr,
+			 char *buf)
+{
+	struct dasd_device *device;
+	unsigned int state;
+	int len;
+
+	device = dasd_device_from_cdev(to_ccwdev(dev));
+	if (IS_ERR(device))
+		return -ENODEV;
+	if (device->ft_bias == 0) {
+		len = sysfs_emit(buf, "fulltrack deactivated\n");
+	} else if (device->ft_bias >= DASD_FT_BIAS_MAX) {
+		len = sysfs_emit(buf, "fulltrack permanent active\n");
+	} else if (!dasd_ese_adaptive(device)) {
+		/* adaptive range but not ESE: the heuristic does not run */
+		len = sysfs_emit(buf, "fulltrack deactivated\n");
+	} else {
+		state = device->ese_probe_state;
+		if (state < ARRAY_SIZE(dasd_ese_heu_state_names))
+			len = sysfs_emit(buf, "%s\n", dasd_ese_heu_state_names[state]);
+		else
+			len = sysfs_emit(buf, "unknown\n");
+	}
+	dasd_put_device(device);
+	return len;
+}
+
+static DEVICE_ATTR_RO(ese_heuristic_state);
 
 static ssize_t
 dasd_retries_show(struct device *dev, struct device_attribute *attr, char *buf)
@@ -1862,7 +1937,7 @@ static ssize_t dasd_pm_show(struct device *dev,
 
 	device = dasd_device_from_cdev(to_ccwdev(dev));
 	if (IS_ERR(device))
-		return sprintf(buf, "0\n");
+		return sysfs_emit(buf, "0\n");
 
 	opm = dasd_path_get_opm(device);
 	nppm = dasd_path_get_nppm(device);
@@ -1872,8 +1947,8 @@ static ssize_t dasd_pm_show(struct device *dev,
 	ifccpm = dasd_path_get_ifccpm(device);
 	dasd_put_device(device);
 
-	return sprintf(buf, "%02x %02x %02x %02x %02x %02x\n", opm, nppm,
-		       cablepm, cuirpm, hpfpm, ifccpm);
+	return sysfs_emit(buf, "%02x %02x %02x %02x %02x %02x\n", opm, nppm,
+			  cablepm, cuirpm, hpfpm, ifccpm);
 }
 
 static DEVICE_ATTR(path_masks, 0444, dasd_pm_show, NULL);
@@ -2258,13 +2333,19 @@ static ssize_t dasd_copy_pair_store(struct device *dev,
 
 	/* allocate primary devmap if needed */
 	prim_devmap = dasd_find_busid(prim_busid);
-	if (IS_ERR(prim_devmap))
+	if (IS_ERR(prim_devmap)) {
 		prim_devmap = dasd_add_busid(prim_busid, DASD_FEATURE_DEFAULT);
+		if (IS_ERR(prim_devmap))
+			return PTR_ERR(prim_devmap);
+	}
 
 	/* allocate secondary devmap if needed */
 	sec_devmap = dasd_find_busid(sec_busid);
-	if (IS_ERR(sec_devmap))
+	if (IS_ERR(sec_devmap)) {
 		sec_devmap = dasd_add_busid(sec_busid, DASD_FEATURE_DEFAULT);
+		if (IS_ERR(sec_devmap))
+			return PTR_ERR(sec_devmap);
+	}
 
 	/* setting copy relation is only allowed for offline secondary */
 	if (sec_devmap->device)
@@ -2275,7 +2356,7 @@ static ssize_t dasd_copy_pair_store(struct device *dev,
 	} else if (sec_devmap->copy) {
 		copy = sec_devmap->copy;
 	} else {
-		copy = kzalloc(sizeof(*copy), GFP_KERNEL);
+		copy = kzalloc_obj(*copy);
 		if (!copy)
 			return -ENOMEM;
 	}
@@ -2401,9 +2482,10 @@ static ssize_t dasd_##_name##_show(struct device *dev,			\
 									\
 	return sysfs_emit(buf, "%d\n", val);			\
 }									\
-static DEVICE_ATTR(_name, 0444, dasd_##_name##_show, NULL);		\
+static DEVICE_ATTR(_name, 0444, dasd_##_name##_show, NULL);
 
-DASD_DEFINE_ATTR(ese, device->discipline->is_ese);
+DASD_DEFINE_ATTR(ese, device->discipline->ese_capable);
+DASD_DEFINE_ATTR(on_demand_formatting, device->discipline->on_demand_format);
 DASD_DEFINE_ATTR(extent_size, device->discipline->ext_size);
 DASD_DEFINE_ATTR(pool_id, device->discipline->ext_pool_id);
 DASD_DEFINE_ATTR(space_configured, device->discipline->space_configured);
@@ -2426,6 +2508,8 @@ static struct attribute * dasd_attrs[] = {
 	&dev_attr_erplog.attr,
 	&dev_attr_failfast.attr,
 	&dev_attr_expires.attr,
+	&dev_attr_full_track_bias.attr,
+	&dev_attr_ese_heuristic_state.attr,
 	&dev_attr_retries.attr,
 	&dev_attr_timeout.attr,
 	&dev_attr_reservation_policy.attr,
@@ -2439,6 +2523,7 @@ static struct attribute * dasd_attrs[] = {
 	&dev_attr_path_reset.attr,
 	&dev_attr_hpf.attr,
 	&dev_attr_ese.attr,
+	&dev_attr_on_demand_formatting.attr,
 	&dev_attr_fc_security.attr,
 	&dev_attr_copy_pair.attr,
 	&dev_attr_copy_role.attr,

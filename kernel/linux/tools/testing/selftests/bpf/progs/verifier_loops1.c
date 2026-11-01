@@ -75,9 +75,10 @@ l0_%=:	r0 += 1;					\
 "	::: __clobber_all);
 }
 
-SEC("tracepoint")
+SEC("socket")
 __description("bounded loop, start in the middle")
-__failure __msg("back-edge")
+__success
+__failure_unpriv __msg_unpriv("back-edge")
 __naked void loop_start_in_the_middle(void)
 {
 	asm volatile ("					\
@@ -136,7 +137,8 @@ l0_%=:	exit;						\
 
 SEC("tracepoint")
 __description("bounded recursion")
-__failure __msg("back-edge")
+__failure
+__msg("recursive call from")
 __naked void bounded_recursion(void)
 {
 	asm volatile ("					\
@@ -254,6 +256,87 @@ l0_%=:	r2 += r1;					\
 	r0 = r2;					\
 	exit;						\
 "	::: __clobber_all);
+}
+
+SEC("xdp")
+__success
+__naked void not_an_inifinite_loop(void)
+{
+	asm volatile ("					\
+	call %[bpf_get_prandom_u32];			\
+	r0 &= 0xff;					\
+	*(u64 *)(r10 - 8) = r0;				\
+	r0 = 0;						\
+loop_%=:						\
+	r0 = *(u64 *)(r10 - 8);				\
+	if r0 > 10 goto exit_%=;			\
+	r0 += 1;					\
+	*(u64 *)(r10 - 8) = r0;				\
+	r0 = 0;						\
+	goto loop_%=;					\
+exit_%=:						\
+	r0 = 0;						\
+	exit;						\
+"	:
+	: __imm(bpf_get_prandom_u32)
+	: __clobber_all);
+}
+
+/*
+ * This test case triggered a bug in verifier.c:maybe_exit_scc().
+ * Speculative execution path reaches stack access instruction,
+ * stops and triggers maybe_exit_scc() w/o accompanying maybe_enter_scc() call.
+ */
+SEC("socket")
+__arch_x86_64
+__caps_unpriv(CAP_BPF)
+__naked void maybe_exit_scc_bug1(void)
+{
+	asm volatile (
+	"r0 = 100;"
+"1:"
+	/* Speculative execution path reaches and stops here. */
+	"*(u64 *)(r10 - 512) = r0;"
+	/* Condition is always false, but verifier speculatively executes the true branch. */
+	"if r0 <= 0x0 goto 1b;"
+	"exit;"
+	::: __clobber_all);
+}
+
+/*
+ * The loop reads zero from the caller's stack on its first iteration and
+ * one from the callee's stack on its second iteration. At the loop header,
+ * only the frame number of the pointer in r1 changes.
+ */
+static __naked __noinline __used
+void loop_stack_frames_reg(void)
+{
+	asm volatile (
+	"*(u64 *)(r10 - 8) = 1;"
+"1:"
+	"r0 = *(u64 *)(r1 + 0);"
+	"if r0 != 0 goto 2f;"
+	"r1 = r10;"
+	"r1 += -8;"
+	"goto 1b;"
+"2:"
+	"exit;"
+	::: __clobber_all);
+}
+
+SEC("xdp")
+__description("bounded loop changing stack frame in a register")
+__success __retval(1)
+__flag(BPF_F_TEST_STATE_FREQ)
+__naked void bounded_loop_stack_frames_reg(void)
+{
+	asm volatile (
+	"*(u64 *)(r10 - 8) = 0;"
+	"r1 = r10;"
+	"r1 += -8;"
+	"call loop_stack_frames_reg;"
+	"exit;"
+	::: __clobber_all);
 }
 
 char _license[] SEC("license") = "GPL";

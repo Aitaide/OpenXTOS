@@ -33,6 +33,66 @@ if [[ -z "$XTOS_VERSION" ]]; then
 fi
 RELEASE_NAME="$(sed -n 's/^XTOS_RELEASE_NAME=//p' "$ROOT/VERSION" | head -1)"
 RELEASE_DATE="$(sed -n 's/^XTOS_RELEASE_DATE=//p' "$ROOT/VERSION" | head -1)"
+KERNEL_PIN="$ROOT/kernel/source-pin.json"
+
+validate_kernel_artifacts() {
+    local arch="$1" build_dir="$2" image="$3" initramfs="$4"
+    local config="$build_dir/.config" release_file="$build_dir/include/config/kernel.release"
+    local artifact
+    for artifact in "$image" "$initramfs" "$config" "$release_file"; do
+        if [[ ! -s "$artifact" ]]; then
+            printf 'error: %s kernel artifact missing or empty: %s\n' "$arch" "$artifact" >&2
+            return 1
+        fi
+    done
+    if [[ "$arch" == x86_64 ]] && ! cmp -s "$config" "$BUILD_ROOT/images/kernel.config"; then
+        printf 'error: packaged config differs from resolved kernel config\n' >&2
+        return 1
+    fi
+    python3 - "$KERNEL_PIN" "$config" "$release_file" "$arch" "$image" "$ROOT/kernel/linux/scripts/extract-ikconfig" <<'PY'
+import json
+import re
+import subprocess
+import sys
+from pathlib import Path
+
+pin_path, config_path, release_path, arch, image_path, extractor = sys.argv[1:]
+pin = json.loads(Path(pin_path).read_text())
+version = pin.get("version")
+config = Path(config_path).read_text()
+match = re.search(r'^CONFIG_LOCALVERSION="((?:[^"\\]|\\.)*)"$', config, re.M)
+localversion = match.group(1) if match else ""
+release = Path(release_path).read_text().strip()
+expected = f"{version}{localversion}"
+if not isinstance(version, str) or not version or (localversion and not localversion.startswith("-")):
+    print(f"error: invalid kernel pin/localversion for {arch}", file=sys.stderr)
+    raise SystemExit(1)
+if release != expected:
+    print(f"error: {arch} kernel.release mismatch: expected {expected!r} from source pin and CONFIG_LOCALVERSION, got {release!r}", file=sys.stderr)
+    raise SystemExit(1)
+if config.splitlines().count('CONFIG_PREEMPT_RT=y') != 1:
+    raise SystemExit('error: resolved kernel config must enable PREEMPT_RT')
+image_file = Path(image_path)
+if image_file.stat().st_size > 256 * 1024 * 1024:
+    raise SystemExit('error: actual kernel image exceeds bounded release validation')
+image = image_file.read_bytes()
+if arch == 'x86_64':
+    if len(image) < 0x210 or image[0x1fe:0x200] != b'\x55\xaa' or image[0x202:0x206] != b'HdrS':
+        raise SystemExit('error: actual kernel image has invalid x86 boot header')
+    offset = 0x200 + int.from_bytes(image[0x20e:0x210], 'little')
+    version = image[offset:offset + 512].split(b'\0', 1)[0].split(b' ', 1)[0]
+    if offset < 0x210 or version != release.encode('ascii'):
+        raise SystemExit('error: actual kernel image version differs from release sidecar')
+else:
+    magic = b'ARM\x64' if arch == 'arm64' else b'RSC\x05'
+    if image[56:60] != magic or b'Linux version ' + release.encode('ascii') + b' ' not in image:
+        raise SystemExit('error: actual kernel image architecture/version differs from sidecar')
+embedded = subprocess.run(['sh', extractor, image_path], capture_output=True, timeout=30)
+if embedded.returncode or embedded.stdout != Path(config_path).read_bytes():
+    raise SystemExit('error: actual kernel image embedded config differs from resolved config')
+print(release)
+PY
+}
 
 RELEASE_DIR="$BUILD_ROOT/release/xtos-$XTOS_VERSION"
 rm -rf "$RELEASE_DIR"
@@ -43,20 +103,18 @@ printf '==> XTOS %s (%s, %s)\n' "$XTOS_VERSION" "$RELEASE_NAME" "$RELEASE_DATE"
 # --- Stage 1: build artifacts (reproducible environment) -------------------
 printf '==> Building x86_64 system (reproducible)\n'
 JOBS="${JOBS:-$(nproc)}" "$ROOT/scripts/build_system.sh"
+X86_KERNEL_RELEASE="$(validate_kernel_artifacts x86_64 "$BUILD_ROOT/kernel-build" \
+    "$BUILD_ROOT/images/xtos-bzImage" "$BUILD_ROOT/images/xtos-rootfs.cpio.gz")"
 
 if [[ "$X86_ONLY" -eq 0 ]]; then
-    if [[ -d "$BUILD_ROOT/kernel-build-arm64" && -f "$BUILD_ROOT/initramfs-arm64.cpio.gz" ]]; then
-        printf '==> ARM64 artifacts found in .build (reused)\n'
-    else
-        printf '==> Building ARM64 system\n'
-        JOBS="$JOBS" "$ROOT/scripts/build_system_arm64.sh"
-    fi
-    if [[ -d "$BUILD_ROOT/kernel-build-riscv64" && -f "$BUILD_ROOT/initramfs-riscv64.cpio.gz" ]]; then
-        printf '==> RISC-V 64 artifacts found in .build (reused)\n'
-    else
-        printf '==> Building RISC-V 64 system\n'
-        JOBS="$JOBS" "$ROOT/scripts/build_system_riscv64.sh"
-    fi
+    printf '==> Building ARM64 system\n'
+    JOBS="$JOBS" "$ROOT/scripts/build_system_arm64.sh"
+    ARM64_KERNEL_RELEASE="$(validate_kernel_artifacts arm64 "$BUILD_ROOT/kernel-build-arm64" \
+        "$BUILD_ROOT/kernel-install-arm64/Image" "$BUILD_ROOT/initramfs-arm64.cpio.gz")"
+    printf '==> Building RISC-V 64 system\n'
+    JOBS="$JOBS" "$ROOT/scripts/build_system_riscv64.sh"
+    RISCV64_KERNEL_RELEASE="$(validate_kernel_artifacts riscv64 "$BUILD_ROOT/kernel-build-riscv64" \
+        "$BUILD_ROOT/kernel-install-riscv64/Image" "$BUILD_ROOT/initramfs-riscv64.cpio.gz")"
 fi
 
 # --- Stage 2: assemble the release tree -------------------------------------
@@ -71,9 +129,11 @@ ARCH_DIRS=()
 if [[ "$X86_ONLY" -eq 0 ]]; then
     mkdir -p "$RELEASE_DIR/arm64" "$RELEASE_DIR/riscv64"
     install -m 0644 "$BUILD_ROOT/kernel-install-arm64/Image" \
-        "$BUILD_ROOT/initramfs-arm64.cpio.gz" "$RELEASE_DIR/arm64/" 2>/dev/null || true
+        "$BUILD_ROOT/initramfs-arm64.cpio.gz" "$RELEASE_DIR/arm64/"
+    install -m 0644 "$BUILD_ROOT/kernel-build-arm64/.config" "$RELEASE_DIR/arm64/kernel.config"
     install -m 0644 "$BUILD_ROOT/kernel-install-riscv64/Image" \
-        "$BUILD_ROOT/initramfs-riscv64.cpio.gz" "$RELEASE_DIR/riscv64/" 2>/dev/null || true
+        "$BUILD_ROOT/initramfs-riscv64.cpio.gz" "$RELEASE_DIR/riscv64/"
+    install -m 0644 "$BUILD_ROOT/kernel-build-riscv64/.config" "$RELEASE_DIR/riscv64/kernel.config"
 fi
 
 # SBOM: regenerate into the release tree (fresh hashes for this build)
@@ -82,11 +142,15 @@ install -m 0644 "$ROOT/docs/sbom.md"             "$RELEASE_DIR/docs/sbom.md"
 install -m 0644 "$ROOT/docs/reproducible_build.md" "$RELEASE_DIR/docs/reproducible_build.md"
 install -m 0644 "$ROOT/docs/abi_versioning.md"   "$RELEASE_DIR/docs/abi_versioning.md"
 
-# Quick-start README for the release tree
+# Quick-start README uses releases read back from each built kernel.
+README_KERNEL_RELEASES="Linux $X86_KERNEL_RELEASE (PREEMPT_RT)"
+if [[ "$X86_ONLY" -eq 0 ]]; then
+    README_KERNEL_RELEASES="x86_64 $X86_KERNEL_RELEASE, ARM64 $ARM64_KERNEL_RELEASE, RISC-V 64 $RISCV64_KERNEL_RELEASE (PREEMPT_RT)"
+fi
 cat > "$RELEASE_DIR/README.md" << EOF
 # XTOS $XTOS_VERSION — $RELEASE_NAME ($RELEASE_DATE)
 
-Real-time research system: Linux 6.6.0-rt15 (PREEMPT_RT) + XTOS BCI kernel
+Real-time research system: $README_KERNEL_RELEASES + XTOS BCI kernel
 components + BusyBox 1.37.0 + XTOS SDK (Apache-2.0).
 
 ## Run (QEMU)
@@ -139,20 +203,16 @@ The first packaged XTOS Developer Preview: a bootable, self-testing
 real-time research system for brain-computer-interface and deterministic
 signal-processing workloads.
 
-## Validated in this release
+## Validation status
 
-- x86_64: full system build reproducible byte-for-byte across clean
-  rebuilds; QEMU selftest passes (realtime=1, xtos_modules=pass,
-  guest_userspace=pass, XTOS_SYSTEM_TEST=PASS)
-- ARM64: in-guest validation 14/14 (XTOS kernel modules load; test_rt /
-  test_spsc / test_signal pass in guest)
-- RISC-V 64: OpenSBI boot 5/5 + in-guest validation 15/15
-- User-space: 181-assertion signal suite, C/Python reference parity,
-  SPSC under ASan/UBSan/TSan
-- Fuzz: 4,000+ mutated inputs across CSV and OpenBCI packet harnesses,
-  ASan+UBSan clean (tools/xtos-fuzz)
-- Supply chain: CycloneDX SBOM (docs/sbom.json) with source hashes;
-  ABI policy v1.0.0 for the three SDK libraries (docs/abi_versioning.md)
+Validation status: NOT_VERIFIED_BY_PACKAGING
+
+The package contains fresh producer outputs whose release/config identities
+were checked against kernel/source-pin.json. This script does not run boot,
+functional, sanitizer, reproducibility or physical-device acceptance.
+Independent reports must identify this exact source commit and artifact
+hashes before any of those gates can be claimed as passed. Historical
+6.6/rt15 reports remain historical and do not validate this package.
 
 ## Not in scope (explicitly)
 

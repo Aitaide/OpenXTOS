@@ -123,7 +123,7 @@ static void openbci_rx_fault(struct xtos_bci_dev *dev, int error)
 	spin_unlock_irqrestore(&dev->lock, flags);
 }
 
-static int openbci_receive_buf(struct serdev_device *serdev,
+static size_t openbci_receive_buf(struct serdev_device *serdev,
                               const unsigned char *data,
                               size_t count)
 {
@@ -801,7 +801,7 @@ static int openbci_probe(struct serdev_device *serdev)
 	xtos_cyton_parser_init(&priv->parser);
 
 	/* Initialize device descriptor */
-	strncpy(dev->name, "OpenBCI Cyton", sizeof(dev->name) - 1);
+	memcpy(dev->name, "OpenBCI Cyton", sizeof("OpenBCI Cyton"));
 	dev->num_channels = XTOS_CYTON_CHANNELS;
 	dev->sampling_rate = OPENBCI_DEFAULT_RATE;
 	dev->resolution_bits = OPENBCI_ADC_BITS;

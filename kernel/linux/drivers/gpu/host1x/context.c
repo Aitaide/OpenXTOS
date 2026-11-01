@@ -4,6 +4,7 @@
  */
 
 #include <linux/device.h>
+#include <linux/host1x_context_bus.h>
 #include <linux/kref.h>
 #include <linux/of.h>
 #include <linux/of_device.h>
@@ -23,7 +24,7 @@ int host1x_memory_context_list_init(struct host1x *host1x)
 	struct host1x_memory_context_list *cdl = &host1x->context_list;
 	struct device_node *node = host1x->dev->of_node;
 	struct host1x_memory_context *ctx;
-	unsigned int i;
+	unsigned int devs, i;
 	int err;
 
 	cdl->devs = NULL;
@@ -34,10 +35,19 @@ int host1x_memory_context_list_init(struct host1x *host1x)
 	if (err < 0)
 		return 0;
 
-	cdl->devs = kcalloc(err, sizeof(*cdl->devs), GFP_KERNEL);
+	devs = 0;
+
+	for (i = 0; i < err / 4; i++) {
+		u32 length;
+
+		of_property_read_u32_index(node, "iommu-map", i * 4 + 3, &length);
+		devs += length;
+	}
+
+	cdl->len = devs;
+	cdl->devs = kzalloc_objs(*cdl->devs, cdl->len);
 	if (!cdl->devs)
 		return -ENOMEM;
-	cdl->len = err / 4;
 
 	for (i = 0; i < cdl->len; i++) {
 		ctx = &cdl->devs[i];
@@ -58,6 +68,7 @@ int host1x_memory_context_list_init(struct host1x *host1x)
 		ctx->dev.parent = host1x->dev;
 		ctx->dev.release = host1x_memory_context_release;
 
+		ctx->dev.dma_parms = &ctx->dma_parms;
 		dma_set_max_seg_size(&ctx->dev, UINT_MAX);
 
 		err = device_add(&ctx->dev);

@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: (GPL-2.0-only OR BSD-3-Clause)
 //
-// Copyright(c) 2020 Intel Corporation. All rights reserved.
+// Copyright(c) 2020 Intel Corporation
 //
 // Author: Fred Oh <fred.oh@linux.intel.com>
 //
@@ -9,10 +9,14 @@
  * Hardware interface for audio DSP on IceLake.
  */
 
-#include <linux/kernel.h>
-#include <linux/kconfig.h>
-#include <linux/export.h>
+#include <linux/array_size.h>
 #include <linux/bits.h>
+#include <linux/dev_printk.h>
+#include <linux/errno.h>
+#include <linux/slab.h>
+#include <linux/string.h>
+#include <linux/types.h>
+
 #include "../ipc4-priv.h"
 #include "../ops.h"
 #include "hda.h"
@@ -97,7 +101,6 @@ static int icl_dsp_post_fw_run(struct snd_sof_dev *sdev)
 
 /* Icelake ops */
 struct snd_sof_dsp_ops sof_icl_ops;
-EXPORT_SYMBOL_NS(sof_icl_ops, SND_SOC_SOF_INTEL_HDA_COMMON);
 
 int sof_icl_ops_init(struct snd_sof_dev *sdev)
 {
@@ -107,7 +110,7 @@ int sof_icl_ops_init(struct snd_sof_dev *sdev)
 	/* probe/remove/shutdown */
 	sof_icl_ops.shutdown	= hda_dsp_shutdown;
 
-	if (sdev->pdata->ipc_type == SOF_IPC) {
+	if (sdev->pdata->ipc_type == SOF_IPC_TYPE_3) {
 		/* doorbell */
 		sof_icl_ops.irq_thread	= cnl_ipc_irq_thread;
 
@@ -120,10 +123,10 @@ int sof_icl_ops_init(struct snd_sof_dev *sdev)
 		sof_icl_ops.set_power_state = hda_dsp_set_power_state_ipc3;
 	}
 
-	if (sdev->pdata->ipc_type == SOF_INTEL_IPC4) {
+	if (sdev->pdata->ipc_type == SOF_IPC_TYPE_4) {
 		struct sof_ipc4_fw_data *ipc4_data;
 
-		sdev->private = devm_kzalloc(sdev->dev, sizeof(*ipc4_data), GFP_KERNEL);
+		sdev->private = kzalloc_obj(*ipc4_data);
 		if (!sdev->private)
 			return -ENOMEM;
 
@@ -166,7 +169,6 @@ int sof_icl_ops_init(struct snd_sof_dev *sdev)
 
 	return 0;
 };
-EXPORT_SYMBOL_NS(sof_icl_ops_init, SND_SOC_SOF_INTEL_HDA_COMMON);
 
 const struct sof_intel_dsp_desc icl_chip_info = {
 	/* Icelake */
@@ -189,10 +191,11 @@ const struct sof_intel_dsp_desc icl_chip_info = {
 	.enable_sdw_irq	= hda_common_enable_sdw_irq,
 	.check_sdw_irq	= hda_common_check_sdw_irq,
 	.check_sdw_wakeen_irq = hda_sdw_check_wakeen_irq_common,
+	.sdw_process_wakeen = hda_sdw_process_wakeen_common,
 	.check_ipc_irq	= hda_dsp_check_ipc_irq,
 	.cl_init = cl_dsp_init,
 	.power_down_dsp = hda_power_down_dsp,
 	.disable_interrupts = hda_dsp_disable_interrupts,
 	.hw_ip_version = SOF_INTEL_CAVS_2_0,
+	.platform = "icl",
 };
-EXPORT_SYMBOL_NS(icl_chip_info, SND_SOC_SOF_INTEL_HDA_COMMON);

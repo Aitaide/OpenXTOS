@@ -188,7 +188,7 @@ static struct snd_kcontrol_new mop500_ab8500_ctrls[] = {
 
 static int mop500_ab8500_startup(struct snd_pcm_substream *substream)
 {
-	struct snd_soc_pcm_runtime *rtd = asoc_substream_to_rtd(substream);
+	struct snd_soc_pcm_runtime *rtd = snd_soc_substream_to_rtd(substream);
 
 	/* Set audio-clock source */
 	return mop500_ab8500_set_mclk(rtd->card->dev,
@@ -197,7 +197,7 @@ static int mop500_ab8500_startup(struct snd_pcm_substream *substream)
 
 static void mop500_ab8500_shutdown(struct snd_pcm_substream *substream)
 {
-	struct snd_soc_pcm_runtime *rtd = asoc_substream_to_rtd(substream);
+	struct snd_soc_pcm_runtime *rtd = snd_soc_substream_to_rtd(substream);
 	struct device *dev = rtd->card->dev;
 
 	dev_dbg(dev, "%s: Enter\n", __func__);
@@ -212,9 +212,9 @@ static void mop500_ab8500_shutdown(struct snd_pcm_substream *substream)
 static int mop500_ab8500_hw_params(struct snd_pcm_substream *substream,
 			struct snd_pcm_hw_params *params)
 {
-	struct snd_soc_pcm_runtime *rtd = asoc_substream_to_rtd(substream);
-	struct snd_soc_dai *codec_dai = asoc_rtd_to_codec(rtd, 0);
-	struct snd_soc_dai *cpu_dai = asoc_rtd_to_cpu(rtd, 0);
+	struct snd_soc_pcm_runtime *rtd = snd_soc_substream_to_rtd(substream);
+	struct snd_soc_dai *codec_dai = snd_soc_rtd_to_codec(rtd, 0);
+	struct snd_soc_dai *cpu_dai = snd_soc_rtd_to_cpu(rtd, 0);
 	struct device *dev = rtd->card->dev;
 	unsigned int fmt;
 	int channels, ret = 0, driver_mode, slots;
@@ -234,19 +234,18 @@ static int mop500_ab8500_hw_params(struct snd_pcm_substream *substream,
 		substream->number);
 
 	/* Ensure configuration consistency between DAIs */
-	mutex_lock(&mop500_ab8500_params_lock);
-	if (mop500_ab8500_usage) {
-		if (mop500_ab8500_rate != params_rate(params) ||
-		    mop500_ab8500_channels != params_channels(params)) {
-			mutex_unlock(&mop500_ab8500_params_lock);
-			return -EBUSY;
+	scoped_guard(mutex, &mop500_ab8500_params_lock) {
+		if (mop500_ab8500_usage) {
+			if (mop500_ab8500_rate != params_rate(params) ||
+			    mop500_ab8500_channels != params_channels(params)) {
+				return -EBUSY;
+			}
+		} else {
+			mop500_ab8500_rate = params_rate(params);
+			mop500_ab8500_channels = params_channels(params);
 		}
-	} else {
-		mop500_ab8500_rate = params_rate(params);
-		mop500_ab8500_channels = params_channels(params);
+		__set_bit(cpu_dai->id, &mop500_ab8500_usage);
 	}
-	__set_bit(cpu_dai->id, &mop500_ab8500_usage);
-	mutex_unlock(&mop500_ab8500_params_lock);
 
 	channels = params_channels(params);
 
@@ -275,12 +274,12 @@ static int mop500_ab8500_hw_params(struct snd_pcm_substream *substream,
 
 	if (driver_mode == DRIVERMODE_NORMAL) {
 		fmt = SND_SOC_DAIFMT_DSP_A |
-			SND_SOC_DAIFMT_CBM_CFM |
+			SND_SOC_DAIFMT_CBP_CFP |
 			SND_SOC_DAIFMT_NB_NF |
 			SND_SOC_DAIFMT_CONT;
 	} else {
 		fmt = SND_SOC_DAIFMT_DSP_A |
-			SND_SOC_DAIFMT_CBM_CFM |
+			SND_SOC_DAIFMT_CBP_CFP |
 			SND_SOC_DAIFMT_NB_NF |
 			SND_SOC_DAIFMT_GATED;
 	}
@@ -336,12 +335,11 @@ static int mop500_ab8500_hw_params(struct snd_pcm_substream *substream,
 
 static int mop500_ab8500_hw_free(struct snd_pcm_substream *substream)
 {
-	struct snd_soc_pcm_runtime *rtd = asoc_substream_to_rtd(substream);
-	struct snd_soc_dai *cpu_dai = asoc_rtd_to_cpu(rtd, 0);
+	struct snd_soc_pcm_runtime *rtd = snd_soc_substream_to_rtd(substream);
+	struct snd_soc_dai *cpu_dai = snd_soc_rtd_to_cpu(rtd, 0);
 
-	mutex_lock(&mop500_ab8500_params_lock);
+	guard(mutex)(&mop500_ab8500_params_lock);
 	__clear_bit(cpu_dai->id, &mop500_ab8500_usage);
-	mutex_unlock(&mop500_ab8500_params_lock);
 
 	return 0;
 }
@@ -357,7 +355,7 @@ const struct snd_soc_ops mop500_ab8500_ops[] = {
 
 int mop500_ab8500_machine_init(struct snd_soc_pcm_runtime *rtd)
 {
-	struct snd_soc_dapm_context *dapm = &rtd->card->dapm;
+	struct snd_soc_dapm_context *dapm = snd_soc_card_to_dapm(rtd->card);
 	struct device *dev = rtd->card->dev;
 	struct mop500_ab8500_drvdata *drvdata;
 	int ret;
@@ -435,5 +433,5 @@ void mop500_ab8500_remove(struct snd_soc_card *card)
 	clk_put(drvdata->clk_ptr_ulpclk);
 	clk_put(drvdata->clk_ptr_intclk);
 
-	snd_soc_card_set_drvdata(card, drvdata);
+	snd_soc_card_set_drvdata(card, NULL);
 }

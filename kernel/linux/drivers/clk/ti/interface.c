@@ -34,7 +34,7 @@ static struct clk *_register_interface(struct device_node *node,
 	struct clk_hw_omap *clk_hw;
 	struct clk *clk;
 
-	clk_hw = kzalloc(sizeof(*clk_hw), GFP_KERNEL);
+	clk_hw = kzalloc_obj(*clk_hw);
 	if (!clk_hw)
 		return ERR_PTR(-ENOMEM);
 
@@ -66,13 +66,11 @@ static void __init _of_ti_interface_clk_setup(struct device_node *node,
 	struct clk_omap_reg reg;
 	u8 enable_bit = 0;
 	const char *name;
-	u32 val;
 
 	if (ti_clk_get_reg_addr(node, 0, &reg))
 		return;
 
-	if (!of_property_read_u32(node, "ti,bit-shift", &val))
-		enable_bit = val;
+	enable_bit = reg.bit;
 
 	parent_name = of_clk_get_parent_name(node, 0);
 	if (!parent_name) {

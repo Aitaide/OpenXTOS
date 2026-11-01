@@ -47,13 +47,12 @@ extern void __smp_call_single_queue(int cpu, struct llist_node *node);
 /* total number of cpus in this system (may exceed NR_CPUS) */
 extern unsigned int total_cpus;
 
-int smp_call_function_single(int cpuid, smp_call_func_t func, void *info,
-			     int wait);
+int smp_call_function_single(int cpuid, smp_call_func_t func, void *info, bool wait);
 
 void on_each_cpu_cond_mask(smp_cond_func_t cond_func, smp_call_func_t func,
 			   void *info, bool wait, const struct cpumask *mask);
 
-int smp_call_function_single_async(int cpu, struct __call_single_data *csd);
+int smp_call_function_single_async(int cpu, call_single_data_t *csd);
 
 /*
  * Cpus stopping functions in panic. All have default weak definitions.
@@ -62,6 +61,7 @@ int smp_call_function_single_async(int cpu, struct __call_single_data *csd);
 void __noreturn panic_smp_self_stop(void);
 void __noreturn nmi_panic_self_stop(struct pt_regs *regs);
 void crash_smp_send_stop(void);
+int panic_smp_redirect_cpu(int target_cpu, void *msg);
 
 /*
  * Call a function on all processors
@@ -72,7 +72,7 @@ static inline void on_each_cpu(smp_call_func_t func, void *info, int wait)
 }
 
 /**
- * on_each_cpu_mask(): Run a function on processors specified by
+ * on_each_cpu_mask() - Run a function on processors specified by
  * cpumask, which may include the local processor.
  * @mask: The set of cpus to run on (only runs on online subset).
  * @func: The function to run. This must be fast and non-blocking.
@@ -104,6 +104,12 @@ static inline void on_each_cpu_cond(smp_cond_func_t cond_func,
 {
 	on_each_cpu_cond_mask(cond_func, func, info, wait, cpu_online_mask);
 }
+
+/*
+ * Architecture specific boot CPU setup.  Defined as empty weak function in
+ * init/main.c. Architectures can override it.
+ */
+void __init smp_prepare_boot_cpu(void);
 
 #ifdef CONFIG_SMP
 
@@ -162,6 +168,7 @@ int smp_call_function_any(const struct cpumask *mask,
 
 void kick_all_cpus_sync(void);
 void wake_up_all_idle_cpus(void);
+bool cpus_peek_for_pending_ipi(const struct cpumask *mask);
 
 /*
  * Generic and arch helpers
@@ -170,12 +177,6 @@ void __init call_function_init(void);
 void generic_smp_call_function_single_interrupt(void);
 #define generic_smp_call_function_interrupt \
 	generic_smp_call_function_single_interrupt
-
-/*
- * Mark the boot cpu "online" so that it can call console drivers in
- * printk() and can access its per-cpu storage.
- */
-void smp_prepare_boot_cpu(void);
 
 extern unsigned int setup_max_cpus;
 extern void __init setup_nr_cpu_ids(void);
@@ -203,7 +204,6 @@ static inline void up_smp_call_function(smp_call_func_t func, void *info)
 			(up_smp_call_function(func, info))
 
 static inline void smp_send_reschedule(int cpu) { }
-#define smp_prepare_boot_cpu()			do {} while (0)
 #define smp_call_function_many(mask, func, info, wait) \
 			(up_smp_call_function(func, info))
 static inline void call_function_init(void) { }
@@ -217,10 +217,16 @@ smp_call_function_any(const struct cpumask *mask, smp_call_func_t func,
 
 static inline void kick_all_cpus_sync(void) {  }
 static inline void wake_up_all_idle_cpus(void) {  }
+static inline bool cpus_peek_for_pending_ipi(const struct cpumask *mask)
+{
+	return false;
+}
+
+#define setup_max_cpus 0
 
 #ifdef CONFIG_UP_LATE_INIT
 extern void __init up_late_init(void);
-static inline void smp_init(void) { up_late_init(); }
+static __always_inline void smp_init(void) { up_late_init(); }
 #else
 static inline void smp_init(void) { }
 #endif
@@ -232,13 +238,42 @@ static inline int get_boot_cpu_id(void)
 
 #endif /* !SMP */
 
-/**
- * raw_processor_id() - get the current (unstable) CPU id
+#if defined(CONFIG_PREEMPTION) && defined(CONFIG_SMP)
+int smp_task_ipi_mask_alloc(struct task_struct *task);
+void smp_task_ipi_mask_free(struct task_struct *task);
+#else
+static inline int smp_task_ipi_mask_alloc(struct task_struct *task)
+{
+	return 0;
+}
+
+static inline void smp_task_ipi_mask_free(struct task_struct *task) { }
+#endif
+
+/*
+ * raw_smp_processor_id() - get the current (unstable) CPU id
  *
- * For then you know what you are doing and need an unstable
+ * raw_smp_processor_id() is arch-specific/arch-defined and
+ * may be a macro or a static inline function.
+ *
+ * For when you know what you are doing and need an unstable
  * CPU id.
  */
 
+/*
+ * Allow the architecture to differentiate between a stable and unstable read.
+ * For example, x86 uses an IRQ-safe asm-volatile read for the unstable but a
+ * regular asm read for the stable.
+ */
+#ifndef __smp_processor_id
+#define __smp_processor_id() raw_smp_processor_id()
+#endif
+
+#ifdef CONFIG_DEBUG_PREEMPT
+  extern unsigned int debug_smp_processor_id(void);
+# define smp_processor_id() debug_smp_processor_id()
+
+#else
 /**
  * smp_processor_id() - get the current (stable) CPU id
  *
@@ -251,23 +286,10 @@ static inline int get_boot_cpu_id(void)
  *  - preemption is disabled;
  *  - the task is CPU affine.
  *
- * When CONFIG_DEBUG_PREEMPT; we verify these assumption and WARN
+ * When CONFIG_DEBUG_PREEMPT=y, we verify these assumptions and WARN
  * when smp_processor_id() is used when the CPU id is not stable.
  */
 
-/*
- * Allow the architecture to differentiate between a stable and unstable read.
- * For example, x86 uses an IRQ-safe asm-volatile read for the unstable but a
- * regular asm read for the stable.
- */
-#ifndef __smp_processor_id
-#define __smp_processor_id(x) raw_smp_processor_id(x)
-#endif
-
-#ifdef CONFIG_DEBUG_PREEMPT
-  extern unsigned int debug_smp_processor_id(void);
-# define smp_processor_id() debug_smp_processor_id()
-#else
 # define smp_processor_id() __smp_processor_id()
 #endif
 
@@ -292,5 +314,11 @@ int smp_call_on_cpu(unsigned int cpu, int (*func)(void *), void *par,
 int smpcfd_prepare_cpu(unsigned int cpu);
 int smpcfd_dead_cpu(unsigned int cpu);
 int smpcfd_dying_cpu(unsigned int cpu);
+
+#ifdef CONFIG_CSD_LOCK_WAIT_DEBUG
+bool csd_lock_is_stuck(void);
+#else
+static inline bool csd_lock_is_stuck(void) { return false; }
+#endif
 
 #endif /* __LINUX_SMP_H */

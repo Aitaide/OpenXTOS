@@ -10,6 +10,7 @@
 #ifndef _SCSI_PROTO_H_
 #define _SCSI_PROTO_H_
 
+#include <linux/build_bug.h>
 #include <linux/types.h>
 
 /*
@@ -32,8 +33,8 @@
 #define INQUIRY               0x12
 #define RECOVER_BUFFERED_DATA 0x14
 #define MODE_SELECT           0x15
-#define RESERVE               0x16
-#define RELEASE               0x17
+#define RESERVE_6             0x16
+#define RELEASE_6             0x17
 #define COPY                  0x18
 #define ERASE                 0x19
 #define MODE_SENSE            0x1a
@@ -119,6 +120,7 @@
 #define WRITE_SAME_16	      0x93
 #define ZBC_OUT		      0x94
 #define ZBC_IN		      0x95
+#define WRITE_ATOMIC_16	0x9c
 #define SERVICE_ACTION_BIDIRECTIONAL 0x9d
 #define SERVICE_ACTION_IN_16  0x9e
 #define SERVICE_ACTION_OUT_16 0x9f
@@ -126,6 +128,11 @@
 #define	SAI_READ_CAPACITY_16  0x10
 #define SAI_GET_LBA_STATUS    0x12
 #define SAI_REPORT_REFERRALS  0x13
+#define SAI_GET_STREAM_STATUS 0x16
+#define SAI_GET_PHYSICAL_ELEMENT_STATUS 0x17
+#define SAI_REMOVE_ELEMENT_AND_TRUNCATE 0x18
+#define SAI_RESTORE_ELEMENTS_AND_REBUILD 0x19
+#define SAI_REMOVE_ELEMENT_AND_MODIFY_ZONES 0x1a
 /* values for maintenance in */
 #define MI_REPORT_IDENTIFYING_INFORMATION 0x05
 #define MI_REPORT_TARGET_PGS  0x0a
@@ -231,6 +238,57 @@ enum sam_status {
 #define COMPLETED	    0x0f
 
 /*
+ * Additional Sense Codes (ASC).
+ */
+#define NO_ADDITIONAL_SENSE		0x00
+#define OVERLAP_ATOMIC_COMMAND_ASC	0x00
+#define LOGICAL_UNIT_NOT_READY		0x04
+#define LOGICAL_UNIT_COMMUNICATION_FAILURE 0x8
+#define WRITE_ERROR_ASC			0x0c
+#define UNRECOVERED_READ_ERR		0x11
+#define PARAMETER_LIST_LENGTH_ERR	0x1a
+#define MISCOMPARE_VERIFY_ASC		0x1d
+#define INVALID_OPCODE			0x20
+#define LBA_OUT_OF_RANGE		0x21
+#define INVALID_FIELD_IN_CDB		0x24
+#define INVALID_FIELD_IN_PARAM_LIST	0x26
+#define WRITE_PROTECTED			0x27
+#define UA_READY_ASC			0x28
+#define UA_RESET_ASC			0x29
+#define UA_CHANGED_ASC			0x2a
+#define TOO_MANY_IN_PARTITION_ASC	0x3b
+#define TARGET_CHANGED_ASC		0x3f
+#define SAVING_PARAMS_UNSUP		0x39
+#define TRANSPORT_PROBLEM		0x4b
+#define INSUFF_RES_ASC			0x55
+#define LOW_POWER_COND_ON		0x5e
+#define THRESHOLD_EXCEEDED		0x5d
+
+/*
+ * Additional Sense Code Qualifiers (ASCQ).
+ */
+#define POWER_ON_RESET_ASCQ		0x00
+#define MODE_CHANGED_ASCQ		0x01	/* mode parameters changed */
+#define FILEMARK_DETECTED_ASCQ		0x01
+#define POWER_ON_OCCURRED_ASCQ		0x01
+#define MICROCODE_CHANGED_ASCQ		0x01	/* with TARGET_CHANGED_ASC */
+#define BUS_RESET_ASCQ			0x02	/* scsi bus reset occurred */
+#define EOP_EOM_DETECTED_ASCQ		0x02
+#define INSUFF_RES_ASCQ			0x03
+#define BEGINNING_OF_P_M_DETECTED_ASCQ	0x04
+#define UNALIGNED_WRITE_ASCQ		0x04
+#define EOD_DETECTED_ASCQ		0x05
+#define WRITE_BOUNDARY_ASCQ		0x05
+#define READ_INVDATA_ASCQ		0x06
+#define READ_BOUNDARY_ASCQ		0x07
+#define CAPACITY_CHANGED_ASCQ		0x09
+#define ATTEMPT_ACCESS_GAP		0x09
+#define LUNS_CHANGED_ASCQ		0x0e
+#define INSUFF_ZONE_ASCQ		0x0e
+#define MICROCODE_CHANGED_WO_RESET_ASCQ 0x16
+#define OVERLAP_ATOMIC_COMMAND_ASCQ	0x23
+
+/*
  *  DEVICE TYPES
  *  Please keep them in 0x%02x format for $MODALIAS to work
  */
@@ -274,6 +332,81 @@ enum scsi_protocol {
 struct scsi_lun {
 	__u8 scsi_lun[8];
 };
+
+/* SBC-5 IO advice hints group descriptor */
+struct scsi_io_group_descriptor {
+#if defined(__BIG_ENDIAN)
+	u8 io_advice_hints_mode: 2;
+	u8 reserved1: 3;
+	u8 st_enble: 1;
+	u8 cs_enble: 1;
+	u8 ic_enable: 1;
+#elif defined(__LITTLE_ENDIAN)
+	u8 ic_enable: 1;
+	u8 cs_enble: 1;
+	u8 st_enble: 1;
+	u8 reserved1: 3;
+	u8 io_advice_hints_mode: 2;
+#else
+#error
+#endif
+	u8 reserved2[3];
+	/* Logical block markup descriptor */
+#if defined(__BIG_ENDIAN)
+	u8 acdlu: 1;
+	u8 reserved3: 1;
+	u8 rlbsr: 2;
+	u8 lbm_descriptor_type: 4;
+#elif defined(__LITTLE_ENDIAN)
+	u8 lbm_descriptor_type: 4;
+	u8 rlbsr: 2;
+	u8 reserved3: 1;
+	u8 acdlu: 1;
+#else
+#error
+#endif
+	u8 params[2];
+	u8 reserved4;
+	u8 reserved5[8];
+};
+
+static_assert(sizeof(struct scsi_io_group_descriptor) == 16);
+
+/* SCSI stream status descriptor */
+struct scsi_stream_status {
+#if defined(__BIG_ENDIAN)
+	u8 perm: 1;
+	u8 reserved1: 7;
+#elif defined(__LITTLE_ENDIAN)
+	u8 reserved1: 7;
+	u8 perm: 1;
+#else
+#error
+#endif
+	u8 reserved2;
+	__be16 stream_identifier;
+#if defined(__BIG_ENDIAN)
+	u8 reserved3: 2;
+	u8 rel_lifetime: 6;
+#elif defined(__LITTLE_ENDIAN)
+	u8 rel_lifetime: 6;
+	u8 reserved3: 2;
+#else
+#error
+#endif
+	u8 reserved4[3];
+};
+
+static_assert(sizeof(struct scsi_stream_status) == 8);
+
+/* GET STREAM STATUS parameter data */
+struct scsi_stream_status_header {
+	__be32 len;	/* length in bytes of following payload */
+	u16 reserved;
+	__be16 number_of_open_streams;
+};
+
+static_assert(sizeof(struct scsi_stream_status_header) == 8);
 
 /* SPC asymmetric access states */
 #define SCSI_ACCESS_STATE_OPTIMAL     0x00
@@ -333,6 +466,25 @@ enum zbc_zone_cond {
 enum zbc_zone_alignment_method {
 	ZBC_CONSTANT_ZONE_LENGTH	= 0x1,
 	ZBC_CONSTANT_ZONE_START_OFFSET	= 0x8,
+};
+
+/* SCSI physical element types */
+enum scsi_phys_element_type {
+	SCSI_PHYS_ELEM_TYPE_ALL_ACCESS_STORAGE	= 0x1,
+	SCSI_PHYS_ELEM_TYPE_FRAC_ACCESS_STORAGE	= 0x2,
+};
+
+/* SCSI physical element health. */
+enum scsi_phys_element_health {
+	SCSI_PHYS_ELEM_HEALTH_NOT_REPORTED		= 0x00,
+	SCSI_PHYS_ELEM_HEALTH_WITHIN_SPEC_LIMITS	= 0x01,
+	SCSI_PHYS_ELEM_HEALTH_AT_SPEC_LIMITS		= 0x64,
+	SCSI_PHYS_ELEM_HEALTH_OUTSIDE_SPEC_LIMITS	= 0x65,
+	SCSI_PHYS_ELEM_HEALTH_DEPOP_REVOKE_ERR		= 0xFB,
+	SCSI_PHYS_ELEM_HEALTH_DEPOP_REVOKE_IN_PROGRESS	= 0xFC,
+	SCSI_PHYS_ELEM_HEALTH_DEPOP_ERR			= 0xFD,
+	SCSI_PHYS_ELEM_HEALTH_DEPOP_IN_PROGRESS		= 0xFE,
+	SCSI_PHYS_ELEM_HEALTH_DEPOP_OK			= 0xFF,
 };
 
 /* Version descriptor values for INQUIRY */

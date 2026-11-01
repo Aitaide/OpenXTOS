@@ -26,6 +26,8 @@
 #include <linux/dma-mapping.h>
 #include <linux/moduleparam.h>
 
+#include <drm/drm_print.h>
+
 #include "virtgpu_drv.h"
 
 static int virtio_gpu_virglrenderer_workaround = 1;
@@ -47,6 +49,7 @@ int virtio_gpu_resource_id_get(struct virtio_gpu_device *vgdev, uint32_t *resid)
 		*resid = handle + 1;
 	} else {
 		int handle = ida_alloc(&vgdev->resource_ida, GFP_KERNEL);
+
 		if (handle < 0)
 			return handle;
 		*resid = handle + 1;
@@ -56,9 +59,17 @@ int virtio_gpu_resource_id_get(struct virtio_gpu_device *vgdev, uint32_t *resid)
 
 static void virtio_gpu_resource_id_put(struct virtio_gpu_device *vgdev, uint32_t id)
 {
-	if (!virtio_gpu_virglrenderer_workaround) {
+	if (!virtio_gpu_virglrenderer_workaround)
 		ida_free(&vgdev->resource_ida, id - 1);
-	}
+}
+
+void virtio_gpu_remove_from_restore_list(struct virtio_gpu_object *bo)
+{
+	struct virtio_gpu_device *vgdev = bo->base.base.dev->dev_private;
+
+	mutex_lock(&vgdev->obj_restore_lock);
+	list_del_init(&bo->restore_node);
+	mutex_unlock(&vgdev->obj_restore_lock);
 }
 
 void virtio_gpu_cleanup_object(struct virtio_gpu_object *bo)
@@ -80,6 +91,9 @@ void virtio_gpu_cleanup_object(struct virtio_gpu_object *bo)
 		drm_gem_free_mmap_offset(&vram->base.base.base);
 		drm_gem_object_release(&vram->base.base.base);
 		kfree(vram);
+	} else {
+		drm_gem_object_release(&bo->base.base);
+		kfree(bo);
 	}
 }
 
@@ -89,12 +103,34 @@ static void virtio_gpu_free_object(struct drm_gem_object *obj)
 	struct virtio_gpu_device *vgdev = bo->base.base.dev->dev_private;
 
 	if (bo->created) {
-		virtio_gpu_cmd_unref_resource(vgdev, bo);
+		virtio_gpu_remove_from_restore_list(bo);
+		virtio_gpu_cmd_unref_resource(vgdev, bo, false);
 		virtio_gpu_notify(vgdev);
 		/* completion handler calls virtio_gpu_cleanup_object() */
 		return;
 	}
 	virtio_gpu_cleanup_object(bo);
+}
+
+int virtio_gpu_detach_object_fenced(struct virtio_gpu_object *bo)
+{
+	struct virtio_gpu_device *vgdev = bo->base.base.dev->dev_private;
+	struct virtio_gpu_fence *fence;
+
+	if (!bo->attached)
+		return 0;
+
+	fence = virtio_gpu_fence_alloc(vgdev, vgdev->fence_drv.context, 0);
+	if (!fence)
+		return -ENOMEM;
+
+	virtio_gpu_object_detach(vgdev, bo, fence);
+	virtio_gpu_notify(vgdev);
+
+	dma_fence_wait(&fence->f, false);
+	dma_fence_put(&fence->f);
+
+	return 0;
 }
 
 static const struct drm_gem_object_funcs virtio_gpu_shmem_funcs = {
@@ -123,7 +159,7 @@ struct drm_gem_object *virtio_gpu_create_object(struct drm_device *dev,
 	struct virtio_gpu_object_shmem *shmem;
 	struct drm_gem_shmem_object *dshmem;
 
-	shmem = kzalloc(sizeof(*shmem), GFP_KERNEL);
+	shmem = kzalloc_obj(*shmem);
 	if (!shmem)
 		return ERR_PTR(-ENOMEM);
 
@@ -137,7 +173,7 @@ static int virtio_gpu_object_shmem_init(struct virtio_gpu_device *vgdev,
 					struct virtio_gpu_mem_entry **ents,
 					unsigned int *nents)
 {
-	bool use_dma_api = !virtio_has_dma_quirk(vgdev->vdev);
+	bool use_dma_api = virtio_gpu_use_dma_api(vgdev->vdev);
 	struct scatterlist *sg;
 	struct sg_table *pages;
 	int si;
@@ -151,9 +187,7 @@ static int virtio_gpu_object_shmem_init(struct virtio_gpu_device *vgdev,
 	else
 		*nents = pages->orig_nents;
 
-	*ents = kvmalloc_array(*nents,
-			       sizeof(struct virtio_gpu_mem_entry),
-			       GFP_KERNEL);
+	*ents = kvmalloc_objs(struct virtio_gpu_mem_entry, *nents);
 	if (!(*ents)) {
 		DRM_ERROR("failed to allocate ent list\n");
 		return -ENOMEM;
@@ -196,6 +230,8 @@ int virtio_gpu_object_create(struct virtio_gpu_device *vgdev,
 		return PTR_ERR(shmem_obj);
 	bo = gem_to_virtio_gpu_obj(&shmem_obj->base);
 
+	INIT_LIST_HEAD(&bo->restore_node);
+
 	ret = virtio_gpu_resource_id_get(vgdev, &bo->hw_res_handle);
 	if (ret < 0)
 		goto err_free_gem;
@@ -234,6 +270,12 @@ int virtio_gpu_object_create(struct virtio_gpu_device *vgdev,
 		virtio_gpu_object_attach(vgdev, bo, ents, nents);
 	}
 
+	if (!params->virgl) {
+		/* store non-virgl object with its param to the restore list */
+		bo->params = *params;
+		virtio_gpu_add_object_to_restore_list(vgdev, bo);
+	}
+
 	*bo_ptr = bo;
 	return 0;
 
@@ -246,4 +288,74 @@ err_put_id:
 err_free_gem:
 	drm_gem_shmem_free(shmem_obj);
 	return ret;
+}
+
+void virtio_gpu_add_object_to_restore_list(struct virtio_gpu_device *vgdev,
+					   struct virtio_gpu_object *bo)
+{
+	mutex_lock(&vgdev->obj_restore_lock);
+	list_add_tail(&bo->restore_node, &vgdev->obj_restore_list);
+	mutex_unlock(&vgdev->obj_restore_lock);
+}
+
+int virtio_gpu_object_restore_all(struct virtio_gpu_device *vgdev)
+{
+	struct virtio_gpu_object *bo, *tmp;
+	struct virtio_gpu_mem_entry *ents;
+	unsigned int nents;
+	int ret = 0;
+
+	mutex_lock(&vgdev->obj_restore_lock);
+	list_for_each_entry_safe(bo, tmp, &vgdev->obj_restore_list,
+				 restore_node) {
+		if (drm_gem_is_imported(&bo->base.base)) {
+			ret = virtgpu_dma_buf_obj_resubmit(vgdev, bo);
+			if (ret)
+				break;
+
+			continue;
+		}
+
+		if (bo->params.blob || bo->attached) {
+			ret = virtio_gpu_object_shmem_init(vgdev, bo, &ents,
+							   &nents);
+			if (ret)
+				break;
+		}
+
+		if (bo->params.blob) {
+			virtio_gpu_cmd_resource_create_blob(vgdev, bo,
+							    &bo->params,
+							    ents, nents);
+		} else {
+			virtio_gpu_cmd_create_resource(vgdev, bo, &bo->params,
+						       NULL, NULL);
+			if (bo->attached) {
+				bo->attached = false;
+				virtio_gpu_object_attach(vgdev, bo, ents,
+							 nents);
+			}
+		}
+	}
+	mutex_unlock(&vgdev->obj_restore_lock);
+
+	if (ret)
+		DRM_ERROR("failed to restore virtio-gpu objects: %d\n", ret);
+
+	return ret;
+}
+
+void virtio_gpu_object_unref_all(struct virtio_gpu_device *vgdev)
+{
+	struct virtio_gpu_object *bo, *tmp;
+
+	mutex_lock(&vgdev->obj_restore_lock);
+	list_for_each_entry_safe(bo, tmp, &vgdev->obj_restore_list,
+				 restore_node)
+		if (bo->created) {
+			virtio_gpu_cmd_unref_resource(vgdev, bo, true);
+			virtio_gpu_notify(vgdev);
+		}
+
+	mutex_unlock(&vgdev->obj_restore_lock);
 }

@@ -581,7 +581,7 @@ static struct platform_driver mtk_pinctrl_driver = {
 	.driver = {
 		.name = "mediatek-mt2712-pinctrl",
 		.of_match_table = mt2712_pctrl_match,
-		.pm = &mtk_eint_pm_ops,
+		.pm = pm_sleep_ptr(&mtk_eint_pm_ops),
 	},
 };
 
@@ -591,3 +591,7 @@ static int __init mtk_pinctrl_init(void)
 }
 
 arch_initcall(mtk_pinctrl_init);
+
+MODULE_DESCRIPTION("MediaTek MT2712 Pinctrl Driver");
+MODULE_LICENSE("GPL v2");
+MODULE_IMPORT_NS("MTK_PINCTRL");

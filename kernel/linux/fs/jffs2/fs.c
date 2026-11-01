@@ -43,7 +43,7 @@ int jffs2_do_setattr (struct inode *inode, struct iattr *iattr)
 	int ret;
 	int alloc_type = ALLOC_NORMAL;
 
-	jffs2_dbg(1, "%s(): ino #%lu\n", __func__, inode->i_ino);
+	jffs2_dbg(1, "%s(): ino #%llu\n", __func__, inode->i_ino);
 
 	/* Special cases - we don't want more than one data node
 	   for these types on the medium at any time. So setattr
@@ -113,8 +113,8 @@ int jffs2_do_setattr (struct inode *inode, struct iattr *iattr)
 
 
 	ri->isize = cpu_to_je32((ivalid & ATTR_SIZE)?iattr->ia_size:inode->i_size);
-	ri->atime = cpu_to_je32(I_SEC((ivalid & ATTR_ATIME)?iattr->ia_atime:inode->i_atime));
-	ri->mtime = cpu_to_je32(I_SEC((ivalid & ATTR_MTIME)?iattr->ia_mtime:inode->i_mtime));
+	ri->atime = cpu_to_je32(I_SEC((ivalid & ATTR_ATIME)?iattr->ia_atime:inode_get_atime(inode)));
+	ri->mtime = cpu_to_je32(I_SEC((ivalid & ATTR_MTIME)?iattr->ia_mtime:inode_get_mtime(inode)));
 	ri->ctime = cpu_to_je32(I_SEC((ivalid & ATTR_CTIME)?iattr->ia_ctime:inode_get_ctime(inode)));
 
 	ri->offset = cpu_to_je32(0);
@@ -147,9 +147,9 @@ int jffs2_do_setattr (struct inode *inode, struct iattr *iattr)
 		return PTR_ERR(new_metadata);
 	}
 	/* It worked. Update the inode */
-	inode->i_atime = ITIME(je32_to_cpu(ri->atime));
+	inode_set_atime_to_ts(inode, ITIME(je32_to_cpu(ri->atime)));
 	inode_set_ctime_to_ts(inode, ITIME(je32_to_cpu(ri->ctime)));
-	inode->i_mtime = ITIME(je32_to_cpu(ri->mtime));
+	inode_set_mtime_to_ts(inode, ITIME(je32_to_cpu(ri->mtime)));
 	inode->i_mode = jemode_to_cpu(ri->mode);
 	i_uid_write(inode, je16_to_cpu(ri->uid));
 	i_gid_write(inode, je16_to_cpu(ri->gid));
@@ -243,7 +243,7 @@ void jffs2_evict_inode (struct inode *inode)
 	struct jffs2_sb_info *c = JFFS2_SB_INFO(inode->i_sb);
 	struct jffs2_inode_info *f = JFFS2_INODE_INFO(inode);
 
-	jffs2_dbg(1, "%s(): ino #%lu mode %o\n",
+	jffs2_dbg(1, "%s(): ino #%llu mode %o\n",
 		  __func__, inode->i_ino, inode->i_mode);
 	truncate_inode_pages_final(&inode->i_data);
 	clear_inode(inode);
@@ -265,7 +265,7 @@ struct inode *jffs2_iget(struct super_block *sb, unsigned long ino)
 	inode = iget_locked(sb, ino);
 	if (!inode)
 		return ERR_PTR(-ENOMEM);
-	if (!(inode->i_state & I_NEW))
+	if (!(inode_state_read_once(inode) & I_NEW))
 		return inode;
 
 	f = JFFS2_INODE_INFO(inode);
@@ -282,8 +282,8 @@ struct inode *jffs2_iget(struct super_block *sb, unsigned long ino)
 	i_uid_write(inode, je16_to_cpu(latest_node.uid));
 	i_gid_write(inode, je16_to_cpu(latest_node.gid));
 	inode->i_size = je32_to_cpu(latest_node.isize);
-	inode->i_atime = ITIME(je32_to_cpu(latest_node.atime));
-	inode->i_mtime = ITIME(je32_to_cpu(latest_node.mtime));
+	inode_set_atime_to_ts(inode, ITIME(je32_to_cpu(latest_node.atime)));
+	inode_set_mtime_to_ts(inode, ITIME(je32_to_cpu(latest_node.mtime)));
 	inode_set_ctime_to_ts(inode, ITIME(je32_to_cpu(latest_node.ctime)));
 
 	set_nlink(inode, f->inocache->pino_nlink);
@@ -334,8 +334,8 @@ struct inode *jffs2_iget(struct super_block *sb, unsigned long ino)
 		ret = jffs2_read_dnode(c, f, f->metadata, (char *)&jdev, 0, f->metadata->size);
 		if (ret < 0) {
 			/* Eep */
-			pr_notice("Read device numbers for inode %lu failed\n",
-				  (unsigned long)inode->i_ino);
+			pr_notice("Read device numbers for inode %llu failed\n",
+				  inode->i_ino);
 			goto error;
 		}
 		if (f->metadata->size == sizeof(jdev.old_id))
@@ -351,8 +351,8 @@ struct inode *jffs2_iget(struct super_block *sb, unsigned long ino)
 		break;
 
 	default:
-		pr_warn("%s(): Bogus i_mode %o for ino %lu\n",
-			__func__, inode->i_mode, (unsigned long)inode->i_ino);
+		pr_warn("%s(): Bogus i_mode %o for ino %llu\n",
+			__func__, inode->i_mode, inode->i_ino);
 	}
 
 	mutex_unlock(&f->sem);
@@ -373,21 +373,21 @@ void jffs2_dirty_inode(struct inode *inode, int flags)
 {
 	struct iattr iattr;
 
-	if (!(inode->i_state & I_DIRTY_DATASYNC)) {
-		jffs2_dbg(2, "%s(): not calling setattr() for ino #%lu\n",
+	if (!(inode_state_read_once(inode) & I_DIRTY_DATASYNC)) {
+		jffs2_dbg(2, "%s(): not calling setattr() for ino #%llu\n",
 			  __func__, inode->i_ino);
 		return;
 	}
 
-	jffs2_dbg(1, "%s(): calling setattr() for ino #%lu\n",
+	jffs2_dbg(1, "%s(): calling setattr() for ino #%llu\n",
 		  __func__, inode->i_ino);
 
 	iattr.ia_valid = ATTR_MODE|ATTR_UID|ATTR_GID|ATTR_ATIME|ATTR_MTIME|ATTR_CTIME;
 	iattr.ia_mode = inode->i_mode;
 	iattr.ia_uid = inode->i_uid;
 	iattr.ia_gid = inode->i_gid;
-	iattr.ia_atime = inode->i_atime;
-	iattr.ia_mtime = inode->i_mtime;
+	iattr.ia_atime = inode_get_atime(inode);
+	iattr.ia_mtime = inode_get_mtime(inode);
 	iattr.ia_ctime = inode_get_ctime(inode);
 
 	jffs2_do_setattr(inode, &iattr);
@@ -428,7 +428,7 @@ struct inode *jffs2_new_inode (struct inode *dir_i, umode_t mode, struct jffs2_r
 	struct jffs2_inode_info *f;
 	int ret;
 
-	jffs2_dbg(1, "%s(): dir_i %ld, mode 0x%x\n",
+	jffs2_dbg(1, "%s(): dir_i %llu, mode 0x%x\n",
 		  __func__, dir_i->i_ino, mode);
 
 	c = JFFS2_SB_INFO(sb);
@@ -475,8 +475,8 @@ struct inode *jffs2_new_inode (struct inode *dir_i, umode_t mode, struct jffs2_r
 	inode->i_mode = jemode_to_cpu(ri->mode);
 	i_gid_write(inode, je16_to_cpu(ri->gid));
 	i_uid_write(inode, je16_to_cpu(ri->uid));
-	inode->i_atime = inode->i_mtime = inode_set_ctime_current(inode);
-	ri->atime = ri->mtime = ri->ctime = cpu_to_je32(I_SEC(inode->i_mtime));
+	simple_inode_init_ts(inode);
+	ri->atime = ri->mtime = ri->ctime = cpu_to_je32(I_SEC(inode_get_mtime(inode)));
 
 	inode->i_blocks = 0;
 	inode->i_size = 0;
@@ -562,7 +562,8 @@ int jffs2_do_fill_super(struct super_block *sb, struct fs_context *fc)
 		return ret;
 
 	c->inocache_hashsize = calculate_inocache_hashsize(c->flash_size);
-	c->inocache_list = kcalloc(c->inocache_hashsize, sizeof(struct jffs2_inode_cache *), GFP_KERNEL);
+	c->inocache_list = kzalloc_objs(struct jffs2_inode_cache *,
+					c->inocache_hashsize);
 	if (!c->inocache_list) {
 		ret = -ENOMEM;
 		goto out_wbuf;

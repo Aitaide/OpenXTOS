@@ -282,7 +282,7 @@ static struct tegra_dma_desc *tegra_dma_desc_get(struct tegra_dma_channel *tdc)
 	spin_unlock_irqrestore(&tdc->lock, flags);
 
 	/* Allocate DMA desc */
-	dma_desc = kzalloc(sizeof(*dma_desc), GFP_NOWAIT);
+	dma_desc = kzalloc_obj(*dma_desc, GFP_NOWAIT);
 	if (!dma_desc)
 		return NULL;
 
@@ -321,7 +321,7 @@ tegra_dma_sg_req_get(struct tegra_dma_channel *tdc)
 	}
 	spin_unlock_irqrestore(&tdc->lock, flags);
 
-	sg_req = kzalloc(sizeof(*sg_req), GFP_NOWAIT);
+	sg_req = kzalloc_obj(*sg_req, GFP_NOWAIT);
 
 	return sg_req;
 }
@@ -463,7 +463,7 @@ static void tegra_dma_configure_for_next(struct tegra_dma_channel *tdc,
 
 	/*
 	 * If interrupt is pending then do nothing as the ISR will handle
-	 * the programing for new request.
+	 * the programming for new request.
 	 */
 	if (status & TEGRA_APBDMA_STATUS_ISE_EOC) {
 		dev_err(tdc2dev(tdc),
@@ -1581,7 +1581,7 @@ err_clk_unprepare:
 	return ret;
 }
 
-static int tegra_dma_remove(struct platform_device *pdev)
+static void tegra_dma_remove(struct platform_device *pdev)
 {
 	struct tegra_dma *tdma = platform_get_drvdata(pdev);
 
@@ -1589,8 +1589,6 @@ static int tegra_dma_remove(struct platform_device *pdev)
 	dma_async_device_unregister(&tdma->dma_dev);
 	pm_runtime_disable(&pdev->dev);
 	clk_unprepare(tdma->dma_clk);
-
-	return 0;
 }
 
 static int __maybe_unused tegra_dma_runtime_suspend(struct device *dev)

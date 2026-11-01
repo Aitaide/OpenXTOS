@@ -10,14 +10,23 @@
 #ifndef AMD_SFH_COMMON_H
 #define AMD_SFH_COMMON_H
 
+#include <linux/auxiliary_bus.h>
+#include <linux/mutex.h>
 #include <linux/pci.h>
+#include <linux/sizes.h>
 #include "amd_sfh_hid.h"
 
 #define PCI_DEVICE_ID_AMD_MP2		0x15E4
 #define PCI_DEVICE_ID_AMD_MP2_1_1	0x164A
 
+/* The BAR 2 size must cover the highest register offset (0x10958) */
+#define AMD_SFH_MIN_BAR_SIZE		SZ_128K
+
 #define AMD_C2P_MSG(regno) (0x10500 + ((regno) * 4))
 #define AMD_P2C_MSG(regno) (0x10680 + ((regno) * 4))
+
+#define AMD_C2P_MSG_V1(regno) (0x10900 + ((regno) * 4))
+#define AMD_P2C_MSG_V1(regno) (0x10500 + ((regno) * 4))
 
 #define SENSOR_ENABLED			4
 #define SENSOR_DISABLED			5
@@ -31,10 +40,22 @@ enum cmd_id {
 	STOP_ALL_SENSORS = 8,
 };
 
+enum amd_mp2_version {
+	MP2_VER_V2 = 1,
+	MP2_VER_1_1 = 2,
+};
+
 struct amd_mp2_sensor_info {
 	u8 sensor_idx;
 	u32 period;
 	dma_addr_t dma_address;
+};
+
+struct sfh_dev_status {
+	bool is_hpd_present;
+	bool is_hpd_enabled;
+	bool is_als_present;
+	bool is_sra_present;
 };
 
 struct amd_mp2_dev {
@@ -47,6 +68,14 @@ struct amd_mp2_dev {
 	struct amd_input_data in_data;
 	/* mp2 active control status */
 	u32 mp2_acs;
+	struct sfh_dev_status dev_en;
+	struct work_struct work;
+	/* mp2 to protect data */
+	struct mutex lock;
+	u8 init_done;
+	u8 rver;
+	u8 mp2_ver;
+	struct auxiliary_device *tm_auxdev;
 };
 
 struct amd_mp2_ops {
@@ -73,4 +102,19 @@ void amd_sfh_clear_intr_v2(struct amd_mp2_dev *privdata);
 int amd_sfh_irq_init_v2(struct amd_mp2_dev *privdata);
 void amd_sfh_clear_intr(struct amd_mp2_dev *privdata);
 int amd_sfh_irq_init(struct amd_mp2_dev *privdata);
+
+static inline u64 amd_get_c2p_val(struct amd_mp2_dev *mp2, u32 idx)
+{
+	return mp2->rver == 1 ? AMD_C2P_MSG_V1(idx) :  AMD_C2P_MSG(idx);
+}
+
+static inline u64 amd_get_p2c_val(struct amd_mp2_dev *mp2, u32 idx)
+{
+	return mp2->rver == 1 ? AMD_P2C_MSG_V1(idx) :  AMD_P2C_MSG(idx);
+}
+
+bool amd_sfh_op_idx_enabled(struct amd_mp2_dev *mp2);
+void sfh_set_emp2(struct amd_mp2_dev *mp2);
+void sfh_deinit_emp2(void);
+
 #endif

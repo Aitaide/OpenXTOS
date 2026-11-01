@@ -11,9 +11,7 @@
 #include <linux/dma-mapping.h>
 #include <linux/isa.h>
 
-static struct device isa_bus = {
-	.init_name	= "isa"
-};
+static struct device *isa_bus;
 
 struct isa_dev {
 	struct device dev;
@@ -23,7 +21,7 @@ struct isa_dev {
 
 #define to_isa_dev(x) container_of((x), struct isa_dev, dev)
 
-static int isa_bus_match(struct device *dev, struct device_driver *driver)
+static int isa_bus_match(struct device *dev, const struct device_driver *driver)
 {
 	struct isa_driver *isa_driver = to_isa_driver(driver);
 
@@ -82,7 +80,7 @@ static int isa_bus_resume(struct device *dev)
 	return 0;
 }
 
-static struct bus_type isa_bus_type = {
+static const struct bus_type isa_bus_type = {
 	.name		= "isa",
 	.match		= isa_bus_match,
 	.probe		= isa_bus_probe,
@@ -125,13 +123,13 @@ int isa_register_driver(struct isa_driver *isa_driver, unsigned int ndev)
 	for (id = 0; id < ndev; id++) {
 		struct isa_dev *isa_dev;
 
-		isa_dev = kzalloc(sizeof *isa_dev, GFP_KERNEL);
+		isa_dev = kzalloc_obj(*isa_dev);
 		if (!isa_dev) {
 			error = -ENOMEM;
 			break;
 		}
 
-		isa_dev->dev.parent	= &isa_bus;
+		isa_dev->dev.parent	= isa_bus;
 		isa_dev->dev.bus	= &isa_bus_type;
 
 		dev_set_name(&isa_dev->dev, "%s.%u",
@@ -168,12 +166,16 @@ static int __init isa_bus_init(void)
 	int error;
 
 	error = bus_register(&isa_bus_type);
-	if (!error) {
-		error = device_register(&isa_bus);
-		if (error)
-			bus_unregister(&isa_bus_type);
+	if (error)
+		return error;
+
+	isa_bus = root_device_register("isa");
+	if (IS_ERR(isa_bus)) {
+		bus_unregister(&isa_bus_type);
+		return PTR_ERR(isa_bus);
 	}
-	return error;
+
+	return 0;
 }
 
 postcore_initcall(isa_bus_init);

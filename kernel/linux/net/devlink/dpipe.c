@@ -165,18 +165,17 @@ static int devlink_dpipe_table_put(struct sk_buff *skb,
 		return -EMSGSIZE;
 
 	if (nla_put_string(skb, DEVLINK_ATTR_DPIPE_TABLE_NAME, table->name) ||
-	    nla_put_u64_64bit(skb, DEVLINK_ATTR_DPIPE_TABLE_SIZE, table_size,
-			      DEVLINK_ATTR_PAD))
+	    devlink_nl_put_u64(skb, DEVLINK_ATTR_DPIPE_TABLE_SIZE, table_size))
 		goto nla_put_failure;
 	if (nla_put_u8(skb, DEVLINK_ATTR_DPIPE_TABLE_COUNTERS_ENABLED,
 		       table->counters_enabled))
 		goto nla_put_failure;
 
 	if (table->resource_valid) {
-		if (nla_put_u64_64bit(skb, DEVLINK_ATTR_DPIPE_TABLE_RESOURCE_ID,
-				      table->resource_id, DEVLINK_ATTR_PAD) ||
-		    nla_put_u64_64bit(skb, DEVLINK_ATTR_DPIPE_TABLE_RESOURCE_UNITS,
-				      table->resource_units, DEVLINK_ATTR_PAD))
+		if (devlink_nl_put_u64(skb, DEVLINK_ATTR_DPIPE_TABLE_RESOURCE_ID,
+				       table->resource_id) ||
+		    devlink_nl_put_u64(skb, DEVLINK_ATTR_DPIPE_TABLE_RESOURCE_UNITS,
+				       table->resource_units))
 			goto nla_put_failure;
 	}
 	if (devlink_dpipe_matches_put(table, skb))
@@ -214,7 +213,7 @@ static int devlink_dpipe_tables_fill(struct genl_info *info,
 				     struct list_head *dpipe_tables,
 				     const char *table_name)
 {
-	struct devlink *devlink = info->user_ptr[0];
+	struct devlink *devlink = devlink_nl_ctx(info)->devlink;
 	struct devlink_dpipe_table *table;
 	struct nlattr *tables_attr;
 	struct sk_buff *skb = NULL;
@@ -289,9 +288,9 @@ err_table_put:
 	return err;
 }
 
-int devlink_nl_cmd_dpipe_table_get(struct sk_buff *skb, struct genl_info *info)
+int devlink_nl_dpipe_table_get_doit(struct sk_buff *skb, struct genl_info *info)
 {
-	struct devlink *devlink = info->user_ptr[0];
+	struct devlink *devlink = devlink_nl_ctx(info)->devlink;
 	const char *table_name =  NULL;
 
 	if (info->attrs[DEVLINK_ATTR_DPIPE_TABLE_NAME])
@@ -403,12 +402,11 @@ static int devlink_dpipe_entry_put(struct sk_buff *skb,
 	if (!entry_attr)
 		return  -EMSGSIZE;
 
-	if (nla_put_u64_64bit(skb, DEVLINK_ATTR_DPIPE_ENTRY_INDEX, entry->index,
-			      DEVLINK_ATTR_PAD))
+	if (devlink_nl_put_u64(skb, DEVLINK_ATTR_DPIPE_ENTRY_INDEX, entry->index))
 		goto nla_put_failure;
 	if (entry->counter_valid)
-		if (nla_put_u64_64bit(skb, DEVLINK_ATTR_DPIPE_ENTRY_COUNTER,
-				      entry->counter, DEVLINK_ATTR_PAD))
+		if (devlink_nl_put_u64(skb, DEVLINK_ATTR_DPIPE_ENTRY_COUNTER,
+				       entry->counter))
 			goto nla_put_failure;
 
 	matches_attr = nla_nest_start_noflag(skb,
@@ -480,7 +478,7 @@ int devlink_dpipe_entry_ctx_prepare(struct devlink_dpipe_dump_ctx *dump_ctx)
 	if (!dump_ctx->hdr)
 		goto nla_put_failure;
 
-	devlink = dump_ctx->info->user_ptr[0];
+	devlink = devlink_nl_ctx(dump_ctx->info)->devlink;
 	if (devlink_nl_put_handle(dump_ctx->skb, devlink))
 		goto nla_put_failure;
 	dump_ctx->nest = nla_nest_start_noflag(dump_ctx->skb,
@@ -562,10 +560,10 @@ send_done:
 	return genlmsg_reply(dump_ctx.skb, info);
 }
 
-int devlink_nl_cmd_dpipe_entries_get(struct sk_buff *skb,
-				     struct genl_info *info)
+int devlink_nl_dpipe_entries_get_doit(struct sk_buff *skb,
+				      struct genl_info *info)
 {
-	struct devlink *devlink = info->user_ptr[0];
+	struct devlink *devlink = devlink_nl_ctx(info)->devlink;
 	struct devlink_dpipe_table *table;
 	const char *table_name;
 
@@ -652,7 +650,7 @@ static int devlink_dpipe_headers_fill(struct genl_info *info,
 				      struct devlink_dpipe_headers *
 				      dpipe_headers)
 {
-	struct devlink *devlink = info->user_ptr[0];
+	struct devlink *devlink = devlink_nl_ctx(info)->devlink;
 	struct nlattr *headers_attr;
 	struct sk_buff *skb = NULL;
 	struct nlmsghdr *nlh;
@@ -712,10 +710,10 @@ err_table_put:
 	return err;
 }
 
-int devlink_nl_cmd_dpipe_headers_get(struct sk_buff *skb,
-				     struct genl_info *info)
+int devlink_nl_dpipe_headers_get_doit(struct sk_buff *skb,
+				      struct genl_info *info)
 {
-	struct devlink *devlink = info->user_ptr[0];
+	struct devlink *devlink = devlink_nl_ctx(info)->devlink;
 
 	if (!devlink->dpipe_headers)
 		return -EOPNOTSUPP;
@@ -746,10 +744,10 @@ static int devlink_dpipe_table_counters_set(struct devlink *devlink,
 	return 0;
 }
 
-int devlink_nl_cmd_dpipe_table_counters_set(struct sk_buff *skb,
-					    struct genl_info *info)
+int devlink_nl_dpipe_table_counters_set_doit(struct sk_buff *skb,
+					     struct genl_info *info)
 {
-	struct devlink *devlink = info->user_ptr[0];
+	struct devlink *devlink = devlink_nl_ctx(info)->devlink;
 	const char *table_name;
 	bool counters_enable;
 
@@ -839,7 +837,7 @@ EXPORT_SYMBOL_GPL(devlink_dpipe_table_counter_enabled);
  */
 int devl_dpipe_table_register(struct devlink *devlink,
 			      const char *table_name,
-			      struct devlink_dpipe_table_ops *table_ops,
+			      const struct devlink_dpipe_table_ops *table_ops,
 			      void *priv, bool counter_control_extern)
 {
 	struct devlink_dpipe_table *table;
@@ -853,7 +851,7 @@ int devl_dpipe_table_register(struct devlink *devlink,
 				     devlink))
 		return -EEXIST;
 
-	table = kzalloc(sizeof(*table), GFP_KERNEL);
+	table = kzalloc_obj(*table);
 	if (!table)
 		return -ENOMEM;
 

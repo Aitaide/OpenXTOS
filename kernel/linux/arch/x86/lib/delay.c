@@ -14,12 +14,10 @@
 
 #include <linux/export.h>
 #include <linux/sched.h>
-#include <linux/timex.h>
 #include <linux/preempt.h>
 #include <linux/delay.h>
 
 #include <asm/processor.h>
-#include <asm/delay.h>
 #include <asm/timer.h>
 #include <asm/mwait.h>
 
@@ -75,7 +73,7 @@ static void delay_tsc(u64 cycles)
 
 		/* Allow RT tasks to run */
 		preempt_enable();
-		rep_nop();
+		native_pause();
 		preempt_disable();
 
 		/*
@@ -128,10 +126,10 @@ static void delay_halt_mwaitx(u64 unused, u64 cycles)
 
 	delay = min_t(u64, MWAITX_MAX_WAIT_CYCLES, cycles);
 	/*
-	 * Use cpu_tss_rw as a cacheline-aligned, seldomly accessed per-cpu
+	 * Use cpu_tss_rw as a cacheline-aligned, seldom accessed per-cpu
 	 * variable as the monitor target.
 	 */
-	 __monitorx(raw_cpu_ptr(&cpu_tss_rw), 0, 0);
+	__monitorx(raw_cpu_ptr(&cpu_tss_rw), 0, 0);
 
 	/*
 	 * AMD, like Intel, supports the EAX hint and EAX=0xf means, do not
@@ -189,13 +187,13 @@ void use_mwaitx_delay(void)
 	delay_fn = delay_halt;
 }
 
-int read_current_timer(unsigned long *timer_val)
+bool delay_read_timer(unsigned long *timer_val)
 {
 	if (delay_fn == delay_tsc) {
 		*timer_val = rdtsc();
-		return 0;
+		return true;
 	}
-	return -1;
+	return false;
 }
 
 void __delay(unsigned long loops)

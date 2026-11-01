@@ -18,9 +18,10 @@
 #include <linux/sched.h>
 #include <linux/slab.h>
 #include <linux/spinlock.h>
+#include <linux/units.h>
 
 #define WAIT_PCLK(n, rate)	\
-	ndelay(DIV_ROUND_UP(DIV_ROUND_UP(1000000000, rate), n) + 10)
+	ndelay(DIV_ROUND_UP(DIV_ROUND_UP(HZ_PER_GHZ, rate), n) + 10)
 
 /* I2C register address definitions */
 #define SYNQUACER_I2C_REG_BSR		(0x00 << 2) // Bus Status
@@ -138,7 +139,6 @@ struct synquacer_i2c {
 	int			irq;
 	struct device		*dev;
 	void __iomem		*base;
-	struct clk		*pclk;
 	u32			pclkrate;
 	u32			speed_khz;
 	u32			timeout_ms;
@@ -311,7 +311,7 @@ static int synquacer_i2c_doxfer(struct synquacer_i2c *i2c,
 				struct i2c_msg *msgs, int num)
 {
 	unsigned char bsr;
-	unsigned long timeout;
+	unsigned long time_left;
 	int ret;
 
 	synquacer_i2c_hw_init(i2c);
@@ -335,9 +335,9 @@ static int synquacer_i2c_doxfer(struct synquacer_i2c *i2c,
 		return ret;
 	}
 
-	timeout = wait_for_completion_timeout(&i2c->completion,
-					msecs_to_jiffies(i2c->timeout_ms));
-	if (timeout == 0) {
+	time_left = wait_for_completion_timeout(&i2c->completion,
+						msecs_to_jiffies(i2c->timeout_ms));
+	if (time_left == 0) {
 		dev_dbg(i2c->dev, "timeout\n");
 		return -EAGAIN;
 	}
@@ -521,8 +521,8 @@ static u32 synquacer_i2c_functionality(struct i2c_adapter *adap)
 }
 
 static const struct i2c_algorithm synquacer_i2c_algo = {
-	.master_xfer	= synquacer_i2c_xfer,
-	.functionality	= synquacer_i2c_functionality,
+	.xfer = synquacer_i2c_xfer,
+	.functionality = synquacer_i2c_functionality,
 };
 
 static const struct i2c_adapter synquacer_i2c_ops = {
@@ -535,6 +535,7 @@ static const struct i2c_adapter synquacer_i2c_ops = {
 static int synquacer_i2c_probe(struct platform_device *pdev)
 {
 	struct synquacer_i2c *i2c;
+	struct clk *pclk;
 	u32 bus_speed;
 	int ret;
 
@@ -550,17 +551,13 @@ static int synquacer_i2c_probe(struct platform_device *pdev)
 	device_property_read_u32(&pdev->dev, "socionext,pclk-rate",
 				 &i2c->pclkrate);
 
-	i2c->pclk = devm_clk_get(&pdev->dev, "pclk");
-	if (PTR_ERR(i2c->pclk) == -EPROBE_DEFER)
-		return -EPROBE_DEFER;
-	if (!IS_ERR_OR_NULL(i2c->pclk)) {
-		dev_dbg(&pdev->dev, "clock source %p\n", i2c->pclk);
+	pclk = devm_clk_get_optional_enabled(&pdev->dev, "pclk");
+	if (IS_ERR(pclk))
+		return dev_err_probe(&pdev->dev, PTR_ERR(pclk),
+				     "failed to get and enable clock\n");
 
-		ret = clk_prepare_enable(i2c->pclk);
-		if (ret)
-			return dev_err_probe(&pdev->dev, ret, "failed to enable clock\n");
-		i2c->pclkrate = clk_get_rate(i2c->pclk);
-	}
+	if (pclk)
+		i2c->pclkrate = clk_get_rate(pclk);
 
 	if (i2c->pclkrate < SYNQUACER_I2C_MIN_CLK_RATE ||
 	    i2c->pclkrate > SYNQUACER_I2C_MAX_CLK_RATE)
@@ -579,7 +576,7 @@ static int synquacer_i2c_probe(struct platform_device *pdev)
 	ret = devm_request_irq(&pdev->dev, i2c->irq, synquacer_i2c_isr,
 			       0, dev_name(&pdev->dev), i2c);
 	if (ret < 0)
-		return dev_err_probe(&pdev->dev, ret, "cannot claim IRQ %d\n", i2c->irq);
+		return ret;
 
 	i2c->state = STATE_IDLE;
 	i2c->dev = &pdev->dev;
@@ -615,8 +612,6 @@ static void synquacer_i2c_remove(struct platform_device *pdev)
 	struct synquacer_i2c *i2c = platform_get_drvdata(pdev);
 
 	i2c_del_adapter(&i2c->adapter);
-	if (!IS_ERR(i2c->pclk))
-		clk_disable_unprepare(i2c->pclk);
 };
 
 static const struct of_device_id synquacer_i2c_dt_ids[] __maybe_unused = {
@@ -635,7 +630,7 @@ MODULE_DEVICE_TABLE(acpi, synquacer_i2c_acpi_ids);
 
 static struct platform_driver synquacer_i2c_driver = {
 	.probe	= synquacer_i2c_probe,
-	.remove_new = synquacer_i2c_remove,
+	.remove = synquacer_i2c_remove,
 	.driver	= {
 		.name = "synquacer_i2c",
 		.of_match_table = of_match_ptr(synquacer_i2c_dt_ids),

@@ -24,10 +24,9 @@ static int bme680_i2c_probe(struct i2c_client *client)
 	const char *name = NULL;
 
 	regmap = devm_regmap_init_i2c(client, &bme680_regmap_config);
-	if (IS_ERR(regmap)) {
-		dev_err(&client->dev, "Failed to register i2c regmap %ld\n", PTR_ERR(regmap));
-		return PTR_ERR(regmap);
-	}
+	if (IS_ERR(regmap))
+		return dev_err_probe(&client->dev, PTR_ERR(regmap),
+				     "Failed to register i2c regmap\n");
 
 	if (id)
 		name = id->name;
@@ -36,14 +35,14 @@ static int bme680_i2c_probe(struct i2c_client *client)
 }
 
 static const struct i2c_device_id bme680_i2c_id[] = {
-	{"bme680", 0},
-	{},
+	{ .name = "bme680" },
+	{ }
 };
 MODULE_DEVICE_TABLE(i2c, bme680_i2c_id);
 
 static const struct of_device_id bme680_of_i2c_match[] = {
 	{ .compatible = "bosch,bme680", },
-	{},
+	{ }
 };
 MODULE_DEVICE_TABLE(of, bme680_of_i2c_match);
 
@@ -51,6 +50,7 @@ static struct i2c_driver bme680_i2c_driver = {
 	.driver = {
 		.name			= "bme680_i2c",
 		.of_match_table		= bme680_of_i2c_match,
+		.pm = pm_ptr(&bme680_dev_pm_ops),
 	},
 	.probe = bme680_i2c_probe,
 	.id_table = bme680_i2c_id,
@@ -60,4 +60,4 @@ module_i2c_driver(bme680_i2c_driver);
 MODULE_AUTHOR("Himanshu Jha <himanshujha199640@gmail.com>");
 MODULE_DESCRIPTION("BME680 I2C driver");
 MODULE_LICENSE("GPL v2");
-MODULE_IMPORT_NS(IIO_BME680);
+MODULE_IMPORT_NS("IIO_BME680");

@@ -33,7 +33,8 @@
 #include <linux/init.h>		/* For __init/__exit/... */
 #include <linux/idr.h>		/* For ida_* macros */
 #include <linux/err.h>		/* For IS_ERR macros */
-#include <linux/of.h>		/* For of_get_timeout_sec */
+#include <linux/of.h>		/* For of_alias_get_id */
+#include <linux/property.h>	/* For device_property_read_u32 */
 #include <linux/suspend.h>
 
 #include "watchdog_core.h"	/* For watchdog_dev_register/... */
@@ -54,9 +55,9 @@ MODULE_PARM_DESC(stop_on_reboot, "Stop watchdogs on reboot (0=keep watching, 1=s
  * for example when it's impossible to disable it. To do so,
  * raising the initcall level of the watchdog driver is a solution.
  * But in such case, the miscdev is maybe not ready (subsys_initcall), and
- * watchdog_core need miscdev to register the watchdog as a char device.
+ * watchdog_core needs miscdev to register the watchdog as a char device.
  *
- * The deferred registration infrastructure offer a way for the watchdog
+ * The deferred registration infrastructure offers a way for the watchdog
  * subsystem to register a watchdog properly, even before miscdev is ready.
  */
 
@@ -116,7 +117,8 @@ static void watchdog_check_min_max_timeout(struct watchdog_device *wdd)
  * bounds.
  */
 int watchdog_init_timeout(struct watchdog_device *wdd,
-				unsigned int timeout_parm, struct device *dev)
+			  unsigned int timeout_parm,
+			  const struct device *dev)
 {
 	const char *dev_str = wdd->parent ? dev_name(wdd->parent) :
 			      (const char *)wdd->info->identity;
@@ -137,8 +139,7 @@ int watchdog_init_timeout(struct watchdog_device *wdd,
 	}
 
 	/* try to get the timeout_sec property */
-	if (dev && dev->of_node &&
-	    of_property_read_u32(dev->of_node, "timeout-sec", &t) == 0) {
+	if (dev && device_property_read_u32(dev, "timeout-sec", &t) == 0) {
 		if (t && !watchdog_timeout_invalid(wdd, t)) {
 			wdd->timeout = t;
 			return 0;
@@ -221,11 +222,11 @@ static int watchdog_pm_notifier(struct notifier_block *nb, unsigned long mode,
  * watchdog_set_restart_priority - Change priority of restart handler
  * @wdd: watchdog device
  * @priority: priority of the restart handler, should follow these guidelines:
- *   0:   use watchdog's restart function as last resort, has limited restart
- *        capabilies
- *   128: default restart handler, use if no other handler is expected to be
+ * * 0:   use watchdog's restart function as last resort, has limited restart
+ *        capabilities
+ * * 128: default restart handler, use if no other handler is expected to be
  *        available and/or if restart is sufficient to restart the entire system
- *   255: preempt all other handlers
+ * * 255: preempt all other handlers
  *
  * If a wdd->ops->restart function is provided when watchdog_register_device is
  * called, it will be registered as a restart handler with the priority given
@@ -237,9 +238,11 @@ void watchdog_set_restart_priority(struct watchdog_device *wdd, int priority)
 }
 EXPORT_SYMBOL_GPL(watchdog_set_restart_priority);
 
-static int __watchdog_register_device(struct watchdog_device *wdd)
+static int ___watchdog_register_device(struct watchdog_device *wdd)
 {
-	int ret, id = -1;
+	int ret, min_id, id = -1;
+	struct device_node *np;
+	char alias[16];
 
 	if (wdd == NULL || wdd->info == NULL || wdd->ops == NULL)
 		return -EINVAL;
@@ -260,12 +263,30 @@ static int __watchdog_register_device(struct watchdog_device *wdd)
 	if (wdd->parent) {
 		ret = of_alias_get_id(wdd->parent->of_node, "watchdog");
 		if (ret >= 0)
-			id = ida_simple_get(&watchdog_ida, ret,
-					    ret + 1, GFP_KERNEL);
+			id = ida_alloc_range(&watchdog_ida, ret, ret,
+					     GFP_KERNEL);
 	}
 
-	if (id < 0)
-		id = ida_simple_get(&watchdog_ida, 0, MAX_DOGS, GFP_KERNEL);
+	/*
+	 * Find an id which is not pre-assigned via a DT alias to some
+	 * other, possibly not yet probed, watchdog device.
+	 */
+	if (id < 0) {
+		np = of_find_node_by_path("/aliases");
+
+		for (min_id = 0; ; min_id = id + 1) {
+			id = ida_alloc_range(&watchdog_ida, min_id, MAX_DOGS - 1,
+					     GFP_KERNEL);
+			if (!np || id < 0)
+				break;
+
+			scnprintf(alias, sizeof(alias), "watchdog%d", id);
+			if (!of_get_property(np, alias, NULL))
+				break;
+			ida_free(&watchdog_ida, id);
+		}
+		of_node_put(np);
+	}
 
 	if (id < 0)
 		return id;
@@ -273,19 +294,20 @@ static int __watchdog_register_device(struct watchdog_device *wdd)
 
 	ret = watchdog_dev_register(wdd);
 	if (ret) {
-		ida_simple_remove(&watchdog_ida, id);
+		ida_free(&watchdog_ida, id);
 		if (!(id == 0 && ret == -EBUSY))
 			return ret;
 
 		/* Retry in case a legacy watchdog module exists */
-		id = ida_simple_get(&watchdog_ida, 1, MAX_DOGS, GFP_KERNEL);
+		id = ida_alloc_range(&watchdog_ida, 1, MAX_DOGS - 1,
+				     GFP_KERNEL);
 		if (id < 0)
 			return id;
 		wdd->id = id;
 
 		ret = watchdog_dev_register(wdd);
 		if (ret) {
-			ida_simple_remove(&watchdog_ida, id);
+			ida_free(&watchdog_ida, id);
 			return ret;
 		}
 	}
@@ -309,7 +331,7 @@ static int __watchdog_register_device(struct watchdog_device *wdd)
 				pr_err("watchdog%d: Cannot register reboot notifier (%d)\n",
 					wdd->id, ret);
 				watchdog_dev_unregister(wdd);
-				ida_simple_remove(&watchdog_ida, id);
+				ida_free(&watchdog_ida, id);
 				return ret;
 			}
 		}
@@ -336,6 +358,22 @@ static int __watchdog_register_device(struct watchdog_device *wdd)
 	return 0;
 }
 
+static int __watchdog_register_device(struct watchdog_device *wdd)
+{
+	const char *dev_str;
+	int ret;
+
+	ret = ___watchdog_register_device(wdd);
+	if (ret) {
+		dev_str = wdd->parent ? dev_name(wdd->parent) :
+			  (const char *)wdd->info->identity;
+		pr_err("%s: failed to register watchdog device (err = %d)\n",
+			dev_str, ret);
+	}
+
+	return ret;
+}
+
 /**
  * watchdog_register_device() - register a watchdog device
  * @wdd: watchdog device
@@ -349,7 +387,6 @@ static int __watchdog_register_device(struct watchdog_device *wdd)
 
 int watchdog_register_device(struct watchdog_device *wdd)
 {
-	const char *dev_str;
 	int ret = 0;
 
 	mutex_lock(&wtd_deferred_reg_mutex);
@@ -358,13 +395,6 @@ int watchdog_register_device(struct watchdog_device *wdd)
 	else
 		watchdog_deferred_registration_add(wdd);
 	mutex_unlock(&wtd_deferred_reg_mutex);
-
-	if (ret) {
-		dev_str = wdd->parent ? dev_name(wdd->parent) :
-			  (const char *)wdd->info->identity;
-		pr_err("%s: failed to register watchdog device (err = %d)\n",
-			dev_str, ret);
-	}
 
 	return ret;
 }
@@ -381,8 +411,11 @@ static void __watchdog_unregister_device(struct watchdog_device *wdd)
 	if (test_bit(WDOG_STOP_ON_REBOOT, &wdd->status))
 		unregister_reboot_notifier(&wdd->reboot_nb);
 
+	if (test_bit(WDOG_NO_PING_ON_SUSPEND, &wdd->status))
+		unregister_pm_notifier(&wdd->pm_nb);
+
 	watchdog_dev_unregister(wdd);
-	ida_simple_remove(&watchdog_ida, wdd->id);
+	ida_free(&watchdog_ida, wdd->id);
 }
 
 /**

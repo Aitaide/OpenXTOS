@@ -1,7 +1,8 @@
 // SPDX-License-Identifier: (GPL-2.0+ OR MIT)
 
 /dts-v1/;
-#include "rk3399-nanopi-r4s.dts"
+
+#include "rk3399-nanopi-r4s.dtsi"
 
 / {
 	model = "FriendlyElec NanoPi R4S Enterprise Edition";
@@ -15,7 +16,7 @@
 
 &i2c2 {
 	eeprom@51 {
-		compatible = "microchip,24c02", "atmel,24c02";
+		compatible = "microchip,24aa025e48";
 		reg = <0x51>;
 		pagesize = <16>;
 		size = <256>;

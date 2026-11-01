@@ -3,7 +3,7 @@
  * Microchip Polarfire FPGA programming over slave SPI interface.
  */
 
-#include <asm/unaligned.h>
+#include <linux/unaligned.h>
 #include <linux/delay.h>
 #include <linux/fpga/fpga-mgr.h>
 #include <linux/iopoll.h>
@@ -116,6 +116,9 @@ static int mpf_ops_parse_header(struct fpga_manager *mgr,
 	}
 
 	header_size = *(buf + MPF_HEADER_SIZE_OFFSET);
+	if (!header_size)
+		return -EINVAL;
+
 	if (header_size > count) {
 		info->header_size = header_size;
 		return -EAGAIN;

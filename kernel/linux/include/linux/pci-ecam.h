@@ -45,6 +45,10 @@ struct pci_ecam_ops {
 	unsigned int			bus_shift;
 	struct pci_ops			pci_ops;
 	int				(*init)(struct pci_config_window *);
+	int				(*enable_device)(struct pci_host_bridge *,
+							 struct pci_dev *);
+	void				(*disable_device)(struct pci_host_bridge *,
+							  struct pci_dev *);
 };
 
 /*
@@ -77,6 +81,9 @@ void __iomem *pci_ecam_map_bus(struct pci_bus *bus, unsigned int devfn,
 /* default ECAM ops */
 extern const struct pci_ecam_ops pci_generic_ecam_ops;
 
+/* default CAM ops */
+extern const struct pci_ecam_ops pci_generic_cam_ops;
+
 #if defined(CONFIG_ACPI) && defined(CONFIG_PCI_QUIRKS)
 extern const struct pci_ecam_ops pci_32b_ops;	/* 32-bit accesses only */
 extern const struct pci_ecam_ops pci_32b_read_ops; /* 32-bit read only */
@@ -88,11 +95,5 @@ extern const struct pci_ecam_ops xgene_v2_pcie_ecam_ops; /* APM X-Gene PCIe v2.x
 extern const struct pci_ecam_ops al_pcie_ops;	/* Amazon Annapurna Labs PCIe */
 extern const struct pci_ecam_ops tegra194_pcie_ops; /* Tegra194 PCIe */
 extern const struct pci_ecam_ops loongson_pci_ecam_ops; /* Loongson PCIe */
-#endif
-
-#if IS_ENABLED(CONFIG_PCI_HOST_COMMON)
-/* for DT-based PCI controllers that support ECAM */
-int pci_host_common_probe(struct platform_device *pdev);
-int pci_host_common_remove(struct platform_device *pdev);
 #endif
 #endif

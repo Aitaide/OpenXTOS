@@ -1,6 +1,6 @@
 # XTOS sched_class 集成 RFC 候选
 
-状态：RFC 候选，未批准实施。
+状态：RFC 候选，未批准实施。当前 Linux 7.3.1，本次仅 `source_inspection_only`，不提供 build、guest 或 physical 验收。M0/M1 物理目标机 go/no-go 未通过，M2 保持未开始。PREEMPT_RT 已内置，旧 RT patch 与 `localversion-rt` 只属于历史基线。
 
 ## 目的和决策门
 
@@ -20,8 +20,10 @@
 候选顺序仅为待验证假设：
 
 ```text
-stop > deadline > rt > xtos > fair > idle
+stop > deadline > rt > xtos > fair > ext > idle
 ```
+
+当前 SCHED_DATA 的实际段次序为 stop > dl > rt > fair > ext > idle，尚无 XTOS 类。ext 受 `CONFIG_SCHED_CLASS_EXT` 控制，active-class 遍历还受 scx 状态影响；上述插入位置仅是候选，必须审查 fair/ext 切换和 fast path。
 
 XTOS 只服务显式选择的任务；普通、管理、IRQ、`SCHED_FIFO/RR` 和 `SCHED_DEADLINE` 任务继续由 Linux 原生类管理。XTOS 不得抢占更高类，不改变既有 Linux 类的语义。空 XTOS 队列必须回退到下一类。
 
@@ -56,14 +58,15 @@ XTOS 只服务显式选择的任务；普通、管理、IRQ、`SCHED_FIFO/RR` �
 
 ## 完整 callback 集成检查表
 
-目标内核 callback 名单及锁/上下文分析见 [lifecycle matrix](xtos_scheduler_lifecycle_matrix.md)。该表从当前树 `kernel/linux/kernel/sched/sched.h` 的 `struct sched_class` 提取字段，并由 `tests/test_sched_class_hooks.py` 自动比较，避免 RFC 只写概念生命周期而漏掉实际 hook。任何基线更新或 Kconfig 组合变化，都必须重新核对表中的 `CONFIG_SMP`、`CONFIG_FAIR_GROUP_SCHED`、`CONFIG_SCHED_CORE` 条件。
+目标内核 callback 名单及锁/上下文分析见 [lifecycle matrix](xtos_scheduler_lifecycle_matrix.md)。该表从当前树 `kernel/linux/kernel/sched/sched.h` 的 `struct sched_class` 提取字段，并由 `tests/test_sched_class_hooks.py` 自动比较，避免 RFC 只写概念生命周期而漏掉实际 hook。7.3.1 的 `pick_task`、`balance` 和 affinity/migration 字段均无 CONFIG_SMP 声明 guard；运行语义仍需按 UP/SMP 验证。仅下列两项 callback 有声明 guard；`CONFIG_UCLAMP_TASK` 控制的是非 callback 字段。`pick_next_task` 是 core 路径名，不再是 struct callback；旧 `check_preempt_curr` 对应当前 `wakeup_preempt`。
 
-当前 callback 共 27 项：
+当前 callback 共 30 项：
 
-- 通用：`enqueue_task`、`dequeue_task`、`yield_task`、`yield_to_task`、`check_preempt_curr`、`pick_next_task`、`put_prev_task`、`set_next_task`、`task_tick`、`task_fork`、`task_dead`、`switched_from`、`switched_to`、`prio_changed`、`get_rr_interval`、`update_curr`
-- `CONFIG_SMP`：`balance`、`select_task_rq`、`pick_task`、`migrate_task_rq`、`task_woken`、`set_cpus_allowed`、`rq_online`、`rq_offline`、`find_lock_rq`
-- `CONFIG_FAIR_GROUP_SCHED`：`task_change_group`
-- `CONFIG_SCHED_CORE`：`task_is_throttled`
+- 无条件：`enqueue_task`、`dequeue_task`、`yield_task`、`yield_to_task`、`wakeup_preempt`、`balance`、`pick_task`、`put_prev_task`、`set_next_task`、`select_task_rq`、`migrate_task_rq`、`task_woken`、`set_cpus_allowed`、`rq_online`、`rq_offline`、`find_lock_rq`、`task_tick`、`task_fork`、`task_dead`、`switching_from`、`switched_from`、`switching_to`、`switched_to`、`get_prio`、`prio_changed`、`reweight_task`、`get_rr_interval`、`update_curr`
+- CONFIG_FAIR_GROUP_SCHED：`task_change_group`
+- CONFIG_SCHED_CORE：`task_is_throttled`
+
+需逐项审查实际签名：dequeue 返回 bool；pick 接收 rq_flags、允许 RETRY_TASK 重试；put_prev 接收 next；get_prio/oldprio 使用 u64；reweight 接收 const load_weight。
 
 上述清单只是结构覆盖，不等于实现已支持；当前所有 callback 仍为 BLOCKED，M0 关闭前不得进入 M2。
 

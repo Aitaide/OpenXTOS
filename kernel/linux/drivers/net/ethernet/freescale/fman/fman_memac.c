@@ -267,7 +267,6 @@ struct memac_cfg {
 	bool reset_on_init;
 	bool pause_ignore;
 	bool promiscuous_mode_enable;
-	struct fixed_phy_status *fixed_link;
 	u16 max_frame_length;
 	u16 pause_quanta;
 	u32 tx_ipg_length;
@@ -618,18 +617,17 @@ static int memac_accept_rx_pause_frames(struct fman_mac *memac, bool en)
 	return 0;
 }
 
-static void memac_validate(struct phylink_config *config,
-			   unsigned long *supported,
-			   struct phylink_link_state *state)
+static unsigned long memac_get_caps(struct phylink_config *config,
+				    phy_interface_t interface)
 {
 	struct fman_mac *memac = fman_config_to_mac(config)->fman_mac;
 	unsigned long caps = config->mac_capabilities;
 
-	if (phy_interface_mode_is_rgmii(state->interface) &&
+	if (phy_interface_mode_is_rgmii(interface) &&
 	    memac->rgmii_no_half_duplex)
 		caps &= ~(MAC_10HD | MAC_100HD);
 
-	phylink_validate_mask_caps(supported, state, caps);
+	return caps;
 }
 
 /**
@@ -651,6 +649,7 @@ static u32 memac_if_mode(phy_interface_t interface)
 		return IF_MODE_GMII | IF_MODE_RGMII;
 	case PHY_INTERFACE_MODE_SGMII:
 	case PHY_INTERFACE_MODE_1000BASEX:
+	case PHY_INTERFACE_MODE_2500BASEX:
 	case PHY_INTERFACE_MODE_QSGMII:
 		return IF_MODE_GMII;
 	case PHY_INTERFACE_MODE_10GBASER:
@@ -669,6 +668,7 @@ static struct phylink_pcs *memac_select_pcs(struct phylink_config *config,
 	switch (iface) {
 	case PHY_INTERFACE_MODE_SGMII:
 	case PHY_INTERFACE_MODE_1000BASEX:
+	case PHY_INTERFACE_MODE_2500BASEX:
 		return memac->sgmii_pcs;
 	case PHY_INTERFACE_MODE_QSGMII:
 		return memac->qsgmii_pcs;
@@ -687,6 +687,7 @@ static int memac_prepare(struct phylink_config *config, unsigned int mode,
 	switch (iface) {
 	case PHY_INTERFACE_MODE_SGMII:
 	case PHY_INTERFACE_MODE_1000BASEX:
+	case PHY_INTERFACE_MODE_2500BASEX:
 	case PHY_INTERFACE_MODE_QSGMII:
 	case PHY_INTERFACE_MODE_10GBASER:
 		return phy_set_mode_ext(memac->serdes, PHY_MODE_ETHERNET,
@@ -776,7 +777,7 @@ static void memac_link_down(struct phylink_config *config, unsigned int mode,
 }
 
 static const struct phylink_mac_ops memac_mac_ops = {
-	.validate = memac_validate,
+	.mac_get_caps = memac_get_caps,
 	.mac_select_pcs = memac_select_pcs,
 	.mac_prepare = memac_prepare,
 	.mac_config = memac_mac_config,
@@ -810,7 +811,7 @@ static int memac_add_hash_mac_address(struct fman_mac *memac,
 	hash = get_mac_addr_hash_code(addr) & HASH_CTRL_ADDR_MASK;
 
 	/* Create element to be added to the driver hash table */
-	hash_entry = kmalloc(sizeof(*hash_entry), GFP_ATOMIC);
+	hash_entry = kmalloc_obj(*hash_entry, GFP_ATOMIC);
 	if (!hash_entry)
 		return -ENOMEM;
 	hash_entry->addr = addr;
@@ -897,6 +898,89 @@ static int memac_set_exception(struct fman_mac *memac,
 	set_exception(memac->regs, bit_mask, enable);
 
 	return 0;
+}
+
+static u64 memac_read64(void __iomem *reg)
+{
+	u32 low, high, tmp;
+
+	do {
+		high = ioread32be(reg + 4);
+		low = ioread32be(reg);
+		tmp = ioread32be(reg + 4);
+	} while (high != tmp);
+
+	return ((u64)high << 32) | low;
+}
+
+static void memac_get_pause_stats(struct fman_mac *memac,
+				  struct ethtool_pause_stats *s)
+{
+	s->tx_pause_frames = memac_read64(&memac->regs->txpf_l);
+	s->rx_pause_frames = memac_read64(&memac->regs->rxpf_l);
+}
+
+static const struct ethtool_rmon_hist_range memac_rmon_ranges[] = {
+	{   64,   64 },
+	{   65,  127 },
+	{  128,  255 },
+	{  256,  511 },
+	{  512, 1023 },
+	{ 1024, 1518 },
+	{ 1519, 9600 },
+	{},
+};
+
+static void memac_get_rmon_stats(struct fman_mac *memac,
+				 struct ethtool_rmon_stats *s,
+				 const struct ethtool_rmon_hist_range **ranges)
+{
+	s->undersize_pkts = memac_read64(&memac->regs->rund_l);
+	s->oversize_pkts = memac_read64(&memac->regs->rovr_l);
+	s->fragments = memac_read64(&memac->regs->rfrg_l);
+	s->jabbers = memac_read64(&memac->regs->rjbr_l);
+
+	s->hist[0] = memac_read64(&memac->regs->r64_l);
+	s->hist[1] = memac_read64(&memac->regs->r127_l);
+	s->hist[2] = memac_read64(&memac->regs->r255_l);
+	s->hist[3] = memac_read64(&memac->regs->r511_l);
+	s->hist[4] = memac_read64(&memac->regs->r1023_l);
+	s->hist[5] = memac_read64(&memac->regs->r1518_l);
+	s->hist[6] = memac_read64(&memac->regs->r1519x_l);
+
+	s->hist_tx[0] = memac_read64(&memac->regs->t64_l);
+	s->hist_tx[1] = memac_read64(&memac->regs->t127_l);
+	s->hist_tx[2] = memac_read64(&memac->regs->t255_l);
+	s->hist_tx[3] = memac_read64(&memac->regs->t511_l);
+	s->hist_tx[4] = memac_read64(&memac->regs->t1023_l);
+	s->hist_tx[5] = memac_read64(&memac->regs->t1518_l);
+	s->hist_tx[6] = memac_read64(&memac->regs->t1519x_l);
+
+	*ranges = memac_rmon_ranges;
+}
+
+static void memac_get_eth_ctrl_stats(struct fman_mac *memac,
+				     struct ethtool_eth_ctrl_stats *s)
+{
+	s->MACControlFramesTransmitted = memac_read64(&memac->regs->tcnp_l);
+	s->MACControlFramesReceived = memac_read64(&memac->regs->rcnp_l);
+}
+
+static void memac_get_eth_mac_stats(struct fman_mac *memac,
+				    struct ethtool_eth_mac_stats *s)
+{
+	s->FramesTransmittedOK = memac_read64(&memac->regs->tfrm_l);
+	s->FramesReceivedOK = memac_read64(&memac->regs->rfrm_l);
+	s->FrameCheckSequenceErrors = memac_read64(&memac->regs->rfcs_l);
+	s->AlignmentErrors = memac_read64(&memac->regs->raln_l);
+	s->OctetsTransmittedOK = memac_read64(&memac->regs->teoct_l);
+	s->FramesLostDueToIntMACXmitError = memac_read64(&memac->regs->terr_l);
+	s->OctetsReceivedOK = memac_read64(&memac->regs->reoct_l);
+	s->FramesLostDueToIntMACRcvError = memac_read64(&memac->regs->rdrntp_l);
+	s->MulticastFramesXmittedOK = memac_read64(&memac->regs->tmca_l);
+	s->BroadcastFramesXmittedOK = memac_read64(&memac->regs->tbca_l);
+	s->MulticastFramesReceivedOK = memac_read64(&memac->regs->rmca_l);
+	s->BroadcastFramesReceivedOK = memac_read64(&memac->regs->rbca_l);
 }
 
 static int memac_init(struct fman_mac *memac)
@@ -1002,12 +1086,12 @@ static struct fman_mac *memac_config(struct mac_device *mac_dev,
 	struct memac_cfg *memac_drv_param;
 
 	/* allocate memory for the m_emac data structure */
-	memac = kzalloc(sizeof(*memac), GFP_KERNEL);
+	memac = kzalloc_obj(*memac);
 	if (!memac)
 		return NULL;
 
 	/* allocate memory for the m_emac driver parameters data structure */
-	memac_drv_param = kzalloc(sizeof(*memac_drv_param), GFP_KERNEL);
+	memac_drv_param = kzalloc_obj(*memac_drv_param);
 	if (!memac_drv_param) {
 		memac_free(memac);
 		return NULL;
@@ -1068,11 +1152,18 @@ int memac_initialization(struct mac_device *mac_dev,
 			 struct fman_mac_params *params)
 {
 	int			 err;
-	struct device_node      *fixed;
 	struct phylink_pcs	*pcs;
 	struct fman_mac		*memac;
 	unsigned long		 capabilities;
 	unsigned long		*supported;
+
+	/* The internal connection to the serdes is XGMII, but this isn't
+	 * really correct for the phy mode (which is the external connection).
+	 * However, this is how all older device trees say that they want
+	 * 10GBASE-R (aka XFI), so just convert it for them.
+	 */
+	if (mac_dev->phy_if == PHY_INTERFACE_MODE_XGMII)
+		mac_dev->phy_if = PHY_INTERFACE_MODE_10GBASER;
 
 	mac_dev->phylink_ops		= &memac_mac_ops;
 	mac_dev->set_promisc		= memac_set_promiscuous;
@@ -1082,9 +1173,12 @@ int memac_initialization(struct mac_device *mac_dev,
 	mac_dev->set_exception		= memac_set_exception;
 	mac_dev->set_allmulti		= memac_set_allmulti;
 	mac_dev->set_tstamp		= memac_set_tstamp;
-	mac_dev->set_multi		= fman_set_multi;
 	mac_dev->enable			= memac_enable;
 	mac_dev->disable		= memac_disable;
+	mac_dev->get_pause_stats	= memac_get_pause_stats;
+	mac_dev->get_rmon_stats		= memac_get_rmon_stats;
+	mac_dev->get_eth_ctrl_stats	= memac_get_eth_ctrl_stats;
+	mac_dev->get_eth_mac_stats	= memac_get_eth_mac_stats;
 
 	mac_dev->fman_mac = memac_config(mac_dev, params);
 	if (!mac_dev->fman_mac)
@@ -1140,7 +1234,7 @@ int memac_initialization(struct mac_device *mac_dev,
 	 * (and therefore that xfi_pcs cannot be set). If we are defaulting to
 	 * XGMII, assume this is for XFI. Otherwise, assume it is for SGMII.
 	 */
-	if (err && mac_dev->phy_if == PHY_INTERFACE_MODE_XGMII)
+	if (err && mac_dev->phy_if == PHY_INTERFACE_MODE_10GBASER)
 		memac->xfi_pcs = pcs;
 	else
 		memac->sgmii_pcs = pcs;
@@ -1153,14 +1247,6 @@ int memac_initialization(struct mac_device *mac_dev,
 		err = PTR_ERR(memac->serdes);
 		goto _return_fm_mac_free;
 	}
-
-	/* The internal connection to the serdes is XGMII, but this isn't
-	 * really correct for the phy mode (which is the external connection).
-	 * However, this is how all older device trees say that they want
-	 * 10GBASE-R (aka XFI), so just convert it for them.
-	 */
-	if (mac_dev->phy_if == PHY_INTERFACE_MODE_XGMII)
-		mac_dev->phy_if = PHY_INTERFACE_MODE_10GBASER;
 
 	/* TODO: The following interface modes are supported by (some) hardware
 	 * but not by this driver:
@@ -1224,18 +1310,16 @@ int memac_initialization(struct mac_device *mac_dev,
 		memac->rgmii_no_half_duplex = true;
 
 	/* Most boards should use MLO_AN_INBAND, but existing boards don't have
-	 * a managed property. Default to MLO_AN_INBAND if nothing else is
-	 * specified. We need to be careful and not enable this if we have a
-	 * fixed link or if we are using MII or RGMII, since those
-	 * configurations modes don't use in-band autonegotiation.
+	 * a managed property. Default to MLO_AN_INBAND rather than MLO_AN_PHY.
+	 * Phylink will allow this to be overriden by a fixed link. We need to
+	 * be careful and not enable this if we are using MII or RGMII, since
+	 * those configurations modes don't use in-band autonegotiation.
 	 */
-	fixed = of_get_child_by_name(mac_node, "fixed-link");
-	if (!fixed && !of_property_read_bool(mac_node, "fixed-link") &&
-	    !of_property_read_bool(mac_node, "managed") &&
+	if (!of_property_present(mac_node, "managed") &&
+	    mac_dev->phy_if != PHY_INTERFACE_MODE_2500BASEX &&
 	    mac_dev->phy_if != PHY_INTERFACE_MODE_MII &&
 	    !phy_interface_mode_is_rgmii(mac_dev->phy_if))
-		mac_dev->phylink_config.ovr_an_inband = true;
-	of_node_put(fixed);
+		mac_dev->phylink_config.default_an_inband = true;
 
 	err = memac_init(mac_dev->fman_mac);
 	if (err < 0)

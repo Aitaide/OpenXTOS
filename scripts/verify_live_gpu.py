@@ -112,7 +112,7 @@ def verify(candidate, key, evidence, timeout):
                     time.sleep(3 * (attempt + 1))
             raise RuntimeError(str(last))
 
-        result['identity'] = ssh('xtos', 'id; cat /sys/kernel/realtime')
+        result['identity'] = ssh('xtos', 'id; /usr/bin/xtos-rt-status')
         access_source = '''import json,os,stat
 nodes=[]
 for name,gid in [('card0',44),('renderD128',1001)]:

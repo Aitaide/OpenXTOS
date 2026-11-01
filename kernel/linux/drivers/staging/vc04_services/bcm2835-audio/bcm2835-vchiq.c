@@ -4,6 +4,9 @@
 #include <linux/slab.h>
 #include <linux/module.h>
 #include <linux/completion.h>
+
+#include <linux/raspberrypi/vchiq_arm.h>
+
 #include "bcm2835.h"
 #include "vc_vchi_audioserv_defs.h"
 
@@ -57,7 +60,7 @@ static int bcm2835_audio_send_msg_locked(struct bcm2835_audio_instance *instance
 
 	if (wait) {
 		if (!wait_for_completion_timeout(&instance->msg_avail_comp,
-						 msecs_to_jiffies(10 * 1000))) {
+						 secs_to_jiffies(10))) {
 			dev_err(instance->dev,
 				"vchi message timeout, msg=%d\n", m->type);
 			return -ETIMEDOUT;
@@ -94,7 +97,8 @@ static int bcm2835_audio_send_simple(struct bcm2835_audio_instance *instance,
 static int audio_vchi_callback(struct vchiq_instance *vchiq_instance,
 			       enum vchiq_reason reason,
 			       struct vchiq_header *header,
-			       unsigned int handle, void *userdata)
+			       unsigned int handle,
+			       void *cb_data, void __user *cb_userdata)
 {
 	struct bcm2835_audio_instance *instance = vchiq_get_service_userdata(vchiq_instance,
 									     handle);
@@ -175,10 +179,11 @@ static void vc_vchi_audio_deinit(struct bcm2835_audio_instance *instance)
 
 int bcm2835_new_vchi_ctx(struct device *dev, struct bcm2835_vchi_ctx *vchi_ctx)
 {
+	struct vchiq_drv_mgmt *mgmt = dev_get_drvdata(dev->parent);
 	int ret;
 
 	/* Initialize and create a VCHI connection */
-	ret = vchiq_initialise(&vchi_ctx->instance);
+	ret = vchiq_initialise(&mgmt->state, &vchi_ctx->instance);
 	if (ret) {
 		dev_err(dev, "failed to initialise VCHI instance (ret=%d)\n",
 			ret);
@@ -214,7 +219,7 @@ int bcm2835_audio_open(struct bcm2835_alsa_stream *alsa_stream)
 	int err;
 
 	/* Allocate memory for this instance */
-	instance = kzalloc(sizeof(*instance), GFP_KERNEL);
+	instance = kzalloc_obj(*instance);
 	if (!instance)
 		return -ENOMEM;
 	mutex_init(&instance->vchi_mutex);

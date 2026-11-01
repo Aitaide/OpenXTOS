@@ -102,7 +102,11 @@ struct tegra_bpmp {
 #ifdef CONFIG_DEBUG_FS
 	struct dentry *debugfs_mirror;
 #endif
+
+	bool suspended;
 };
+
+#define TEGRA_BPMP_MESSAGE_RESET BIT(0)
 
 struct tegra_bpmp_message {
 	unsigned int mrq;
@@ -117,10 +121,13 @@ struct tegra_bpmp_message {
 		size_t size;
 		int ret;
 	} rx;
+
+	unsigned long flags;
 };
 
 #if IS_ENABLED(CONFIG_TEGRA_BPMP)
 struct tegra_bpmp *tegra_bpmp_get(struct device *dev);
+struct tegra_bpmp *tegra_bpmp_get_with_id(struct device *dev, unsigned int *id);
 void tegra_bpmp_put(struct tegra_bpmp *bpmp);
 int tegra_bpmp_transfer_atomic(struct tegra_bpmp *bpmp,
 			       struct tegra_bpmp_message *msg);
@@ -137,21 +144,31 @@ bool tegra_bpmp_mrq_is_supported(struct tegra_bpmp *bpmp, unsigned int mrq);
 #else
 static inline struct tegra_bpmp *tegra_bpmp_get(struct device *dev)
 {
-	return ERR_PTR(-ENOTSUPP);
+	return ERR_PTR(-ENODEV);
 }
+
+static inline struct tegra_bpmp *tegra_bpmp_get_with_id(struct device *dev,
+							unsigned int *id)
+{
+	return ERR_PTR(-ENODEV);
+}
+
 static inline void tegra_bpmp_put(struct tegra_bpmp *bpmp)
 {
 }
+
 static inline int tegra_bpmp_transfer_atomic(struct tegra_bpmp *bpmp,
 					     struct tegra_bpmp_message *msg)
 {
-	return -ENOTSUPP;
+	return -ENODEV;
 }
+
 static inline int tegra_bpmp_transfer(struct tegra_bpmp *bpmp,
 				      struct tegra_bpmp_message *msg)
 {
-	return -ENOTSUPP;
+	return -ENODEV;
 }
+
 static inline void tegra_bpmp_mrq_return(struct tegra_bpmp_channel *channel,
 					 int code, const void *data,
 					 size_t size)
@@ -163,8 +180,9 @@ static inline int tegra_bpmp_request_mrq(struct tegra_bpmp *bpmp,
 					 tegra_bpmp_mrq_handler_t handler,
 					 void *data)
 {
-	return -ENOTSUPP;
+	return -ENODEV;
 }
+
 static inline void tegra_bpmp_free_mrq(struct tegra_bpmp *bpmp,
 				       unsigned int mrq, void *data)
 {

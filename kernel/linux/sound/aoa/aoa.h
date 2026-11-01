@@ -7,7 +7,6 @@
 
 #ifndef __AOA_H
 #define __AOA_H
-#include <asm/prom.h>
 #include <linux/module.h>
 #include <sound/core.h>
 #include <sound/asound.h>
@@ -49,7 +48,7 @@ struct aoa_codec {
 	u32 connected;
 
 	/* data the fabric can associate with this structure */
-	void *fabric_data;
+	const void *fabric_data;
 
 	/* private! */
 	struct list_head list;

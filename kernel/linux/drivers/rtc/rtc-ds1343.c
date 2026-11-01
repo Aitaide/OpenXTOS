@@ -120,7 +120,7 @@ static ssize_t ds1343_store_glitchfilter(struct device *dev,
 	return count;
 }
 
-static DEVICE_ATTR(glitch_filter, S_IRUGO | S_IWUSR, ds1343_show_glitchfilter,
+static DEVICE_ATTR(glitch_filter, 0644, ds1343_show_glitchfilter,
 			ds1343_store_glitchfilter);
 
 static int ds1343_nvram_write(void *priv, unsigned int off, void *val,
@@ -183,7 +183,7 @@ static ssize_t ds1343_show_tricklecharger(struct device *dev,
 	return sprintf(buf, "%s %s\n", diodes, resistors);
 }
 
-static DEVICE_ATTR(trickle_charger, S_IRUGO, ds1343_show_tricklecharger, NULL);
+static DEVICE_ATTR(trickle_charger, 0444, ds1343_show_tricklecharger, NULL);
 
 static struct attribute *ds1343_attrs[] = {
 	&dev_attr_glitch_filter.attr,
@@ -427,16 +427,11 @@ static int ds1343_probe(struct spi_device *spi)
 				"unable to request irq for rtc ds1343\n");
 		} else {
 			device_init_wakeup(&spi->dev, true);
-			dev_pm_set_wake_irq(&spi->dev, spi->irq);
+			devm_pm_set_wake_irq(&spi->dev, spi->irq);
 		}
 	}
 
 	return 0;
-}
-
-static void ds1343_remove(struct spi_device *spi)
-{
-	dev_pm_clear_wake_irq(&spi->dev);
 }
 
 #ifdef CONFIG_PM_SLEEP
@@ -471,7 +466,6 @@ static struct spi_driver ds1343_driver = {
 		.pm = &ds1343_pm,
 	},
 	.probe = ds1343_probe,
-	.remove = ds1343_remove,
 	.id_table = ds1343_id,
 };
 

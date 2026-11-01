@@ -23,6 +23,7 @@
 #include <linux/reboot.h>
 #include <linux/serial.h> /* ASYNC_* flags */
 #include <linux/slab.h>
+#include <asm/machine.h>
 #include <asm/ccwdev.h>
 #include <asm/cio.h>
 #include <linux/io.h>
@@ -79,8 +80,8 @@ struct raw3215_info {
 	struct ccw_device *cdev;      /* device for tty driver */
 	spinlock_t *lock;	      /* pointer to irq lock */
 	int flags;		      /* state flags */
-	char *buffer;		      /* pointer to output buffer */
-	char *inbuf;		      /* pointer to input buffer */
+	u8 *buffer;		      /* pointer to output buffer */
+	u8 *inbuf;		      /* pointer to input buffer */
 	int head;		      /* first free byte in output buffer */
 	int count;		      /* number of bytes in output buffer */
 	int written;		      /* number of bytes in write requests */
@@ -89,7 +90,6 @@ struct raw3215_info {
 	wait_queue_head_t empty_wait; /* wait queue for flushing */
 	struct timer_list timer;      /* timer for delayed output */
 	int line_pos;		      /* position on the line (for tabs) */
-	char ubuffer[80];	      /* copy_from_user buffer */
 };
 
 /* array of 3215 devices structures */
@@ -160,7 +160,7 @@ static void raw3215_mk_read_req(struct raw3215_info *raw)
 	ccw->cmd_code = 0x0A; /* read inquiry */
 	ccw->flags = 0x20;    /* ignore incorrect length */
 	ccw->count = 160;
-	ccw->cda = (__u32)__pa(raw->inbuf);
+	ccw->cda = virt_to_dma32(raw->inbuf);
 }
 
 /*
@@ -219,7 +219,7 @@ static void raw3215_mk_write_req(struct raw3215_info *raw)
 			ccw[-1].flags |= 0x40; /* use command chaining */
 		ccw->cmd_code = 0x01; /* write, auto carrier return */
 		ccw->flags = 0x20;    /* ignore incorrect length ind.  */
-		ccw->cda = (__u32)__pa(raw->buffer + ix);
+		ccw->cda = virt_to_dma32(raw->buffer + ix);
 		count = len;
 		if (ix + count > RAW3215_BUFFER_SIZE)
 			count = RAW3215_BUFFER_SIZE - ix;
@@ -284,7 +284,7 @@ static void raw3215_start_io(struct raw3215_info *raw)
  */
 static void raw3215_timeout(struct timer_list *t)
 {
-	struct raw3215_info *raw = from_timer(raw, t, timer);
+	struct raw3215_info *raw = timer_container_of(raw, t, timer);
 	unsigned long flags;
 
 	spin_lock_irqsave(get_ccwdev_lock(raw->cdev), flags);
@@ -481,6 +481,7 @@ static unsigned int raw3215_drop(struct raw3215_info *raw)
  */
 static unsigned int raw3215_make_room(struct raw3215_info *raw,
 				      unsigned int length, bool drop)
+	__must_hold(get_ccwdev_lock(raw->cdev))
 {
 	while (RAW3215_BUFFER_SIZE - raw->count < length) {
 		if (drop)
@@ -523,12 +524,14 @@ static unsigned int raw3215_make_room(struct raw3215_info *raw,
  *	string	without blocking.
  *	Return value is the number of bytes copied.
  */
-static unsigned int raw3215_addtext(const char *str, unsigned int length,
+static unsigned int raw3215_addtext(const u8 *str, size_t length,
 				    struct raw3215_info *raw, int opmode,
 				    unsigned int todrop)
 {
-	unsigned int c, ch, i, blanks, expanded_size = 0;
+	unsigned int i, blanks, expanded_size = 0;
 	unsigned int column = raw->line_pos;
+	size_t c;
+	u8 ch;
 
 	if (opmode == RAW3215_COUNT)
 		todrop = 0;
@@ -559,7 +562,7 @@ static unsigned int raw3215_addtext(const char *str, unsigned int length,
 		if (todrop && expanded_size < todrop)	/* Drop head data */
 			continue;
 		for (i = 0; i < blanks; i++) {
-			raw->buffer[raw->head] = (char)_ascebc[(int)ch];
+			raw->buffer[raw->head] = _ascebc[ch];
 			raw->head = (raw->head + 1) & (RAW3215_BUFFER_SIZE - 1);
 			raw->count++;
 		}
@@ -571,8 +574,8 @@ static unsigned int raw3215_addtext(const char *str, unsigned int length,
 /*
  * String write routine for 3215 devices
  */
-static void raw3215_write(struct raw3215_info *raw, const char *str,
-			  unsigned int length)
+static void raw3215_write(struct raw3215_info *raw, const u8 *str,
+			  size_t length)
 {
 	unsigned int count, avail;
 	unsigned long flags;
@@ -597,7 +600,7 @@ static void raw3215_write(struct raw3215_info *raw, const char *str,
 /*
  * Put character routine for 3215 devices
  */
-static void raw3215_putchar(struct raw3215_info *raw, unsigned char ch)
+static void raw3215_putchar(struct raw3215_info *raw, u8 ch)
 {
 	raw3215_write(raw, &ch, 1);
 }
@@ -668,7 +671,7 @@ static struct raw3215_info *raw3215_alloc_info(void)
 {
 	struct raw3215_info *info;
 
-	info = kzalloc(sizeof(struct raw3215_info), GFP_KERNEL | GFP_DMA);
+	info = kzalloc_obj(struct raw3215_info, GFP_KERNEL | GFP_DMA);
 	if (!info)
 		return NULL;
 
@@ -802,7 +805,6 @@ static struct attribute *con3215_drv_attrs[] = {
 
 static struct attribute_group con3215_drv_attr_group = {
 	.attrs = con3215_drv_attrs,
-	NULL,
 };
 
 static const struct attribute_group *con3215_drv_attr_groups[] = {
@@ -824,12 +826,10 @@ static struct ccw_driver raw3215_ccw_driver = {
 	.int_class	= IRQIO_C15,
 };
 
-static void handle_write(struct raw3215_info *raw, const char *str, int count)
+static void handle_write(struct raw3215_info *raw, const u8 *str, size_t count)
 {
-	int i;
-
 	while (count > 0) {
-		i = min_t(int, count, RAW3215_BUFFER_SIZE - 1);
+		size_t i = min_t(size_t, count, RAW3215_BUFFER_SIZE - 1);
 		raw3215_write(raw, str, i);
 		count -= i;
 		str += i;
@@ -909,7 +909,7 @@ static int __init con3215_init(void)
 		return -ENODEV;
 
 	/* Set the console mode for VM */
-	if (MACHINE_IS_VM) {
+	if (machine_is_vm()) {
 		cpcmd("TERM CONMODE 3215", NULL, 0, NULL);
 		cpcmd("TERM AUTOCR OFF", NULL, 0, NULL);
 	}
@@ -917,7 +917,7 @@ static int __init con3215_init(void)
 	/* allocate 3215 request structures */
 	raw3215_freelist = NULL;
 	for (i = 0; i < NR_3215_REQ; i++) {
-		req = kzalloc(sizeof(struct raw3215_req), GFP_KERNEL | GFP_DMA);
+		req = kzalloc_obj(struct raw3215_req, GFP_KERNEL | GFP_DMA);
 		if (!req)
 			return -ENOMEM;
 		req->next = raw3215_freelist;

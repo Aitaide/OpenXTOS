@@ -295,17 +295,14 @@ svcxdr_decode_sattr3(struct svc_rqst *rqstp, struct xdr_stream *xdr,
 static bool
 svcxdr_decode_sattrguard3(struct xdr_stream *xdr, struct nfsd3_sattrargs *args)
 {
-	__be32 *p;
 	u32 check;
 
 	if (xdr_stream_decode_bool(xdr, &check) < 0)
 		return false;
 	if (check) {
-		p = xdr_inline_decode(xdr, XDR_UNIT * 2);
-		if (!p)
+		if (!svcxdr_decode_nfstime3(xdr, &args->guardtime))
 			return false;
 		args->check_guard = 1;
-		args->guardtime = be32_to_cpup(p);
 	} else
 		args->check_guard = 0;
 
@@ -990,7 +987,7 @@ compose_entry_fh(struct nfsd3_readdirres *cd, struct svc_fh *fhp,
 	dparent = cd->fh.fh_dentry;
 	exp  = cd->fh.fh_export;
 
-	if (isdotent(name, namlen)) {
+	if (name_is_dot_dotdot(name, namlen)) {
 		if (namlen == 2) {
 			dchild = dget_parent(dparent);
 			/*
@@ -1004,7 +1001,9 @@ compose_entry_fh(struct nfsd3_readdirres *cd, struct svc_fh *fhp,
 		} else
 			dchild = dget(dparent);
 	} else
-		dchild = lookup_positive_unlocked(name, dparent, namlen);
+		dchild = lookup_one_positive_unlocked(&nop_mnt_idmap,
+						      &QSTR_LEN(name, namlen),
+						      dparent);
 	if (IS_ERR(dchild))
 		return rv;
 	if (d_mountpoint(dchild))
@@ -1070,7 +1069,7 @@ svcxdr_encode_entry3_common(struct nfsd3_readdirres *resp, const char *name,
  *
  * Return values:
  *   %0: Entry was successfully encoded.
- *   %-EINVAL: An encoding problem occured, secondary status code in resp->common.err
+ *   %-EINVAL: An encoding problem occurred, secondary status code in resp->common.err
  *
  * On exit, the following fields are updated:
  *   - resp->xdr
@@ -1145,7 +1144,7 @@ out_noattrs:
  *
  * Return values:
  *   %0: Entry was successfully encoded.
- *   %-EINVAL: An encoding problem occured, secondary status code in resp->common.err
+ *   %-EINVAL: An encoding problem occurred, secondary status code in resp->common.err
  *
  * On exit, the following fields are updated:
  *   - resp->xdr

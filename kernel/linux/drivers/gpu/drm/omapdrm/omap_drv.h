@@ -32,6 +32,7 @@
 #define MODULE_NAME     "omapdrm"
 
 struct omap_drm_usergart;
+struct omap_fbdev;
 
 struct omap_drm_pipeline {
 	struct drm_crtc *crtc;
@@ -97,12 +98,14 @@ struct omap_drm_private {
 
 	/* memory bandwidth limit if it is needed on the platform */
 	unsigned int max_bandwidth;
+
+	struct omap_fbdev *fbdev;
 };
 
 
 void omap_debugfs_init(struct drm_minor *minor);
 
-struct omap_global_state * __must_check omap_get_global_state(struct drm_atomic_state *s);
+struct omap_global_state * __must_check omap_get_global_state(struct drm_atomic_commit *s);
 
 struct omap_global_state *omap_get_existing_global_state(struct omap_drm_private *priv);
 

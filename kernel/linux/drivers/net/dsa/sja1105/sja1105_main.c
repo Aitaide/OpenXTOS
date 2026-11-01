@@ -15,12 +15,13 @@
 #include <linux/of.h>
 #include <linux/of_net.h>
 #include <linux/of_mdio.h>
-#include <linux/pcs/pcs-xpcs.h>
 #include <linux/netdev_features.h>
 #include <linux/netdevice.h>
 #include <linux/if_bridge.h>
 #include <linux/if_ether.h>
 #include <linux/dsa/8021q.h>
+#include <linux/units.h>
+
 #include "sja1105.h"
 #include "sja1105_tas.h"
 
@@ -1186,9 +1187,8 @@ static int sja1105_parse_ports_node(struct sja1105_private *priv,
 				    struct device_node *ports_node)
 {
 	struct device *dev = &priv->spidev->dev;
-	struct device_node *child;
 
-	for_each_available_child_of_node(ports_node, child) {
+	for_each_available_child_of_node_scoped(ports_node, child) {
 		struct device_node *phy_node;
 		phy_interface_t phy_mode;
 		u32 index;
@@ -1198,7 +1198,6 @@ static int sja1105_parse_ports_node(struct sja1105_private *priv,
 		if (of_property_read_u32(child, "reg", &index) < 0) {
 			dev_err(dev, "Port number not defined in device tree "
 				"(property \"reg\")\n");
-			of_node_put(child);
 			return -ENODEV;
 		}
 
@@ -1208,7 +1207,6 @@ static int sja1105_parse_ports_node(struct sja1105_private *priv,
 			dev_err(dev, "Failed to read phy-mode or "
 				"phy-interface-type property for port %d\n",
 				index);
-			of_node_put(child);
 			return -ENODEV;
 		}
 
@@ -1217,7 +1215,6 @@ static int sja1105_parse_ports_node(struct sja1105_private *priv,
 			if (!of_phy_is_fixed_link(child)) {
 				dev_err(dev, "phy-handle or fixed-link "
 					"properties missing!\n");
-				of_node_put(child);
 				return -ENODEV;
 			}
 			/* phy-handle is missing, but fixed-link isn't.
@@ -1231,10 +1228,8 @@ static int sja1105_parse_ports_node(struct sja1105_private *priv,
 		priv->phy_mode[index] = phy_mode;
 
 		err = sja1105_parse_rgmii_delays(priv, index, child);
-		if (err) {
-			of_node_put(child);
+		if (err)
 			return err;
-		}
 	}
 
 	return 0;
@@ -1261,24 +1256,8 @@ static int sja1105_parse_dt(struct sja1105_private *priv)
 	return rc;
 }
 
-/* Convert link speed from SJA1105 to ethtool encoding */
-static int sja1105_port_speed_to_ethtool(struct sja1105_private *priv,
-					 u64 speed)
-{
-	if (speed == priv->info->port_speed[SJA1105_SPEED_10MBPS])
-		return SPEED_10;
-	if (speed == priv->info->port_speed[SJA1105_SPEED_100MBPS])
-		return SPEED_100;
-	if (speed == priv->info->port_speed[SJA1105_SPEED_1000MBPS])
-		return SPEED_1000;
-	if (speed == priv->info->port_speed[SJA1105_SPEED_2500MBPS])
-		return SPEED_2500;
-	return SPEED_UNKNOWN;
-}
-
-/* Set link speed in the MAC configuration for a specific port. */
-static int sja1105_adjust_port_config(struct sja1105_private *priv, int port,
-				      int speed_mbps)
+static int sja1105_set_port_speed(struct sja1105_private *priv, int port,
+				  int speed_mbps)
 {
 	struct sja1105_mac_config_entry *mac;
 	struct device *dev = priv->ds->dev;
@@ -1317,7 +1296,7 @@ static int sja1105_adjust_port_config(struct sja1105_private *priv, int port,
 		speed = priv->info->port_speed[SJA1105_SPEED_2500MBPS];
 		break;
 	default:
-		dev_err(dev, "Invalid speed %iMbps\n", speed_mbps);
+		dev_err(priv->ds->dev, "Invalid speed %iMbps\n", speed_mbps);
 		return -EINVAL;
 	}
 
@@ -1325,15 +1304,8 @@ static int sja1105_adjust_port_config(struct sja1105_private *priv, int port,
 	 * table, since this will be used for the clocking setup, and we no
 	 * longer need to store it in the static config (already told hardware
 	 * we want auto during upload phase).
-	 * Actually for the SGMII port, the MAC is fixed at 1 Gbps and
-	 * we need to configure the PCS only (if even that).
 	 */
-	if (priv->phy_mode[port] == PHY_INTERFACE_MODE_SGMII)
-		mac[port].speed = priv->info->port_speed[SJA1105_SPEED_1000MBPS];
-	else if (priv->phy_mode[port] == PHY_INTERFACE_MODE_2500BASEX)
-		mac[port].speed = priv->info->port_speed[SJA1105_SPEED_2500MBPS];
-	else
-		mac[port].speed = speed;
+	mac[port].speed = speed;
 
 	/* Write to the dynamic reconfiguration tables */
 	rc = sja1105_dynamic_config_write(priv, BLK_IDX_MAC_CONFIG, port,
@@ -1356,35 +1328,41 @@ static int sja1105_adjust_port_config(struct sja1105_private *priv, int port,
 }
 
 static struct phylink_pcs *
-sja1105_mac_select_pcs(struct dsa_switch *ds, int port, phy_interface_t iface)
+sja1105_mac_select_pcs(struct phylink_config *config, phy_interface_t iface)
 {
-	struct sja1105_private *priv = ds->priv;
-	struct dw_xpcs *xpcs = priv->xpcs[port];
+	struct dsa_port *dp = dsa_phylink_to_port(config);
+	struct sja1105_private *priv = dp->ds->priv;
 
-	if (xpcs)
-		return &xpcs->pcs;
-
-	return NULL;
+	return priv->pcs[dp->index];
 }
 
-static void sja1105_mac_link_down(struct dsa_switch *ds, int port,
+static void sja1105_mac_config(struct phylink_config *config,
+			       unsigned int mode,
+			       const struct phylink_link_state *state)
+{
+}
+
+static void sja1105_mac_link_down(struct phylink_config *config,
 				  unsigned int mode,
 				  phy_interface_t interface)
 {
-	sja1105_inhibit_tx(ds->priv, BIT(port), true);
+	struct dsa_port *dp = dsa_phylink_to_port(config);
+
+	sja1105_inhibit_tx(dp->ds->priv, BIT(dp->index), true);
 }
 
-static void sja1105_mac_link_up(struct dsa_switch *ds, int port,
+static void sja1105_mac_link_up(struct phylink_config *config,
+				struct phy_device *phydev,
 				unsigned int mode,
 				phy_interface_t interface,
-				struct phy_device *phydev,
 				int speed, int duplex,
 				bool tx_pause, bool rx_pause)
 {
-	struct sja1105_private *priv = ds->priv;
+	struct dsa_port *dp = dsa_phylink_to_port(config);
+	struct sja1105_private *priv = dp->ds->priv;
+	int port = dp->index;
 
-	sja1105_adjust_port_config(priv, port, speed);
-
+	sja1105_set_port_speed(priv, port, speed);
 	sja1105_inhibit_tx(priv, BIT(port), false);
 }
 
@@ -2076,17 +2054,13 @@ static void sja1105_bridge_stp_state_set(struct dsa_switch *ds, int port,
 	switch (state) {
 	case BR_STATE_DISABLED:
 	case BR_STATE_BLOCKING:
+	case BR_STATE_LISTENING:
 		/* From UM10944 description of DRPDTAG (why put this there?):
 		 * "Management traffic flows to the port regardless of the state
 		 * of the INGRESS flag". So BPDUs are still be allowed to pass.
 		 * At the moment no difference between DISABLED and BLOCKING.
 		 */
 		mac[port].ingress   = false;
-		mac[port].egress    = false;
-		mac[port].dyn_learn = false;
-		break;
-	case BR_STATE_LISTENING:
-		mac[port].ingress   = true;
 		mac[port].egress    = false;
 		mac[port].dyn_learn = false;
 		break;
@@ -2120,13 +2094,12 @@ static int sja1105_bridge_join(struct dsa_switch *ds, int port,
 	if (rc)
 		return rc;
 
-	rc = dsa_tag_8021q_bridge_join(ds, port, bridge);
+	rc = dsa_tag_8021q_bridge_join(ds, port, bridge, tx_fwd_offload,
+				       extack);
 	if (rc) {
 		sja1105_bridge_member(ds, port, bridge, false);
 		return rc;
 	}
-
-	*tx_fwd_offload = true;
 
 	return 0;
 }
@@ -2138,7 +2111,6 @@ static void sja1105_bridge_leave(struct dsa_switch *ds, int port,
 	sja1105_bridge_member(ds, port, bridge, false);
 }
 
-#define BYTES_PER_KBIT (1000LL / 8)
 /* Port 0 (the uC port) does not have CBS shapers */
 #define SJA1110_FIXED_CBS(port, prio) ((((port) - 1) * SJA1105_NUM_TC) + (prio))
 
@@ -2288,33 +2260,32 @@ int sja1105_static_config_reload(struct sja1105_private *priv,
 {
 	struct ptp_system_timestamp ptp_sts_before;
 	struct ptp_system_timestamp ptp_sts_after;
-	int speed_mbps[SJA1105_MAX_NUM_PORTS];
-	u16 bmcr[SJA1105_MAX_NUM_PORTS] = {0};
 	struct sja1105_mac_config_entry *mac;
 	struct dsa_switch *ds = priv->ds;
+	struct dsa_port *dp;
 	s64 t1, t2, t3, t4;
-	s64 t12, t34;
-	int rc, i;
-	s64 now;
+	s64 t12, t34, now;
+	int rc;
 
 	mutex_lock(&priv->fdb_lock);
 	mutex_lock(&priv->mgmt_lock);
 
 	mac = priv->static_config.tables[BLK_IDX_MAC_CONFIG].entries;
 
-	/* Back up the dynamic link speed changed by sja1105_adjust_port_config
+	/* Back up the dynamic link speed changed by sja1105_set_port_speed()
 	 * in order to temporarily restore it to SJA1105_SPEED_AUTO - which the
 	 * switch wants to see in the static config in order to allow us to
 	 * change it through the dynamic interface later.
 	 */
-	for (i = 0; i < ds->num_ports; i++) {
-		speed_mbps[i] = sja1105_port_speed_to_ethtool(priv,
-							      mac[i].speed);
-		mac[i].speed = priv->info->port_speed[SJA1105_SPEED_AUTO];
+	dsa_switch_for_each_available_port(dp, ds) {
+		/* May be called during unbind when we unoffload a VLAN-aware
+		 * bridge from port 1 while port 0 was already torn down
+		 */
+		if (!dp->pl)
+			continue;
 
-		if (priv->xpcs[i])
-			bmcr[i] = mdiobus_c45_read(priv->mdio_pcs, i,
-						   MDIO_MMD_VEND2, MDIO_CTRL1);
+		phylink_replay_link_begin(dp->pl);
+		mac[dp->index].speed = priv->info->port_speed[SJA1105_SPEED_AUTO];
 	}
 
 	/* No PTP operations can run right now */
@@ -2339,10 +2310,10 @@ int sja1105_static_config_reload(struct sja1105_private *priv,
 		goto out;
 	}
 
-	t1 = timespec64_to_ns(&ptp_sts_before.pre_ts);
-	t2 = timespec64_to_ns(&ptp_sts_before.post_ts);
-	t3 = timespec64_to_ns(&ptp_sts_after.pre_ts);
-	t4 = timespec64_to_ns(&ptp_sts_after.post_ts);
+	t1 = ktime_to_ns(ptp_sts_before.pre_sts.systime);
+	t2 = ktime_to_ns(ptp_sts_before.post_sts.systime);
+	t3 = ktime_to_ns(ptp_sts_after.pre_sts.systime);
+	t4 = ktime_to_ns(ptp_sts_after.post_sts.systime);
 	/* Mid point, corresponds to pre-reset PTPCLKVAL */
 	t12 = t1 + (t2 - t1) / 2;
 	/* Mid point, corresponds to post-reset PTPCLKVAL, aka 0 */
@@ -2368,47 +2339,13 @@ int sja1105_static_config_reload(struct sja1105_private *priv,
 			goto out;
 	}
 
-	for (i = 0; i < ds->num_ports; i++) {
-		struct dw_xpcs *xpcs = priv->xpcs[i];
-		unsigned int neg_mode;
-
-		rc = sja1105_adjust_port_config(priv, i, speed_mbps[i]);
-		if (rc < 0)
-			goto out;
-
-		if (!xpcs)
-			continue;
-
-		if (bmcr[i] & BMCR_ANENABLE)
-			neg_mode = PHYLINK_PCS_NEG_INBAND_ENABLED;
-		else
-			neg_mode = PHYLINK_PCS_NEG_OUTBAND;
-
-		rc = xpcs_do_config(xpcs, priv->phy_mode[i], NULL, neg_mode);
-		if (rc < 0)
-			goto out;
-
-		if (neg_mode == PHYLINK_PCS_NEG_OUTBAND) {
-			int speed = SPEED_UNKNOWN;
-
-			if (priv->phy_mode[i] == PHY_INTERFACE_MODE_2500BASEX)
-				speed = SPEED_2500;
-			else if (bmcr[i] & BMCR_SPEED1000)
-				speed = SPEED_1000;
-			else if (bmcr[i] & BMCR_SPEED100)
-				speed = SPEED_100;
-			else
-				speed = SPEED_10;
-
-			xpcs_link_up(&xpcs->pcs, neg_mode, priv->phy_mode[i],
-				     speed, DUPLEX_FULL);
-		}
-	}
-
 	rc = sja1105_reload_cbs(priv);
-	if (rc < 0)
-		goto out;
+
 out:
+	dsa_switch_for_each_available_port(dp, ds)
+		if (dp->pl)
+			phylink_replay_link_end(dp->pl);
+
 	mutex_unlock(&priv->mgmt_lock);
 	mutex_unlock(&priv->fdb_lock);
 
@@ -2688,7 +2625,7 @@ static int sja1105_mgmt_xmit(struct dsa_switch *ds, int port, int slot,
 	}
 
 	/* Transfer skb to the host port. */
-	dsa_enqueue_skb(skb, dsa_to_port(ds, port)->slave);
+	dsa_enqueue_skb(skb, dsa_to_port(ds, port)->user);
 
 	/* Wait until the switch has processed the frame */
 	do {
@@ -2910,7 +2847,8 @@ static void sja1105_mirror_del(struct dsa_switch *ds, int port,
 }
 
 static int sja1105_port_policer_add(struct dsa_switch *ds, int port,
-				    struct dsa_mall_policer_tc_entry *policer)
+				    const struct flow_action_police *policer,
+				    struct netlink_ext_ack *extack)
 {
 	struct sja1105_l2_policing_entry *policing;
 	struct sja1105_private *priv = ds->priv;
@@ -2921,7 +2859,7 @@ static int sja1105_port_policer_add(struct dsa_switch *ds, int port,
 	 * the value of RATE bytes divided by 64, up to a maximum of SMAX
 	 * bytes.
 	 */
-	policing[port].rate = div_u64(512 * policer->rate_bytes_per_sec,
+	policing[port].rate = div_u64(512 * policer->rate_bytes_ps,
 				      1000000);
 	policing[port].smax = policer->burst;
 
@@ -3081,7 +3019,7 @@ static int sja1105_port_bridge_flags(struct dsa_switch *ds, int port,
  * ref_clk pin. So port clocking needs to be initialized early, before
  * connecting to PHYs is attempted, otherwise they won't respond through MDIO.
  * Setting correct PHY link speed does not matter now.
- * But dsa_slave_phy_setup is called later than sja1105_setup, so the PHY
+ * But dsa_user_phy_setup is called later than sja1105_setup, so the PHY
  * bindings are not yet parsed by DSA core. We need to parse early so that we
  * can populate the xMII mode parameters table.
  */
@@ -3153,10 +3091,8 @@ static int sja1105_setup(struct dsa_switch *ds)
 	 * TPID is ETH_P_SJA1105, and the VLAN ID is the port pvid.
 	 */
 	ds->vlan_filtering_is_global = true;
-	ds->untag_bridge_pvid = true;
 	ds->fdb_isolation = true;
-	/* tag_8021q has 3 bits for the VBID, and the value 0 is reserved */
-	ds->max_num_bridges = 7;
+	ds->max_num_bridges = DSA_TAG_8021Q_MAX_NUM_BRIDGES;
 
 	/* Advertise the 8 egress queues */
 	ds->num_tx_queues = SJA1105_NUM_TC;
@@ -3197,6 +3133,13 @@ static void sja1105_teardown(struct dsa_switch *ds)
 	sja1105_static_config_free(&priv->static_config);
 }
 
+static const struct phylink_mac_ops sja1105_phylink_mac_ops = {
+	.mac_select_pcs	= sja1105_mac_select_pcs,
+	.mac_config	= sja1105_mac_config,
+	.mac_link_up	= sja1105_mac_link_up,
+	.mac_link_down	= sja1105_mac_link_down,
+};
+
 static const struct dsa_switch_ops sja1105_switch_ops = {
 	.get_tag_protocol	= sja1105_get_tag_protocol,
 	.connect_tag_protocol	= sja1105_connect_tag_protocol,
@@ -3206,9 +3149,6 @@ static const struct dsa_switch_ops sja1105_switch_ops = {
 	.port_change_mtu	= sja1105_change_mtu,
 	.port_max_mtu		= sja1105_get_max_mtu,
 	.phylink_get_caps	= sja1105_phylink_get_caps,
-	.phylink_mac_select_pcs	= sja1105_mac_select_pcs,
-	.phylink_mac_link_up	= sja1105_mac_link_up,
-	.phylink_mac_link_down	= sja1105_mac_link_down,
 	.get_strings		= sja1105_get_strings,
 	.get_ethtool_stats	= sja1105_get_ethtool_stats,
 	.get_sset_count		= sja1105_get_sset_count,
@@ -3374,6 +3314,7 @@ static int sja1105_probe(struct spi_device *spi)
 	ds->dev = dev;
 	ds->num_ports = priv->info->num_ports;
 	ds->ops = &sja1105_switch_ops;
+	ds->phylink_mac_ops = &sja1105_phylink_mac_ops;
 	ds->priv = priv;
 	priv->ds = ds;
 
@@ -3455,7 +3396,6 @@ MODULE_DEVICE_TABLE(spi, sja1105_spi_ids);
 static struct spi_driver sja1105_driver = {
 	.driver = {
 		.name  = "sja1105",
-		.owner = THIS_MODULE,
 		.of_match_table = of_match_ptr(sja1105_dt_ids),
 	},
 	.id_table = sja1105_spi_ids,

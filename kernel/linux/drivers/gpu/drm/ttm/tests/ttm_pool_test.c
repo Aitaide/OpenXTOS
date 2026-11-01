@@ -8,11 +8,12 @@
 #include <drm/ttm/ttm_pool.h>
 
 #include "ttm_kunit_helpers.h"
+#include "../ttm_pool_internal.h"
 
 struct ttm_pool_test_case {
 	const char *description;
 	unsigned int order;
-	bool use_dma_alloc;
+	unsigned int alloc_flags;
 };
 
 struct ttm_pool_test_priv {
@@ -48,7 +49,7 @@ static void ttm_pool_test_fini(struct kunit *test)
 }
 
 static struct ttm_tt *ttm_tt_kunit_init(struct kunit *test,
-					uint32_t page_flags,
+					u32 page_flags,
 					enum ttm_caching caching,
 					size_t size)
 {
@@ -57,7 +58,7 @@ static struct ttm_tt *ttm_tt_kunit_init(struct kunit *test,
 	struct ttm_tt *tt;
 	int err;
 
-	bo = ttm_bo_kunit_init(test, priv->devs, size);
+	bo = ttm_bo_kunit_init(test, priv->devs, size, NULL);
 	KUNIT_ASSERT_NOT_NULL(test, bo);
 	priv->mock_bo = bo;
 
@@ -78,16 +79,15 @@ static struct ttm_pool *ttm_pool_pre_populated(struct kunit *test,
 	struct ttm_test_devices *devs = priv->devs;
 	struct ttm_pool *pool;
 	struct ttm_tt *tt;
-	unsigned long order = __fls(size / PAGE_SIZE);
 	int err;
 
-	tt = ttm_tt_kunit_init(test, order, caching, size);
+	tt = ttm_tt_kunit_init(test, 0, caching, size);
 	KUNIT_ASSERT_NOT_NULL(test, tt);
 
 	pool = kunit_kzalloc(test, sizeof(*pool), GFP_KERNEL);
 	KUNIT_ASSERT_NOT_NULL(test, pool);
 
-	ttm_pool_init(pool, devs->dev, NUMA_NO_NODE, true, false);
+	ttm_pool_init(pool, devs->dev, NUMA_NO_NODE, TTM_ALLOCATION_POOL_USE_DMA_ALLOC);
 
 	err = ttm_pool_alloc(pool, tt, &simple_ctx);
 	KUNIT_ASSERT_EQ(test, err, 0);
@@ -109,17 +109,17 @@ static const struct ttm_pool_test_case ttm_pool_basic_cases[] = {
 	},
 	{
 		.description = "Above the allocation limit",
-		.order = MAX_ORDER + 1,
+		.order = MAX_PAGE_ORDER + 1,
 	},
 	{
 		.description = "One page, with coherent DMA mappings enabled",
 		.order = 0,
-		.use_dma_alloc = true,
+		.alloc_flags = TTM_ALLOCATION_POOL_USE_DMA_ALLOC,
 	},
 	{
 		.description = "Above the allocation limit, with coherent DMA mappings enabled",
-		.order = MAX_ORDER + 1,
-		.use_dma_alloc = true,
+		.order = MAX_PAGE_ORDER + 1,
+		.alloc_flags = TTM_ALLOCATION_POOL_USE_DMA_ALLOC,
 	},
 };
 
@@ -151,12 +151,11 @@ static void ttm_pool_alloc_basic(struct kunit *test)
 	pool = kunit_kzalloc(test, sizeof(*pool), GFP_KERNEL);
 	KUNIT_ASSERT_NOT_NULL(test, pool);
 
-	ttm_pool_init(pool, devs->dev, NUMA_NO_NODE, params->use_dma_alloc,
-		      false);
+	ttm_pool_init(pool, devs->dev, NUMA_NO_NODE, params->alloc_flags);
 
 	KUNIT_ASSERT_PTR_EQ(test, pool->dev, devs->dev);
 	KUNIT_ASSERT_EQ(test, pool->nid, NUMA_NO_NODE);
-	KUNIT_ASSERT_EQ(test, pool->use_dma_alloc, params->use_dma_alloc);
+	KUNIT_ASSERT_EQ(test, pool->alloc_flags, params->alloc_flags);
 
 	err = ttm_pool_alloc(pool, tt, &simple_ctx);
 	KUNIT_ASSERT_EQ(test, err, 0);
@@ -165,15 +164,15 @@ static void ttm_pool_alloc_basic(struct kunit *test)
 	fst_page = tt->pages[0];
 	last_page = tt->pages[tt->num_pages - 1];
 
-	if (params->order <= MAX_ORDER) {
-		if (params->use_dma_alloc) {
+	if (params->order <= MAX_PAGE_ORDER) {
+		if (ttm_pool_uses_dma_alloc(pool)) {
 			KUNIT_ASSERT_NOT_NULL(test, (void *)fst_page->private);
 			KUNIT_ASSERT_NOT_NULL(test, (void *)last_page->private);
 		} else {
 			KUNIT_ASSERT_EQ(test, fst_page->private, params->order);
 		}
 	} else {
-		if (params->use_dma_alloc) {
+		if (ttm_pool_uses_dma_alloc(pool)) {
 			KUNIT_ASSERT_NOT_NULL(test, (void *)fst_page->private);
 			KUNIT_ASSERT_NULL(test, (void *)last_page->private);
 		} else {
@@ -182,7 +181,7 @@ static void ttm_pool_alloc_basic(struct kunit *test)
 			 * order 0 blocks
 			 */
 			KUNIT_ASSERT_EQ(test, fst_page->private,
-					min_t(unsigned int, MAX_ORDER,
+					min_t(unsigned int, MAX_PAGE_ORDER,
 					      params->order));
 			KUNIT_ASSERT_EQ(test, last_page->private, 0);
 		}
@@ -210,7 +209,7 @@ static void ttm_pool_alloc_basic_dma_addr(struct kunit *test)
 	tt = kunit_kzalloc(test, sizeof(*tt), GFP_KERNEL);
 	KUNIT_ASSERT_NOT_NULL(test, tt);
 
-	bo = ttm_bo_kunit_init(test, devs, size);
+	bo = ttm_bo_kunit_init(test, devs, size, NULL);
 	KUNIT_ASSERT_NOT_NULL(test, bo);
 
 	err = ttm_sg_tt_init(tt, bo, 0, caching);
@@ -219,7 +218,7 @@ static void ttm_pool_alloc_basic_dma_addr(struct kunit *test)
 	pool = kunit_kzalloc(test, sizeof(*pool), GFP_KERNEL);
 	KUNIT_ASSERT_NOT_NULL(test, pool);
 
-	ttm_pool_init(pool, devs->dev, NUMA_NO_NODE, true, false);
+	ttm_pool_init(pool, devs->dev, NUMA_NO_NODE, TTM_ALLOCATION_POOL_USE_DMA_ALLOC);
 
 	err = ttm_pool_alloc(pool, tt, &simple_ctx);
 	KUNIT_ASSERT_EQ(test, err, 0);
@@ -249,7 +248,7 @@ static void ttm_pool_alloc_order_caching_match(struct kunit *test)
 	pool = ttm_pool_pre_populated(test, size, caching);
 
 	pt = &pool->caching[caching].orders[order];
-	KUNIT_ASSERT_FALSE(test, list_empty(&pt->pages));
+	KUNIT_ASSERT_FALSE(test, !list_lru_count(&pt->pages));
 
 	tt = ttm_tt_kunit_init(test, 0, caching, size);
 	KUNIT_ASSERT_NOT_NULL(test, tt);
@@ -257,7 +256,7 @@ static void ttm_pool_alloc_order_caching_match(struct kunit *test)
 	err = ttm_pool_alloc(pool, tt, &simple_ctx);
 	KUNIT_ASSERT_EQ(test, err, 0);
 
-	KUNIT_ASSERT_TRUE(test, list_empty(&pt->pages));
+	KUNIT_ASSERT_TRUE(test, !list_lru_count(&pt->pages));
 
 	ttm_pool_free(pool, tt);
 	ttm_tt_fini(tt);
@@ -283,8 +282,8 @@ static void ttm_pool_alloc_caching_mismatch(struct kunit *test)
 	tt = ttm_tt_kunit_init(test, 0, tt_caching, size);
 	KUNIT_ASSERT_NOT_NULL(test, tt);
 
-	KUNIT_ASSERT_FALSE(test, list_empty(&pt_pool->pages));
-	KUNIT_ASSERT_TRUE(test, list_empty(&pt_tt->pages));
+	KUNIT_ASSERT_FALSE(test, !list_lru_count(&pt_pool->pages));
+	KUNIT_ASSERT_TRUE(test, !list_lru_count(&pt_tt->pages));
 
 	err = ttm_pool_alloc(pool, tt, &simple_ctx);
 	KUNIT_ASSERT_EQ(test, err, 0);
@@ -292,8 +291,8 @@ static void ttm_pool_alloc_caching_mismatch(struct kunit *test)
 	ttm_pool_free(pool, tt);
 	ttm_tt_fini(tt);
 
-	KUNIT_ASSERT_FALSE(test, list_empty(&pt_pool->pages));
-	KUNIT_ASSERT_FALSE(test, list_empty(&pt_tt->pages));
+	KUNIT_ASSERT_FALSE(test, !list_lru_count(&pt_pool->pages));
+	KUNIT_ASSERT_FALSE(test, !list_lru_count(&pt_tt->pages));
 
 	ttm_pool_fini(pool);
 }
@@ -317,8 +316,8 @@ static void ttm_pool_alloc_order_mismatch(struct kunit *test)
 	tt = ttm_tt_kunit_init(test, 0, caching, snd_size);
 	KUNIT_ASSERT_NOT_NULL(test, tt);
 
-	KUNIT_ASSERT_FALSE(test, list_empty(&pt_pool->pages));
-	KUNIT_ASSERT_TRUE(test, list_empty(&pt_tt->pages));
+	KUNIT_ASSERT_FALSE(test, !list_lru_count(&pt_pool->pages));
+	KUNIT_ASSERT_TRUE(test, !list_lru_count(&pt_tt->pages));
 
 	err = ttm_pool_alloc(pool, tt, &simple_ctx);
 	KUNIT_ASSERT_EQ(test, err, 0);
@@ -326,8 +325,8 @@ static void ttm_pool_alloc_order_mismatch(struct kunit *test)
 	ttm_pool_free(pool, tt);
 	ttm_tt_fini(tt);
 
-	KUNIT_ASSERT_FALSE(test, list_empty(&pt_pool->pages));
-	KUNIT_ASSERT_FALSE(test, list_empty(&pt_tt->pages));
+	KUNIT_ASSERT_FALSE(test, !list_lru_count(&pt_pool->pages));
+	KUNIT_ASSERT_FALSE(test, !list_lru_count(&pt_tt->pages));
 
 	ttm_pool_fini(pool);
 }
@@ -349,16 +348,16 @@ static void ttm_pool_free_dma_alloc(struct kunit *test)
 	pool = kunit_kzalloc(test, sizeof(*pool), GFP_KERNEL);
 	KUNIT_ASSERT_NOT_NULL(test, pool);
 
-	ttm_pool_init(pool, devs->dev, NUMA_NO_NODE, true, false);
+	ttm_pool_init(pool, devs->dev, NUMA_NO_NODE, TTM_ALLOCATION_POOL_USE_DMA_ALLOC);
 	ttm_pool_alloc(pool, tt, &simple_ctx);
 
 	pt = &pool->caching[caching].orders[order];
-	KUNIT_ASSERT_TRUE(test, list_empty(&pt->pages));
+	KUNIT_ASSERT_TRUE(test, !list_lru_count(&pt->pages));
 
 	ttm_pool_free(pool, tt);
 	ttm_tt_fini(tt);
 
-	KUNIT_ASSERT_FALSE(test, list_empty(&pt->pages));
+	KUNIT_ASSERT_FALSE(test, !list_lru_count(&pt->pages));
 
 	ttm_pool_fini(pool);
 }
@@ -369,7 +368,6 @@ static void ttm_pool_free_no_dma_alloc(struct kunit *test)
 	struct ttm_test_devices *devs = priv->devs;
 	struct ttm_tt *tt;
 	struct ttm_pool *pool;
-	struct ttm_pool_type *pt;
 	enum ttm_caching caching = ttm_uncached;
 	unsigned int order = 2;
 	size_t size = (1 << order) * PAGE_SIZE;
@@ -380,16 +378,11 @@ static void ttm_pool_free_no_dma_alloc(struct kunit *test)
 	pool = kunit_kzalloc(test, sizeof(*pool), GFP_KERNEL);
 	KUNIT_ASSERT_NOT_NULL(test, pool);
 
-	ttm_pool_init(pool, devs->dev, NUMA_NO_NODE, false, false);
+	ttm_pool_init(pool, devs->dev, NUMA_NO_NODE, 0);
 	ttm_pool_alloc(pool, tt, &simple_ctx);
-
-	pt = &pool->caching[caching].orders[order];
-	KUNIT_ASSERT_TRUE(test, list_is_singular(&pt->pages));
 
 	ttm_pool_free(pool, tt);
 	ttm_tt_fini(tt);
-
-	KUNIT_ASSERT_TRUE(test, list_is_singular(&pt->pages));
 
 	ttm_pool_fini(pool);
 }
@@ -405,11 +398,11 @@ static void ttm_pool_fini_basic(struct kunit *test)
 	pool = ttm_pool_pre_populated(test, size, caching);
 	pt = &pool->caching[caching].orders[order];
 
-	KUNIT_ASSERT_FALSE(test, list_empty(&pt->pages));
+	KUNIT_ASSERT_FALSE(test, !list_lru_count(&pt->pages));
 
 	ttm_pool_fini(pool);
 
-	KUNIT_ASSERT_TRUE(test, list_empty(&pt->pages));
+	KUNIT_ASSERT_TRUE(test, !list_lru_count(&pt->pages));
 }
 
 static struct kunit_case ttm_pool_test_cases[] = {
@@ -434,4 +427,5 @@ static struct kunit_suite ttm_pool_test_suite = {
 
 kunit_test_suites(&ttm_pool_test_suite);
 
-MODULE_LICENSE("GPL");
+MODULE_DESCRIPTION("KUnit tests for ttm_pool APIs");
+MODULE_LICENSE("GPL and additional rights");

@@ -32,15 +32,6 @@
 #define CARMINE_MEM_SIZE	0x8000000
 #define DRV_NAME		"mb862xxfb"
 
-#if defined(CONFIG_SOCRATES)
-static struct mb862xx_gc_mode socrates_gc_mode = {
-	/* Mode for Prime View PM070WL4 TFT LCD Panel */
-	{ "800x480", 45, 800, 480, 40000, 86, 42, 33, 10, 128, 2, 0, 0, 0 },
-	/* 16 bits/pixel, 16MB, 133MHz, SDRAM memory mode value */
-	16, 0x1000000, GC_CCF_COT_133, 0x4157ba63
-};
-#endif
-
 /* Helpers */
 static inline int h_total(struct fb_var_screeninfo *var)
 {
@@ -417,7 +408,7 @@ static struct fb_ops mb862xxfb_ops = {
 };
 
 /* initialize fb_info data */
-static int mb862xxfb_init_fbinfo(struct fb_info *fbi)
+static int __maybe_unused mb862xxfb_init_fbinfo(struct fb_info *fbi)
 {
 	struct mb862xxfb_par *par = fbi->par;
 	struct mb862xx_gc_mode *mode = par->gc_mode;
@@ -577,9 +568,9 @@ static ssize_t dispregs_show(struct device *dev,
 	return ptr - buf;
 }
 
-static DEVICE_ATTR_RO(dispregs);
+static __maybe_unused DEVICE_ATTR_RO(dispregs);
 
-static irqreturn_t mb862xx_intr(int irq, void *dev_id)
+static irqreturn_t __maybe_unused mb862xx_intr(int irq, void *dev_id)
 {
 	struct mb862xxfb_par *par = (struct mb862xxfb_par *) dev_id;
 	unsigned long reg_ist, mask;
@@ -666,6 +657,15 @@ static int mb862xx_gdc_init(struct mb862xxfb_par *par)
 	return 0;
 }
 
+#if defined(CONFIG_SOCRATES)
+static struct mb862xx_gc_mode socrates_gc_mode = {
+	/* Mode for Prime View PM070WL4 TFT LCD Panel */
+	{ "800x480", 45, 800, 480, 40000, 86, 42, 33, 10, 128, 2, 0, 0, 0 },
+	/* 16 bits/pixel, 16MB, 133MHz, SDRAM memory mode value */
+	16, 0x1000000, GC_CCF_COT_133, 0x4157ba63
+};
+#endif
+
 static int of_platform_mb862xx_probe(struct platform_device *ofdev)
 {
 	struct device_node *np = ofdev->dev.of_node;
@@ -674,7 +674,7 @@ static int of_platform_mb862xx_probe(struct platform_device *ofdev)
 	struct fb_info *info;
 	struct resource res;
 	resource_size_t res_size;
-	unsigned long ret = -ENODEV;
+	int ret = -ENODEV;
 
 	if (of_address_to_resource(np, 0, &res)) {
 		dev_err(dev, "Invalid address\n");
@@ -834,7 +834,7 @@ static struct platform_driver of_platform_mb862xxfb_driver = {
 		.of_match_table = of_platform_mb862xx_tbl,
 	},
 	.probe		= of_platform_mb862xx_probe,
-	.remove_new	= of_platform_mb862xx_remove,
+	.remove		= of_platform_mb862xx_remove,
 };
 #endif
 

@@ -86,6 +86,7 @@ struct amdgpu_doorbell_index {
 			uint32_t vce_ring6_7;
 		} uvd_vce;
 	};
+	uint32_t vpe_ring;
 	uint32_t first_non_cp;
 	uint32_t last_non_cp;
 	uint32_t max_assignment;
@@ -226,10 +227,12 @@ enum AMDGPU_NAVI10_DOORBELL_ASSIGNMENT {
 	AMDGPU_NAVI10_DOORBELL64_VCNc_d			= 0x18E,
 	AMDGPU_NAVI10_DOORBELL64_VCNe_f			= 0x18F,
 
-	AMDGPU_NAVI10_DOORBELL64_FIRST_NON_CP		= AMDGPU_NAVI10_DOORBELL_sDMA_ENGINE0,
-	AMDGPU_NAVI10_DOORBELL64_LAST_NON_CP		= AMDGPU_NAVI10_DOORBELL64_VCNe_f,
+	AMDGPU_NAVI10_DOORBELL64_VPE			= 0x190,
 
-	AMDGPU_NAVI10_DOORBELL_MAX_ASSIGNMENT		= 0x18F,
+	AMDGPU_NAVI10_DOORBELL64_FIRST_NON_CP		= AMDGPU_NAVI10_DOORBELL_sDMA_ENGINE0,
+	AMDGPU_NAVI10_DOORBELL64_LAST_NON_CP		= AMDGPU_NAVI10_DOORBELL64_VPE,
+
+	AMDGPU_NAVI10_DOORBELL_MAX_ASSIGNMENT		= AMDGPU_NAVI10_DOORBELL64_VPE,
 	AMDGPU_NAVI10_DOORBELL_INVALID			= 0xFFFF
 };
 
@@ -345,6 +348,36 @@ enum AMDGPU_DOORBELL_ASSIGNMENT_LAYOUT1 {
 	AMDGPU_DOORBELL_LAYOUT1_INVALID                 = 0xFFFF
 };
 
+enum AMDGPU_SOC_V1_0_DOORBELL_ASSIGNMENT {
+	/* KIQ/HIQ/DIQ */
+	AMDGPU_SOC_V1_0_DOORBELL_KIQ_START		= 0x000,
+	AMDGPU_SOC_V1_0_DOORBELL_HIQ			= 0x001,
+	AMDGPU_SOC_V1_0_DOORBELL_DIQ			= 0x002,
+	/* Compute: 0x03 ~ 0x20  */
+	AMDGPU_SOC_V1_0_DOORBELL_MEC_RING_START		= 0x003,
+	AMDGPU_SOC_V1_0_DOORBELL_MEC_RING_END		= 0x00A,
+	AMDGPU_SOC_V1_0_DOORBELL_MES_RING0		= 0x00B,
+	AMDGPU_SOC_V1_0_DOORBELL_MES_RING1		= 0x00C,
+	AMDGPU_SOC_V1_0_DOORBELL_USERQUEUE_START	= 0x00D,
+	AMDGPU_SOC_V1_0_DOORBELL_USERQUEUE_END		= 0x01F,
+	AMDGPU_SOC_V1_0_DOORBELL_XCC_RANGE		= 0x020,
+
+	/* SDMA: 0x100 ~ 0x19F */
+	AMDGPU_SOC_V1_0_DOORBELL_sDMA_ENGINE_START	= 0x100,
+	AMDGPU_SOC_V1_0_DOORBELL_sDMA_ENGINE_END	= 0x19F,
+	/* IH: 0x1A0 ~ 0x1AF */
+	AMDGPU_SOC_V1_0_DOORBELL_IH			= 0x1A0,
+	/* VCN: 0x1B0 ~ 0x1EF */
+	AMDGPU_SOC_V1_0_DOORBELL_VCN_START		= 0x1B0,
+	AMDGPU_SOC_V1_0_DOORBELL_VCN_END		= 0x1EF,
+
+	AMDGPU_SOC_V1_0_DOORBELL_FIRST_NON_CP		= AMDGPU_SOC_V1_0_DOORBELL_sDMA_ENGINE_START,
+	AMDGPU_SOC_V1_0_DOORBELL_LAST_NON_CP		= AMDGPU_SOC_V1_0_DOORBELL_VCN_END,
+
+	AMDGPU_SOC_V1_0_DOORBELL_MAX_ASSIGNMENT		= 0x1EF,
+	AMDGPU_SOC_V1_0_DOORBELL_INVALID		= 0xFFFF
+};
+
 u32 amdgpu_mm_rdoorbell(struct amdgpu_device *adev, u32 index);
 void amdgpu_mm_wdoorbell(struct amdgpu_device *adev, u32 index, u32 v);
 u64 amdgpu_mm_rdoorbell64(struct amdgpu_device *adev, u32 index);
@@ -357,8 +390,9 @@ int amdgpu_doorbell_init(struct amdgpu_device *adev);
 void amdgpu_doorbell_fini(struct amdgpu_device *adev);
 int amdgpu_doorbell_create_kernel_doorbells(struct amdgpu_device *adev);
 uint32_t amdgpu_doorbell_index_on_bar(struct amdgpu_device *adev,
-				       struct amdgpu_bo *db_bo,
-				       uint32_t doorbell_index);
+				      struct amdgpu_bo *db_bo,
+				      uint32_t doorbell_index,
+				      uint32_t db_size);
 
 #define RDOORBELL32(index) amdgpu_mm_rdoorbell(adev, (index))
 #define WDOORBELL32(index, v) amdgpu_mm_wdoorbell(adev, (index), (v))

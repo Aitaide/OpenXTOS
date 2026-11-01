@@ -5,7 +5,7 @@
  * Author: Thomas Abraham <thomas.ab@samsung.com>
  *
  * Common Clock Framework support for Exynos5250 SoC.
-*/
+ */
 
 #include <dt-bindings/clock/exynos5250.h>
 #include <linux/clk-provider.h>
@@ -776,8 +776,9 @@ static const struct exynos_cpuclk_cfg_data exynos5250_armclk_d[] __initconst = {
 };
 
 static const struct samsung_cpu_clock exynos5250_cpu_clks[] __initconst = {
-	CPU_CLK(CLK_ARM_CLK, "armclk", CLK_MOUT_APLL, CLK_MOUT_MPLL, CLK_CPU_HAS_DIV1, 0x200,
-			exynos5250_armclk_d),
+	CPU_CLK(CLK_ARM_CLK, "armclk", CLK_MOUT_APLL, CLK_MOUT_MPLL,
+		CLK_CPU_HAS_DIV1, 0x0, CPUCLK_LAYOUT_E4210,
+		exynos5250_armclk_d),
 };
 
 static const struct of_device_id ext_clk_match[] __initconst = {
@@ -852,7 +853,7 @@ static void __init exynos5250_clk_init(struct device_node *np)
 		PWR_CTRL2_CORE2_UP_RATIO | PWR_CTRL2_CORE1_UP_RATIO);
 	__raw_writel(tmp, reg_base + PWR_CTRL2);
 
-	samsung_clk_sleep_init(reg_base, exynos5250_clk_regs,
+	samsung_clk_sleep_init(reg_base, NULL, exynos5250_clk_regs,
 			       ARRAY_SIZE(exynos5250_clk_regs));
 	exynos5_subcmus_init(ctx, ARRAY_SIZE(exynos5250_subcmus),
 			     exynos5250_subcmus);

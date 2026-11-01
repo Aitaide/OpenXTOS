@@ -7,6 +7,7 @@
 #include <linux/types.h>
 #include <linux/skbuff.h>
 #include <linux/debugfs.h>
+#include <linux/limits.h>
 #include <linux/random.h>
 #include <linux/moduleparam.h>
 #include <linux/ieee80211.h>
@@ -1053,7 +1054,7 @@ minstrel_ht_refill_sample_rates(struct minstrel_ht_sta *mi)
  *  - max_prob_rate must use only one stream, as a tradeoff between delivery
  *    probability and throughput during strong fluctuations
  *  - as long as the max prob rate has a probability of more than 75%, pick
- *    higher throughput rates, even if the probablity is a bit lower
+ *    higher throughput rates, even if the probability is a bit lower
  */
 static void
 minstrel_ht_update_stats(struct minstrel_priv *mp, struct minstrel_ht_sta *mi)
@@ -1193,6 +1194,54 @@ minstrel_ht_update_stats(struct minstrel_priv *mp, struct minstrel_ht_sta *mi)
 	mi->sample_time = jiffies;
 }
 
+/*
+ * Check whether an HT/VHT rate from a TX status entry maps to an entry
+ * in the minstrel_ht rate tables.  Values that cannot be represented
+ * there must not be used for indexing mi->groups[] and the MCS groups.
+ */
+static bool
+minstrel_ht_txstat_rate_valid(struct ieee80211_tx_rate *rate)
+{
+	unsigned int bw;
+
+	if (!(rate->flags & (IEEE80211_TX_RC_MCS | IEEE80211_TX_RC_VHT_MCS)))
+		return true;
+
+	if (rate->flags & IEEE80211_TX_RC_MCS) {
+		/* minstrel_ht supports up to MINSTREL_MAX_STREAMS streams */
+		return rate->idx < MINSTREL_MAX_STREAMS * 8;
+	}
+
+	/* minstrel_ht has no VHT groups for 160 MHz and wider */
+	bw = !!(rate->flags & IEEE80211_TX_RC_40_MHZ_WIDTH) +
+	     2 * !!(rate->flags & IEEE80211_TX_RC_80_MHZ_WIDTH);
+	if ((rate->flags & IEEE80211_TX_RC_160_MHZ_WIDTH) || bw > BW_80)
+		return false;
+
+	return ieee80211_rate_get_vht_nss(rate) <= MINSTREL_MAX_STREAMS &&
+	       ieee80211_rate_get_vht_mcs(rate) < MCS_GROUP_RATES;
+}
+
+static bool
+minstrel_ht_ri_txstat_rate_valid(struct rate_info *rate)
+{
+	if (!(rate->flags & (RATE_INFO_FLAGS_MCS | RATE_INFO_FLAGS_VHT_MCS)))
+		return true;
+
+	if (rate->flags & RATE_INFO_FLAGS_MCS) {
+		/* minstrel_ht supports up to MINSTREL_MAX_STREAMS streams */
+		return rate->mcs < MINSTREL_MAX_STREAMS * 8;
+	}
+
+	/* minstrel_ht has VHT groups only for 20/40/80 MHz */
+	if (rate->bw != RATE_INFO_BW_20 && rate->bw != RATE_INFO_BW_40 &&
+	    rate->bw != RATE_INFO_BW_80)
+		return false;
+
+	return rate->nss <= MINSTREL_MAX_STREAMS &&
+	       rate->mcs < MCS_GROUP_RATES;
+}
+
 static bool
 minstrel_ht_txstat_valid(struct minstrel_priv *mp, struct minstrel_ht_sta *mi,
 			 struct ieee80211_tx_rate *rate)
@@ -1205,9 +1254,8 @@ minstrel_ht_txstat_valid(struct minstrel_priv *mp, struct minstrel_ht_sta *mi,
 	if (!rate->count)
 		return false;
 
-	if (rate->flags & IEEE80211_TX_RC_MCS ||
-	    rate->flags & IEEE80211_TX_RC_VHT_MCS)
-		return true;
+	if (rate->flags & (IEEE80211_TX_RC_MCS | IEEE80211_TX_RC_VHT_MCS))
+		return minstrel_ht_txstat_rate_valid(rate);
 
 	for (i = 0; i < ARRAY_SIZE(mp->cck_rates); i++)
 		if (rate->idx == mp->cck_rates[i])
@@ -1235,9 +1283,9 @@ minstrel_ht_ri_txstat_valid(struct minstrel_priv *mp,
 	if (!rate_status->try_count)
 		return false;
 
-	if (rate_status->rate_idx.flags & RATE_INFO_FLAGS_MCS ||
-	    rate_status->rate_idx.flags & RATE_INFO_FLAGS_VHT_MCS)
-		return true;
+	if (rate_status->rate_idx.flags &
+	    (RATE_INFO_FLAGS_MCS | RATE_INFO_FLAGS_VHT_MCS))
+		return minstrel_ht_ri_txstat_rate_valid(&rate_status->rate_idx);
 
 	for (i = 0; i < ARRAY_SIZE(mp->cck_rates); i++) {
 		if (rate_status->rate_idx.legacy ==
@@ -1553,7 +1601,7 @@ minstrel_ht_update_rates(struct minstrel_priv *mp, struct minstrel_ht_sta *mi)
 	int i = 0;
 	int max_rates = min_t(int, mp->hw->max_rates, IEEE80211_TX_RATE_TABLE_SIZE);
 
-	rates = kzalloc(sizeof(*rates), GFP_ATOMIC);
+	rates = kzalloc_obj(*rates, GFP_ATOMIC);
 	if (!rates)
 		return;
 
@@ -1725,16 +1773,15 @@ minstrel_ht_update_caps(void *priv, struct ieee80211_supported_band *sband,
 	mi->band = sband->band;
 	mi->last_stats_update = jiffies;
 
-	ack_dur = ieee80211_frame_duration(sband->band, 10, 60, 1, 1, 0);
-	mi->overhead = ieee80211_frame_duration(sband->band, 0, 60, 1, 1, 0);
+	ack_dur = ieee80211_frame_duration(sband->band, 10, 60, 1, 1);
+	mi->overhead = ieee80211_frame_duration(sband->band, 0, 60, 1, 1);
 	mi->overhead += ack_dur;
 	mi->overhead_rtscts = mi->overhead + 2 * ack_dur;
 
 	ctl_rate = &sband->bitrates[rate_lowest_index(sband, sta)];
 	erp = ctl_rate->flags & IEEE80211_RATE_ERP_G;
 	ack_dur = ieee80211_frame_duration(sband->band, 10,
-					   ctl_rate->bitrate, erp, 1,
-					   ieee80211_chandef_get_shift(chandef));
+					   ctl_rate->bitrate, erp, 1);
 	mi->overhead_legacy = ack_dur;
 	mi->overhead_legacy_rtscts = mi->overhead_legacy + 2 * ack_dur;
 
@@ -1850,20 +1897,7 @@ minstrel_ht_rate_update(void *priv, struct ieee80211_supported_band *sband,
 static void *
 minstrel_ht_alloc_sta(void *priv, struct ieee80211_sta *sta, gfp_t gfp)
 {
-	struct ieee80211_supported_band *sband;
-	struct minstrel_ht_sta *mi;
-	struct minstrel_priv *mp = priv;
-	struct ieee80211_hw *hw = mp->hw;
-	int max_rates = 0;
-	int i;
-
-	for (i = 0; i < NUM_NL80211_BANDS; i++) {
-		sband = hw->wiphy->bands[i];
-		if (sband && sband->n_bitrates > max_rates)
-			max_rates = sband->n_bitrates;
-	}
-
-	return kzalloc(sizeof(*mi), gfp);
+	return kzalloc_obj(struct minstrel_ht_sta, gfp);
 }
 
 static void
@@ -1874,15 +1908,12 @@ minstrel_ht_free_sta(void *priv, struct ieee80211_sta *sta, void *priv_sta)
 
 static void
 minstrel_ht_fill_rate_array(u8 *dest, struct ieee80211_supported_band *sband,
-			    const s16 *bitrates, int n_rates, u32 rate_flags)
+			    const s16 *bitrates, int n_rates)
 {
 	int i, j;
 
 	for (i = 0; i < sband->n_bitrates; i++) {
 		struct ieee80211_rate *rate = &sband->bitrates[i];
-
-		if ((rate_flags & sband->bitrates[i].flags) != rate_flags)
-			continue;
 
 		for (j = 0; j < n_rates; j++) {
 			if (rate->bitrate != bitrates[j])
@@ -1899,7 +1930,6 @@ minstrel_ht_init_cck_rates(struct minstrel_priv *mp)
 {
 	static const s16 bitrates[4] = { 10, 20, 55, 110 };
 	struct ieee80211_supported_band *sband;
-	u32 rate_flags = ieee80211_chandef_rate_flags(&mp->hw->conf.chandef);
 
 	memset(mp->cck_rates, 0xff, sizeof(mp->cck_rates));
 	sband = mp->hw->wiphy->bands[NL80211_BAND_2GHZ];
@@ -1909,8 +1939,7 @@ minstrel_ht_init_cck_rates(struct minstrel_priv *mp)
 	BUILD_BUG_ON(ARRAY_SIZE(mp->cck_rates) != ARRAY_SIZE(bitrates));
 	minstrel_ht_fill_rate_array(mp->cck_rates, sband,
 				    minstrel_cck_bitrates,
-				    ARRAY_SIZE(minstrel_cck_bitrates),
-				    rate_flags);
+				    ARRAY_SIZE(minstrel_cck_bitrates));
 }
 
 static void
@@ -1918,7 +1947,6 @@ minstrel_ht_init_ofdm_rates(struct minstrel_priv *mp, enum nl80211_band band)
 {
 	static const s16 bitrates[8] = { 60, 90, 120, 180, 240, 360, 480, 540 };
 	struct ieee80211_supported_band *sband;
-	u32 rate_flags = ieee80211_chandef_rate_flags(&mp->hw->conf.chandef);
 
 	memset(mp->ofdm_rates[band], 0xff, sizeof(mp->ofdm_rates[band]));
 	sband = mp->hw->wiphy->bands[band];
@@ -1928,8 +1956,7 @@ minstrel_ht_init_ofdm_rates(struct minstrel_priv *mp, enum nl80211_band band)
 	BUILD_BUG_ON(ARRAY_SIZE(mp->ofdm_rates[band]) != ARRAY_SIZE(bitrates));
 	minstrel_ht_fill_rate_array(mp->ofdm_rates[band], sband,
 				    minstrel_ofdm_bitrates,
-				    ARRAY_SIZE(minstrel_ofdm_bitrates),
-				    rate_flags);
+				    ARRAY_SIZE(minstrel_ofdm_bitrates));
 }
 
 static void *
@@ -1938,7 +1965,7 @@ minstrel_ht_alloc(struct ieee80211_hw *hw)
 	struct minstrel_priv *mp;
 	int i;
 
-	mp = kzalloc(sizeof(struct minstrel_priv), GFP_ATOMIC);
+	mp = kzalloc_obj(struct minstrel_priv, GFP_ATOMIC);
 	if (!mp)
 		return NULL;
 
@@ -1968,14 +1995,39 @@ minstrel_ht_alloc(struct ieee80211_hw *hw)
 }
 
 #ifdef CONFIG_MAC80211_DEBUGFS
+static int minstrel_ht_fixed_rate_idx_get(void *data, u64 *val)
+{
+	*val = *(u32 *)data;
+	return 0;
+}
+
+static int minstrel_ht_fixed_rate_idx_set(void *data, u64 val)
+{
+	u32 idx = val;
+
+	/* U32_MAX is the default and keeps fixed rate processing disabled */
+	if (val != U32_MAX &&
+	    (val > U16_MAX ||
+	     MI_RATE_GROUP(idx) >= ARRAY_SIZE(minstrel_mcs_groups) ||
+	     MI_RATE_IDX(idx) >= MCS_GROUP_RATES))
+		return -EINVAL;
+
+	*(u32 *)data = idx;
+	return 0;
+}
+
+DEFINE_DEBUGFS_ATTRIBUTE(minstrel_ht_fixed_rate_idx_fops,
+			 minstrel_ht_fixed_rate_idx_get,
+			 minstrel_ht_fixed_rate_idx_set, "%llu\n");
+
 static void minstrel_ht_add_debugfs(struct ieee80211_hw *hw, void *priv,
 				    struct dentry *debugfsdir)
 {
 	struct minstrel_priv *mp = priv;
 
 	mp->fixed_rate_idx = (u32) -1;
-	debugfs_create_u32("fixed_rate_idx", S_IRUGO | S_IWUGO, debugfsdir,
-			   &mp->fixed_rate_idx);
+	debugfs_create_file("fixed_rate_idx", S_IRUGO | S_IWUGO, debugfsdir,
+			    &mp->fixed_rate_idx, &minstrel_ht_fixed_rate_idx_fops);
 }
 #endif
 

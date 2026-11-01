@@ -78,8 +78,7 @@ int acpiphp_register_attention(struct acpiphp_attention_info *info)
 {
 	int retval = -EINVAL;
 
-	if (info && info->owner && info->set_attn &&
-			info->get_attn && !attention_info) {
+	if (info && info->set_attn && info->get_attn && !attention_info) {
 		retval = 0;
 		attention_info = info;
 	}
@@ -261,7 +260,7 @@ int acpiphp_register_hotplug_slot(struct acpiphp_slot *acpiphp_slot,
 	int retval = -ENOMEM;
 	char name[SLOT_NAME_SIZE];
 
-	slot = kzalloc(sizeof(*slot), GFP_KERNEL);
+	slot = kzalloc_obj(*slot);
 	if (!slot)
 		goto error;
 

@@ -6,12 +6,21 @@
 #ifndef BTRFS_ORDERED_DATA_H
 #define BTRFS_ORDERED_DATA_H
 
-/* one of these per inode */
-struct btrfs_ordered_inode_tree {
-	spinlock_t lock;
-	struct rb_root tree;
-	struct rb_node *last;
-};
+#include <linux/types.h>
+#include <linux/list.h>
+#include <linux/refcount.h>
+#include <linux/completion.h>
+#include <linux/rbtree.h>
+#include <linux/wait.h>
+#include "async-thread.h"
+
+struct inode;
+struct page;
+struct extent_state;
+struct btrfs_block_group;
+struct btrfs_inode;
+struct btrfs_root;
+struct btrfs_fs_info;
 
 struct btrfs_ordered_sum {
 	/*
@@ -38,8 +47,25 @@ struct btrfs_ordered_sum {
  * IO is done and any metadata is inserted into the tree.
  */
 enum {
+	/* Extra status bits for ordered extents */
+
+	/* Set when all the pages are written. */
+	BTRFS_ORDERED_IO_DONE,
+	/* Set when removed from the tree. */
+	BTRFS_ORDERED_COMPLETE,
+	/* We had an io error when writing this out. */
+	BTRFS_ORDERED_IOERR,
+	/* Set when we have to truncate an extent. */
+	BTRFS_ORDERED_TRUNCATED,
+	/* Used during fsync to track already logged extents. */
+	BTRFS_ORDERED_LOGGED,
+	/* We have already logged all the csums of the ordered extent. */
+	BTRFS_ORDERED_LOGGED_CSUM,
+	/* We wait for this extent to complete in the current transaction. */
+	BTRFS_ORDERED_PENDING,
+
 	/*
-	 * Different types for ordered extents, one and only one of the 4 types
+	 * Different types for ordered extents, one and only one of these types
 	 * need to be set when creating ordered extent.
 	 *
 	 * REGULAR:	For regular non-compressed COW write
@@ -52,37 +78,27 @@ enum {
 	BTRFS_ORDERED_PREALLOC,
 	BTRFS_ORDERED_COMPRESSED,
 
+	/* Extra bit for encoded write, must be set with COMPRESSED. */
+	BTRFS_ORDERED_ENCODED,
+
 	/*
 	 * Extra bit for direct io, can only be set for
-	 * REGULAR/NOCOW/PREALLOC. No direct io for compressed extent.
+	 * REGULAR/NOCOW/PREALLOC. Must not be set for COMPRESSED nor ENCODED.
 	 */
 	BTRFS_ORDERED_DIRECT,
 
-	/* Extra status bits for ordered extents */
-
-	/* set when all the pages are written */
-	BTRFS_ORDERED_IO_DONE,
-	/* set when removed from the tree */
-	BTRFS_ORDERED_COMPLETE,
-	/* We had an io error when writing this out */
-	BTRFS_ORDERED_IOERR,
-	/* Set when we have to truncate an extent */
-	BTRFS_ORDERED_TRUNCATED,
-	/* Used during fsync to track already logged extents */
-	BTRFS_ORDERED_LOGGED,
-	/* We have already logged all the csums of the ordered extent */
-	BTRFS_ORDERED_LOGGED_CSUM,
-	/* We wait for this extent to complete in the current transaction */
-	BTRFS_ORDERED_PENDING,
-	/* BTRFS_IOC_ENCODED_WRITE */
-	BTRFS_ORDERED_ENCODED,
+	BTRFS_ORDERED_NR_FLAGS,
 };
+static_assert(BTRFS_ORDERED_NR_FLAGS <= BITS_PER_LONG);
+
+/* One and only one flag can be set. */
+#define BTRFS_ORDERED_EXCLUSIVE_FLAGS ((1UL << BTRFS_ORDERED_REGULAR) |		\
+				       (1UL << BTRFS_ORDERED_NOCOW) |		\
+				       (1UL << BTRFS_ORDERED_PREALLOC) |	\
+				       (1UL << BTRFS_ORDERED_COMPRESSED))
 
 /* BTRFS_ORDERED_* flags that specify the type of the extent. */
-#define BTRFS_ORDERED_TYPE_FLAGS ((1UL << BTRFS_ORDERED_REGULAR) |	\
-				  (1UL << BTRFS_ORDERED_NOCOW) |	\
-				  (1UL << BTRFS_ORDERED_PREALLOC) |	\
-				  (1UL << BTRFS_ORDERED_COMPRESSED) |	\
+#define BTRFS_ORDERED_TYPE_FLAGS (BTRFS_ORDERED_EXCLUSIVE_FLAGS |	\
 				  (1UL << BTRFS_ORDERED_DIRECT) |	\
 				  (1UL << BTRFS_ORDERED_ENCODED))
 
@@ -104,13 +120,6 @@ struct btrfs_ordered_extent {
 	u64 bytes_left;
 
 	/*
-	 * the end of the ordered extent which is behind it but
-	 * didn't update disk_i_size. Please see the comment of
-	 * btrfs_ordered_update_i_size();
-	 */
-	u64 outstanding_isize;
-
-	/*
 	 * If we get truncated we need to adjust the file extent we enter for
 	 * this ordered extent so that we do not expose stale data.
 	 */
@@ -129,10 +138,10 @@ struct btrfs_ordered_extent {
 	refcount_t refs;
 
 	/* the inode we belong to */
-	struct inode *inode;
+	struct btrfs_inode *inode;
 
 	/* list of checksums for insertion when the extent io is done */
-	struct list_head list;
+	struct list_head csum_list;
 
 	/* used for fast fsyncs */
 	struct list_head log_list;
@@ -151,42 +160,50 @@ struct btrfs_ordered_extent {
 	struct completion completion;
 	struct btrfs_work flush_work;
 	struct list_head work_list;
-};
 
-static inline void
-btrfs_ordered_inode_tree_init(struct btrfs_ordered_inode_tree *t)
-{
-	spin_lock_init(&t->lock);
-	t->tree = RB_ROOT;
-	t->last = NULL;
-}
+	struct list_head bioc_list;
+};
 
 int btrfs_finish_one_ordered(struct btrfs_ordered_extent *ordered_extent);
 int btrfs_finish_ordered_io(struct btrfs_ordered_extent *ordered_extent);
 
 void btrfs_put_ordered_extent(struct btrfs_ordered_extent *entry);
-void btrfs_remove_ordered_extent(struct btrfs_inode *btrfs_inode,
-				struct btrfs_ordered_extent *entry);
-bool btrfs_finish_ordered_extent(struct btrfs_ordered_extent *ordered,
-				 struct page *page, u64 file_offset, u64 len,
-				 bool uptodate);
+void btrfs_remove_ordered_extent(struct btrfs_ordered_extent *entry);
+void btrfs_finish_ordered_extent(struct btrfs_ordered_extent *ordered,
+				 u64 file_offset, u64 len, bool uptodate);
 void btrfs_mark_ordered_io_finished(struct btrfs_inode *inode,
-				struct page *page, u64 file_offset,
-				u64 num_bytes, bool uptodate);
+				    u64 file_offset, u64 num_bytes, bool uptodate);
 bool btrfs_dec_test_ordered_pending(struct btrfs_inode *inode,
 				    struct btrfs_ordered_extent **cached,
 				    u64 file_offset, u64 io_size);
+
+/*
+ * This represents details about the target file extent item of a write operation.
+ */
+struct btrfs_file_extent {
+	u64 disk_bytenr;
+	u64 disk_num_bytes;
+	u64 num_bytes;
+	u64 ram_bytes;
+	u64 offset;
+	u8 compression;
+};
+
 struct btrfs_ordered_extent *btrfs_alloc_ordered_extent(
 			struct btrfs_inode *inode, u64 file_offset,
-			u64 num_bytes, u64 ram_bytes, u64 disk_bytenr,
-			u64 disk_num_bytes, u64 offset, unsigned long flags,
-			int compress_type);
+			const struct btrfs_file_extent *file_extent, unsigned long flags);
 void btrfs_add_ordered_sum(struct btrfs_ordered_extent *entry,
 			   struct btrfs_ordered_sum *sum);
 struct btrfs_ordered_extent *btrfs_lookup_ordered_extent(struct btrfs_inode *inode,
 							 u64 file_offset);
-void btrfs_start_ordered_extent(struct btrfs_ordered_extent *entry);
-int btrfs_wait_ordered_range(struct inode *inode, u64 start, u64 len);
+void btrfs_start_ordered_extent_nowriteback(struct btrfs_ordered_extent *entry,
+				u64 nowriteback_start, u32 nowriteback_len);
+static inline void btrfs_start_ordered_extent(struct btrfs_ordered_extent *entry)
+{
+	return btrfs_start_ordered_extent_nowriteback(entry, 0, 0);
+}
+
+int btrfs_wait_ordered_range(struct btrfs_inode *inode, u64 start, u64 len);
 struct btrfs_ordered_extent *
 btrfs_lookup_first_ordered_extent(struct btrfs_inode *inode, u64 file_offset);
 struct btrfs_ordered_extent *btrfs_lookup_first_ordered_range(
@@ -198,9 +215,9 @@ struct btrfs_ordered_extent *btrfs_lookup_ordered_range(
 void btrfs_get_ordered_extents_for_logging(struct btrfs_inode *inode,
 					   struct list_head *list);
 u64 btrfs_wait_ordered_extents(struct btrfs_root *root, u64 nr,
-			       const u64 range_start, const u64 range_len);
+			       const struct btrfs_block_group *bg);
 void btrfs_wait_ordered_roots(struct btrfs_fs_info *fs_info, u64 nr,
-			      const u64 range_start, const u64 range_len);
+			      const struct btrfs_block_group *bg);
 void btrfs_lock_and_flush_ordered_range(struct btrfs_inode *inode, u64 start,
 					u64 end,
 					struct extent_state **cached_state);
@@ -208,6 +225,9 @@ bool btrfs_try_lock_ordered_range(struct btrfs_inode *inode, u64 start, u64 end,
 				  struct extent_state **cached_state);
 struct btrfs_ordered_extent *btrfs_split_ordered_extent(
 			struct btrfs_ordered_extent *ordered, u64 len);
+void btrfs_mark_ordered_extent_error(struct btrfs_ordered_extent *ordered);
+void btrfs_mark_ordered_extent_truncated(struct btrfs_ordered_extent *ordered,
+					 u64 truncate_len);
 int __init ordered_data_init(void);
 void __cold ordered_data_exit(void);
 

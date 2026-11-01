@@ -12,7 +12,6 @@
 #include <linux/firewire.h>
 #include <linux/firewire-constants.h>
 #include <linux/module.h>
-#include <linux/mod_devicetable.h>
 #include <linux/mutex.h>
 #include <linux/slab.h>
 #include <linux/compat.h>
@@ -138,6 +137,7 @@ extern const struct snd_motu_spec snd_motu_spec_8pre;
 
 extern const struct snd_motu_spec snd_motu_spec_828mk3_fw;
 extern const struct snd_motu_spec snd_motu_spec_828mk3_hybrid;
+extern const struct snd_motu_spec snd_motu_spec_896mk3;
 extern const struct snd_motu_spec snd_motu_spec_traveler_mk3;
 extern const struct snd_motu_spec snd_motu_spec_ultralite_mk3;
 extern const struct snd_motu_spec snd_motu_spec_audio_express;

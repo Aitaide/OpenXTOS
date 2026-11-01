@@ -6,7 +6,7 @@
  * Copyright(c) 2015 Bryan O'Donoghue <pure.logic@nexus-software.ie>
  *
  * IMR self test. The purpose of this module is to run a set of tests on the
- * IMR API to validate it's sanity. We check for overlapping, reserved
+ * IMR API to validate its sanity. We check for overlapping, reserved
  * addresses and setup/teardown sanity.
  *
  */
@@ -50,7 +50,7 @@ void __init imr_self_test_result(int res, const char *fmt, ...)
 #undef SELFTEST
 
 /**
- * imr_self_test
+ * imr_self_test - perform the IMR self-test
  *
  * Verify IMR self_test with some simple tests to verify overlap,
  * zero sized allocations and 1 KiB sized areas.
@@ -105,7 +105,7 @@ static void __init imr_self_test(void)
 }
 
 static const struct x86_cpu_id imr_ids[] __initconst = {
-	X86_MATCH_VENDOR_FAM_MODEL(INTEL, 5, INTEL_FAM5_QUARK_X1000, NULL),
+	X86_MATCH_VFM(INTEL_QUARK_X1000, NULL),
 	{}
 };
 
@@ -121,9 +121,4 @@ static int __init imr_self_test_init(void)
 	return 0;
 }
 
-/**
- * imr_self_test_exit - exit point for IMR code.
- *
- * return:
- */
 device_initcall(imr_self_test_init);

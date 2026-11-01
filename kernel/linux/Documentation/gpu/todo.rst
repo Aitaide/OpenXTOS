@@ -29,6 +29,38 @@ refactorings already and are an expert in the specific area
 Subsystem-wide refactorings
 ===========================
 
+Open-code drm_simple_encoder_init()
+-----------------------------------
+
+The helper drm_simple_encoder_init() was supposed to simplify encoder
+initialization. Instead it only added an intermediate layer between atomic
+modesetting and the DRM driver.
+
+The task here is to remove drm_simple_encoder_init(). Search for a driver
+that calls drm_simple_encoder_init() and inline the helper. The driver will
+also need its own instance of drm_encoder_funcs.
+
+Contact: Thomas Zimmermann, respective driver maintainer
+
+Level: Easy
+
+Replace struct drm_simple_display_pipe with regular atomic helpers
+------------------------------------------------------------------
+
+The data type struct drm_simple_display_pipe and its helpers were supposed
+to simplify driver development. Instead they only added an intermediate layer
+between atomic modesetting and the DRM driver.
+
+There are still drivers that use drm_simple_display_pipe. The task here is to
+convert them to use regular atomic helpers. Search for a driver that calls
+drm_simple_display_pipe_init() and inline all helpers from drm_simple_kms_helper.c
+into the driver, such that no simple-KMS interfaces are required. Please also
+rename all inlined functions according to driver conventions.
+
+Contact: Thomas Zimmermann, respective driver maintainer
+
+Level: Easy
+
 Remove custom dumb_map_offset implementations
 ---------------------------------------------
 
@@ -37,7 +69,7 @@ Audit each individual driver, make sure it'll work with the generic
 implementation (there's lots of outdated locking leftovers in various
 implementations), and then remove it.
 
-Contact: Daniel Vetter, respective driver maintainers
+Contact: Simona Vetter, respective driver maintainers
 
 Level: Intermediate
 
@@ -61,7 +93,7 @@ do by directly using the new atomic helper driver callbacks.
   .. [2] https://lwn.net/Articles/653071/
   .. [3] https://lwn.net/Articles/653466/
 
-Contact: Daniel Vetter, respective driver maintainers
+Contact: Simona Vetter, respective driver maintainers
 
 Level: Advanced
 
@@ -75,7 +107,7 @@ helper should also be moved from drm_plane_helper.c to the atomic helpers, to
 avoid confusion - the other helpers in that file are all deprecated legacy
 helpers.
 
-Contact: Ville Syrjälä, Daniel Vetter, driver maintainers
+Contact: Ville Syrjälä, Simona Vetter, driver maintainers
 
 Level: Advanced
 
@@ -97,7 +129,7 @@ with the current helpers:
 - Then we could go through all the drivers and remove the more-or-less confused
   checks for plane_state->fb and plane_state->crtc.
 
-Contact: Daniel Vetter
+Contact: Simona Vetter
 
 Level: Advanced
 
@@ -116,7 +148,7 @@ Somewhat related is the legacy_cursor_update hack, which should be replaced with
 the new atomic_async_check/commit functionality in the helpers in drivers that
 still look at that flag.
 
-Contact: Daniel Vetter, respective driver maintainers
+Contact: Simona Vetter, respective driver maintainers
 
 Level: Advanced
 
@@ -146,34 +178,9 @@ interfaces to fix these issues:
   ``_helper_funcs`` since they are not part of the core ABI. There's a
   ``FIXME`` comment in the kerneldoc for each such case in ``drm_crtc.h``.
 
-Contact: Daniel Vetter
+Contact: Simona Vetter
 
 Level: Intermediate
-
-Get rid of dev->struct_mutex from GEM drivers
----------------------------------------------
-
-``dev->struct_mutex`` is the Big DRM Lock from legacy days and infested
-everything. Nowadays in modern drivers the only bit where it's mandatory is
-serializing GEM buffer object destruction. Which unfortunately means drivers
-have to keep track of that lock and either call ``unreference`` or
-``unreference_locked`` depending upon context.
-
-Core GEM doesn't have a need for ``struct_mutex`` any more since kernel 4.8,
-and there's a GEM object ``free`` callback for any drivers which are
-entirely ``struct_mutex`` free.
-
-For drivers that need ``struct_mutex`` it should be replaced with a driver-
-private lock. The tricky part is the BO free functions, since those can't
-reliably take that lock any more. Instead state needs to be protected with
-suitable subordinate locks or some cleanup work pushed to a worker thread. For
-performance-critical drivers it might also be better to go with a more
-fine-grained per-buffer object and per-context lockings scheme. Currently only
-the ``msm`` and `i915` drivers use ``struct_mutex``.
-
-Contact: Daniel Vetter, respective driver maintainers
-
-Level: Advanced
 
 Move Buffer Object Locking to dma_resv_lock()
 ---------------------------------------------
@@ -220,19 +227,6 @@ Contact: Maintainer of the driver you plan to convert
 
 Level: Intermediate
 
-Convert drivers to use drm_fbdev_generic_setup()
-------------------------------------------------
-
-Most drivers can use drm_fbdev_generic_setup(). Driver have to implement
-atomic modesetting and GEM vmap support. Historically, generic fbdev emulation
-expected the framebuffer in system memory or system-like memory. By employing
-struct iosys_map, drivers with frambuffers in I/O memory can be supported
-as well.
-
-Contact: Maintainer of the driver you plan to convert
-
-Level: Intermediate
-
 Reimplement functions in drm_fbdev_fb_ops without fbdev
 -------------------------------------------------------
 
@@ -241,7 +235,7 @@ being rewritten without dependencies on the fbdev module. Some of the
 helpers could further benefit from using struct iosys_map instead of
 raw pointers.
 
-Contact: Thomas Zimmermann <tzimmermann@suse.de>, Daniel Vetter
+Contact: Thomas Zimmermann <tzimmermann@suse.de>, Simona Vetter
 
 Level: Advanced
 
@@ -287,7 +281,7 @@ Various hold-ups:
   version of the varios drm_gem_fb_create functions. Maybe called
   drm_gem_fb_create/_with_dirty/_with_funcs as needed.
 
-Contact: Daniel Vetter
+Contact: Simona Vetter
 
 Level: Intermediate
 
@@ -319,7 +313,7 @@ everything after it has done the write-protect/mkwrite trickery:
 
 Might be good to also have some igt testcases for this.
 
-Contact: Daniel Vetter, Noralf Tronnes
+Contact: Simona Vetter, Noralf Tronnes
 
 Level: Advanced
 
@@ -337,8 +331,8 @@ connector register/unregister fixes
 
 Level: Intermediate
 
-Remove load/unload callbacks from all non-DRIVER_LEGACY drivers
----------------------------------------------------------------
+Remove load/unload callbacks
+----------------------------
 
 The load/unload callbacks in struct &drm_driver are very much midlayers, plus
 for historical reasons they get the ordering wrong (and we can't fix that)
@@ -347,10 +341,9 @@ between setting up the &drm_driver structure and calling drm_dev_register().
 - Rework drivers to no longer use the load/unload callbacks, directly coding the
   load/unload sequence into the driver's probe function.
 
-- Once all non-DRIVER_LEGACY drivers are converted, disallow the load/unload
-  callbacks for all modern drivers.
+- Once all drivers are converted, remove the load/unload callbacks.
 
-Contact: Daniel Vetter
+Contact: Simona Vetter
 
 Level: Intermediate
 
@@ -413,7 +406,7 @@ The task is to use struct iosys_map where it makes sense.
 * TTM might benefit from using struct iosys_map internally.
 * Framebuffer copying and blitting helpers should operate on struct iosys_map.
 
-Contact: Thomas Zimmermann <tzimmermann@suse.de>, Christian König, Daniel Vetter
+Contact: Thomas Zimmermann <tzimmermann@suse.de>, Christian König, Simona Vetter
 
 Level: Intermediate
 
@@ -432,14 +425,15 @@ Contact: Thomas Zimmermann <tzimmermann@suse.de>
 
 Level: Intermediate
 
-Request memory regions in all drivers
--------------------------------------
+Request memory regions in all fbdev drivers
+--------------------------------------------
 
-Go through all drivers and add code to request the memory regions that the
-driver uses. This requires adding calls to request_mem_region(),
+Old/ancient fbdev drivers do not request their memory properly.
+Go through these drivers and add code to request the memory regions
+that the driver uses. This requires adding calls to request_mem_region(),
 pci_request_region() or similar functions. Use helpers for managed cleanup
-where possible.
-
+where possible. Problematic areas include hardware that has exclusive ranges
+like VGA. VGA16fb does not request the range as it is expected.
 Drivers are pretty bad at doing this and there used to be conflicts among
 DRM and fbdev drivers. Still, it's the correct thing to do.
 
@@ -460,31 +454,82 @@ Contact: Thomas Zimmermann <tzimmermann@suse.de>
 
 Level: Starter
 
-Clean up checks for already prepared/enabled in panels
-------------------------------------------------------
+Remove disable/unprepare in remove/shutdown in panel-simple and panel-edp
+-------------------------------------------------------------------------
 
-In a whole pile of panel drivers, we have code to make the
-prepare/unprepare/enable/disable callbacks behave as no-ops if they've already
-been called. To get some idea of the duplicated code, try::
+As of commit d2aacaf07395 ("drm/panel: Check for already prepared/enabled in
+drm_panel"), we have a check in the drm_panel core to make sure nobody
+double-calls prepare/enable/disable/unprepare. Eventually that should probably
+be turned into a WARN_ON() or somehow made louder.
 
-  git grep 'if.*>prepared' -- drivers/gpu/drm/panel
-  git grep 'if.*>enabled' -- drivers/gpu/drm/panel
+At the moment, we expect that we may still encounter the warnings in the
+drm_panel core when using panel-simple and panel-edp. Since those panel
+drivers are used with a lot of different DRM modeset drivers they still
+make an extra effort to disable/unprepare the panel themsevles at shutdown
+time. Specifically we could still encounter those warnings if the panel
+driver gets shutdown() _before_ the DRM modeset driver and the DRM modeset
+driver properly calls drm_atomic_helper_shutdown() in its own shutdown()
+callback. Warnings could be avoided in such a case by using something like
+device links to ensure that the panel gets shutdown() after the DRM modeset
+driver.
 
-In the patch ("drm/panel: Check for already prepared/enabled in drm_panel")
-we've moved this check to the core. Now we can most definitely remove the
-check from the individual panels and save a pile of code.
-
-In adition to removing the check from the individual panels, it is believed
-that even the core shouldn't need this check and that should be considered
-an error if other code ever relies on this check. The check in the core
-currently prints a warning whenever something is relying on this check with
-dev_warn(). After a little while, we likely want to promote this to a
-WARN(1) to help encourage folks not to rely on this behavior.
+Once all DRM modeset drivers are known to shutdown properly, the extra
+calls to disable/unprepare in remove/shutdown in panel-simple and panel-edp
+should be removed and this TODO item marked complete.
 
 Contact: Douglas Anderson <dianders@chromium.org>
 
-Level: Starter/Intermediate
+Level: Intermediate
 
+Transition away from using deprecated MIPI DSI functions
+--------------------------------------------------------
+
+There are many functions defined in ``drm_mipi_dsi.c`` which have been
+deprecated. Each deprecated function was deprecated in favor of its `multi`
+variant (e.g. `mipi_dsi_generic_write()` and `mipi_dsi_generic_write_multi()`).
+The `multi` variant of a function includes improved error handling and logic
+which makes it more convenient to make several calls in a row, as most MIPI
+drivers do.
+
+Drivers should be updated to use undeprecated functions. Once all usages of the
+deprecated MIPI DSI functions have been removed, their definitions may be
+removed from ``drm_mipi_dsi.c``.
+
+Contact: Douglas Anderson <dianders@chromium.org>
+
+Level: Starter
+
+Remove devm_drm_put_bridge()
+----------------------------
+
+Due to how the panel bridge handles the drm_bridge object lifetime, special
+care must be taken to dispose of the drm_bridge object when the
+panel_bridge is removed. This is currently managed using
+devm_drm_put_bridge(), but that is an unsafe, temporary workaround. To fix
+that, the DRM panel lifetime needs to be reworked. After the rework is
+done, remove devm_drm_put_bridge() and the TODO in
+drm_panel_bridge_remove().
+
+Contact: Maxime Ripard <mripard@kernel.org>,
+         Luca Ceresoli <luca.ceresoli@bootlin.com>
+
+Level: Intermediate
+
+Convert users of of_drm_find_bridge() to of_drm_find_and_get_bridge()
+---------------------------------------------------------------------
+
+Taking a struct drm_bridge pointer requires getting a reference and putting
+it after disposing of the pointer. Most functions returning a struct
+drm_bridge pointer already call drm_bridge_get() to increment the refcount
+and their users have been updated to call drm_bridge_put() when
+appropriate. of_drm_find_bridge() does not get a reference and it has been
+deprecated in favor of of_drm_find_and_get_bridge() which does, but some
+users still need to be converted.
+
+Contact: Maxime Ripard <mripard@kernel.org>,
+         Luca Ceresoli <luca.ceresoli@bootlin.com>
+
+Level: Intermediate
 
 Core refactorings
 =================
@@ -529,7 +574,7 @@ This is a really varied tasks with lots of little bits and pieces:
   <https://lore.kernel.org/lkml/1446217392-11981-1-git-send-email-alexandru.murtaza@intel.com/>`_
   for some example code that could be reused.
 
-Contact: Daniel Vetter
+Contact: Simona Vetter
 
 Level: Advanced
 
@@ -558,7 +603,7 @@ There's a bunch of issues with it:
   this (together with the drm_minor->drm_device move) would allow us to remove
   debugfs_init.
 
-Contact: Daniel Vetter
+Contact: Simona Vetter
 
 Level: Intermediate
 
@@ -579,7 +624,7 @@ Both these problems can be solved by switching over to drmm_kzalloc(), and the
 various convenience wrappers provided, e.g. drmm_crtc_alloc_with_planes(),
 drmm_universal_plane_alloc(), ... and so on.
 
-Contact: Daniel Vetter
+Contact: Simona Vetter
 
 Level: Intermediate
 
@@ -599,10 +644,47 @@ cache is also tied to &drm_gem_object.import_attach. Meanwhile we paper over
 this problem for USB devices by fishing out the USB host controller device, as
 long as that supports DMA. Otherwise importing can still needlessly fail.
 
-Contact: Thomas Zimmermann <tzimmermann@suse.de>, Daniel Vetter
+Contact: Thomas Zimmermann <tzimmermann@suse.de>, Simona Vetter
 
 Level: Advanced
 
+Implement a new DUMB_CREATE2 ioctl
+----------------------------------
+
+The current DUMB_CREATE ioctl is not well defined. Instead of a pixel and
+framebuffer format, it only accepts a color mode of vague semantics. Assuming
+a linear framebuffer, the color mode gives an idea of the supported pixel
+format. But userspace effectively has to guess the correct values. It really
+only works reliably with framebuffers in XRGB8888. Userspace has begun to
+workaround these limitations by computing arbitrary format's buffer sizes and
+calculating their sizes in terms of XRGB8888 pixels.
+
+One possible solution is a new ioctl DUMB_CREATE2. It should accept a DRM
+format and a format modifier to resolve the color mode's ambiguity. As
+framebuffers can be multi-planar, the new ioctl has to return the buffer size,
+pitch and GEM handle for each individual color plane.
+
+In the first step, the new ioctl can be limited to the current features of
+the existing DUMB_CREATE. Individual drivers can then be extended to support
+multi-planar formats. Rockchip might require this and would be a good candidate.
+
+It might also be helpful to userspace to query information about the size of
+a potential buffer, if allocated. Userspace would supply geometry and format;
+the kernel would return minimal allocation sizes and scanline pitch. There is
+interest to allocate that memory from another device and provide it to the
+DRM driver (say via dma-buf).
+
+Another requested feature is the ability to allocate a buffer by size, without
+format. Accelators use this for their buffer allocation and it could likely be
+generalized.
+
+In addition to the kernel implementation, there must be user-space support
+for the new ioctl. There's code in Mesa that might be able to use the new
+call.
+
+Contact: Thomas Zimmermann <tzimmermann@suse.de>
+
+Level: Advanced
 
 Better Testing
 ==============
@@ -618,6 +700,23 @@ A good candidate for the first unit tests are the format-conversion helpers in
 ``drm_format_helper.c``.
 
 Contact: Javier Martinez Canillas <javierm@redhat.com>
+
+Level: Intermediate
+
+Clean up and document former selftests suites
+---------------------------------------------
+
+Some KUnit test suites (drm_buddy, drm_cmdline_parser, drm_damage_helper,
+drm_format, drm_framebuffer, drm_dp_mst_helper, drm_mm, drm_plane_helper and
+drm_rect) are former selftests suites that have been converted over when KUnit
+was first introduced.
+
+These suites were fairly undocumented, and with different goals than what unit
+tests can be. Trying to identify what each test in these suites actually test
+for, whether that makes sense for a unit test, and either remove it if it
+doesn't or document it if it does would be of great help.
+
+Contact: Maxime Ripard <mripard@kernel.org>
 
 Level: Intermediate
 
@@ -663,7 +762,7 @@ Plan to fix this:
 2. In all, only look at one of the three status bits set by the above helpers.
 3. Remove the other two status bits.
 
-Contact: Daniel Vetter
+Contact: Simona Vetter
 
 Level: Intermediate
 
@@ -764,6 +863,132 @@ multiple panels really should build on top of this new KMS property.
 Contact: Hans de Goede
 
 Level: Advanced
+
+Buffer age or other damage accumulation algorithm for buffer damage
+===================================================================
+
+Drivers that do per-buffer uploads, need a buffer damage handling (rather than
+frame damage like drivers that do per-plane or per-CRTC uploads), but there is
+no support to get the buffer age or any other damage accumulation algorithm.
+
+For this reason, the damage helpers just fallback to a full plane update if the
+framebuffer attached to a plane has changed since the last page-flip. Drivers
+set &drm_plane_state.ignore_damage_clips to true as indication to
+drm_atomic_helper_damage_iter_init() and drm_atomic_helper_damage_iter_next()
+helpers that the damage clips should be ignored.
+
+This should be improved to get damage tracking properly working on drivers that
+do per-buffer uploads.
+
+More information about damage tracking and references to learning materials can
+be found in :ref:`damage_tracking_properties`.
+
+Contact: Javier Martinez Canillas <javierm@redhat.com>
+
+Level: Advanced
+
+Querying errors from drm_syncobj
+================================
+
+The drm_syncobj container can be used by driver independent code to signal
+complection of submission.
+
+One minor feature still missing is a generic DRM IOCTL to query the error
+status of binary and timeline drm_syncobj.
+
+This was already improved by implementing the necessary kernel interface
+(patches are on the dri-devel mailing list) but adding support for that in the
+userspace stack is still missing.
+
+Contact: Christian König, Michel Dänzer
+
+Level: Starter
+
+DRM GPU Scheduler
+=================
+
+Provide a universal successor for drm_sched_resubmit_jobs()
+-----------------------------------------------------------
+
+drm_sched_resubmit_jobs() is deprecated. Main reason being that it leads to
+reinitializing dma_fences. See that function's docu for details. The better
+approach for valid resubmissions by amdgpu and Xe is (apparently) to figure out
+which job (and, through association: which entity) caused the hang. Then, the
+job's buffer data, together with all other jobs' buffer data currently in the
+same hardware ring, must be invalidated. This can for example be done by
+overwriting it. amdgpu currently determines which jobs are in the ring and need
+to be overwritten by keeping copies of the job. Xe obtains that information by
+directly accessing drm_sched's pending_list.
+
+Tasks:
+
+1. implement scheduler functionality through which the driver can obtain the
+   information which *broken* jobs are currently in the hardware ring.
+2. Such infrastructure would then typically be used in
+   drm_sched_backend_ops.timedout_job(). Document that.
+3. Port a driver as first user.
+4. Document the new alternative in the docu of deprecated
+   drm_sched_resubmit_jobs().
+
+Contact: Christian König <christian.koenig@amd.com>
+         Philipp Stanner <phasta@kernel.org>
+
+Level: Advanced
+
+Add locking for runqueues
+-------------------------
+
+There is an old FIXME by Sima in include/drm/gpu_scheduler.h. It details that
+struct drm_sched_rq is read at many places without any locks, not even with a
+READ_ONCE. At XDC 2025 no one could really tell why that is the case, whether
+locks are needed and whether they could be added. (But for real, that should
+probably be locked!). Check whether it's possible to add locks everywhere, and
+do so if yes.
+
+Contact: Philipp Stanner <phasta@kernel.org>
+
+Level: Intermediate
+
+Replace the lockless queue with a locked list
+---------------------------------------------
+
+drm_sched is the only user in the entire kernel of a special lockless queue, the
+spsc_queue. This queue utilizes:
+
+- preempt_disable()
+- atomic instructions
+- memory barriers
+- ACCESS_ONCE()
+
+whereas a conventional spinlock utilizes:
+
+- preempt_disable()
+- 1 atomic instruction for taking / releasing the lock
+- memory barriers
+
+Moreover, drm_sched_entity_push_job(), the only user of spsc_queue_push(), has
+to take a lock in some situations anyways and calls to it are often serialized
+with a driver lock.
+
+It is, thus, highly questionable whether the lockless queue grants any advantage
+at all. Considering that its internals are not well documented and its correctness
+is not formally proven, it seems desirable to replace the queue with a mere list
+or hlist that is protected by a spinlock.
+
+Tasks:
+
+- Replace the spsc_queue in drm/sched (and those who might access the scheduler's
+  internal queue) with a spinlock + (h)list.
+- Ideally, check with some micro benchmarks and real world tests (preferably
+  with amdgpu) for relevant performance regressions.
+- Remove the spsc_queue from the kernel altogether.
+
+Contact:
+
+- Philipp Stanner <phasta@kernel.org>
+- Christian König <christian.koenig@amd.com>
+
+Level: Beginner
 
 Outside DRM
 ===========

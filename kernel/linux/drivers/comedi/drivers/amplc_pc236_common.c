@@ -147,7 +147,7 @@ int amplc_pc236_common_attach(struct comedi_device *dev, unsigned long iobase,
 
 	s = &dev->subdevices[0];
 	/* digital i/o subdevice (8255) */
-	ret = subdev_8255_init(dev, s, NULL, 0x00);
+	ret = subdev_8255_io_init(dev, s, 0x00);
 	if (ret)
 		return ret;
 
@@ -175,17 +175,6 @@ int amplc_pc236_common_attach(struct comedi_device *dev, unsigned long iobase,
 	return 0;
 }
 EXPORT_SYMBOL_GPL(amplc_pc236_common_attach);
-
-static int __init amplc_pc236_common_init(void)
-{
-	return 0;
-}
-module_init(amplc_pc236_common_init);
-
-static void __exit amplc_pc236_common_exit(void)
-{
-}
-module_exit(amplc_pc236_common_exit);
 
 MODULE_AUTHOR("Comedi https://www.comedi.org");
 MODULE_DESCRIPTION("Comedi helper for amplc_pc236 and amplc_pci236");

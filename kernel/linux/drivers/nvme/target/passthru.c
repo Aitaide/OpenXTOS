@@ -13,7 +13,7 @@
 #include "../host/nvme.h"
 #include "nvmet.h"
 
-MODULE_IMPORT_NS(NVME_TARGET_PASSTHRU);
+MODULE_IMPORT_NS("NVME_TARGET_PASSTHRU");
 
 /*
  * xarray to maintain one passthru subsystem per nvme controller.
@@ -53,13 +53,22 @@ static u16 nvmet_passthru_override_id_descs(struct nvmet_req *req)
 	for (pos = 0; pos < NVME_IDENTIFY_DATA_SIZE; pos += len) {
 		struct nvme_ns_id_desc *cur = data + pos;
 
+		if (pos + sizeof(*cur) > NVME_IDENTIFY_DATA_SIZE)
+			break;
+
 		if (cur->nidl == 0)
 			break;
+
 		if (cur->nidt == NVME_NIDT_CSI) {
+			if (pos + sizeof(*cur) + NVME_NIDT_CSI_LEN >
+						NVME_IDENTIFY_DATA_SIZE)
+				break;
+
 			memcpy(&csi, cur + 1, NVME_NIDT_CSI_LEN);
 			csi_seen = true;
 			break;
 		}
+
 		len = sizeof(struct nvme_ns_id_desc) + cur->nidl;
 	}
 
@@ -86,7 +95,7 @@ static u16 nvmet_passthru_override_id_ctrl(struct nvmet_req *req)
 	unsigned int max_hw_sectors;
 	int page_shift;
 
-	id = kzalloc(sizeof(*id), GFP_KERNEL);
+	id = kzalloc_obj(*id);
 	if (!id)
 		return NVME_SC_INTERNAL;
 
@@ -99,14 +108,14 @@ static u16 nvmet_passthru_override_id_ctrl(struct nvmet_req *req)
 
 	/*
 	 * The passthru NVMe driver may have a limit on the number of segments
-	 * which depends on the host's memory fragementation. To solve this,
+	 * which depends on the host's memory fragmentation. To solve this,
 	 * ensure mdts is limited to the pages equal to the number of segments.
 	 */
 	max_hw_sectors = min_not_zero(pctrl->max_segments << PAGE_SECTORS_SHIFT,
 				      pctrl->max_hw_sectors);
 
 	/*
-	 * nvmet_passthru_map_sg is limitted to using a single bio so limit
+	 * nvmet_passthru_map_sg is limited to using a single bio so limit
 	 * the mdts based on BIO_MAX_VECS as well
 	 */
 	max_hw_sectors = min_not_zero(BIO_MAX_VECS << PAGE_SECTORS_SHIFT,
@@ -132,7 +141,7 @@ static u16 nvmet_passthru_override_id_ctrl(struct nvmet_req *req)
 
 	id->sqes = min_t(__u8, ((0x6 << 4) | 0x6), id->sqes);
 	id->cqes = min_t(__u8, ((0x4 << 4) | 0x4), id->cqes);
-	id->maxcmd = cpu_to_le16(NVMET_MAX_CMD);
+	id->maxcmd = cpu_to_le16(NVMET_MAX_CMD(ctrl));
 
 	/* don't support fuse commands */
 	id->fuses = 0;
@@ -147,10 +156,10 @@ static u16 nvmet_passthru_override_id_ctrl(struct nvmet_req *req)
 	 * When passthru controller is setup using nvme-loop transport it will
 	 * export the passthru ctrl subsysnqn (PCIe NVMe ctrl) and will fail in
 	 * the nvme/host/core.c in the nvme_init_subsystem()->nvme_active_ctrl()
-	 * code path with duplicate ctr subsynqn. In order to prevent that we
+	 * code path with duplicate ctrl subsysnqn. In order to prevent that we
 	 * mask the passthru-ctrl subsysnqn with the target ctrl subsysnqn.
 	 */
-	memcpy(id->subnqn, ctrl->subsysnqn, sizeof(id->subnqn));
+	strscpy(id->subnqn, ctrl->subsys->subsysnqn, sizeof(id->subnqn));
 
 	/* use fabric id-ctrl values */
 	id->ioccsz = cpu_to_le32((sizeof(struct nvme_command) +
@@ -178,7 +187,7 @@ static u16 nvmet_passthru_override_id_ns(struct nvmet_req *req)
 	struct nvme_id_ns *id;
 	int i;
 
-	id = kzalloc(sizeof(*id), GFP_KERNEL);
+	id = kzalloc_obj(*id);
 	if (!id)
 		return NVME_SC_INTERNAL;
 
@@ -226,13 +235,13 @@ static void nvmet_passthru_execute_cmd_work(struct work_struct *w)
 	    req->cmd->common.opcode == nvme_admin_identify) {
 		switch (req->cmd->identify.cns) {
 		case NVME_ID_CNS_CTRL:
-			nvmet_passthru_override_id_ctrl(req);
+			status = nvmet_passthru_override_id_ctrl(req);
 			break;
 		case NVME_ID_CNS_NS:
-			nvmet_passthru_override_id_ns(req);
+			status = nvmet_passthru_override_id_ns(req);
 			break;
 		case NVME_ID_CNS_NS_DESC_LIST:
-			nvmet_passthru_override_id_descs(req);
+			status = nvmet_passthru_override_id_descs(req);
 			break;
 		}
 	} else if (status < 0)
@@ -247,7 +256,8 @@ static void nvmet_passthru_execute_cmd_work(struct work_struct *w)
 }
 
 static enum rq_end_io_ret nvmet_passthru_req_done(struct request *rq,
-						  blk_status_t blk_status)
+						  blk_status_t blk_status,
+						  const struct io_comp_batch *iob)
 {
 	struct nvmet_req *req = rq->end_io_data;
 
@@ -261,6 +271,7 @@ static int nvmet_passthru_map_sg(struct nvmet_req *req, struct request *rq)
 {
 	struct scatterlist *sg;
 	struct bio *bio;
+	int ret = -EINVAL;
 	int i;
 
 	if (req->sg_cnt > BIO_MAX_VECS)
@@ -277,16 +288,19 @@ static int nvmet_passthru_map_sg(struct nvmet_req *req, struct request *rq)
 	}
 
 	for_each_sg(req->sg, sg, req->sg_cnt, i) {
-		if (bio_add_pc_page(rq->q, bio, sg_page(sg), sg->length,
-				    sg->offset) < sg->length) {
-			nvmet_req_bio_put(req, bio);
-			return -EINVAL;
-		}
+		if (bio_add_page(bio, sg_page(sg), sg->length, sg->offset) <
+				sg->length)
+			goto out_bio_put;
 	}
 
-	blk_rq_bio_prep(rq, bio, req->sg_cnt);
-
+	ret = blk_rq_append_bio(rq, bio);
+	if (ret)
+		goto out_bio_put;
 	return 0;
+
+out_bio_put:
+	nvmet_req_bio_put(req, bio);
+	return ret;
 }
 
 static void nvmet_passthru_execute_cmd(struct nvmet_req *req)
@@ -306,7 +320,7 @@ static void nvmet_passthru_execute_cmd(struct nvmet_req *req)
 		ns = nvme_find_get_ns(ctrl, nsid);
 		if (unlikely(!ns)) {
 			pr_err("failed to get passthru ns nsid:%u\n", nsid);
-			status = NVME_SC_INVALID_NS | NVME_SC_DNR;
+			status = NVME_SC_INVALID_NS | NVME_STATUS_DNR;
 			goto out;
 		}
 
@@ -426,7 +440,7 @@ u16 nvmet_parse_passthru_io_cmd(struct nvmet_req *req)
 		 * emulated in the future if regular targets grow support for
 		 * this feature.
 		 */
-		return NVME_SC_INVALID_OPCODE | NVME_SC_DNR;
+		return NVME_SC_INVALID_OPCODE | NVME_STATUS_DNR;
 	}
 
 	return nvmet_setup_passthru_command(req);
@@ -478,7 +492,7 @@ static u16 nvmet_passthru_get_set_features(struct nvmet_req *req)
 	case NVME_FEAT_RESV_PERSIST:
 		/* No reservations, see nvmet_parse_passthru_io_cmd() */
 	default:
-		return NVME_SC_INVALID_OPCODE | NVME_SC_DNR;
+		return NVME_SC_INVALID_OPCODE | NVME_STATUS_DNR;
 	}
 }
 
@@ -529,16 +543,14 @@ u16 nvmet_parse_passthru_admin_cmd(struct nvmet_req *req)
 		case NVME_FEAT_HOST_ID:
 			req->execute = nvmet_execute_get_features;
 			return NVME_SC_SUCCESS;
+		case NVME_FEAT_FDP:
+			return nvmet_setup_passthru_command(req);
 		default:
 			return nvmet_passthru_get_set_features(req);
 		}
 		break;
 	case nvme_admin_identify:
 		switch (req->cmd->identify.cns) {
-		case NVME_ID_CNS_CTRL:
-			req->execute = nvmet_passthru_execute_cmd;
-			req->p.use_workqueue = true;
-			return NVME_SC_SUCCESS;
 		case NVME_ID_CNS_CS_CTRL:
 			switch (req->cmd->identify.csi) {
 			case NVME_CSI_ZNS:
@@ -546,8 +558,10 @@ u16 nvmet_parse_passthru_admin_cmd(struct nvmet_req *req)
 				req->p.use_workqueue = true;
 				return NVME_SC_SUCCESS;
 			}
-			return NVME_SC_INVALID_OPCODE | NVME_SC_DNR;
+			return NVME_SC_INVALID_OPCODE | NVME_STATUS_DNR;
+		case NVME_ID_CNS_CTRL:
 		case NVME_ID_CNS_NS:
+		case NVME_ID_CNS_NS_DESC_LIST:
 			req->execute = nvmet_passthru_execute_cmd;
 			req->p.use_workqueue = true;
 			return NVME_SC_SUCCESS;
@@ -558,7 +572,7 @@ u16 nvmet_parse_passthru_admin_cmd(struct nvmet_req *req)
 				req->p.use_workqueue = true;
 				return NVME_SC_SUCCESS;
 			}
-			return NVME_SC_INVALID_OPCODE | NVME_SC_DNR;
+			return NVME_SC_INVALID_OPCODE | NVME_STATUS_DNR;
 		default:
 			return nvmet_setup_passthru_command(req);
 		}
@@ -602,7 +616,7 @@ int nvmet_passthru_ctrl_enable(struct nvmet_subsys *subsys)
 		goto out_put_file;
 	}
 
-	old = xa_cmpxchg(&passthru_subsystems, ctrl->cntlid, NULL,
+	old = xa_cmpxchg(&passthru_subsystems, ctrl->instance, NULL,
 			 subsys, GFP_KERNEL);
 	if (xa_is_err(old)) {
 		ret = xa_err(old);
@@ -635,7 +649,7 @@ out_unlock:
 static void __nvmet_passthru_ctrl_disable(struct nvmet_subsys *subsys)
 {
 	if (subsys->passthru_ctrl) {
-		xa_erase(&passthru_subsystems, subsys->passthru_ctrl->cntlid);
+		xa_erase(&passthru_subsystems, subsys->passthru_ctrl->instance);
 		module_put(subsys->passthru_ctrl->ops->module);
 		nvme_put_ctrl(subsys->passthru_ctrl);
 	}

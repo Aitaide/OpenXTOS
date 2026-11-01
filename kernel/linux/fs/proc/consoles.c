@@ -28,7 +28,6 @@ static int show_console_dev(struct seq_file *m, void *v)
 	};
 	char flags[ARRAY_SIZE(con_flags) + 1];
 	struct console *con = v;
-	char con_write = '-';
 	unsigned int a;
 	dev_t dev = 0;
 
@@ -59,14 +58,8 @@ static int show_console_dev(struct seq_file *m, void *v)
 	seq_setwidth(m, 21 - 1);
 	seq_printf(m, "%s%d", con->name, con->index);
 	seq_pad(m, ' ');
-	if (con->flags & CON_NBCON) {
-		if (con->write_atomic || con->write_thread)
-			con_write = 'W';
-	} else {
-		if (con->write)
-			con_write = 'W';
-	}
-	seq_printf(m, "%c%c%c (%s)", con->read ? 'R' : '-', con_write,
+	seq_printf(m, "%c%c%c (%s)", con->read ? 'R' : '-',
+		   ((con->flags & CON_NBCON) || con->write) ? 'W' : '-',
 		   con->unblank ? 'U' : '-', flags);
 	if (dev)
 		seq_printf(m, " %4d:%d", MAJOR(dev), MINOR(dev));
@@ -76,6 +69,7 @@ static int show_console_dev(struct seq_file *m, void *v)
 }
 
 static void *c_start(struct seq_file *m, loff_t *pos)
+	__acquires(&console_mutex)
 {
 	struct console *con;
 	loff_t off = 0;
@@ -102,6 +96,7 @@ static void *c_next(struct seq_file *m, void *v, loff_t *pos)
 }
 
 static void c_stop(struct seq_file *m, void *v)
+	__releases(&console_mutex)
 {
 	console_list_unlock();
 }

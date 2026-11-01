@@ -186,8 +186,8 @@ static int rt4831_regulator_probe(struct platform_device *pdev)
 }
 
 static const struct platform_device_id rt4831_regulator_match[] = {
-	{ "rt4831-regulator", 0 },
-	{}
+	{ .name = "rt4831-regulator" },
+	{ }
 };
 MODULE_DEVICE_TABLE(platform, rt4831_regulator_match);
 
@@ -202,4 +202,5 @@ static struct platform_driver rt4831_regulator_driver = {
 module_platform_driver(rt4831_regulator_driver);
 
 MODULE_AUTHOR("ChiYuan Huang <cy_huang@richtek.com>");
+MODULE_DESCRIPTION("Richtek RT4831 DSV Regulators driver");
 MODULE_LICENSE("GPL v2");

@@ -59,24 +59,50 @@
 
 #define to_amdgpu_device(x) (container_of(x, struct amdgpu_device, pm.smu_i2c))
 
-#define FEATURE_MASK(feature) (1ULL << feature)
-#define SMC_DPM_FEATURE ( \
-	FEATURE_MASK(FEATURE_DPM_GFXCLK_BIT)     | \
-	FEATURE_MASK(FEATURE_DPM_UCLK_BIT)	 | \
-	FEATURE_MASK(FEATURE_DPM_LINK_BIT)       | \
-	FEATURE_MASK(FEATURE_DPM_SOCCLK_BIT)     | \
-	FEATURE_MASK(FEATURE_DPM_FCLK_BIT)	 | \
-	FEATURE_MASK(FEATURE_DPM_MP0CLK_BIT))
+static void smu_v13_0_7_get_od_setting_limits(struct smu_context *smu,
+					      int od_feature_bit,
+					      int32_t *min, int32_t *max);
+static int smu_v13_0_7_init_ppt_limits(struct smu_context *smu);
+
+static const struct smu_feature_bits smu_v13_0_7_dpm_features = {
+	.bits = {
+		SMU_FEATURE_BIT_INIT(FEATURE_DPM_GFXCLK_BIT),
+		SMU_FEATURE_BIT_INIT(FEATURE_DPM_UCLK_BIT),
+		SMU_FEATURE_BIT_INIT(FEATURE_DPM_LINK_BIT),
+		SMU_FEATURE_BIT_INIT(FEATURE_DPM_SOCCLK_BIT),
+		SMU_FEATURE_BIT_INIT(FEATURE_DPM_FCLK_BIT),
+		SMU_FEATURE_BIT_INIT(FEATURE_DPM_MP0CLK_BIT)
+	}
+};
 
 #define smnMP1_FIRMWARE_FLAGS_SMU_13_0_7   0x3b10028
 
 #define MP0_MP1_DATA_REGION_SIZE_COMBOPPTABLE	0x4000
+
+#define mmMP1_SMN_C2PMSG_75                                                                            0x028b
+#define mmMP1_SMN_C2PMSG_75_BASE_IDX                                                                   0
+
+#define mmMP1_SMN_C2PMSG_53                                                                            0x0275
+#define mmMP1_SMN_C2PMSG_53_BASE_IDX                                                                   0
+
+#define mmMP1_SMN_C2PMSG_54                                                                            0x0276
+#define mmMP1_SMN_C2PMSG_54_BASE_IDX                                                                   0
+
+#define DEBUGSMC_MSG_Mode1Reset    2
 
 #define PP_OD_FEATURE_GFXCLK_FMIN			0
 #define PP_OD_FEATURE_GFXCLK_FMAX			1
 #define PP_OD_FEATURE_UCLK_FMIN				2
 #define PP_OD_FEATURE_UCLK_FMAX				3
 #define PP_OD_FEATURE_GFX_VF_CURVE			4
+#define PP_OD_FEATURE_FAN_CURVE_TEMP			5
+#define PP_OD_FEATURE_FAN_CURVE_PWM			6
+#define PP_OD_FEATURE_FAN_ACOUSTIC_LIMIT		7
+#define PP_OD_FEATURE_FAN_ACOUSTIC_TARGET		8
+#define PP_OD_FEATURE_FAN_TARGET_TEMPERATURE		9
+#define PP_OD_FEATURE_FAN_MINIMUM_PWM			10
+#define PP_OD_FEATURE_FAN_ZERO_RPM_ENABLE		11
+#define PP_OD_FEATURE_FAN_ZERO_RPM_STOP_TEMP		12
 
 #define LINK_SPEED_MAX					3
 
@@ -134,6 +160,7 @@ static struct cmn2asic_msg_mapping smu_v13_0_7_message_map[SMU_MSG_MAX_COUNT] = 
 	MSG_MAP(AllowGpo,			PPSMC_MSG_SetGpoAllow,           0),
 	MSG_MAP(GetPptLimit,			PPSMC_MSG_GetPptLimit,                 0),
 	MSG_MAP(NotifyPowerSource,		PPSMC_MSG_NotifyPowerSource,           0),
+	MSG_MAP(EnableUCLKShadow,		PPSMC_MSG_EnableUCLKShadow,            0),
 };
 
 static struct cmn2asic_mapping smu_v13_0_7_clk_map[SMU_CLK_COUNT] = {
@@ -147,6 +174,7 @@ static struct cmn2asic_mapping smu_v13_0_7_clk_map[SMU_CLK_COUNT] = {
 	CLK_MAP(VCLK1,		PPCLK_VCLK_1),
 	CLK_MAP(DCLK,		PPCLK_DCLK_0),
 	CLK_MAP(DCLK1,		PPCLK_DCLK_1),
+	CLK_MAP(DCEFCLK,	PPCLK_DCFCLK),
 };
 
 static struct cmn2asic_mapping smu_v13_0_7_feature_mask_map[SMU_FEATURE_COUNT] = {
@@ -215,6 +243,7 @@ static struct cmn2asic_mapping smu_v13_0_7_table_map[SMU_TABLE_COUNT] = {
 	TAB_MAP(ACTIVITY_MONITOR_COEFF),
 	[SMU_TABLE_COMBO_PPTABLE] = {1, TABLE_COMBO_PPTABLE},
 	TAB_MAP(OVERDRIVE),
+	TAB_MAP(WIFIBAND),
 };
 
 static struct cmn2asic_mapping smu_v13_0_7_pwr_src_map[SMU_POWER_SOURCE_COUNT] = {
@@ -254,71 +283,67 @@ static const uint8_t smu_v13_0_7_throttler_map[] = {
 };
 
 static int
-smu_v13_0_7_get_allowed_feature_mask(struct smu_context *smu,
-				  uint32_t *feature_mask, uint32_t num)
+smu_v13_0_7_init_allowed_features(struct smu_context *smu)
 {
 	struct amdgpu_device *adev = smu->adev;
 
-	if (num > 2)
-		return -EINVAL;
+	smu_feature_list_clear_all(smu, SMU_FEATURE_LIST_ALLOWED);
 
-	memset(feature_mask, 0, sizeof(uint32_t) * num);
-
-	*(uint64_t *)feature_mask |= FEATURE_MASK(FEATURE_FW_DATA_READ_BIT);
+	smu_feature_list_set_bit(smu, SMU_FEATURE_LIST_ALLOWED, FEATURE_FW_DATA_READ_BIT);
 
 	if (adev->pm.pp_feature & PP_SCLK_DPM_MASK) {
-		*(uint64_t *)feature_mask |= FEATURE_MASK(FEATURE_DPM_GFXCLK_BIT);
-		*(uint64_t *)feature_mask |= FEATURE_MASK(FEATURE_GFX_IMU_BIT);
-		*(uint64_t *)feature_mask |= FEATURE_MASK(FEATURE_DPM_GFX_POWER_OPTIMIZER_BIT);
+		smu_feature_list_set_bit(smu, SMU_FEATURE_LIST_ALLOWED, FEATURE_DPM_GFXCLK_BIT);
+		smu_feature_list_set_bit(smu, SMU_FEATURE_LIST_ALLOWED, FEATURE_GFX_IMU_BIT);
+		smu_feature_list_set_bit(smu, SMU_FEATURE_LIST_ALLOWED, FEATURE_DPM_GFX_POWER_OPTIMIZER_BIT);
 	}
 
 	if (adev->pm.pp_feature & PP_GFXOFF_MASK)
-		*(uint64_t *)feature_mask |= FEATURE_MASK(FEATURE_GFXOFF_BIT);
+		smu_feature_list_set_bit(smu, SMU_FEATURE_LIST_ALLOWED, FEATURE_GFXOFF_BIT);
 
 	if (adev->pm.pp_feature & PP_MCLK_DPM_MASK) {
-		*(uint64_t *)feature_mask |= FEATURE_MASK(FEATURE_DPM_UCLK_BIT);
-		*(uint64_t *)feature_mask |= FEATURE_MASK(FEATURE_DPM_FCLK_BIT);
-		*(uint64_t *)feature_mask |= FEATURE_MASK(FEATURE_VMEMP_SCALING_BIT);
-		*(uint64_t *)feature_mask |= FEATURE_MASK(FEATURE_VDDIO_MEM_SCALING_BIT);
+		smu_feature_list_set_bit(smu, SMU_FEATURE_LIST_ALLOWED, FEATURE_DPM_UCLK_BIT);
+		smu_feature_list_set_bit(smu, SMU_FEATURE_LIST_ALLOWED, FEATURE_DPM_FCLK_BIT);
+		smu_feature_list_set_bit(smu, SMU_FEATURE_LIST_ALLOWED, FEATURE_VMEMP_SCALING_BIT);
+		smu_feature_list_set_bit(smu, SMU_FEATURE_LIST_ALLOWED, FEATURE_VDDIO_MEM_SCALING_BIT);
 	}
 
-	*(uint64_t *)feature_mask |= FEATURE_MASK(FEATURE_DPM_SOCCLK_BIT);
+	smu_feature_list_set_bit(smu, SMU_FEATURE_LIST_ALLOWED, FEATURE_DPM_SOCCLK_BIT);
 
 	if (adev->pm.pp_feature & PP_PCIE_DPM_MASK)
-		*(uint64_t *)feature_mask |= FEATURE_MASK(FEATURE_DPM_LINK_BIT);
+		smu_feature_list_set_bit(smu, SMU_FEATURE_LIST_ALLOWED, FEATURE_DPM_LINK_BIT);
 
 	if (adev->pm.pp_feature & PP_SCLK_DEEP_SLEEP_MASK)
-		*(uint64_t *)feature_mask |= FEATURE_MASK(FEATURE_DS_GFXCLK_BIT);
+		smu_feature_list_set_bit(smu, SMU_FEATURE_LIST_ALLOWED, FEATURE_DS_GFXCLK_BIT);
 
 	if (adev->pm.pp_feature & PP_ULV_MASK)
-		*(uint64_t *)feature_mask |= FEATURE_MASK(FEATURE_GFX_ULV_BIT);
+		smu_feature_list_set_bit(smu, SMU_FEATURE_LIST_ALLOWED, FEATURE_GFX_ULV_BIT);
 
-	*(uint64_t *)feature_mask |= FEATURE_MASK(FEATURE_DS_LCLK_BIT);
-	*(uint64_t *)feature_mask |= FEATURE_MASK(FEATURE_DPM_MP0CLK_BIT);
-	*(uint64_t *)feature_mask |= FEATURE_MASK(FEATURE_MM_DPM_BIT);
-	*(uint64_t *)feature_mask |= FEATURE_MASK(FEATURE_DS_VCN_BIT);
-	*(uint64_t *)feature_mask |= FEATURE_MASK(FEATURE_DS_FCLK_BIT);
-	*(uint64_t *)feature_mask |= FEATURE_MASK(FEATURE_DF_CSTATE_BIT);
-	*(uint64_t *)feature_mask |= FEATURE_MASK(FEATURE_THROTTLERS_BIT);
-	*(uint64_t *)feature_mask |= FEATURE_MASK(FEATURE_VR0HOT_BIT);
-	*(uint64_t *)feature_mask |= FEATURE_MASK(FEATURE_FW_CTF_BIT);
-	*(uint64_t *)feature_mask |= FEATURE_MASK(FEATURE_FAN_CONTROL_BIT);
-	*(uint64_t *)feature_mask |= FEATURE_MASK(FEATURE_DS_SOCCLK_BIT);
-	*(uint64_t *)feature_mask |= FEATURE_MASK(FEATURE_GFXCLK_SPREAD_SPECTRUM_BIT);
-	*(uint64_t *)feature_mask |= FEATURE_MASK(FEATURE_MEM_TEMP_READ_BIT);
-	*(uint64_t *)feature_mask |= FEATURE_MASK(FEATURE_FW_DSTATE_BIT);
-	*(uint64_t *)feature_mask |= FEATURE_MASK(FEATURE_SOC_MPCLK_DS_BIT);
-	*(uint64_t *)feature_mask |= FEATURE_MASK(FEATURE_BACO_MPCLK_DS_BIT);
-	*(uint64_t *)feature_mask |= FEATURE_MASK(FEATURE_GFX_PCC_DFLL_BIT);
-	*(uint64_t *)feature_mask |= FEATURE_MASK(FEATURE_SOC_CG_BIT);
-	*(uint64_t *)feature_mask |= FEATURE_MASK(FEATURE_BACO_BIT);
+	smu_feature_list_set_bit(smu, SMU_FEATURE_LIST_ALLOWED, FEATURE_DS_LCLK_BIT);
+	smu_feature_list_set_bit(smu, SMU_FEATURE_LIST_ALLOWED, FEATURE_DPM_MP0CLK_BIT);
+	smu_feature_list_set_bit(smu, SMU_FEATURE_LIST_ALLOWED, FEATURE_MM_DPM_BIT);
+	smu_feature_list_set_bit(smu, SMU_FEATURE_LIST_ALLOWED, FEATURE_DS_VCN_BIT);
+	smu_feature_list_set_bit(smu, SMU_FEATURE_LIST_ALLOWED, FEATURE_DS_FCLK_BIT);
+	smu_feature_list_set_bit(smu, SMU_FEATURE_LIST_ALLOWED, FEATURE_DF_CSTATE_BIT);
+	smu_feature_list_set_bit(smu, SMU_FEATURE_LIST_ALLOWED, FEATURE_THROTTLERS_BIT);
+	smu_feature_list_set_bit(smu, SMU_FEATURE_LIST_ALLOWED, FEATURE_VR0HOT_BIT);
+	smu_feature_list_set_bit(smu, SMU_FEATURE_LIST_ALLOWED, FEATURE_FW_CTF_BIT);
+	smu_feature_list_set_bit(smu, SMU_FEATURE_LIST_ALLOWED, FEATURE_FAN_CONTROL_BIT);
+	smu_feature_list_set_bit(smu, SMU_FEATURE_LIST_ALLOWED, FEATURE_DS_SOCCLK_BIT);
+	smu_feature_list_set_bit(smu, SMU_FEATURE_LIST_ALLOWED, FEATURE_GFXCLK_SPREAD_SPECTRUM_BIT);
+	smu_feature_list_set_bit(smu, SMU_FEATURE_LIST_ALLOWED, FEATURE_MEM_TEMP_READ_BIT);
+	smu_feature_list_set_bit(smu, SMU_FEATURE_LIST_ALLOWED, FEATURE_FW_DSTATE_BIT);
+	smu_feature_list_set_bit(smu, SMU_FEATURE_LIST_ALLOWED, FEATURE_SOC_MPCLK_DS_BIT);
+	smu_feature_list_set_bit(smu, SMU_FEATURE_LIST_ALLOWED, FEATURE_BACO_MPCLK_DS_BIT);
+	smu_feature_list_set_bit(smu, SMU_FEATURE_LIST_ALLOWED, FEATURE_GFX_PCC_DFLL_BIT);
+	smu_feature_list_set_bit(smu, SMU_FEATURE_LIST_ALLOWED, FEATURE_SOC_CG_BIT);
+	smu_feature_list_set_bit(smu, SMU_FEATURE_LIST_ALLOWED, FEATURE_BACO_BIT);
 
 	if (adev->pm.pp_feature & PP_DCEFCLK_DPM_MASK)
-		*(uint64_t *)feature_mask |= FEATURE_MASK(FEATURE_DPM_DCN_BIT);
+		smu_feature_list_set_bit(smu, SMU_FEATURE_LIST_ALLOWED, FEATURE_DPM_DCN_BIT);
 
 	if ((adev->pg_flags & AMD_PG_SUPPORT_ATHUB) &&
 	    (adev->pg_flags & AMD_PG_SUPPORT_MMHUB))
-		*(uint64_t *)feature_mask |= FEATURE_MASK(FEATURE_ATHUB_MMHUB_PG_BIT);
+		smu_feature_list_set_bit(smu, SMU_FEATURE_LIST_ALLOWED, FEATURE_ATHUB_MMHUB_PG_BIT);
 
 	return 0;
 }
@@ -331,39 +356,34 @@ static int smu_v13_0_7_check_powerplay_table(struct smu_context *smu)
 	struct smu_baco_context *smu_baco = &smu->smu_baco;
 	PPTable_t *smc_pptable = table_context->driver_pptable;
 	BoardTable_t *BoardTable = &smc_pptable->BoardTable;
-#if 0
 	const OverDriveLimits_t * const overdrive_upperlimits =
 				&smc_pptable->SkuTable.OverDriveLimitsBasicMax;
 	const OverDriveLimits_t * const overdrive_lowerlimits =
 				&smc_pptable->SkuTable.OverDriveLimitsMin;
-#endif
 
 	if (powerplay_table->platform_caps & SMU_13_0_7_PP_PLATFORM_CAP_HARDWAREDC)
 		smu->dc_controlled_by_gpio = true;
 
-	if (powerplay_table->platform_caps & SMU_13_0_7_PP_PLATFORM_CAP_BACO ||
-	    powerplay_table->platform_caps & SMU_13_0_7_PP_PLATFORM_CAP_MACO)
+	if (powerplay_table->platform_caps & SMU_13_0_7_PP_PLATFORM_CAP_BACO) {
 		smu_baco->platform_support = true;
 
-	if (smu_baco->platform_support && (BoardTable->HsrEnabled || BoardTable->VddqOffEnabled))
-		smu_baco->maco_support = true;
+		if ((powerplay_table->platform_caps & SMU_13_0_7_PP_PLATFORM_CAP_MACO)
+					&& (BoardTable->HsrEnabled || BoardTable->VddqOffEnabled))
+			smu_baco->maco_support = true;
+	}
 
-#if 0
 	if (!overdrive_lowerlimits->FeatureCtrlMask ||
 	    !overdrive_upperlimits->FeatureCtrlMask)
 		smu->od_enabled = false;
+
+	table_context->thermal_controller_type =
+		powerplay_table->thermal_controller_type;
 
 	/*
 	 * Instead of having its own buffer space and get overdrive_table copied,
 	 * smu->od_settings just points to the actual overdrive_table
 	 */
 	smu->od_settings = &powerplay_table->overdrive_table;
-#else
-	smu->od_enabled = false;
-#endif
-
-	table_context->thermal_controller_type =
-		powerplay_table->thermal_controller_type;
 
 	return 0;
 }
@@ -484,13 +504,14 @@ static int smu_v13_0_7_setup_pptable(struct smu_context *smu)
 	if (ret)
 		return ret;
 
-	return ret;
+	return smu_v13_0_7_init_ppt_limits(smu);
 }
 
 static int smu_v13_0_7_tables_init(struct smu_context *smu)
 {
 	struct smu_table_context *smu_table = &smu->smu_table;
 	struct smu_table *tables = smu_table->tables;
+	int ret;
 
 	SMU_TABLE_INIT(tables, SMU_TABLE_PPTABLE, sizeof(PPTable_t),
 		PAGE_SIZE, AMDGPU_GEM_DOMAIN_VRAM);
@@ -510,25 +531,29 @@ static int smu_v13_0_7_tables_init(struct smu_context *smu)
 		       AMDGPU_GEM_DOMAIN_VRAM);
 	SMU_TABLE_INIT(tables, SMU_TABLE_COMBO_PPTABLE, MP0_MP1_DATA_REGION_SIZE_COMBOPPTABLE,
 			PAGE_SIZE, AMDGPU_GEM_DOMAIN_VRAM);
+	SMU_TABLE_INIT(tables, SMU_TABLE_WIFIBAND,
+		       sizeof(WifiBandEntryTable_t), PAGE_SIZE,
+		       AMDGPU_GEM_DOMAIN_VRAM);
 
-	smu_table->metrics_table = kzalloc(sizeof(SmuMetricsExternal_t), GFP_KERNEL);
+	smu_table->metrics_table = kzalloc_obj(SmuMetricsExternal_t);
 	if (!smu_table->metrics_table)
 		goto err0_out;
 	smu_table->metrics_time = 0;
 
-	smu_table->gpu_metrics_table_size = sizeof(struct gpu_metrics_v1_3);
-	smu_table->gpu_metrics_table = kzalloc(smu_table->gpu_metrics_table_size, GFP_KERNEL);
-	if (!smu_table->gpu_metrics_table)
+	ret = smu_driver_table_init(smu, SMU_DRIVER_TABLE_GPU_METRICS,
+				     sizeof(struct gpu_metrics_v1_3),
+				     SMU_GPU_METRICS_CACHE_INTERVAL);
+	if (ret)
 		goto err1_out;
 
-	smu_table->watermarks_table = kzalloc(sizeof(Watermarks_t), GFP_KERNEL);
+	smu_table->watermarks_table = kzalloc_obj(Watermarks_t);
 	if (!smu_table->watermarks_table)
 		goto err2_out;
 
 	return 0;
 
 err2_out:
-	kfree(smu_table->gpu_metrics_table);
+	smu_driver_table_fini(smu, SMU_DRIVER_TABLE_GPU_METRICS);
 err1_out:
 	kfree(smu_table->metrics_table);
 err0_out:
@@ -539,8 +564,7 @@ static int smu_v13_0_7_allocate_dpm_context(struct smu_context *smu)
 {
 	struct smu_dpm_context *smu_dpm = &smu->smu_dpm;
 
-	smu_dpm->dpm_context = kzalloc(sizeof(struct smu_13_0_dpm_context),
-				       GFP_KERNEL);
+	smu_dpm->dpm_context = kzalloc_obj(struct smu_13_0_dpm_context);
 	if (!smu_dpm->dpm_context)
 		return -ENOMEM;
 
@@ -569,13 +593,12 @@ static int smu_v13_0_7_set_default_dpm_table(struct smu_context *smu)
 	struct smu_13_0_dpm_context *dpm_context = smu->smu_dpm.dpm_context;
 	PPTable_t *driver_ppt = smu->smu_table.driver_pptable;
 	SkuTable_t *skutable = &driver_ppt->SkuTable;
-	struct smu_13_0_dpm_table *dpm_table;
-	struct smu_13_0_pcie_table *pcie_table;
-	uint32_t link_level;
+	struct smu_dpm_table *dpm_table;
 	int ret = 0;
 
 	/* socclk dpm table setup */
 	dpm_table = &dpm_context->dpm_tables.soc_table;
+	dpm_table->clk_type = SMU_SOCCLK;
 	if (smu_cmn_feature_is_enabled(smu, SMU_FEATURE_DPM_SOCCLK_BIT)) {
 		ret = smu_v13_0_set_single_dpm_table(smu,
 						     SMU_SOCCLK,
@@ -586,12 +609,11 @@ static int smu_v13_0_7_set_default_dpm_table(struct smu_context *smu)
 		dpm_table->count = 1;
 		dpm_table->dpm_levels[0].value = smu->smu_table.boot_values.socclk / 100;
 		dpm_table->dpm_levels[0].enabled = true;
-		dpm_table->min = dpm_table->dpm_levels[0].value;
-		dpm_table->max = dpm_table->dpm_levels[0].value;
 	}
 
 	/* gfxclk dpm table setup */
 	dpm_table = &dpm_context->dpm_tables.gfx_table;
+	dpm_table->clk_type = SMU_GFXCLK;
 	if (smu_cmn_feature_is_enabled(smu, SMU_FEATURE_DPM_GFXCLK_BIT)) {
 		ret = smu_v13_0_set_single_dpm_table(smu,
 						     SMU_GFXCLK,
@@ -604,18 +626,16 @@ static int smu_v13_0_7_set_default_dpm_table(struct smu_context *smu)
 			skutable->DriverReportedClocks.GameClockAc)) {
 			dpm_table->dpm_levels[dpm_table->count - 1].value =
 				skutable->DriverReportedClocks.GameClockAc;
-			dpm_table->max = skutable->DriverReportedClocks.GameClockAc;
 		}
 	} else {
 		dpm_table->count = 1;
 		dpm_table->dpm_levels[0].value = smu->smu_table.boot_values.gfxclk / 100;
 		dpm_table->dpm_levels[0].enabled = true;
-		dpm_table->min = dpm_table->dpm_levels[0].value;
-		dpm_table->max = dpm_table->dpm_levels[0].value;
 	}
 
 	/* uclk dpm table setup */
 	dpm_table = &dpm_context->dpm_tables.uclk_table;
+	dpm_table->clk_type = SMU_UCLK;
 	if (smu_cmn_feature_is_enabled(smu, SMU_FEATURE_DPM_UCLK_BIT)) {
 		ret = smu_v13_0_set_single_dpm_table(smu,
 						     SMU_UCLK,
@@ -626,12 +646,11 @@ static int smu_v13_0_7_set_default_dpm_table(struct smu_context *smu)
 		dpm_table->count = 1;
 		dpm_table->dpm_levels[0].value = smu->smu_table.boot_values.uclk / 100;
 		dpm_table->dpm_levels[0].enabled = true;
-		dpm_table->min = dpm_table->dpm_levels[0].value;
-		dpm_table->max = dpm_table->dpm_levels[0].value;
 	}
 
 	/* fclk dpm table setup */
 	dpm_table = &dpm_context->dpm_tables.fclk_table;
+	dpm_table->clk_type = SMU_FCLK;
 	if (smu_cmn_feature_is_enabled(smu, SMU_FEATURE_DPM_FCLK_BIT)) {
 		ret = smu_v13_0_set_single_dpm_table(smu,
 						     SMU_FCLK,
@@ -642,12 +661,11 @@ static int smu_v13_0_7_set_default_dpm_table(struct smu_context *smu)
 		dpm_table->count = 1;
 		dpm_table->dpm_levels[0].value = smu->smu_table.boot_values.fclk / 100;
 		dpm_table->dpm_levels[0].enabled = true;
-		dpm_table->min = dpm_table->dpm_levels[0].value;
-		dpm_table->max = dpm_table->dpm_levels[0].value;
 	}
 
 	/* vclk dpm table setup */
 	dpm_table = &dpm_context->dpm_tables.vclk_table;
+	dpm_table->clk_type = SMU_VCLK;
 	if (smu_cmn_feature_is_enabled(smu, SMU_FEATURE_DPM_VCLK_BIT)) {
 		ret = smu_v13_0_set_single_dpm_table(smu,
 						     SMU_VCLK,
@@ -658,12 +676,11 @@ static int smu_v13_0_7_set_default_dpm_table(struct smu_context *smu)
 		dpm_table->count = 1;
 		dpm_table->dpm_levels[0].value = smu->smu_table.boot_values.vclk / 100;
 		dpm_table->dpm_levels[0].enabled = true;
-		dpm_table->min = dpm_table->dpm_levels[0].value;
-		dpm_table->max = dpm_table->dpm_levels[0].value;
 	}
 
 	/* dclk dpm table setup */
 	dpm_table = &dpm_context->dpm_tables.dclk_table;
+	dpm_table->clk_type = SMU_DCLK;
 	if (smu_cmn_feature_is_enabled(smu, SMU_FEATURE_DPM_DCLK_BIT)) {
 		ret = smu_v13_0_set_single_dpm_table(smu,
 						     SMU_DCLK,
@@ -674,26 +691,21 @@ static int smu_v13_0_7_set_default_dpm_table(struct smu_context *smu)
 		dpm_table->count = 1;
 		dpm_table->dpm_levels[0].value = smu->smu_table.boot_values.dclk / 100;
 		dpm_table->dpm_levels[0].enabled = true;
-		dpm_table->min = dpm_table->dpm_levels[0].value;
-		dpm_table->max = dpm_table->dpm_levels[0].value;
 	}
 
-	/* lclk dpm table setup */
-	pcie_table = &dpm_context->dpm_tables.pcie_table;
-	pcie_table->num_of_link_levels = 0;
-	for (link_level = 0; link_level < NUM_LINK_LEVELS; link_level++) {
-		if (!skutable->PcieGenSpeed[link_level] &&
-		    !skutable->PcieLaneCount[link_level] &&
-		    !skutable->LclkFreq[link_level])
-			continue;
-
-		pcie_table->pcie_gen[pcie_table->num_of_link_levels] =
-					skutable->PcieGenSpeed[link_level];
-		pcie_table->pcie_lane[pcie_table->num_of_link_levels] =
-					skutable->PcieLaneCount[link_level];
-		pcie_table->clk_freq[pcie_table->num_of_link_levels] =
-					skutable->LclkFreq[link_level];
-		pcie_table->num_of_link_levels++;
+	/* dcefclk dpm table setup */
+	dpm_table = &dpm_context->dpm_tables.dcef_table;
+	dpm_table->clk_type = SMU_DCEFCLK;
+	if (smu_cmn_feature_is_enabled(smu, SMU_FEATURE_DPM_DCN_BIT)) {
+		ret = smu_v13_0_set_single_dpm_table(smu,
+						     SMU_DCEFCLK,
+						     dpm_table);
+		if (ret)
+			return ret;
+	} else {
+		dpm_table->count = 1;
+		dpm_table->dpm_levels[0].value = smu->smu_table.boot_values.dcefclk / 100;
+		dpm_table->dpm_levels[0].enabled = true;
 	}
 
 	return 0;
@@ -702,26 +714,14 @@ static int smu_v13_0_7_set_default_dpm_table(struct smu_context *smu)
 static bool smu_v13_0_7_is_dpm_running(struct smu_context *smu)
 {
 	int ret = 0;
-	uint64_t feature_enabled;
+	struct smu_feature_bits feature_enabled;
 
 	ret = smu_cmn_get_enabled_mask(smu, &feature_enabled);
 	if (ret)
 		return false;
 
-	return !!(feature_enabled & SMC_DPM_FEATURE);
-}
-
-static void smu_v13_0_7_dump_pptable(struct smu_context *smu)
-{
-       struct smu_table_context *table_context = &smu->smu_table;
-       PPTable_t *pptable = table_context->driver_pptable;
-       SkuTable_t *skutable = &pptable->SkuTable;
-
-       dev_info(smu->adev->dev, "Dumped PPTable:\n");
-
-       dev_info(smu->adev->dev, "Version = 0x%08x\n", skutable->Version);
-       dev_info(smu->adev->dev, "FeaturesToRun[0] = 0x%08x\n", skutable->FeaturesToRun[0]);
-       dev_info(smu->adev->dev, "FeaturesToRun[1] = 0x%08x\n", skutable->FeaturesToRun[1]);
+	return smu_feature_bits_test_mask(&feature_enabled,
+					  smu_v13_0_7_dpm_features.bits);
 }
 
 static uint32_t smu_v13_0_7_get_throttler_status(SmuMetrics_t *metrics)
@@ -777,20 +777,27 @@ static int smu_v13_0_7_get_smu_metrics_data(struct smu_context *smu,
 	case METRICS_CURR_FCLK:
 		*value = metrics->CurrClock[PPCLK_FCLK];
 		break;
+	case METRICS_CURR_DCEFCLK:
+		*value = metrics->CurrClock[PPCLK_DCFCLK];
+		break;
 	case METRICS_AVERAGE_GFXCLK:
 		*value = metrics->AverageGfxclkFrequencyPreDs;
 		break;
 	case METRICS_AVERAGE_FCLK:
-		if (metrics->AverageUclkActivity <= SMU_13_0_7_BUSY_THRESHOLD)
+		if (smu_safe_u16_nn(metrics->AverageUclkActivity) <= SMU_13_0_7_BUSY_THRESHOLD)
 			*value = metrics->AverageFclkFrequencyPostDs;
 		else
 			*value = metrics->AverageFclkFrequencyPreDs;
 		break;
 	case METRICS_AVERAGE_UCLK:
-		if (metrics->AverageUclkActivity <= SMU_13_0_7_BUSY_THRESHOLD)
+		if (smu_safe_u16_nn(metrics->AverageUclkActivity) <= SMU_13_0_7_BUSY_THRESHOLD)
 			*value = metrics->AverageMemclkFrequencyPostDs;
 		else
 			*value = metrics->AverageMemclkFrequencyPreDs;
+		break;
+	case METRICS_AVERAGE_VCNACTIVITY:
+		*value = max(metrics->Vcn0ActivityPercentage,
+			     metrics->Vcn1ActivityPercentage);
 		break;
 	case METRICS_AVERAGE_VCLK:
 		*value = metrics->AverageVclk0Frequency;
@@ -808,10 +815,10 @@ static int smu_v13_0_7_get_smu_metrics_data(struct smu_context *smu,
 		*value = metrics->AverageGfxActivity;
 		break;
 	case METRICS_AVERAGE_MEMACTIVITY:
-		*value = metrics->AverageUclkActivity;
+		*value = smu_safe_u16_nn(metrics->AverageUclkActivity);
 		break;
 	case METRICS_AVERAGE_SOCKETPOWER:
-		*value = metrics->AverageSocketPower << 8;
+		*value = metrics->AverageSocketPower * MILLIWATT_PER_WATT;
 		break;
 	case METRICS_TEMPERATURE_EDGE:
 		*value = metrics->AvgTemperature[TEMP_EDGE] *
@@ -866,7 +873,7 @@ static int smu_v13_0_7_get_dpm_ultimate_freq(struct smu_context *smu,
 {
 	struct smu_13_0_dpm_context *dpm_context =
 		smu->smu_dpm.dpm_context;
-	struct smu_13_0_dpm_table *dpm_table;
+	struct smu_dpm_table *dpm_table;
 
 	switch (clk_type) {
 	case SMU_MCLK:
@@ -903,9 +910,9 @@ static int smu_v13_0_7_get_dpm_ultimate_freq(struct smu_context *smu,
 	}
 
 	if (min)
-		*min = dpm_table->min;
+		*min = SMU_DPM_TABLE_MIN(dpm_table);
 	if (max)
-		*max = dpm_table->max;
+		*max = SMU_DPM_TABLE_MAX(dpm_table);
 
 	return 0;
 }
@@ -933,6 +940,12 @@ static int smu_v13_0_7_read_sensor(struct smu_context *smu,
 	case AMDGPU_PP_SENSOR_GPU_LOAD:
 		ret = smu_v13_0_7_get_smu_metrics_data(smu,
 						       METRICS_AVERAGE_GFXACTIVITY,
+						       (uint32_t *)data);
+		*size = 4;
+		break;
+	case AMDGPU_PP_SENSOR_VCN_LOAD:
+		ret = smu_v13_0_7_get_smu_metrics_data(smu,
+						       METRICS_AVERAGE_VCNACTIVITY,
 						       (uint32_t *)data);
 		*size = 4;
 		break;
@@ -1027,6 +1040,9 @@ static int smu_v13_0_7_get_current_clk_freq_by_table(struct smu_context *smu,
 	case PPCLK_DCLK_1:
 		member_type = METRICS_CURR_DCLK1;
 		break;
+	case PPCLK_DCFCLK:
+		member_type = METRICS_CURR_DCEFCLK;
+		break;
 	default:
 		return -EINVAL;
 	}
@@ -1042,8 +1058,35 @@ static bool smu_v13_0_7_is_od_feature_supported(struct smu_context *smu,
 	PPTable_t *pptable = smu->smu_table.driver_pptable;
 	const OverDriveLimits_t * const overdrive_upperlimits =
 				&pptable->SkuTable.OverDriveLimitsBasicMax;
+	int32_t min_value, max_value;
+	bool feature_enabled;
 
-	return overdrive_upperlimits->FeatureCtrlMask & (1U << od_feature_bit);
+	switch (od_feature_bit) {
+	case PP_OD_FEATURE_FAN_CURVE_BIT:
+		feature_enabled = !!(overdrive_upperlimits->FeatureCtrlMask & (1U << od_feature_bit));
+		if (feature_enabled) {
+			smu_v13_0_7_get_od_setting_limits(smu, PP_OD_FEATURE_FAN_CURVE_TEMP,
+							  &min_value, &max_value);
+			if (!min_value && !max_value) {
+				feature_enabled = false;
+				goto out;
+			}
+
+			smu_v13_0_7_get_od_setting_limits(smu, PP_OD_FEATURE_FAN_CURVE_PWM,
+							  &min_value, &max_value);
+			if (!min_value && !max_value) {
+				feature_enabled = false;
+				goto out;
+			}
+		}
+		break;
+	default:
+		feature_enabled = !!(overdrive_upperlimits->FeatureCtrlMask & (1U << od_feature_bit));
+		break;
+	}
+
+out:
+	return feature_enabled;
 }
 
 static void smu_v13_0_7_get_od_setting_limits(struct smu_context *smu,
@@ -1078,6 +1121,38 @@ static void smu_v13_0_7_get_od_setting_limits(struct smu_context *smu,
 	case PP_OD_FEATURE_GFX_VF_CURVE:
 		od_min_setting = overdrive_lowerlimits->VoltageOffsetPerZoneBoundary;
 		od_max_setting = overdrive_upperlimits->VoltageOffsetPerZoneBoundary;
+		break;
+	case PP_OD_FEATURE_FAN_CURVE_TEMP:
+		od_min_setting = overdrive_lowerlimits->FanLinearTempPoints;
+		od_max_setting = overdrive_upperlimits->FanLinearTempPoints;
+		break;
+	case PP_OD_FEATURE_FAN_CURVE_PWM:
+		od_min_setting = overdrive_lowerlimits->FanLinearPwmPoints;
+		od_max_setting = overdrive_upperlimits->FanLinearPwmPoints;
+		break;
+	case PP_OD_FEATURE_FAN_ACOUSTIC_LIMIT:
+		od_min_setting = overdrive_lowerlimits->AcousticLimitRpmThreshold;
+		od_max_setting = overdrive_upperlimits->AcousticLimitRpmThreshold;
+		break;
+	case PP_OD_FEATURE_FAN_ACOUSTIC_TARGET:
+		od_min_setting = overdrive_lowerlimits->AcousticTargetRpmThreshold;
+		od_max_setting = overdrive_upperlimits->AcousticTargetRpmThreshold;
+		break;
+	case PP_OD_FEATURE_FAN_TARGET_TEMPERATURE:
+		od_min_setting = overdrive_lowerlimits->FanTargetTemperature;
+		od_max_setting = overdrive_upperlimits->FanTargetTemperature;
+		break;
+	case PP_OD_FEATURE_FAN_MINIMUM_PWM:
+		od_min_setting = overdrive_lowerlimits->FanMinimumPwm;
+		od_max_setting = overdrive_upperlimits->FanMinimumPwm;
+		break;
+	case PP_OD_FEATURE_FAN_ZERO_RPM_ENABLE:
+		od_min_setting = overdrive_lowerlimits->FanZeroRpmEnable;
+		od_max_setting = overdrive_upperlimits->FanZeroRpmEnable;
+		break;
+	case PP_OD_FEATURE_FAN_ZERO_RPM_STOP_TEMP:
+		od_min_setting = overdrive_lowerlimits->FanZeroRpmStopTemp;
+		od_max_setting = overdrive_upperlimits->FanZeroRpmStopTemp;
 		break;
 	default:
 		od_min_setting = od_max_setting = INT_MAX;
@@ -1133,26 +1208,24 @@ static int smu_v13_0_7_upload_overdrive_table(struct smu_context *smu,
 	return ret;
 }
 
-static int smu_v13_0_7_print_clk_levels(struct smu_context *smu,
-					enum smu_clk_type clk_type,
-					char *buf)
+static int smu_v13_0_7_emit_clk_levels(struct smu_context *smu,
+				       enum smu_clk_type clk_type, char *buf,
+				       int *offset)
 {
 	struct smu_dpm_context *smu_dpm = &smu->smu_dpm;
 	struct smu_13_0_dpm_context *dpm_context = smu_dpm->dpm_context;
 	OverDriveTableExternal_t *od_table =
 		(OverDriveTableExternal_t *)smu->smu_table.overdrive_table;
-	struct smu_13_0_dpm_table *single_dpm_table;
-	struct smu_13_0_pcie_table *pcie_table;
+	int i, curr_freq, size = *offset, start_offset = *offset;
+	struct smu_dpm_table *single_dpm_table = NULL;
+	struct smu_pcie_table *pcie_table;
 	uint32_t gen_speed, lane_width;
-	int i, curr_freq, size = 0;
 	int32_t min_value, max_value;
 	int ret = 0;
 
-	smu_cmn_get_sysfs_buf(&buf, &size);
-
 	if (amdgpu_ras_intr_triggered()) {
-		size += sysfs_emit_at(buf, size, "unavailable\n");
-		return size;
+		sysfs_emit_at(buf, size, "unavailable\n");
+		return -EBUSY;
 	}
 
 	switch (clk_type) {
@@ -1176,59 +1249,8 @@ static int smu_v13_0_7_print_clk_levels(struct smu_context *smu,
 	case SMU_DCLK1:
 		single_dpm_table = &(dpm_context->dpm_tables.dclk_table);
 		break;
-	default:
-		break;
-	}
-
-	switch (clk_type) {
-	case SMU_SCLK:
-	case SMU_MCLK:
-	case SMU_SOCCLK:
-	case SMU_FCLK:
-	case SMU_VCLK:
-	case SMU_VCLK1:
-	case SMU_DCLK:
-	case SMU_DCLK1:
-		ret = smu_v13_0_7_get_current_clk_freq_by_table(smu, clk_type, &curr_freq);
-		if (ret) {
-			dev_err(smu->adev->dev, "Failed to get current clock freq!");
-			return ret;
-		}
-
-		if (single_dpm_table->is_fine_grained) {
-			/*
-			 * For fine grained dpms, there are only two dpm levels:
-			 *   - level 0 -> min clock freq
-			 *   - level 1 -> max clock freq
-			 * And the current clock frequency can be any value between them.
-			 * So, if the current clock frequency is not at level 0 or level 1,
-			 * we will fake it as three dpm levels:
-			 *   - level 0 -> min clock freq
-			 *   - level 1 -> current actual clock freq
-			 *   - level 2 -> max clock freq
-			 */
-			if ((single_dpm_table->dpm_levels[0].value != curr_freq) &&
-			     (single_dpm_table->dpm_levels[1].value != curr_freq)) {
-				size += sysfs_emit_at(buf, size, "0: %uMhz\n",
-						single_dpm_table->dpm_levels[0].value);
-				size += sysfs_emit_at(buf, size, "1: %uMhz *\n",
-						curr_freq);
-				size += sysfs_emit_at(buf, size, "2: %uMhz\n",
-						single_dpm_table->dpm_levels[1].value);
-			} else {
-				size += sysfs_emit_at(buf, size, "0: %uMhz %s\n",
-						single_dpm_table->dpm_levels[0].value,
-						single_dpm_table->dpm_levels[0].value == curr_freq ? "*" : "");
-				size += sysfs_emit_at(buf, size, "1: %uMhz %s\n",
-						single_dpm_table->dpm_levels[1].value,
-						single_dpm_table->dpm_levels[1].value == curr_freq ? "*" : "");
-			}
-		} else {
-			for (i = 0; i < single_dpm_table->count; i++)
-				size += sysfs_emit_at(buf, size, "%d: %uMhz %s\n",
-						i, single_dpm_table->dpm_levels[i].value,
-						single_dpm_table->dpm_levels[i].value == curr_freq ? "*" : "");
-		}
+	case SMU_DCEFCLK:
+		single_dpm_table = &(dpm_context->dpm_tables.dcef_table);
 		break;
 	case SMU_PCIE:
 		ret = smu_v13_0_7_get_smu_metrics_data(smu,
@@ -1244,24 +1266,10 @@ static int smu_v13_0_7_print_clk_levels(struct smu_context *smu,
 			return ret;
 
 		pcie_table = &(dpm_context->dpm_tables.pcie_table);
-		for (i = 0; i < pcie_table->num_of_link_levels; i++)
-			size += sysfs_emit_at(buf, size, "%d: %s %s %dMhz %s\n", i,
-					(pcie_table->pcie_gen[i] == 0) ? "2.5GT/s," :
-					(pcie_table->pcie_gen[i] == 1) ? "5.0GT/s," :
-					(pcie_table->pcie_gen[i] == 2) ? "8.0GT/s," :
-					(pcie_table->pcie_gen[i] == 3) ? "16.0GT/s," : "",
-					(pcie_table->pcie_lane[i] == 1) ? "x1" :
-					(pcie_table->pcie_lane[i] == 2) ? "x2" :
-					(pcie_table->pcie_lane[i] == 3) ? "x4" :
-					(pcie_table->pcie_lane[i] == 4) ? "x8" :
-					(pcie_table->pcie_lane[i] == 5) ? "x12" :
-					(pcie_table->pcie_lane[i] == 6) ? "x16" : "",
-					pcie_table->clk_freq[i],
-					(gen_speed == DECODE_GEN_SPEED(pcie_table->pcie_gen[i])) &&
-					(lane_width == DECODE_LANE_WIDTH(pcie_table->pcie_lane[i])) ?
-					"*" : "");
-		break;
-
+		return smu_cmn_print_pcie_levels(smu, pcie_table,
+						 SMU_DPM_PCIE_GEN_IDX(gen_speed),
+						 SMU_DPM_PCIE_WIDTH_IDX(lane_width),
+						 buf, offset);
 	case SMU_OD_SCLK:
 		if (!smu_v13_0_7_is_od_feature_supported(smu,
 							 PP_OD_FEATURE_GFXCLK_BIT))
@@ -1284,16 +1292,151 @@ static int smu_v13_0_7_print_clk_levels(struct smu_context *smu,
 					od_table->OverDriveTable.UclkFmax);
 		break;
 
-	case SMU_OD_VDDC_CURVE:
+	case SMU_OD_VDDGFX_OFFSET:
 		if (!smu_v13_0_7_is_od_feature_supported(smu,
 							 PP_OD_FEATURE_GFX_VF_CURVE_BIT))
 			break;
 
-		size += sysfs_emit_at(buf, size, "OD_VDDC_CURVE:\n");
-		for (i = 0; i < PP_NUM_OD_VF_CURVE_POINTS; i++)
-			size += sysfs_emit_at(buf, size, "%d: %dmv\n",
+		size += sysfs_emit_at(buf, size, "OD_VDDGFX_OFFSET:\n");
+		size += sysfs_emit_at(buf, size, "%dmV\n",
+				      od_table->OverDriveTable.VoltageOffsetPerZoneBoundary[0]);
+		break;
+
+	case SMU_OD_FAN_CURVE:
+		if (!smu_v13_0_7_is_od_feature_supported(smu,
+							 PP_OD_FEATURE_FAN_CURVE_BIT))
+			break;
+
+		size += sysfs_emit_at(buf, size, "OD_FAN_CURVE:\n");
+		for (i = 0; i < NUM_OD_FAN_MAX_POINTS - 1; i++)
+			size += sysfs_emit_at(buf, size, "%d: %dC %d%%\n",
 						i,
-						od_table->OverDriveTable.VoltageOffsetPerZoneBoundary[i]);
+						(int)od_table->OverDriveTable.FanLinearTempPoints[i],
+						(int)od_table->OverDriveTable.FanLinearPwmPoints[i]);
+
+		size += sysfs_emit_at(buf, size, "%s:\n", "OD_RANGE");
+		smu_v13_0_7_get_od_setting_limits(smu,
+						  PP_OD_FEATURE_FAN_CURVE_TEMP,
+						  &min_value,
+						  &max_value);
+		size += sysfs_emit_at(buf, size, "FAN_CURVE(hotspot temp): %uC %uC\n",
+				      min_value, max_value);
+
+		smu_v13_0_7_get_od_setting_limits(smu,
+						  PP_OD_FEATURE_FAN_CURVE_PWM,
+						  &min_value,
+						  &max_value);
+		size += sysfs_emit_at(buf, size, "FAN_CURVE(fan speed): %u%% %u%%\n",
+				      min_value, max_value);
+
+		break;
+
+	case SMU_OD_ACOUSTIC_LIMIT:
+		if (!smu_v13_0_7_is_od_feature_supported(smu,
+							 PP_OD_FEATURE_FAN_CURVE_BIT))
+			break;
+
+		size += sysfs_emit_at(buf, size, "OD_ACOUSTIC_LIMIT:\n");
+		size += sysfs_emit_at(buf, size, "%d\n",
+					(int)od_table->OverDriveTable.AcousticLimitRpmThreshold);
+
+		size += sysfs_emit_at(buf, size, "%s:\n", "OD_RANGE");
+		smu_v13_0_7_get_od_setting_limits(smu,
+						  PP_OD_FEATURE_FAN_ACOUSTIC_LIMIT,
+						  &min_value,
+						  &max_value);
+		size += sysfs_emit_at(buf, size, "ACOUSTIC_LIMIT: %u %u\n",
+				      min_value, max_value);
+		break;
+
+	case SMU_OD_ACOUSTIC_TARGET:
+		if (!smu_v13_0_7_is_od_feature_supported(smu,
+							 PP_OD_FEATURE_FAN_CURVE_BIT))
+			break;
+
+		size += sysfs_emit_at(buf, size, "OD_ACOUSTIC_TARGET:\n");
+		size += sysfs_emit_at(buf, size, "%d\n",
+					(int)od_table->OverDriveTable.AcousticTargetRpmThreshold);
+
+		size += sysfs_emit_at(buf, size, "%s:\n", "OD_RANGE");
+		smu_v13_0_7_get_od_setting_limits(smu,
+						  PP_OD_FEATURE_FAN_ACOUSTIC_TARGET,
+						  &min_value,
+						  &max_value);
+		size += sysfs_emit_at(buf, size, "ACOUSTIC_TARGET: %u %u\n",
+				      min_value, max_value);
+		break;
+
+	case SMU_OD_FAN_TARGET_TEMPERATURE:
+		if (!smu_v13_0_7_is_od_feature_supported(smu,
+							 PP_OD_FEATURE_FAN_CURVE_BIT))
+			break;
+
+		size += sysfs_emit_at(buf, size, "FAN_TARGET_TEMPERATURE:\n");
+		size += sysfs_emit_at(buf, size, "%d\n",
+					(int)od_table->OverDriveTable.FanTargetTemperature);
+
+		size += sysfs_emit_at(buf, size, "%s:\n", "OD_RANGE");
+		smu_v13_0_7_get_od_setting_limits(smu,
+						  PP_OD_FEATURE_FAN_TARGET_TEMPERATURE,
+						  &min_value,
+						  &max_value);
+		size += sysfs_emit_at(buf, size, "TARGET_TEMPERATURE: %u %u\n",
+				      min_value, max_value);
+		break;
+
+	case SMU_OD_FAN_MINIMUM_PWM:
+		if (!smu_v13_0_7_is_od_feature_supported(smu,
+							 PP_OD_FEATURE_FAN_CURVE_BIT))
+			break;
+
+		size += sysfs_emit_at(buf, size, "FAN_MINIMUM_PWM:\n");
+		size += sysfs_emit_at(buf, size, "%d\n",
+					(int)od_table->OverDriveTable.FanMinimumPwm);
+
+		size += sysfs_emit_at(buf, size, "%s:\n", "OD_RANGE");
+		smu_v13_0_7_get_od_setting_limits(smu,
+						  PP_OD_FEATURE_FAN_MINIMUM_PWM,
+						  &min_value,
+						  &max_value);
+		size += sysfs_emit_at(buf, size, "MINIMUM_PWM: %u %u\n",
+				      min_value, max_value);
+		break;
+
+	case SMU_OD_FAN_ZERO_RPM_ENABLE:
+		if (!smu_v13_0_7_is_od_feature_supported(smu,
+							 PP_OD_FEATURE_ZERO_FAN_BIT))
+			break;
+
+		size += sysfs_emit_at(buf, size, "FAN_ZERO_RPM_ENABLE:\n");
+		size += sysfs_emit_at(buf, size, "%d\n",
+					(int)od_table->OverDriveTable.FanZeroRpmEnable);
+
+		size += sysfs_emit_at(buf, size, "%s:\n", "OD_RANGE");
+		smu_v13_0_7_get_od_setting_limits(smu,
+						  PP_OD_FEATURE_FAN_ZERO_RPM_ENABLE,
+						  &min_value,
+						  &max_value);
+		size += sysfs_emit_at(buf, size, "ZERO_RPM_ENABLE: %u %u\n",
+				      min_value, max_value);
+		break;
+
+	case SMU_OD_FAN_ZERO_RPM_STOP_TEMP:
+		if (!smu_v13_0_7_is_od_feature_supported(smu,
+							 PP_OD_FEATURE_ZERO_FAN_BIT))
+			break;
+
+		size += sysfs_emit_at(buf, size, "FAN_ZERO_RPM_STOP_TEMPERATURE:\n");
+		size += sysfs_emit_at(buf, size, "%d\n",
+					(int)od_table->OverDriveTable.FanZeroRpmStopTemp);
+
+		size += sysfs_emit_at(buf, size, "%s:\n", "OD_RANGE");
+		smu_v13_0_7_get_od_setting_limits(smu,
+						  PP_OD_FEATURE_FAN_ZERO_RPM_STOP_TEMP,
+						  &min_value,
+						  &max_value);
+		size += sysfs_emit_at(buf, size, "ZERO_RPM_STOP_TEMPERATURE: %u %u\n",
+				      min_value, max_value);
 		break;
 
 	case SMU_OD_RANGE:
@@ -1335,7 +1478,7 @@ static int smu_v13_0_7_print_clk_levels(struct smu_context *smu,
 							  PP_OD_FEATURE_GFX_VF_CURVE,
 							  &min_value,
 							  &max_value);
-			size += sysfs_emit_at(buf, size, "VDDC_CURVE: %7dmv %10dmv\n",
+			size += sysfs_emit_at(buf, size, "VDDGFX_OFFSET: %7dmv %10dmv\n",
 					      min_value, max_value);
 		}
 		break;
@@ -1344,7 +1487,84 @@ static int smu_v13_0_7_print_clk_levels(struct smu_context *smu,
 		break;
 	}
 
-	return size;
+	if (single_dpm_table) {
+		ret = smu_v13_0_7_get_current_clk_freq_by_table(smu, clk_type,
+								&curr_freq);
+		if (ret) {
+			dev_err(smu->adev->dev,
+				"Failed to get current clock freq!");
+			return ret;
+		}
+		return smu_cmn_print_dpm_clk_levels(smu, single_dpm_table,
+						    curr_freq, buf, offset);
+	}
+
+	*offset += size - start_offset;
+
+	return 0;
+}
+
+static int smu_v13_0_7_od_restore_table_single(struct smu_context *smu, long input)
+{
+	struct smu_table_context *table_context = &smu->smu_table;
+	OverDriveTableExternal_t *boot_overdrive_table =
+		(OverDriveTableExternal_t *)table_context->boot_overdrive_table;
+	OverDriveTableExternal_t *od_table =
+		(OverDriveTableExternal_t *)table_context->overdrive_table;
+	struct amdgpu_device *adev = smu->adev;
+	int i;
+
+	switch (input) {
+	case PP_OD_EDIT_FAN_CURVE:
+		for (i = 0; i < NUM_OD_FAN_MAX_POINTS; i++) {
+			od_table->OverDriveTable.FanLinearTempPoints[i] =
+					boot_overdrive_table->OverDriveTable.FanLinearTempPoints[i];
+			od_table->OverDriveTable.FanLinearPwmPoints[i] =
+					boot_overdrive_table->OverDriveTable.FanLinearPwmPoints[i];
+		}
+		od_table->OverDriveTable.FanMode = FAN_MODE_AUTO;
+		od_table->OverDriveTable.FeatureCtrlMask |= BIT(PP_OD_FEATURE_FAN_CURVE_BIT);
+		break;
+	case PP_OD_EDIT_ACOUSTIC_LIMIT:
+		od_table->OverDriveTable.AcousticLimitRpmThreshold =
+					boot_overdrive_table->OverDriveTable.AcousticLimitRpmThreshold;
+		od_table->OverDriveTable.FanMode = FAN_MODE_AUTO;
+		od_table->OverDriveTable.FeatureCtrlMask |= BIT(PP_OD_FEATURE_FAN_CURVE_BIT);
+		break;
+	case PP_OD_EDIT_ACOUSTIC_TARGET:
+		od_table->OverDriveTable.AcousticTargetRpmThreshold =
+					boot_overdrive_table->OverDriveTable.AcousticTargetRpmThreshold;
+		od_table->OverDriveTable.FanMode = FAN_MODE_AUTO;
+		od_table->OverDriveTable.FeatureCtrlMask |= BIT(PP_OD_FEATURE_FAN_CURVE_BIT);
+		break;
+	case PP_OD_EDIT_FAN_TARGET_TEMPERATURE:
+		od_table->OverDriveTable.FanTargetTemperature =
+					boot_overdrive_table->OverDriveTable.FanTargetTemperature;
+		od_table->OverDriveTable.FanMode = FAN_MODE_AUTO;
+		od_table->OverDriveTable.FeatureCtrlMask |= BIT(PP_OD_FEATURE_FAN_CURVE_BIT);
+		break;
+	case PP_OD_EDIT_FAN_MINIMUM_PWM:
+		od_table->OverDriveTable.FanMinimumPwm =
+					boot_overdrive_table->OverDriveTable.FanMinimumPwm;
+		od_table->OverDriveTable.FanMode = FAN_MODE_AUTO;
+		od_table->OverDriveTable.FeatureCtrlMask |= BIT(PP_OD_FEATURE_FAN_CURVE_BIT);
+		break;
+	case PP_OD_EDIT_FAN_ZERO_RPM_ENABLE:
+		od_table->OverDriveTable.FanZeroRpmEnable =
+					boot_overdrive_table->OverDriveTable.FanZeroRpmEnable;
+		od_table->OverDriveTable.FeatureCtrlMask |= BIT(PP_OD_FEATURE_ZERO_FAN_BIT);
+		break;
+	case PP_OD_EDIT_FAN_ZERO_RPM_STOP_TEMP:
+		od_table->OverDriveTable.FanZeroRpmStopTemp =
+					boot_overdrive_table->OverDriveTable.FanZeroRpmStopTemp;
+		od_table->OverDriveTable.FeatureCtrlMask |= BIT(PP_OD_FEATURE_ZERO_FAN_BIT);
+		break;
+	default:
+		dev_info(adev->dev, "Invalid table index: %ld\n", input);
+		return -EINVAL;
+	}
+
+	return 0;
 }
 
 static int smu_v13_0_7_od_edit_dpm_table(struct smu_context *smu,
@@ -1484,37 +1704,208 @@ static int smu_v13_0_7_od_edit_dpm_table(struct smu_context *smu,
 		}
 		break;
 
-	case PP_OD_EDIT_VDDC_CURVE:
+	case PP_OD_EDIT_VDDGFX_OFFSET:
 		if (!smu_v13_0_7_is_od_feature_supported(smu, PP_OD_FEATURE_GFX_VF_CURVE_BIT)) {
-			dev_warn(adev->dev, "VF curve setting not supported!\n");
+			dev_warn(adev->dev, "Gfx offset setting not supported!\n");
 			return -ENOTSUPP;
 		}
-
-		if (input[0] >= PP_NUM_OD_VF_CURVE_POINTS ||
-		    input[0] < 0)
-			return -EINVAL;
 
 		smu_v13_0_7_get_od_setting_limits(smu,
 						  PP_OD_FEATURE_GFX_VF_CURVE,
 						  &minimum,
 						  &maximum);
+		if (input[0] < minimum ||
+		    input[0] > maximum) {
+			dev_info(adev->dev, "Voltage offset (%ld) must be within [%d, %d]!\n",
+				 input[0], minimum, maximum);
+			return -EINVAL;
+		}
+
+		for (i = 0; i < PP_NUM_OD_VF_CURVE_POINTS; i++)
+			od_table->OverDriveTable.VoltageOffsetPerZoneBoundary[i] = input[0];
+		od_table->OverDriveTable.FeatureCtrlMask |= BIT(PP_OD_FEATURE_GFX_VF_CURVE_BIT);
+		break;
+
+	case PP_OD_EDIT_FAN_CURVE:
+		if (!smu_v13_0_7_is_od_feature_supported(smu, PP_OD_FEATURE_FAN_CURVE_BIT)) {
+			dev_warn(adev->dev, "Fan curve setting not supported!\n");
+			return -ENOTSUPP;
+		}
+
+		if (input[0] >= NUM_OD_FAN_MAX_POINTS - 1 ||
+		    input[0] < 0)
+			return -EINVAL;
+
+		smu_v13_0_7_get_od_setting_limits(smu,
+						  PP_OD_FEATURE_FAN_CURVE_TEMP,
+						  &minimum,
+						  &maximum);
 		if (input[1] < minimum ||
 		    input[1] > maximum) {
-			dev_info(adev->dev, "Voltage offset (%ld) must be within [%d, %d]!\n",
+			dev_info(adev->dev, "Fan curve temp setting(%ld) must be within [%d, %d]!\n",
 				 input[1], minimum, maximum);
 			return -EINVAL;
 		}
 
-		od_table->OverDriveTable.VoltageOffsetPerZoneBoundary[input[0]] = input[1];
-		od_table->OverDriveTable.FeatureCtrlMask |= 1U << PP_OD_FEATURE_GFX_VF_CURVE_BIT;
+		smu_v13_0_7_get_od_setting_limits(smu,
+						  PP_OD_FEATURE_FAN_CURVE_PWM,
+						  &minimum,
+						  &maximum);
+		if (input[2] < minimum ||
+		    input[2] > maximum) {
+			dev_info(adev->dev, "Fan curve pwm setting(%ld) must be within [%d, %d]!\n",
+				 input[2], minimum, maximum);
+			return -EINVAL;
+		}
+
+		od_table->OverDriveTable.FanLinearTempPoints[input[0]] = input[1];
+		od_table->OverDriveTable.FanLinearPwmPoints[input[0]] = input[2];
+		od_table->OverDriveTable.FanMode = FAN_MODE_MANUAL_LINEAR;
+		od_table->OverDriveTable.FeatureCtrlMask |= BIT(PP_OD_FEATURE_FAN_CURVE_BIT);
+		break;
+
+	case PP_OD_EDIT_ACOUSTIC_LIMIT:
+		if (!smu_v13_0_7_is_od_feature_supported(smu, PP_OD_FEATURE_FAN_CURVE_BIT)) {
+			dev_warn(adev->dev, "Fan curve setting not supported!\n");
+			return -ENOTSUPP;
+		}
+
+		smu_v13_0_7_get_od_setting_limits(smu,
+						  PP_OD_FEATURE_FAN_ACOUSTIC_LIMIT,
+						  &minimum,
+						  &maximum);
+		if (input[0] < minimum ||
+		    input[0] > maximum) {
+			dev_info(adev->dev, "acoustic limit threshold setting(%ld) must be within [%d, %d]!\n",
+				 input[0], minimum, maximum);
+			return -EINVAL;
+		}
+
+		od_table->OverDriveTable.AcousticLimitRpmThreshold = input[0];
+		od_table->OverDriveTable.FanMode = FAN_MODE_AUTO;
+		od_table->OverDriveTable.FeatureCtrlMask |= BIT(PP_OD_FEATURE_FAN_CURVE_BIT);
+		break;
+
+	case PP_OD_EDIT_ACOUSTIC_TARGET:
+		if (!smu_v13_0_7_is_od_feature_supported(smu, PP_OD_FEATURE_FAN_CURVE_BIT)) {
+			dev_warn(adev->dev, "Fan curve setting not supported!\n");
+			return -ENOTSUPP;
+		}
+
+		smu_v13_0_7_get_od_setting_limits(smu,
+						  PP_OD_FEATURE_FAN_ACOUSTIC_TARGET,
+						  &minimum,
+						  &maximum);
+		if (input[0] < minimum ||
+		    input[0] > maximum) {
+			dev_info(adev->dev, "acoustic target threshold setting(%ld) must be within [%d, %d]!\n",
+				 input[0], minimum, maximum);
+			return -EINVAL;
+		}
+
+		od_table->OverDriveTable.AcousticTargetRpmThreshold = input[0];
+		od_table->OverDriveTable.FanMode = FAN_MODE_AUTO;
+		od_table->OverDriveTable.FeatureCtrlMask |= BIT(PP_OD_FEATURE_FAN_CURVE_BIT);
+		break;
+
+	case PP_OD_EDIT_FAN_TARGET_TEMPERATURE:
+		if (!smu_v13_0_7_is_od_feature_supported(smu, PP_OD_FEATURE_FAN_CURVE_BIT)) {
+			dev_warn(adev->dev, "Fan curve setting not supported!\n");
+			return -ENOTSUPP;
+		}
+
+		smu_v13_0_7_get_od_setting_limits(smu,
+						  PP_OD_FEATURE_FAN_TARGET_TEMPERATURE,
+						  &minimum,
+						  &maximum);
+		if (input[0] < minimum ||
+		    input[0] > maximum) {
+			dev_info(adev->dev, "fan target temperature setting(%ld) must be within [%d, %d]!\n",
+				 input[0], minimum, maximum);
+			return -EINVAL;
+		}
+
+		od_table->OverDriveTable.FanTargetTemperature = input[0];
+		od_table->OverDriveTable.FanMode = FAN_MODE_AUTO;
+		od_table->OverDriveTable.FeatureCtrlMask |= BIT(PP_OD_FEATURE_FAN_CURVE_BIT);
+		break;
+
+	case PP_OD_EDIT_FAN_MINIMUM_PWM:
+		if (!smu_v13_0_7_is_od_feature_supported(smu, PP_OD_FEATURE_FAN_CURVE_BIT)) {
+			dev_warn(adev->dev, "Fan curve setting not supported!\n");
+			return -ENOTSUPP;
+		}
+
+		smu_v13_0_7_get_od_setting_limits(smu,
+						  PP_OD_FEATURE_FAN_MINIMUM_PWM,
+						  &minimum,
+						  &maximum);
+		if (input[0] < minimum ||
+		    input[0] > maximum) {
+			dev_info(adev->dev, "fan minimum pwm setting(%ld) must be within [%d, %d]!\n",
+				 input[0], minimum, maximum);
+			return -EINVAL;
+		}
+
+		od_table->OverDriveTable.FanMinimumPwm = input[0];
+		od_table->OverDriveTable.FanMode = FAN_MODE_AUTO;
+		od_table->OverDriveTable.FeatureCtrlMask |= BIT(PP_OD_FEATURE_FAN_CURVE_BIT);
+		break;
+
+	case PP_OD_EDIT_FAN_ZERO_RPM_ENABLE:
+		if (!smu_v13_0_7_is_od_feature_supported(smu, PP_OD_FEATURE_ZERO_FAN_BIT)) {
+			dev_warn(adev->dev, "Zero RPM setting not supported!\n");
+			return -ENOTSUPP;
+		}
+
+		smu_v13_0_7_get_od_setting_limits(smu,
+						  PP_OD_FEATURE_FAN_ZERO_RPM_ENABLE,
+						  &minimum,
+						  &maximum);
+		if (input[0] < minimum ||
+		    input[0] > maximum) {
+			dev_info(adev->dev, "zero RPM enable setting(%ld) must be within [%d, %d]!\n",
+				 input[0], minimum, maximum);
+			return -EINVAL;
+		}
+
+		od_table->OverDriveTable.FanZeroRpmEnable = input[0];
+		od_table->OverDriveTable.FeatureCtrlMask |= BIT(PP_OD_FEATURE_ZERO_FAN_BIT);
+		break;
+
+	case PP_OD_EDIT_FAN_ZERO_RPM_STOP_TEMP:
+		if (!smu_v13_0_7_is_od_feature_supported(smu, PP_OD_FEATURE_ZERO_FAN_BIT)) {
+			dev_warn(adev->dev, "Zero RPM setting not supported!\n");
+			return -ENOTSUPP;
+		}
+
+		smu_v13_0_7_get_od_setting_limits(smu,
+						  PP_OD_FEATURE_FAN_ZERO_RPM_STOP_TEMP,
+						  &minimum,
+						  &maximum);
+		if (input[0] < minimum ||
+		    input[0] > maximum) {
+			dev_info(adev->dev, "zero RPM stop temperature setting(%ld) must be within [%d, %d]!\n",
+				 input[0], minimum, maximum);
+			return -EINVAL;
+		}
+
+		od_table->OverDriveTable.FanZeroRpmStopTemp = input[0];
+		od_table->OverDriveTable.FeatureCtrlMask |= BIT(PP_OD_FEATURE_ZERO_FAN_BIT);
 		break;
 
 	case PP_OD_RESTORE_DEFAULT_TABLE:
-		feature_ctrlmask = od_table->OverDriveTable.FeatureCtrlMask;
-		memcpy(od_table,
-		       table_context->boot_overdrive_table,
-		       sizeof(OverDriveTableExternal_t));
-		od_table->OverDriveTable.FeatureCtrlMask = feature_ctrlmask;
+		if (size == 1) {
+			ret = smu_v13_0_7_od_restore_table_single(smu, input[0]);
+			if (ret)
+				return ret;
+		} else {
+			feature_ctrlmask = od_table->OverDriveTable.FeatureCtrlMask;
+			memcpy(od_table,
+					table_context->boot_overdrive_table,
+					sizeof(OverDriveTableExternal_t));
+			od_table->OverDriveTable.FeatureCtrlMask = feature_ctrlmask;
+		}
 		fallthrough;
 
 	case PP_OD_COMMIT_DPM_TABLE:
@@ -1564,7 +1955,7 @@ static int smu_v13_0_7_force_clk_levels(struct smu_context *smu,
 {
 	struct smu_dpm_context *smu_dpm = &smu->smu_dpm;
 	struct smu_13_0_dpm_context *dpm_context = smu_dpm->dpm_context;
-	struct smu_13_0_dpm_table *single_dpm_table;
+	struct smu_dpm_table *single_dpm_table;
 	uint32_t soft_min_level, soft_max_level;
 	uint32_t min_freq, max_freq;
 	int ret = 0;
@@ -1610,7 +2001,7 @@ static int smu_v13_0_7_force_clk_levels(struct smu_context *smu,
 	case SMU_VCLK1:
 	case SMU_DCLK:
 	case SMU_DCLK1:
-		if (single_dpm_table->is_fine_grained) {
+		if (single_dpm_table->flags & SMU_DPM_TABLE_FINE_GRAINED) {
 			/* There is only 2 levels for fine grained DPM */
 			soft_max_level = (soft_max_level >= 1 ? 1 : 0);
 			soft_min_level = (soft_min_level >= 1 ? 1 : 0);
@@ -1626,7 +2017,8 @@ static int smu_v13_0_7_force_clk_levels(struct smu_context *smu,
 		ret = smu_v13_0_set_soft_freq_limited_range(smu,
 							    clk_type,
 							    min_freq,
-							    max_freq);
+							    max_freq,
+							    false);
 		break;
 	case SMU_DCEFCLK:
 	case SMU_PCIE:
@@ -1673,13 +2065,12 @@ static int smu_v13_0_7_get_thermal_temperature_range(struct smu_context *smu,
 	return 0;
 }
 
-#define MAX(a, b)	((a) > (b) ? (a) : (b))
 static ssize_t smu_v13_0_7_get_gpu_metrics(struct smu_context *smu,
 					   void **table)
 {
-	struct smu_table_context *smu_table = &smu->smu_table;
 	struct gpu_metrics_v1_3 *gpu_metrics =
-		(struct gpu_metrics_v1_3 *)smu_table->gpu_metrics_table;
+		(struct gpu_metrics_v1_3 *)smu_driver_table_ptr(
+			smu, SMU_DRIVER_TABLE_GPU_METRICS);
 	SmuMetricsExternal_t metrics_ext;
 	SmuMetrics_t *metrics = &metrics_ext.SmuMetrics;
 	int ret = 0;
@@ -1697,23 +2088,24 @@ static ssize_t smu_v13_0_7_get_gpu_metrics(struct smu_context *smu,
 	gpu_metrics->temperature_mem = metrics->AvgTemperature[TEMP_MEM];
 	gpu_metrics->temperature_vrgfx = metrics->AvgTemperature[TEMP_VR_GFX];
 	gpu_metrics->temperature_vrsoc = metrics->AvgTemperature[TEMP_VR_SOC];
-	gpu_metrics->temperature_vrmem = MAX(metrics->AvgTemperature[TEMP_VR_MEM0],
+	gpu_metrics->temperature_vrmem = max(metrics->AvgTemperature[TEMP_VR_MEM0],
 					     metrics->AvgTemperature[TEMP_VR_MEM1]);
 
 	gpu_metrics->average_gfx_activity = metrics->AverageGfxActivity;
-	gpu_metrics->average_umc_activity = metrics->AverageUclkActivity;
-	gpu_metrics->average_mm_activity = MAX(metrics->Vcn0ActivityPercentage,
+	gpu_metrics->average_umc_activity = smu_safe_u16_nn(metrics->AverageUclkActivity);
+	gpu_metrics->average_mm_activity = max(metrics->Vcn0ActivityPercentage,
 					       metrics->Vcn1ActivityPercentage);
 
 	gpu_metrics->average_socket_power = metrics->AverageSocketPower;
-	gpu_metrics->energy_accumulator = metrics->EnergyAccumulator;
+	if (smu->smc_fw_version <= 0x00521400)
+		gpu_metrics->energy_accumulator = metrics->EnergyAccumulator;
 
 	if (metrics->AverageGfxActivity <= SMU_13_0_7_BUSY_THRESHOLD)
 		gpu_metrics->average_gfxclk_frequency = metrics->AverageGfxclkFrequencyPostDs;
 	else
 		gpu_metrics->average_gfxclk_frequency = metrics->AverageGfxclkFrequencyPreDs;
 
-	if (metrics->AverageUclkActivity <= SMU_13_0_7_BUSY_THRESHOLD)
+	if (smu_safe_u16_nn(metrics->AverageUclkActivity) <= SMU_13_0_7_BUSY_THRESHOLD)
 		gpu_metrics->average_uclk_frequency = metrics->AverageMemclkFrequencyPostDs;
 	else
 		gpu_metrics->average_uclk_frequency = metrics->AverageMemclkFrequencyPreDs;
@@ -1724,6 +2116,8 @@ static ssize_t smu_v13_0_7_get_gpu_metrics(struct smu_context *smu,
 	gpu_metrics->average_dclk1_frequency = metrics->AverageDclk1Frequency;
 
 	gpu_metrics->current_gfxclk = metrics->CurrClock[PPCLK_GFXCLK];
+	gpu_metrics->current_socclk = metrics->CurrClock[PPCLK_SOCCLK];
+	gpu_metrics->current_uclk = metrics->CurrClock[PPCLK_UCLK];
 	gpu_metrics->current_vclk0 = metrics->CurrClock[PPCLK_VCLK_0];
 	gpu_metrics->current_dclk0 = metrics->CurrClock[PPCLK_DCLK_0];
 	gpu_metrics->current_vclk1 = metrics->CurrClock[PPCLK_VCLK_1];
@@ -1751,7 +2145,31 @@ static ssize_t smu_v13_0_7_get_gpu_metrics(struct smu_context *smu,
 
 	*table = (void *)gpu_metrics;
 
+	smu_driver_table_update_cache_time(smu, SMU_DRIVER_TABLE_GPU_METRICS);
+
 	return sizeof(struct gpu_metrics_v1_3);
+}
+
+static void smu_v13_0_7_set_supported_od_feature_mask(struct smu_context *smu)
+{
+	struct amdgpu_device *adev = smu->adev;
+
+	if (smu_v13_0_7_is_od_feature_supported(smu,
+						PP_OD_FEATURE_FAN_CURVE_BIT))
+		adev->pm.od_feature_mask |= OD_OPS_SUPPORT_FAN_CURVE_RETRIEVE |
+					    OD_OPS_SUPPORT_FAN_CURVE_SET |
+					    OD_OPS_SUPPORT_ACOUSTIC_LIMIT_THRESHOLD_RETRIEVE |
+					    OD_OPS_SUPPORT_ACOUSTIC_LIMIT_THRESHOLD_SET |
+					    OD_OPS_SUPPORT_ACOUSTIC_TARGET_THRESHOLD_RETRIEVE |
+					    OD_OPS_SUPPORT_ACOUSTIC_TARGET_THRESHOLD_SET |
+					    OD_OPS_SUPPORT_FAN_TARGET_TEMPERATURE_RETRIEVE |
+					    OD_OPS_SUPPORT_FAN_TARGET_TEMPERATURE_SET |
+					    OD_OPS_SUPPORT_FAN_MINIMUM_PWM_RETRIEVE |
+					    OD_OPS_SUPPORT_FAN_MINIMUM_PWM_SET |
+					    OD_OPS_SUPPORT_FAN_ZERO_RPM_ENABLE_RETRIEVE |
+					    OD_OPS_SUPPORT_FAN_ZERO_RPM_ENABLE_SET |
+					    OD_OPS_SUPPORT_FAN_ZERO_RPM_STOP_TEMP_RETRIEVE |
+					    OD_OPS_SUPPORT_FAN_ZERO_RPM_STOP_TEMP_SET;
 }
 
 static int smu_v13_0_7_set_default_od_settings(struct smu_context *smu)
@@ -1803,7 +2221,27 @@ static int smu_v13_0_7_set_default_od_settings(struct smu_context *smu)
 		for (i = 0; i < PP_NUM_OD_VF_CURVE_POINTS; i++)
 			user_od_table->OverDriveTable.VoltageOffsetPerZoneBoundary[i] =
 				user_od_table_bak.OverDriveTable.VoltageOffsetPerZoneBoundary[i];
+		for (i = 0; i < NUM_OD_FAN_MAX_POINTS - 1; i++) {
+			user_od_table->OverDriveTable.FanLinearTempPoints[i] =
+				user_od_table_bak.OverDriveTable.FanLinearTempPoints[i];
+			user_od_table->OverDriveTable.FanLinearPwmPoints[i] =
+				user_od_table_bak.OverDriveTable.FanLinearPwmPoints[i];
+		}
+		user_od_table->OverDriveTable.AcousticLimitRpmThreshold =
+			user_od_table_bak.OverDriveTable.AcousticLimitRpmThreshold;
+		user_od_table->OverDriveTable.AcousticTargetRpmThreshold =
+			user_od_table_bak.OverDriveTable.AcousticTargetRpmThreshold;
+		user_od_table->OverDriveTable.FanTargetTemperature =
+			user_od_table_bak.OverDriveTable.FanTargetTemperature;
+		user_od_table->OverDriveTable.FanMinimumPwm =
+			user_od_table_bak.OverDriveTable.FanMinimumPwm;
+		user_od_table->OverDriveTable.FanZeroRpmEnable =
+			user_od_table_bak.OverDriveTable.FanZeroRpmEnable;
+		user_od_table->OverDriveTable.FanZeroRpmStopTemp =
+			user_od_table_bak.OverDriveTable.FanZeroRpmStopTemp;
 	}
+
+	smu_v13_0_7_set_supported_od_feature_mask(smu);
 
 	return 0;
 }
@@ -1815,9 +2253,11 @@ static int smu_v13_0_7_restore_user_od_settings(struct smu_context *smu)
 	OverDriveTableExternal_t *user_od_table = table_context->user_overdrive_table;
 	int res;
 
-	user_od_table->OverDriveTable.FeatureCtrlMask = 1U << PP_OD_FEATURE_GFXCLK_BIT |
-							1U << PP_OD_FEATURE_UCLK_BIT |
-							1U << PP_OD_FEATURE_GFX_VF_CURVE_BIT;
+	user_od_table->OverDriveTable.FeatureCtrlMask = BIT(PP_OD_FEATURE_GFXCLK_BIT) |
+							BIT(PP_OD_FEATURE_UCLK_BIT) |
+							BIT(PP_OD_FEATURE_GFX_VF_CURVE_BIT) |
+							BIT(PP_OD_FEATURE_FAN_CURVE_BIT) |
+							BIT(PP_OD_FEATURE_ZERO_FAN_BIT);
 	res = smu_v13_0_7_upload_overdrive_table(smu, user_od_table);
 	user_od_table->OverDriveTable.FeatureCtrlMask = 0;
 	if (res == 0)
@@ -1830,18 +2270,12 @@ static int smu_v13_0_7_populate_umd_state_clk(struct smu_context *smu)
 {
 	struct smu_13_0_dpm_context *dpm_context =
 				smu->smu_dpm.dpm_context;
-	struct smu_13_0_dpm_table *gfx_table =
-				&dpm_context->dpm_tables.gfx_table;
-	struct smu_13_0_dpm_table *mem_table =
-				&dpm_context->dpm_tables.uclk_table;
-	struct smu_13_0_dpm_table *soc_table =
-				&dpm_context->dpm_tables.soc_table;
-	struct smu_13_0_dpm_table *vclk_table =
-				&dpm_context->dpm_tables.vclk_table;
-	struct smu_13_0_dpm_table *dclk_table =
-				&dpm_context->dpm_tables.dclk_table;
-	struct smu_13_0_dpm_table *fclk_table =
-				&dpm_context->dpm_tables.fclk_table;
+	struct smu_dpm_table *gfx_table = &dpm_context->dpm_tables.gfx_table;
+	struct smu_dpm_table *mem_table = &dpm_context->dpm_tables.uclk_table;
+	struct smu_dpm_table *soc_table = &dpm_context->dpm_tables.soc_table;
+	struct smu_dpm_table *vclk_table = &dpm_context->dpm_tables.vclk_table;
+	struct smu_dpm_table *dclk_table = &dpm_context->dpm_tables.dclk_table;
+	struct smu_dpm_table *fclk_table = &dpm_context->dpm_tables.fclk_table;
 	struct smu_umd_pstate_table *pstate_table =
 				&smu->pstate_table;
 	struct smu_table_context *table_context = &smu->smu_table;
@@ -1849,38 +2283,39 @@ static int smu_v13_0_7_populate_umd_state_clk(struct smu_context *smu)
 	DriverReportedClocks_t driver_clocks =
 		pptable->SkuTable.DriverReportedClocks;
 
-	pstate_table->gfxclk_pstate.min = gfx_table->min;
+	pstate_table->gfxclk_pstate.min = SMU_DPM_TABLE_MIN(gfx_table);
 	if (driver_clocks.GameClockAc &&
-		(driver_clocks.GameClockAc < gfx_table->max))
+	    (driver_clocks.GameClockAc < SMU_DPM_TABLE_MAX(gfx_table)))
 		pstate_table->gfxclk_pstate.peak = driver_clocks.GameClockAc;
 	else
-		pstate_table->gfxclk_pstate.peak = gfx_table->max;
+		pstate_table->gfxclk_pstate.peak = SMU_DPM_TABLE_MAX(gfx_table);
 
-	pstate_table->uclk_pstate.min = mem_table->min;
-	pstate_table->uclk_pstate.peak = mem_table->max;
+	pstate_table->uclk_pstate.min = SMU_DPM_TABLE_MIN(mem_table);
+	pstate_table->uclk_pstate.peak = SMU_DPM_TABLE_MAX(mem_table);
 
-	pstate_table->socclk_pstate.min = soc_table->min;
-	pstate_table->socclk_pstate.peak = soc_table->max;
+	pstate_table->socclk_pstate.min = SMU_DPM_TABLE_MIN(soc_table);
+	pstate_table->socclk_pstate.peak = SMU_DPM_TABLE_MAX(soc_table);
 
-	pstate_table->vclk_pstate.min = vclk_table->min;
-	pstate_table->vclk_pstate.peak = vclk_table->max;
+	pstate_table->vclk_pstate.min = SMU_DPM_TABLE_MIN(vclk_table);
+	pstate_table->vclk_pstate.peak = SMU_DPM_TABLE_MAX(vclk_table);
 
-	pstate_table->dclk_pstate.min = dclk_table->min;
-	pstate_table->dclk_pstate.peak = dclk_table->max;
+	pstate_table->dclk_pstate.min = SMU_DPM_TABLE_MIN(dclk_table);
+	pstate_table->dclk_pstate.peak = SMU_DPM_TABLE_MAX(dclk_table);
 
-	pstate_table->fclk_pstate.min = fclk_table->min;
-	pstate_table->fclk_pstate.peak = fclk_table->max;
+	pstate_table->fclk_pstate.min = SMU_DPM_TABLE_MIN(fclk_table);
+	pstate_table->fclk_pstate.peak = SMU_DPM_TABLE_MAX(fclk_table);
 
 	if (driver_clocks.BaseClockAc &&
-		driver_clocks.BaseClockAc < gfx_table->max)
+	    driver_clocks.BaseClockAc < SMU_DPM_TABLE_MAX(gfx_table))
 		pstate_table->gfxclk_pstate.standard = driver_clocks.BaseClockAc;
 	else
-		pstate_table->gfxclk_pstate.standard = gfx_table->max;
-	pstate_table->uclk_pstate.standard = mem_table->max;
-	pstate_table->socclk_pstate.standard = soc_table->min;
-	pstate_table->vclk_pstate.standard = vclk_table->min;
-	pstate_table->dclk_pstate.standard = dclk_table->min;
-	pstate_table->fclk_pstate.standard = fclk_table->min;
+		pstate_table->gfxclk_pstate.standard =
+			SMU_DPM_TABLE_MAX(gfx_table);
+	pstate_table->uclk_pstate.standard = SMU_DPM_TABLE_MAX(mem_table);
+	pstate_table->socclk_pstate.standard = SMU_DPM_TABLE_MIN(soc_table);
+	pstate_table->vclk_pstate.standard = SMU_DPM_TABLE_MIN(vclk_table);
+	pstate_table->dclk_pstate.standard = SMU_DPM_TABLE_MIN(dclk_table);
+	pstate_table->fclk_pstate.standard = SMU_DPM_TABLE_MIN(fclk_table);
 
 	return 0;
 }
@@ -1902,7 +2337,7 @@ static int smu_v13_0_7_get_fan_speed_pwm(struct smu_context *smu,
 	}
 
 	/* Convert the PMFW output which is in percent to pwm(255) based */
-	*speed = MIN(*speed * 255 / 100, 255);
+	*speed = min(*speed * 255 / 100, (uint32_t)255);
 
 	return 0;
 }
@@ -1937,39 +2372,71 @@ static int smu_v13_0_7_enable_mgpu_fan_boost(struct smu_context *smu)
 					       NULL);
 }
 
-static int smu_v13_0_7_get_power_limit(struct smu_context *smu,
-				       uint32_t *current_power_limit,
-				       uint32_t *default_power_limit,
-				       uint32_t *max_power_limit)
+static int smu_v13_0_7_get_ppt_limit(struct smu_context *smu,
+				     enum smu_ppt_limit_type limit_type,
+				     uint32_t *ppt_limit)
+{
+	OverDriveTableExternal_t od_table;
+	int ret;
+
+	if (limit_type != SMU_PPT_LIMIT_PPT0)
+		return -EOPNOTSUPP;
+
+	ret = smu_v13_0_get_ppt_limit(smu, limit_type, ppt_limit);
+	if (ret)
+		return ret;
+
+	ret = smu_v13_0_7_get_overdrive_table(smu, &od_table);
+	if (ret)
+		return ret;
+
+	if (od_table.OverDriveTable.Ppt > 0)
+		*ppt_limit = *ppt_limit *
+			(100 + od_table.OverDriveTable.Ppt) / 100;
+
+	return 0;
+}
+
+static int smu_v13_0_7_init_ppt_limits(struct smu_context *smu)
 {
 	struct smu_table_context *table_context = &smu->smu_table;
 	struct smu_13_0_7_powerplay_table *powerplay_table =
 		(struct smu_13_0_7_powerplay_table *)table_context->power_play_table;
 	PPTable_t *pptable = table_context->driver_pptable;
 	SkuTable_t *skutable = &pptable->SkuTable;
-	uint32_t power_limit, od_percent;
+	uint32_t od_percent_upper = 0, od_percent_lower = 0;
+	uint32_t pp_limit, msg_limit, min_limit, max_limit;
+	int i;
 
-	if (smu_v13_0_get_current_power_limit(smu, &power_limit))
-		power_limit = smu->adev->pm.ac_power ?
-			      skutable->SocketPowerLimitAc[PPT_THROTTLER_PPT0] :
-			      skutable->SocketPowerLimitDc[PPT_THROTTLER_PPT0];
-
-	if (current_power_limit)
-		*current_power_limit = power_limit;
-	if (default_power_limit)
-		*default_power_limit = power_limit;
-
-	if (max_power_limit) {
-		if (smu->od_enabled) {
-			od_percent = le32_to_cpu(powerplay_table->overdrive_table.max[SMU_13_0_7_ODSETTING_POWERPERCENTAGE]);
-
-			dev_dbg(smu->adev->dev, "ODSETTING_POWERPERCENTAGE: %d (default: %d)\n", od_percent, power_limit);
-
-			power_limit *= (100 + od_percent);
-			power_limit /= 100;
-		}
-		*max_power_limit = power_limit;
+	if (powerplay_table &&
+	    smu_v13_0_7_is_od_feature_supported(smu, PP_OD_FEATURE_PPT_BIT)) {
+		od_percent_upper = le32_to_cpu(powerplay_table->overdrive_table.max[
+			SMU_13_0_7_ODSETTING_POWERPERCENTAGE]);
+		od_percent_lower = le32_to_cpu(powerplay_table->overdrive_table.min[
+			SMU_13_0_7_ODSETTING_POWERPERCENTAGE]);
 	}
+
+	for (i = SMU_POWER_SOURCE_AC; i < SMU_POWER_SOURCE_COUNT; i++) {
+		pp_limit = i == SMU_POWER_SOURCE_AC ?
+			skutable->SocketPowerLimitAc[PPT_THROTTLER_PPT0] :
+			skutable->SocketPowerLimitDc[PPT_THROTTLER_PPT0];
+		msg_limit = skutable->MsgLimits.Power[PPT_THROTTLER_PPT0][i];
+		min_limit = min(pp_limit, msg_limit);
+		max_limit = max(pp_limit, msg_limit);
+
+		smu->ppt_limits.range[i][SMU_PPT_LIMIT_PPT0].default_value =
+			pp_limit;
+		smu->ppt_limits.range[i][SMU_PPT_LIMIT_PPT0].max =
+			max_limit;
+		smu->ppt_limits.range[i][SMU_PPT_LIMIT_PPT0].min =
+			min_limit * (100 - od_percent_lower) / 100;
+		smu->ppt_limits.range[i][SMU_PPT_LIMIT_PPT0].od_max =
+			max_limit * (100 + od_percent_upper) / 100;
+		smu->ppt_limits.range[i][SMU_PPT_LIMIT_PPT0].od_min =
+			smu->ppt_limits.range[i][SMU_PPT_LIMIT_PPT0].min;
+	}
+
+	smu->ppt_limits.supported_mask |= BIT(SMU_PPT_LIMIT_PPT0);
 
 	return 0;
 }
@@ -1984,15 +2451,14 @@ static int smu_v13_0_7_get_power_profile_mode(struct smu_context *smu, char *buf
 	if (!buf)
 		return -EINVAL;
 
-	activity_monitor_external = kcalloc(PP_SMC_POWER_PROFILE_COUNT,
-					    sizeof(*activity_monitor_external),
-					    GFP_KERNEL);
+	activity_monitor_external = kzalloc_objs(*activity_monitor_external,
+						 PP_SMC_POWER_PROFILE_COUNT);
 	if (!activity_monitor_external)
 		return -ENOMEM;
 
 	size += sysfs_emit_at(buf, size, "                              ");
 	for (i = 0; i <= PP_SMC_POWER_PROFILE_WINDOW3D; i++)
-		size += sysfs_emit_at(buf, size, "%-14s%s", amdgpu_pp_profile_name[i],
+		size += sysfs_emit_at(buf, size, "%d %-14s%s", i, amdgpu_pp_profile_name[i],
 			(i == smu->power_profile_mode) ? "* " : "  ");
 
 	size += sysfs_emit_at(buf, size, "\n");
@@ -2022,7 +2488,7 @@ static int smu_v13_0_7_get_power_profile_mode(struct smu_context *smu, char *buf
 do {													\
 	size += sysfs_emit_at(buf, size, "%-30s", #field);						\
 	for (j = 0; j <= PP_SMC_POWER_PROFILE_WINDOW3D; j++)						\
-		size += sysfs_emit_at(buf, size, "%-16d", activity_monitor_external[j].DpmActivityMonitorCoeffInt.field);		\
+		size += sysfs_emit_at(buf, size, "%-18d", activity_monitor_external[j].DpmActivityMonitorCoeffInt.field);		\
 	size += sysfs_emit_at(buf, size, "\n");								\
 } while (0)
 
@@ -2048,69 +2514,111 @@ out:
 	return result;
 }
 
-static int smu_v13_0_7_set_power_profile_mode(struct smu_context *smu, long *input, uint32_t size)
+#define SMU_13_0_7_CUSTOM_PARAMS_COUNT 8
+#define SMU_13_0_7_CUSTOM_PARAMS_CLOCK_COUNT 2
+#define SMU_13_0_7_CUSTOM_PARAMS_SIZE (SMU_13_0_7_CUSTOM_PARAMS_CLOCK_COUNT * SMU_13_0_7_CUSTOM_PARAMS_COUNT * sizeof(long))
+
+static int smu_v13_0_7_set_power_profile_mode_coeff(struct smu_context *smu,
+						    long *input)
 {
 
 	DpmActivityMonitorCoeffIntExternal_t activity_monitor_external;
 	DpmActivityMonitorCoeffInt_t *activity_monitor =
 		&(activity_monitor_external.DpmActivityMonitorCoeffInt);
-	int workload_type, ret = 0;
+	int ret, idx;
 
-	smu->power_profile_mode = input[size];
-
-	if (smu->power_profile_mode > PP_SMC_POWER_PROFILE_WINDOW3D) {
-		dev_err(smu->adev->dev, "Invalid power profile mode %d\n", smu->power_profile_mode);
-		return -EINVAL;
+	ret = smu_cmn_update_table(smu,
+				   SMU_TABLE_ACTIVITY_MONITOR_COEFF, WORKLOAD_PPLIB_CUSTOM_BIT,
+				   (void *)(&activity_monitor_external), false);
+	if (ret) {
+		dev_err(smu->adev->dev, "[%s] Failed to get activity monitor!", __func__);
+		return ret;
 	}
 
-	if (smu->power_profile_mode == PP_SMC_POWER_PROFILE_CUSTOM) {
-
-		ret = smu_cmn_update_table(smu,
-				       SMU_TABLE_ACTIVITY_MONITOR_COEFF, WORKLOAD_PPLIB_CUSTOM_BIT,
-				       (void *)(&activity_monitor_external), false);
-		if (ret) {
-			dev_err(smu->adev->dev, "[%s] Failed to get activity monitor!", __func__);
-			return ret;
-		}
-
-		switch (input[0]) {
-		case 0: /* Gfxclk */
-			activity_monitor->Gfx_ActiveHystLimit = input[1];
-			activity_monitor->Gfx_IdleHystLimit = input[2];
-			activity_monitor->Gfx_FPS = input[3];
-			activity_monitor->Gfx_MinActiveFreqType = input[4];
-			activity_monitor->Gfx_BoosterFreqType = input[5];
-			activity_monitor->Gfx_MinActiveFreq = input[6];
-			activity_monitor->Gfx_BoosterFreq = input[7];
-			break;
-		case 1: /* Fclk */
-			activity_monitor->Fclk_ActiveHystLimit = input[1];
-			activity_monitor->Fclk_IdleHystLimit = input[2];
-			activity_monitor->Fclk_FPS = input[3];
-			activity_monitor->Fclk_MinActiveFreqType = input[4];
-			activity_monitor->Fclk_BoosterFreqType = input[5];
-			activity_monitor->Fclk_MinActiveFreq = input[6];
-			activity_monitor->Fclk_BoosterFreq = input[7];
-			break;
-		}
-
-		ret = smu_cmn_update_table(smu,
-				       SMU_TABLE_ACTIVITY_MONITOR_COEFF, WORKLOAD_PPLIB_CUSTOM_BIT,
-				       (void *)(&activity_monitor_external), true);
-		if (ret) {
-			dev_err(smu->adev->dev, "[%s] Failed to set activity monitor!", __func__);
-			return ret;
-		}
+	idx = 0 * SMU_13_0_7_CUSTOM_PARAMS_COUNT;
+	if (input[idx]) {
+		/* Gfxclk */
+		activity_monitor->Gfx_ActiveHystLimit = input[idx + 1];
+		activity_monitor->Gfx_IdleHystLimit = input[idx + 2];
+		activity_monitor->Gfx_FPS = input[idx + 3];
+		activity_monitor->Gfx_MinActiveFreqType = input[idx + 4];
+		activity_monitor->Gfx_BoosterFreqType = input[idx + 5];
+		activity_monitor->Gfx_MinActiveFreq = input[idx + 6];
+		activity_monitor->Gfx_BoosterFreq = input[idx + 7];
+	}
+	idx = 1 * SMU_13_0_7_CUSTOM_PARAMS_COUNT;
+	if (input[idx]) {
+		/* Fclk */
+		activity_monitor->Fclk_ActiveHystLimit = input[idx + 1];
+		activity_monitor->Fclk_IdleHystLimit = input[idx + 2];
+		activity_monitor->Fclk_FPS = input[idx + 3];
+		activity_monitor->Fclk_MinActiveFreqType = input[idx + 4];
+		activity_monitor->Fclk_BoosterFreqType = input[idx + 5];
+		activity_monitor->Fclk_MinActiveFreq = input[idx + 6];
+		activity_monitor->Fclk_BoosterFreq = input[idx + 7];
 	}
 
-	/* conv PP_SMC_POWER_PROFILE* to WORKLOAD_PPLIB_*_BIT */
-	workload_type = smu_cmn_to_asic_specific_index(smu,
-						       CMN2ASIC_MAPPING_WORKLOAD,
-						       smu->power_profile_mode);
-	if (workload_type < 0)
-		return -EINVAL;
-	smu_cmn_send_smc_msg_with_param(smu, SMU_MSG_SetWorkloadMask,
-				    1 << workload_type, NULL);
+	ret = smu_cmn_update_table(smu,
+				   SMU_TABLE_ACTIVITY_MONITOR_COEFF, WORKLOAD_PPLIB_CUSTOM_BIT,
+				   (void *)(&activity_monitor_external), true);
+	if (ret) {
+		dev_err(smu->adev->dev, "[%s] Failed to set activity monitor!", __func__);
+		return ret;
+	}
+
+	return ret;
+}
+
+static int smu_v13_0_7_set_power_profile_mode(struct smu_context *smu,
+					      u32 workload_mask,
+					      long *custom_params,
+					      u32 custom_params_max_idx)
+{
+	u32 backend_workload_mask = 0;
+	int ret, idx = -1, i;
+
+	smu_cmn_get_backend_workload_mask(smu, workload_mask,
+					  &backend_workload_mask);
+
+	if (workload_mask & (1 << PP_SMC_POWER_PROFILE_CUSTOM)) {
+		if (!smu->custom_profile_params) {
+			smu->custom_profile_params =
+				kzalloc(SMU_13_0_7_CUSTOM_PARAMS_SIZE, GFP_KERNEL);
+			if (!smu->custom_profile_params)
+				return -ENOMEM;
+		}
+		if (custom_params && custom_params_max_idx) {
+			if (!smu_cmn_custom_params_count_valid(custom_params_max_idx,
+							       SMU_13_0_7_CUSTOM_PARAMS_COUNT) ||
+			    !smu_cmn_custom_params_clock_valid(custom_params[0],
+							       SMU_13_0_7_CUSTOM_PARAMS_CLOCK_COUNT))
+				return -EINVAL;
+			idx = custom_params[0] * SMU_13_0_7_CUSTOM_PARAMS_COUNT;
+			smu->custom_profile_params[idx] = 1;
+			for (i = 1; i < custom_params_max_idx; i++)
+				smu->custom_profile_params[idx + i] = custom_params[i];
+		}
+		ret = smu_v13_0_7_set_power_profile_mode_coeff(smu,
+							       smu->custom_profile_params);
+		if (ret) {
+			if (idx != -1)
+				smu->custom_profile_params[idx] = 0;
+			return ret;
+		}
+	} else if (smu->custom_profile_params) {
+		memset(smu->custom_profile_params, 0, SMU_13_0_7_CUSTOM_PARAMS_SIZE);
+	}
+
+	ret = smu_cmn_send_smc_msg_with_param(smu, SMU_MSG_SetWorkloadMask,
+					      backend_workload_mask, NULL);
+
+	if (ret) {
+		dev_err(smu->adev->dev, "Failed to set workload mask 0x%08x\n",
+			workload_mask);
+		if (idx != -1)
+			smu->custom_profile_params[idx] = 0;
+		return ret;
+	}
 
 	return ret;
 }
@@ -2130,32 +2638,6 @@ static int smu_v13_0_7_set_mp1_state(struct smu_context *smu,
 	}
 
 	return ret;
-}
-
-static int smu_v13_0_7_baco_enter(struct smu_context *smu)
-{
-	struct smu_baco_context *smu_baco = &smu->smu_baco;
-	struct amdgpu_device *adev = smu->adev;
-
-	if (adev->in_runpm && smu_cmn_is_audio_func_enabled(adev))
-		return smu_v13_0_baco_set_armd3_sequence(smu,
-				(smu_baco->maco_support && amdgpu_runtime_pm != 1) ?
-					BACO_SEQ_BAMACO : BACO_SEQ_BACO);
-	else
-		return smu_v13_0_baco_enter(smu);
-}
-
-static int smu_v13_0_7_baco_exit(struct smu_context *smu)
-{
-	struct amdgpu_device *adev = smu->adev;
-
-	if (adev->in_runpm && smu_cmn_is_audio_func_enabled(adev)) {
-		/* Wait for PMFW handling for the Dstate change */
-		usleep_range(10000, 11000);
-		return smu_v13_0_baco_set_armd3_sequence(smu, BACO_SEQ_ULPS);
-	} else {
-		return smu_v13_0_baco_exit(smu);
-	}
 }
 
 static bool smu_v13_0_7_is_mode1_reset_supported(struct smu_context *smu)
@@ -2178,11 +2660,181 @@ static int smu_v13_0_7_set_df_cstate(struct smu_context *smu,
 					       NULL);
 }
 
+static bool smu_v13_0_7_wbrf_support_check(struct smu_context *smu)
+{
+	return smu->smc_fw_version > 0x00524600;
+}
+
+static int smu_v13_0_7_set_ppt_limit(struct smu_context *smu,
+				     enum smu_ppt_limit_type limit_type,
+				     uint32_t limit)
+{
+	PPTable_t *pptable = smu->smu_table.driver_pptable;
+	SkuTable_t *skutable = &pptable->SkuTable;
+	uint32_t msg_limit = skutable->MsgLimits.Power
+		[PPT_THROTTLER_PPT0][POWER_SOURCE_AC];
+	struct smu_table_context *table_context = &smu->smu_table;
+	OverDriveTableExternal_t *od_table =
+		(OverDriveTableExternal_t *)table_context->overdrive_table;
+	OverDriveTableExternal_t current_od_table;
+	int ret = 0;
+
+	if (limit_type != SMU_PPT_LIMIT_PPT0)
+		return -EINVAL;
+
+	if (limit <= msg_limit) {
+		ret = smu_v13_0_7_get_overdrive_table(smu, &current_od_table);
+		if (ret)
+			return ret;
+
+		if (current_od_table.OverDriveTable.Ppt) {
+			od_table->OverDriveTable.Ppt = 0;
+			od_table->OverDriveTable.FeatureCtrlMask |= 1U << PP_OD_FEATURE_PPT_BIT;
+
+			ret = smu_v13_0_7_upload_overdrive_table(smu, od_table);
+			if (ret) {
+				dev_err(smu->adev->dev, "Failed to upload overdrive table!\n");
+				return ret;
+			}
+		}
+		return smu_v13_0_set_ppt_limit(smu, limit_type, limit);
+	} else if (smu->od_enabled) {
+		ret = smu_v13_0_set_ppt_limit(smu, limit_type, msg_limit);
+		if (ret)
+			return ret;
+
+		od_table->OverDriveTable.Ppt = (limit * 100) / msg_limit - 100;
+		od_table->OverDriveTable.FeatureCtrlMask |= 1U << PP_OD_FEATURE_PPT_BIT;
+
+		ret = smu_v13_0_7_upload_overdrive_table(smu, od_table);
+		if (ret) {
+		  dev_err(smu->adev->dev, "Failed to upload overdrive table!\n");
+		  return ret;
+		}
+
+	} else {
+		return -EINVAL;
+	}
+
+	return 0;
+}
+
+static int smu_v13_0_7_update_pcie_parameters(struct smu_context *smu,
+				     uint8_t pcie_gen_cap,
+				     uint8_t pcie_width_cap)
+{
+	struct smu_13_0_dpm_context *dpm_context = smu->smu_dpm.dpm_context;
+	struct smu_pcie_table *pcie_table = &dpm_context->dpm_tables.pcie_table;
+	int num_of_levels;
+	int link_level;
+	uint32_t smu_pcie_arg;
+	struct smu_table_context *table_context = &smu->smu_table;
+	PPTable_t *pptable = table_context->driver_pptable;
+	SkuTable_t *skutable = &pptable->SkuTable;
+	int ret = 0;
+	int i;
+
+	pcie_table->lclk_levels = 0;
+	for (link_level = 0; link_level < NUM_LINK_LEVELS; link_level++) {
+		if (!skutable->PcieGenSpeed[link_level] &&
+		    !skutable->PcieLaneCount[link_level] &&
+		    !skutable->LclkFreq[link_level])
+			continue;
+
+		pcie_table->pcie_gen[pcie_table->lclk_levels] =
+			skutable->PcieGenSpeed[link_level];
+		pcie_table->pcie_lane[pcie_table->lclk_levels] =
+			skutable->PcieLaneCount[link_level];
+		pcie_table->lclk_freq[pcie_table->lclk_levels] =
+			skutable->LclkFreq[link_level];
+		pcie_table->lclk_levels++;
+	}
+
+	num_of_levels = pcie_table->lclk_levels;
+	if (!num_of_levels)
+		return 0;
+
+	if (!(smu->adev->pm.pp_feature & PP_PCIE_DPM_MASK)) {
+		if (pcie_table->pcie_gen[num_of_levels - 1] < pcie_gen_cap)
+			pcie_gen_cap = pcie_table->pcie_gen[num_of_levels - 1];
+
+		if (pcie_table->pcie_lane[num_of_levels - 1] < pcie_width_cap)
+			pcie_width_cap = pcie_table->pcie_lane[num_of_levels - 1];
+
+		/* Force all levels to use the same settings */
+		for (i = 0; i < num_of_levels; i++) {
+			pcie_table->pcie_gen[i] = pcie_gen_cap;
+			pcie_table->pcie_lane[i] = pcie_width_cap;
+			smu_pcie_arg = i << 16;
+			smu_pcie_arg |= pcie_table->pcie_gen[i] << 8;
+			smu_pcie_arg |= pcie_table->pcie_lane[i];
+
+			ret = smu_cmn_send_smc_msg_with_param(smu,
+								SMU_MSG_OverridePcieParameters,
+								smu_pcie_arg,
+								NULL);
+			if (ret)
+				break;
+		}
+	} else {
+		for (i = 0; i < num_of_levels; i++) {
+			if (pcie_table->pcie_gen[i] > pcie_gen_cap ||
+				pcie_table->pcie_lane[i] > pcie_width_cap) {
+				pcie_table->pcie_gen[i] = pcie_table->pcie_gen[i] > pcie_gen_cap ?
+										  pcie_gen_cap : pcie_table->pcie_gen[i];
+				pcie_table->pcie_lane[i] = pcie_table->pcie_lane[i] > pcie_width_cap ?
+										   pcie_width_cap : pcie_table->pcie_lane[i];
+				smu_pcie_arg = i << 16;
+				smu_pcie_arg |= pcie_table->pcie_gen[i] << 8;
+				smu_pcie_arg |= pcie_table->pcie_lane[i];
+
+				ret = smu_cmn_send_smc_msg_with_param(smu,
+									SMU_MSG_OverridePcieParameters,
+									smu_pcie_arg,
+									NULL);
+				if (ret)
+					break;
+			}
+		}
+	}
+
+	return ret;
+}
+
+static int smu_v13_0_7_mode1_reset(struct smu_context *smu)
+{
+   int ret;
+
+   ret = smu_cmn_send_debug_smc_msg(smu, DEBUGSMC_MSG_Mode1Reset);
+   if (!ret) {
+       /* disable mmio access while doing mode 1 reset*/
+       smu->adev->no_hw_access = true;
+       /* ensure no_hw_access is globally visible before any MMIO */
+       smp_mb();
+       msleep(SMU13_MODE1_RESET_WAIT_TIME_IN_MS);
+   }
+
+   return ret;
+}
+
+static void smu_v13_0_7_init_msg_ctl(struct smu_context *smu)
+{
+	struct amdgpu_device *adev = smu->adev;
+	struct smu_msg_ctl *ctl = &smu->msg_ctl;
+
+	smu_v13_0_init_msg_ctl(smu, smu_v13_0_7_message_map);
+
+	/* Set up debug mailbox registers */
+	ctl->config.debug_param_reg = SOC15_REG_OFFSET(MP1, 0, mmMP1_SMN_C2PMSG_53);
+	ctl->config.debug_msg_reg = SOC15_REG_OFFSET(MP1, 0, mmMP1_SMN_C2PMSG_75);
+	ctl->config.debug_resp_reg = SOC15_REG_OFFSET(MP1, 0, mmMP1_SMN_C2PMSG_54);
+	ctl->flags |= SMU_MSG_CTL_DEBUG_MAILBOX;
+}
+
 static const struct pptable_funcs smu_v13_0_7_ppt_funcs = {
-	.get_allowed_feature_mask = smu_v13_0_7_get_allowed_feature_mask,
+	.init_allowed_features = smu_v13_0_7_init_allowed_features,
 	.set_default_dpm_table = smu_v13_0_7_set_default_dpm_table,
 	.is_dpm_running = smu_v13_0_7_is_dpm_running,
-	.dump_pptable = smu_v13_0_7_dump_pptable,
 	.init_microcode = smu_v13_0_init_microcode,
 	.load_microcode = smu_v13_0_load_microcode,
 	.fini_microcode = smu_v13_0_fini_microcode,
@@ -2192,7 +2844,7 @@ static const struct pptable_funcs smu_v13_0_7_ppt_funcs = {
 	.fini_power = smu_v13_0_fini_power,
 	.check_fw_status = smu_v13_0_7_check_fw_status,
 	.setup_pptable = smu_v13_0_7_setup_pptable,
-	.check_fw_version = smu_v13_0_check_fw_version,
+	.check_fw_version = smu_cmn_check_fw_version,
 	.write_pptable = smu_cmn_write_pptable,
 	.set_driver_table_location = smu_v13_0_set_driver_table_location,
 	.system_features_control = smu_v13_0_system_features_control,
@@ -2206,9 +2858,9 @@ static const struct pptable_funcs smu_v13_0_7_ppt_funcs = {
 	.get_vbios_bootup_values = smu_v13_0_get_vbios_bootup_values,
 	.read_sensor = smu_v13_0_7_read_sensor,
 	.feature_is_enabled = smu_cmn_feature_is_enabled,
-	.print_clk_levels = smu_v13_0_7_print_clk_levels,
+	.emit_clk_levels = smu_v13_0_7_emit_clk_levels,
 	.force_clk_levels = smu_v13_0_7_force_clk_levels,
-	.update_pcie_parameters = smu_v13_0_update_pcie_parameters,
+	.update_pcie_parameters = smu_v13_0_7_update_pcie_parameters,
 	.get_thermal_temperature_range = smu_v13_0_7_get_thermal_temperature_range,
 	.register_irq_handler = smu_v13_0_register_irq_handler,
 	.enable_thermal_alert = smu_v13_0_enable_thermal_alert,
@@ -2228,35 +2880,36 @@ static const struct pptable_funcs smu_v13_0_7_ppt_funcs = {
 	.get_fan_control_mode = smu_v13_0_get_fan_control_mode,
 	.set_fan_control_mode = smu_v13_0_set_fan_control_mode,
 	.enable_mgpu_fan_boost = smu_v13_0_7_enable_mgpu_fan_boost,
-	.get_power_limit = smu_v13_0_7_get_power_limit,
-	.set_power_limit = smu_v13_0_set_power_limit,
+	.get_ppt_limit = smu_v13_0_7_get_ppt_limit,
+	.set_ppt_limit = smu_v13_0_7_set_ppt_limit,
 	.set_power_source = smu_v13_0_set_power_source,
 	.get_power_profile_mode = smu_v13_0_7_get_power_profile_mode,
 	.set_power_profile_mode = smu_v13_0_7_set_power_profile_mode,
 	.set_tool_table_location = smu_v13_0_set_tool_table_location,
 	.get_pp_feature_mask = smu_cmn_get_pp_feature_mask,
 	.set_pp_feature_mask = smu_cmn_set_pp_feature_mask,
-	.baco_is_support = smu_v13_0_baco_is_support,
-	.baco_get_state = smu_v13_0_baco_get_state,
-	.baco_set_state = smu_v13_0_baco_set_state,
-	.baco_enter = smu_v13_0_7_baco_enter,
-	.baco_exit = smu_v13_0_7_baco_exit,
+	.get_bamaco_support = smu_v13_0_get_bamaco_support,
+	.baco_enter = smu_v13_0_baco_enter,
+	.baco_exit = smu_v13_0_baco_exit,
 	.mode1_reset_is_support = smu_v13_0_7_is_mode1_reset_supported,
-	.mode1_reset = smu_v13_0_mode1_reset,
+	.mode1_reset = smu_v13_0_7_mode1_reset,
 	.set_mp1_state = smu_v13_0_7_set_mp1_state,
 	.set_df_cstate = smu_v13_0_7_set_df_cstate,
 	.gpo_control = smu_v13_0_gpo_control,
+	.is_asic_wbrf_supported = smu_v13_0_7_wbrf_support_check,
+	.enable_uclk_shadow = smu_v13_0_enable_uclk_shadow,
+	.set_wbrf_exclusion_ranges = smu_v13_0_set_wbrf_exclusion_ranges,
+	.interrupt_work = smu_v13_0_interrupt_work,
 };
 
 void smu_v13_0_7_set_ppt_funcs(struct smu_context *smu)
 {
 	smu->ppt_funcs = &smu_v13_0_7_ppt_funcs;
-	smu->message_map = smu_v13_0_7_message_map;
 	smu->clock_map = smu_v13_0_7_clk_map;
 	smu->feature_map = smu_v13_0_7_feature_mask_map;
 	smu->table_map = smu_v13_0_7_table_map;
 	smu->pwr_src_map = smu_v13_0_7_pwr_src_map;
 	smu->workload_map = smu_v13_0_7_workload_map;
 	smu->smc_driver_if_version = SMU13_0_7_DRIVER_IF_VERSION;
-	smu_v13_0_set_smu_mailbox_registers(smu);
+	smu_v13_0_7_init_msg_ctl(smu);
 }

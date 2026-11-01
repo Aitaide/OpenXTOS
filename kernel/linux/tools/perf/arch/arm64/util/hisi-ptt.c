@@ -9,6 +9,7 @@
 #include <linux/bitops.h>
 #include <linux/log2.h>
 #include <linux/zalloc.h>
+#include <errno.h>
 #include <time.h>
 
 #include <internal/lib.h> // page_size
@@ -52,7 +53,7 @@ static int hisi_ptt_info_fill(struct auxtrace_record *itr,
 	if (priv_size != HISI_PTT_AUXTRACE_PRIV_SIZE)
 		return -EINVAL;
 
-	if (!session->evlist->core.nr_mmaps)
+	if (!evlist__core(session->evlist)->nr_mmaps)
 		return -EINVAL;
 
 	auxtrace_info->type = PERF_AUXTRACE_HISI_PTT;
@@ -174,7 +175,6 @@ struct auxtrace_record *hisi_ptt_recording_init(int *err,
 	}
 
 	pttr->hisi_ptt_pmu = hisi_ptt_pmu;
-	pttr->itr.pmu = hisi_ptt_pmu;
 	pttr->itr.recording_options = hisi_ptt_recording_options;
 	pttr->itr.info_priv_size = hisi_ptt_info_priv_size;
 	pttr->itr.info_fill = hisi_ptt_info_fill;

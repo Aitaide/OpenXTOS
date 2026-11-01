@@ -21,7 +21,7 @@ static void __nvmet_disc_changed(struct nvmet_port *port,
 	if (nvmet_aen_bit_disabled(ctrl, NVME_AEN_BIT_DISC_CHANGE))
 		return;
 
-	nvmet_add_async_event(ctrl, NVME_AER_TYPE_NOTICE,
+	nvmet_add_async_event(ctrl, NVME_AER_NOTICE,
 			      NVME_AER_NOTICE_DISC_CHANGED, NVME_LOG_DISC);
 }
 
@@ -119,7 +119,7 @@ static void nvmet_format_discovery_entry(struct nvmf_disc_rsp_page_hdr *hdr,
 	memcpy(e->trsvcid, port->disc_addr.trsvcid, NVMF_TRSVCID_SIZE);
 	memcpy(e->traddr, traddr, NVMF_TRADDR_SIZE);
 	memcpy(e->tsas.common, port->disc_addr.tsas.common, NVMF_TSAS_SIZE);
-	strncpy(e->subnqn, subsys_nqn, NVMF_NQN_SIZE);
+	strscpy(e->subnqn, subsys_nqn, NVMF_NQN_SIZE);
 }
 
 /*
@@ -166,6 +166,7 @@ static void nvmet_execute_disc_get_log_page(struct nvmet_req *req)
 	u64 offset = nvmet_get_log_page_offset(req->cmd);
 	size_t data_len = nvmet_get_log_page_len(req->cmd);
 	size_t alloc_len;
+	size_t copy_len;
 	struct nvmet_subsys_link *p;
 	struct nvmet_port *r;
 	u32 numrec = 0;
@@ -179,7 +180,7 @@ static void nvmet_execute_disc_get_log_page(struct nvmet_req *req)
 	if (req->cmd->get_log_page.lid != NVME_LOG_DISC) {
 		req->error_loc =
 			offsetof(struct nvme_get_log_page_command, lid);
-		status = NVME_SC_INVALID_FIELD | NVME_SC_DNR;
+		status = NVME_SC_INVALID_FIELD | NVME_STATUS_DNR;
 		goto out;
 	}
 
@@ -187,7 +188,7 @@ static void nvmet_execute_disc_get_log_page(struct nvmet_req *req)
 	if (offset & 0x3) {
 		req->error_loc =
 			offsetof(struct nvme_get_log_page_command, lpo);
-		status = NVME_SC_INVALID_FIELD | NVME_SC_DNR;
+		status = NVME_SC_INVALID_FIELD | NVME_STATUS_DNR;
 		goto out;
 	}
 
@@ -224,6 +225,9 @@ static void nvmet_execute_disc_get_log_page(struct nvmet_req *req)
 	}
 
 	list_for_each_entry(r, &req->port->referrals, entry) {
+		if (r->disc_addr.trtype == NVMF_TRTYPE_PCI)
+			continue;
+
 		nvmet_format_discovery_entry(hdr, r,
 				NVME_DISC_SUBSYS_NAME,
 				r->disc_addr.traddr,
@@ -239,7 +243,27 @@ static void nvmet_execute_disc_get_log_page(struct nvmet_req *req)
 
 	up_read(&nvmet_config_sem);
 
-	status = nvmet_copy_to_sgl(req, 0, buffer + offset, data_len);
+	/*
+	 * Validate the host-supplied log page offset before copying out.
+	 * Without this check, the host controls a 64-bit byte offset into
+	 * a small kzalloc'd buffer: a value past the log page lets the
+	 * subsequent memcpy read adjacent kernel heap, and a value aimed
+	 * at unmapped kernel memory faults the in-kernel copy and crashes
+	 * the target host. The Discovery controller is unauthenticated,
+	 * so the bug is reachable from any reachable fabric peer.
+	 */
+	if (offset > alloc_len) {
+		req->error_loc =
+			offsetof(struct nvme_get_log_page_command, lpo);
+		status = NVME_SC_INVALID_FIELD | NVME_STATUS_DNR;
+		goto out_free_buffer;
+	}
+
+	copy_len = min_t(size_t, data_len, alloc_len - offset);
+	status = nvmet_copy_to_sgl(req, 0, buffer + offset, copy_len);
+	if (!status && copy_len < data_len)
+		status = nvmet_zero_sgl(req, copy_len, data_len - copy_len);
+out_free_buffer:
 	kfree(buffer);
 out:
 	nvmet_req_complete(req, status);
@@ -256,11 +280,11 @@ static void nvmet_execute_disc_identify(struct nvmet_req *req)
 
 	if (req->cmd->identify.cns != NVME_ID_CNS_CTRL) {
 		req->error_loc = offsetof(struct nvme_identify, cns);
-		status = NVME_SC_INVALID_FIELD | NVME_SC_DNR;
+		status = NVME_SC_INVALID_FIELD | NVME_STATUS_DNR;
 		goto out;
 	}
 
-	id = kzalloc(sizeof(*id), GFP_KERNEL);
+	id = kzalloc_obj(*id);
 	if (!id) {
 		status = NVME_SC_INTERNAL;
 		goto out;
@@ -282,7 +306,7 @@ static void nvmet_execute_disc_identify(struct nvmet_req *req)
 	id->lpa = (1 << 2);
 
 	/* no enforcement soft-limit for maxcmd - pick arbitrary high value */
-	id->maxcmd = cpu_to_le16(NVMET_MAX_CMD);
+	id->maxcmd = cpu_to_le16(NVMET_MAX_CMD(ctrl));
 
 	id->sgls = cpu_to_le32(1 << 0);	/* we always support SGLs */
 	if (ctrl->ops->flags & NVMF_KEYED_SGLS)
@@ -320,7 +344,7 @@ static void nvmet_execute_disc_set_features(struct nvmet_req *req)
 	default:
 		req->error_loc =
 			offsetof(struct nvme_common_command, cdw10);
-		stat = NVME_SC_INVALID_FIELD | NVME_SC_DNR;
+		stat = NVME_SC_INVALID_FIELD | NVME_STATUS_DNR;
 		break;
 	}
 
@@ -345,11 +369,25 @@ static void nvmet_execute_disc_get_features(struct nvmet_req *req)
 	default:
 		req->error_loc =
 			offsetof(struct nvme_common_command, cdw10);
-		stat = NVME_SC_INVALID_FIELD | NVME_SC_DNR;
+		stat = NVME_SC_INVALID_FIELD | NVME_STATUS_DNR;
 		break;
 	}
 
 	nvmet_req_complete(req, stat);
+}
+
+u32 nvmet_discovery_cmd_data_len(struct nvmet_req *req)
+{
+	struct nvme_command *cmd = req->cmd;
+
+	switch (cmd->common.opcode) {
+	case nvme_admin_get_log_page:
+		return nvmet_get_log_page_len(req->cmd);
+	case nvme_admin_identify:
+		return NVME_IDENTIFY_DATA_SIZE;
+	default:
+		return 0;
+	}
 }
 
 u16 nvmet_parse_discovery_cmd(struct nvmet_req *req)
@@ -361,7 +399,7 @@ u16 nvmet_parse_discovery_cmd(struct nvmet_req *req)
 		       cmd->common.opcode);
 		req->error_loc =
 			offsetof(struct nvme_common_command, opcode);
-		return NVME_SC_INVALID_OPCODE | NVME_SC_DNR;
+		return NVME_SC_INVALID_OPCODE | NVME_STATUS_DNR;
 	}
 
 	switch (cmd->common.opcode) {
@@ -386,7 +424,7 @@ u16 nvmet_parse_discovery_cmd(struct nvmet_req *req)
 	default:
 		pr_debug("unhandled cmd %d\n", cmd->common.opcode);
 		req->error_loc = offsetof(struct nvme_common_command, opcode);
-		return NVME_SC_INVALID_OPCODE | NVME_SC_DNR;
+		return NVME_SC_INVALID_OPCODE | NVME_STATUS_DNR;
 	}
 
 }

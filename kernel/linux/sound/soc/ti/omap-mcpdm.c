@@ -19,7 +19,6 @@
 #include <linux/irq.h>
 #include <linux/slab.h>
 #include <linux/pm_runtime.h>
-#include <linux/of_device.h>
 
 #include <sound/core.h>
 #include <sound/pcm.h>
@@ -251,12 +250,10 @@ static int omap_mcpdm_dai_startup(struct snd_pcm_substream *substream,
 {
 	struct omap_mcpdm *mcpdm = snd_soc_dai_get_drvdata(dai);
 
-	mutex_lock(&mcpdm->mutex);
+	guard(mutex)(&mcpdm->mutex);
 
 	if (!snd_soc_dai_active(dai))
 		omap_mcpdm_open_streams(mcpdm);
-
-	mutex_unlock(&mcpdm->mutex);
 
 	return 0;
 }
@@ -269,7 +266,7 @@ static void omap_mcpdm_dai_shutdown(struct snd_pcm_substream *substream,
 	int stream1 = tx ? SNDRV_PCM_STREAM_PLAYBACK : SNDRV_PCM_STREAM_CAPTURE;
 	int stream2 = tx ? SNDRV_PCM_STREAM_CAPTURE : SNDRV_PCM_STREAM_PLAYBACK;
 
-	mutex_lock(&mcpdm->mutex);
+	guard(mutex)(&mcpdm->mutex);
 
 	if (!snd_soc_dai_active(dai)) {
 		if (omap_mcpdm_active(mcpdm)) {
@@ -287,8 +284,6 @@ static void omap_mcpdm_dai_shutdown(struct snd_pcm_substream *substream,
 		cpu_latency_qos_remove_request(&mcpdm->pm_qos_req);
 
 	mcpdm->latency[stream1] = 0;
-
-	mutex_unlock(&mcpdm->mutex);
 }
 
 static int omap_mcpdm_dai_hw_params(struct snd_pcm_substream *substream,
@@ -533,7 +528,7 @@ static const struct snd_soc_component_driver omap_mcpdm_component = {
 void omap_mcpdm_configure_dn_offsets(struct snd_soc_pcm_runtime *rtd,
 				    u8 rx1, u8 rx2)
 {
-	struct omap_mcpdm *mcpdm = snd_soc_dai_get_drvdata(asoc_rtd_to_cpu(rtd, 0));
+	struct omap_mcpdm *mcpdm = snd_soc_dai_get_drvdata(snd_soc_rtd_to_cpu(rtd, 0));
 
 	mcpdm->dn_rx_offset = MCPDM_DNOFST_RX1(rx1) | MCPDM_DNOFST_RX2(rx2);
 }

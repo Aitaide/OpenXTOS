@@ -274,7 +274,6 @@ static int tridentfb_setup_ddc_bus(struct fb_info *info)
 	strscpy(par->ddc_adapter.name, info->fix.id,
 		sizeof(par->ddc_adapter.name));
 	par->ddc_adapter.owner		= THIS_MODULE;
-	par->ddc_adapter.class		= I2C_CLASS_DDC;
 	par->ddc_adapter.algo_data	= &par->ddc_algo;
 	par->ddc_adapter.dev.parent	= info->device;
 	if (is_oldclock(par->chip_id)) { /* not sure if this check is OK */
@@ -1444,6 +1443,7 @@ static int tridentfb_blank(int blank_mode, struct fb_info *info)
 
 static const struct fb_ops tridentfb_ops = {
 	.owner = THIS_MODULE,
+	__FB_DEFAULT_IOMEM_OPS_RDWR,
 	.fb_setcolreg = tridentfb_setcolreg,
 	.fb_pan_display = tridentfb_pan_display,
 	.fb_blank = tridentfb_blank,
@@ -1453,6 +1453,7 @@ static const struct fb_ops tridentfb_ops = {
 	.fb_copyarea = tridentfb_copyarea,
 	.fb_imageblit = tridentfb_imageblit,
 	.fb_sync = tridentfb_sync,
+	__FB_DEFAULT_IOMEM_OPS_MMAP,
 };
 
 static int trident_pci_probe(struct pci_dev *dev,
@@ -1630,7 +1631,7 @@ static int trident_pci_probe(struct pci_dev *dev,
 	}
 
 	if (noaccel) {
-		printk(KERN_DEBUG "disabling acceleration\n");
+		dev_dbg(&dev->dev, "disabling acceleration\n");
 		info->flags |= FBINFO_HWACCEL_DISABLED;
 		info->pixmap.scan_align = 1;
 	}
@@ -1692,7 +1693,7 @@ static int trident_pci_probe(struct pci_dev *dev,
 	info->var.activate |= FB_ACTIVATE_NOW;
 	info->device = &dev->dev;
 	if (register_framebuffer(info) < 0) {
-		printk(KERN_ERR "tridentfb: could not register framebuffer\n");
+		dev_err(&dev->dev, "could not register framebuffer\n");
 		fb_dealloc_cmap(&info->cmap);
 		err = -EINVAL;
 		goto out_unmap2;
@@ -1705,6 +1706,7 @@ static int trident_pci_probe(struct pci_dev *dev,
 	return 0;
 
 out_unmap2:
+	fb_destroy_modelist(&info->modelist);
 	if (default_par->ddc_registered)
 		i2c_del_adapter(&default_par->ddc_adapter);
 	kfree(info->pixmap.addr);
@@ -1735,28 +1737,28 @@ static void trident_pci_remove(struct pci_dev *dev)
 
 /* List of boards that we are trying to support */
 static const struct pci_device_id trident_devices[] = {
-	{PCI_VENDOR_ID_TRIDENT,	BLADE3D, PCI_ANY_ID, PCI_ANY_ID, 0, 0, 0},
-	{PCI_VENDOR_ID_TRIDENT,	CYBERBLADEi7, PCI_ANY_ID, PCI_ANY_ID, 0, 0, 0},
-	{PCI_VENDOR_ID_TRIDENT,	CYBERBLADEi7D, PCI_ANY_ID, PCI_ANY_ID, 0, 0, 0},
-	{PCI_VENDOR_ID_TRIDENT,	CYBERBLADEi1, PCI_ANY_ID, PCI_ANY_ID, 0, 0, 0},
-	{PCI_VENDOR_ID_TRIDENT,	CYBERBLADEi1D, PCI_ANY_ID, PCI_ANY_ID, 0, 0, 0},
-	{PCI_VENDOR_ID_TRIDENT,	CYBERBLADEAi1, PCI_ANY_ID, PCI_ANY_ID, 0, 0, 0},
-	{PCI_VENDOR_ID_TRIDENT,	CYBERBLADEAi1D, PCI_ANY_ID, PCI_ANY_ID, 0, 0, 0},
-	{PCI_VENDOR_ID_TRIDENT,	CYBERBLADEE4, PCI_ANY_ID, PCI_ANY_ID, 0, 0, 0},
-	{PCI_VENDOR_ID_TRIDENT,	TGUI9440, PCI_ANY_ID, PCI_ANY_ID, 0, 0, 0},
-	{PCI_VENDOR_ID_TRIDENT,	TGUI9660, PCI_ANY_ID, PCI_ANY_ID, 0, 0, 0},
-	{PCI_VENDOR_ID_TRIDENT,	IMAGE975, PCI_ANY_ID, PCI_ANY_ID, 0, 0, 0},
-	{PCI_VENDOR_ID_TRIDENT,	IMAGE985, PCI_ANY_ID, PCI_ANY_ID, 0, 0, 0},
-	{PCI_VENDOR_ID_TRIDENT,	CYBER9320, PCI_ANY_ID, PCI_ANY_ID, 0, 0, 0},
-	{PCI_VENDOR_ID_TRIDENT,	CYBER9388, PCI_ANY_ID, PCI_ANY_ID, 0, 0, 0},
-	{PCI_VENDOR_ID_TRIDENT,	CYBER9520, PCI_ANY_ID, PCI_ANY_ID, 0, 0, 0},
-	{PCI_VENDOR_ID_TRIDENT,	CYBER9525DVD, PCI_ANY_ID, PCI_ANY_ID, 0, 0, 0},
-	{PCI_VENDOR_ID_TRIDENT,	CYBER9397, PCI_ANY_ID, PCI_ANY_ID, 0, 0, 0},
-	{PCI_VENDOR_ID_TRIDENT,	CYBER9397DVD, PCI_ANY_ID, PCI_ANY_ID, 0, 0, 0},
-	{PCI_VENDOR_ID_TRIDENT,	CYBERBLADEXPAi1, PCI_ANY_ID, PCI_ANY_ID, 0, 0, 0},
-	{PCI_VENDOR_ID_TRIDENT,	CYBERBLADEXPm8, PCI_ANY_ID, PCI_ANY_ID, 0, 0, 0},
-	{PCI_VENDOR_ID_TRIDENT,	CYBERBLADEXPm16, PCI_ANY_ID, PCI_ANY_ID, 0, 0, 0},
-	{0,}
+	{ PCI_VDEVICE(TRIDENT, BLADE3D) },
+	{ PCI_VDEVICE(TRIDENT, CYBERBLADEi7) },
+	{ PCI_VDEVICE(TRIDENT, CYBERBLADEi7D) },
+	{ PCI_VDEVICE(TRIDENT, CYBERBLADEi1) },
+	{ PCI_VDEVICE(TRIDENT, CYBERBLADEi1D) },
+	{ PCI_VDEVICE(TRIDENT, CYBERBLADEAi1) },
+	{ PCI_VDEVICE(TRIDENT, CYBERBLADEAi1D) },
+	{ PCI_VDEVICE(TRIDENT, CYBERBLADEE4) },
+	{ PCI_VDEVICE(TRIDENT, TGUI9440) },
+	{ PCI_VDEVICE(TRIDENT, TGUI9660) },
+	{ PCI_VDEVICE(TRIDENT, IMAGE975) },
+	{ PCI_VDEVICE(TRIDENT, IMAGE985) },
+	{ PCI_VDEVICE(TRIDENT, CYBER9320) },
+	{ PCI_VDEVICE(TRIDENT, CYBER9388) },
+	{ PCI_VDEVICE(TRIDENT, CYBER9520) },
+	{ PCI_VDEVICE(TRIDENT, CYBER9525DVD) },
+	{ PCI_VDEVICE(TRIDENT, CYBER9397) },
+	{ PCI_VDEVICE(TRIDENT, CYBER9397DVD) },
+	{ PCI_VDEVICE(TRIDENT, CYBERBLADEXPAi1) },
+	{ PCI_VDEVICE(TRIDENT, CYBERBLADEXPm8) },
+	{ PCI_VDEVICE(TRIDENT, CYBERBLADEXPm16) },
+	{ }
 };
 
 MODULE_DEVICE_TABLE(pci, trident_devices);

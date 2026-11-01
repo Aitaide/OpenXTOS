@@ -203,7 +203,7 @@ static int wf_sat_probe(struct i2c_client *client)
 	char *name;
 	int vsens[2], isens[2];
 
-	sat = kzalloc(sizeof(struct wf_sat), GFP_KERNEL);
+	sat = kzalloc_obj(struct wf_sat);
 	if (sat == NULL)
 		return -ENOMEM;
 	sat->nr = -1;
@@ -333,7 +333,7 @@ static void wf_sat_remove(struct i2c_client *client)
 }
 
 static const struct i2c_device_id wf_sat_id[] = {
-	{ "MAC,smu-sat", 0 },
+	{ "MAC,smu-sat" },
 	{ }
 };
 MODULE_DEVICE_TABLE(i2c, wf_sat_id);

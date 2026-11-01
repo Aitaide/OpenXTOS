@@ -62,6 +62,7 @@
 #include "sunrpc.h"
 
 static void xs_close(struct rpc_xprt *xprt);
+static void xs_reset_srcport(struct sock_xprt *transport);
 static void xs_set_srcport(struct sock_xprt *transport, struct socket *sock);
 static void xs_tcp_set_socket_timeouts(struct rpc_xprt *xprt,
 		struct socket *sock);
@@ -159,7 +160,6 @@ static struct ctl_table xs_tunables_table[] = {
 		.mode		= 0644,
 		.proc_handler	= proc_dointvec_jiffies,
 	},
-	{ },
 };
 
 /*
@@ -358,7 +358,7 @@ xs_alloc_sparse_pages(struct xdr_buf *buf, size_t want, gfp_t gfp)
 
 static int
 xs_sock_process_cmsg(struct socket *sock, struct msghdr *msg,
-		     struct cmsghdr *cmsg, int ret)
+		     unsigned int *msg_flags, struct cmsghdr *cmsg, int ret)
 {
 	u8 content_type = tls_get_record_type(sock->sk, cmsg);
 	u8 level, description;
@@ -371,7 +371,7 @@ xs_sock_process_cmsg(struct socket *sock, struct msghdr *msg,
 		 * record, even though there might be more frames
 		 * waiting to be decrypted.
 		 */
-		msg->msg_flags &= ~MSG_EOR;
+		*msg_flags &= ~MSG_EOR;
 		break;
 	case TLS_RECORD_TYPE_ALERT:
 		tls_alert_recv(sock->sk, msg, &level, &description);
@@ -386,19 +386,33 @@ xs_sock_process_cmsg(struct socket *sock, struct msghdr *msg,
 }
 
 static int
-xs_sock_recv_cmsg(struct socket *sock, struct msghdr *msg, int flags)
+xs_sock_recv_cmsg(struct socket *sock, unsigned int *msg_flags, int flags)
 {
 	union {
 		struct cmsghdr	cmsg;
 		u8		buf[CMSG_SPACE(sizeof(u8))];
 	} u;
+	u8 alert[2];
+	struct kvec alert_kvec = {
+		.iov_base = alert,
+		.iov_len = sizeof(alert),
+	};
+	struct msghdr msg = {
+		.msg_flags = *msg_flags,
+		.msg_control = &u,
+		.msg_controllen = sizeof(u),
+	};
 	int ret;
 
-	msg->msg_control = &u;
-	msg->msg_controllen = sizeof(u);
-	ret = sock_recvmsg(sock, msg, flags);
-	if (msg->msg_controllen != sizeof(u))
-		ret = xs_sock_process_cmsg(sock, msg, &u.cmsg, ret);
+	iov_iter_kvec(&msg.msg_iter, ITER_DEST, &alert_kvec, 1,
+		      alert_kvec.iov_len);
+	ret = sock_recvmsg(sock, &msg, flags);
+	if (ret > 0) {
+		if (tls_get_record_type(sock->sk, &u.cmsg) == TLS_RECORD_TYPE_ALERT)
+			iov_iter_revert(&msg.msg_iter, ret);
+		ret = xs_sock_process_cmsg(sock, &msg, msg_flags, &u.cmsg,
+					   -EAGAIN);
+	}
 	return ret;
 }
 
@@ -408,7 +422,13 @@ xs_sock_recvmsg(struct socket *sock, struct msghdr *msg, int flags, size_t seek)
 	ssize_t ret;
 	if (seek != 0)
 		iov_iter_advance(&msg->msg_iter, seek);
-	ret = xs_sock_recv_cmsg(sock, msg, flags);
+	ret = sock_recvmsg(sock, msg, flags);
+	/* Handle TLS inband control message lazily */
+	if (msg->msg_flags & MSG_CTRUNC) {
+		msg->msg_flags &= ~(MSG_CTRUNC | MSG_EOR);
+		if (ret == 0 || ret == -EIO)
+			ret = xs_sock_recv_cmsg(sock, &msg->msg_flags, flags);
+	}
 	return ret > 0 ? ret + seek : ret;
 }
 
@@ -434,7 +454,7 @@ xs_read_discard(struct socket *sock, struct msghdr *msg, int flags,
 		size_t count)
 {
 	iov_iter_discard(&msg->msg_iter, ITER_DEST, count);
-	return xs_sock_recv_cmsg(sock, msg, flags);
+	return xs_sock_recvmsg(sock, msg, flags, 0);
 }
 
 #if ARCH_IMPLEMENTS_FLUSH_DCACHE_PAGE
@@ -883,6 +903,17 @@ static int xs_stream_prepare_request(struct rpc_rqst *req, struct xdr_buf *buf)
 	return xdr_alloc_bvec(buf, rpc_task_gfp_mask());
 }
 
+static void xs_stream_abort_send_request(struct rpc_rqst *req)
+{
+	struct rpc_xprt *xprt = req->rq_xprt;
+	struct sock_xprt *transport =
+		container_of(xprt, struct sock_xprt, xprt);
+
+	if (transport->xmit.offset != 0 &&
+	    !test_bit(XPRT_CLOSE_WAIT, &xprt->state))
+		xprt_force_disconnect(xprt);
+}
+
 /*
  * Determine if the previous message in the stream was aborted before it
  * could complete transmission.
@@ -1171,9 +1202,9 @@ static void xs_save_old_callbacks(struct sock_xprt *transport, struct sock *sk)
 
 static void xs_restore_old_callbacks(struct sock_xprt *transport, struct sock *sk)
 {
-	sk->sk_data_ready = transport->old_data_ready;
+	WRITE_ONCE(sk->sk_data_ready, transport->old_data_ready);
 	sk->sk_state_change = transport->old_state_change;
-	sk->sk_write_space = transport->old_write_space;
+	WRITE_ONCE(sk->sk_write_space, transport->old_write_space);
 	sk->sk_error_report = transport->old_error_report;
 }
 
@@ -1181,11 +1212,13 @@ static void xs_sock_reset_state_flags(struct rpc_xprt *xprt)
 {
 	struct sock_xprt *transport = container_of(xprt, struct sock_xprt, xprt);
 
+	transport->xprt_err = 0;
 	clear_bit(XPRT_SOCK_DATA_READY, &transport->sock_state);
 	clear_bit(XPRT_SOCK_WAKE_ERROR, &transport->sock_state);
 	clear_bit(XPRT_SOCK_WAKE_WRITE, &transport->sock_state);
 	clear_bit(XPRT_SOCK_WAKE_DISCONNECT, &transport->sock_state);
 	clear_bit(XPRT_SOCK_NOSPACE, &transport->sock_state);
+	clear_bit(XPRT_SOCK_UPD_TIMEOUT, &transport->sock_state);
 }
 
 static void xs_run_error_worker(struct sock_xprt *transport, unsigned int nr)
@@ -1266,6 +1299,7 @@ static void xs_reset_transport(struct sock_xprt *transport)
 	transport->file = NULL;
 
 	sk->sk_user_data = NULL;
+	sk->sk_sndtimeo = 0;
 
 	xs_restore_old_callbacks(transport, sk);
 	xprt_clear_connected(xprt);
@@ -1564,8 +1598,10 @@ static void xs_tcp_state_change(struct sock *sk)
 		break;
 	case TCP_CLOSE:
 		if (test_and_clear_bit(XPRT_SOCK_CONNECTING,
-					&transport->sock_state))
+				       &transport->sock_state)) {
+			xs_reset_srcport(transport);
 			xprt_clear_connecting(xprt);
+		}
 		clear_bit(XPRT_CLOSING, &xprt->state);
 		/* Trigger the socket release */
 		xs_run_error_worker(transport, XPRT_SOCK_WAKE_DISCONNECT);
@@ -1628,6 +1664,7 @@ static void xs_udp_do_set_buffer_size(struct rpc_xprt *xprt)
 {
 	struct sock_xprt *transport = container_of(xprt, struct sock_xprt, xprt);
 	struct sock *sk = transport->inet;
+	void (*write_space)(struct sock *sock);
 
 	if (transport->rcvsize) {
 		sk->sk_userlocks |= SOCK_RCVBUF_LOCK;
@@ -1636,7 +1673,8 @@ static void xs_udp_do_set_buffer_size(struct rpc_xprt *xprt)
 	if (transport->sndsize) {
 		sk->sk_userlocks |= SOCK_SNDBUF_LOCK;
 		sk->sk_sndbuf = transport->sndsize * xprt->max_reqs * 2;
-		sk->sk_write_space(sk);
+		write_space = READ_ONCE(sk->sk_write_space);
+		write_space(sk);
 	}
 }
 
@@ -1719,6 +1757,11 @@ static void xs_set_port(struct rpc_xprt *xprt, unsigned short port)
 
 	rpc_set_port(xs_addr(xprt), port);
 	xs_update_peer_port(xprt);
+}
+
+static void xs_reset_srcport(struct sock_xprt *transport)
+{
+	transport->srcport = 0;
 }
 
 static void xs_set_srcport(struct sock_xprt *transport, struct socket *sock)
@@ -1804,8 +1847,8 @@ static int xs_bind(struct sock_xprt *transport, struct socket *sock)
 	memcpy(&myaddr, &transport->srcaddr, transport->xprt.addrlen);
 	do {
 		rpc_set_port((struct sockaddr *)&myaddr, port);
-		err = kernel_bind(sock, (struct sockaddr *)&myaddr,
-				transport->xprt.addrlen);
+		err = kernel_bind(sock, (struct sockaddr_unsized *)&myaddr,
+				  transport->xprt.addrlen);
 		if (err == 0) {
 			if (transport->xprt.reuseport)
 				transport->srcport = port;
@@ -1920,6 +1963,9 @@ static struct socket *xs_create_sock(struct rpc_xprt *xprt,
 		goto out;
 	}
 
+	if (protocol == IPPROTO_TCP)
+		sk_net_refcnt_upgrade(sock->sk);
+
 	filp = sock_alloc_file(sock, O_NONBLOCK, NULL);
 	if (IS_ERR(filp))
 		return ERR_CAST(filp);
@@ -1944,8 +1990,8 @@ static int xs_local_finish_connecting(struct rpc_xprt *xprt,
 		xs_save_old_callbacks(transport, sk);
 
 		sk->sk_user_data = xprt;
-		sk->sk_data_ready = xs_data_ready;
-		sk->sk_write_space = xs_udp_write_space;
+		WRITE_ONCE(sk->sk_data_ready, xs_data_ready);
+		WRITE_ONCE(sk->sk_write_space, xs_udp_write_space);
 		sk->sk_state_change = xs_local_state_change;
 		sk->sk_error_report = xs_error_report;
 		sk->sk_use_task_frag = false;
@@ -1961,7 +2007,7 @@ static int xs_local_finish_connecting(struct rpc_xprt *xprt,
 
 	xs_stream_start_connect(transport);
 
-	return kernel_connect(sock, xs_addr(xprt), xprt->addrlen, 0);
+	return kernel_connect(sock, (struct sockaddr_unsized *)xs_addr(xprt), xprt->addrlen, 0);
 }
 
 /**
@@ -2147,8 +2193,8 @@ static void xs_udp_finish_connecting(struct rpc_xprt *xprt, struct socket *sock)
 		xs_save_old_callbacks(transport, sk);
 
 		sk->sk_user_data = xprt;
-		sk->sk_data_ready = xs_data_ready;
-		sk->sk_write_space = xs_udp_write_space;
+		WRITE_ONCE(sk->sk_data_ready, xs_data_ready);
+		WRITE_ONCE(sk->sk_write_space, xs_udp_write_space);
 		sk->sk_use_task_frag = false;
 
 		xprt_set_connected(xprt);
@@ -2334,9 +2380,9 @@ static int xs_tcp_finish_connecting(struct rpc_xprt *xprt, struct socket *sock)
 		xs_save_old_callbacks(transport, sk);
 
 		sk->sk_user_data = xprt;
-		sk->sk_data_ready = xs_data_ready;
+		WRITE_ONCE(sk->sk_data_ready, xs_data_ready);
 		sk->sk_state_change = xs_tcp_state_change;
-		sk->sk_write_space = xs_tcp_write_space;
+		WRITE_ONCE(sk->sk_write_space, xs_tcp_write_space);
 		sk->sk_error_report = xs_error_report;
 		sk->sk_use_task_frag = false;
 
@@ -2361,7 +2407,8 @@ static int xs_tcp_finish_connecting(struct rpc_xprt *xprt, struct socket *sock)
 
 	/* Tell the socket layer to start connecting... */
 	set_bit(XPRT_SOCK_CONNECTING, &transport->sock_state);
-	return kernel_connect(sock, xs_addr(xprt), xprt->addrlen, O_NONBLOCK);
+	return kernel_connect(sock, (struct sockaddr_unsized *)xs_addr(xprt),
+			      xprt->addrlen, O_NONBLOCK);
 }
 
 /**
@@ -2422,6 +2469,13 @@ static void xs_tcp_setup_socket(struct work_struct *work)
 		transport->srcport = 0;
 		status = -EAGAIN;
 		break;
+	case -EPERM:
+		/* Happens, for instance, if a BPF program is preventing
+		 * the connect. Remap the error so upper layers can better
+		 * deal with it.
+		 */
+		status = -ECONNREFUSED;
+		fallthrough;
 	case -EINVAL:
 		/* Happens, for instance, if the user specified a link
 		 * local IPv6 address without a scope-id.
@@ -2433,6 +2487,7 @@ static void xs_tcp_setup_socket(struct work_struct *work)
 	case -EHOSTUNREACH:
 	case -EADDRINUSE:
 	case -ENOBUFS:
+	case -ENOTCONN:
 		break;
 	default:
 		printk("%s: connect returned unhandled error %d\n",
@@ -2545,7 +2600,15 @@ static void xs_tls_handshake_done(void *data, int status, key_serial_t peerid)
 	struct sock_xprt *lower_transport =
 				container_of(lower_xprt, struct sock_xprt, xprt);
 
-	lower_transport->xprt_err = status ? -EACCES : 0;
+	switch (status) {
+	case 0:
+	case -EACCES:
+	case -ETIMEDOUT:
+		lower_transport->xprt_err = status;
+		break;
+	default:
+		lower_transport->xprt_err = -EACCES;
+	}
 	complete(&lower_transport->handshake_done);
 	xprt_put(lower_xprt);
 }
@@ -2588,10 +2651,19 @@ static int xs_tls_handshake_sync(struct rpc_xprt *lower_xprt, struct xprtsec_par
 						       XS_TLS_HANDSHAKE_TO);
 	if (rc <= 0) {
 		if (!tls_handshake_cancel(sk)) {
+			/*
+			 * Cancellation lost to handshake_complete(): the
+			 * callback still owns its xprt reference and is in
+			 * flight. Wait for it to finish before returning.
+			 */
+			wait_for_completion(&lower_transport->handshake_done);
 			if (rc == 0)
 				rc = -ETIMEDOUT;
-			goto out_put_xprt;
+			goto out;
 		}
+		if (rc == 0)
+			rc = -ETIMEDOUT;
+		goto out_put_xprt;
 	}
 
 	rc = lower_transport->xprt_err;
@@ -2644,6 +2716,7 @@ static void xs_tcp_tls_setup_socket(struct work_struct *work)
 		.xprtsec	= {
 			.policy		= RPC_XPRTSEC_NONE,
 		},
+		.stats		= upper_clnt->cl_stats,
 	};
 	unsigned int pflags = current->flags;
 	struct rpc_clnt *lower_clnt;
@@ -2673,8 +2746,11 @@ static void xs_tcp_tls_setup_socket(struct work_struct *work)
 	lower_xprt = rcu_dereference(lower_clnt->cl_xprt);
 	rcu_read_unlock();
 
-	if (wait_on_bit_lock(&lower_xprt->state, XPRT_LOCKED, TASK_KILLABLE))
+	if (wait_on_bit_lock(&lower_xprt->state, XPRT_LOCKED, TASK_KILLABLE)) {
+		/* XPRT_LOCKED was never acquired. */
+		rpc_shutdown_client(lower_clnt);
 		goto out_unlock;
+	}
 
 	status = xs_tls_handshake_sync(lower_xprt, &upper_xprt->xprtsec);
 	if (status) {
@@ -2686,23 +2762,18 @@ static void xs_tcp_tls_setup_socket(struct work_struct *work)
 	if (status)
 		goto out_close;
 	xprt_release_write(lower_xprt, NULL);
-
 	trace_rpc_socket_connect(upper_xprt, upper_transport->sock, 0);
-	if (!xprt_test_and_set_connected(upper_xprt)) {
-		upper_xprt->connect_cookie++;
-		clear_bit(XPRT_SOCK_CONNECTING, &upper_transport->sock_state);
-		xprt_clear_connecting(upper_xprt);
-
-		upper_xprt->stat.connect_count++;
-		upper_xprt->stat.connect_time += (long)jiffies -
-					   upper_xprt->stat.connect_start;
-		xs_run_error_worker(upper_transport, XPRT_SOCK_WAKE_PENDING);
-	}
 	rpc_shutdown_client(lower_clnt);
+
+	/* Check for ingress data that arrived before the socket's
+	 * ->data_ready callback was set up.
+	 */
+	xs_poll_check_readable(upper_transport);
 
 out_unlock:
 	current_restore_flags(pflags, PF_MEMALLOC);
 	upper_transport->clnt = NULL;
+	rpc_release_client(upper_clnt);
 	xprt_unlock_connect(upper_xprt, upper_transport);
 	return;
 
@@ -2750,7 +2821,15 @@ static void xs_connect(struct rpc_xprt *xprt, struct rpc_task *task)
 	} else
 		dprintk("RPC:       xs_connect scheduled xprt %p\n", xprt);
 
-	transport->clnt = task->tk_client;
+	/*
+	 * Only the TLS connect_worker reads transport->clnt; pinning
+	 * the upper rpc_clnt unconditionally would form a cycle with
+	 * cl_xprt and prevent xprt destruction.
+	 */
+	if (xprt->xprtsec.policy != RPC_XPRTSEC_NONE) {
+		rpc_hold_client(task->tk_client);
+		transport->clnt = task->tk_client;
+	}
 	queue_delayed_work(xprtiod_workqueue,
 			&transport->connect_worker,
 			delay);
@@ -2772,18 +2851,13 @@ static void xs_wake_error(struct sock_xprt *transport)
 {
 	int sockerr;
 
-	if (!test_bit(XPRT_SOCK_WAKE_ERROR, &transport->sock_state))
-		return;
-	mutex_lock(&transport->recv_mutex);
-	if (transport->sock == NULL)
-		goto out;
 	if (!test_and_clear_bit(XPRT_SOCK_WAKE_ERROR, &transport->sock_state))
-		goto out;
+		return;
 	sockerr = xchg(&transport->xprt_err, 0);
-	if (sockerr < 0)
+	if (sockerr < 0) {
 		xprt_wake_pending_tasks(&transport->xprt, sockerr);
-out:
-	mutex_unlock(&transport->recv_mutex);
+		xs_tcp_force_close(&transport->xprt);
+	}
 }
 
 static void xs_wake_pending(struct sock_xprt *transport)
@@ -2991,19 +3065,10 @@ static int bc_send_request(struct rpc_rqst *req)
 	return len;
 }
 
-/*
- * The close routine. Since this is client initiated, we do nothing
- */
-
 static void bc_close(struct rpc_xprt *xprt)
 {
 	xprt_disconnect_done(xprt);
 }
-
-/*
- * The xprt destroy routine. Again, because this connection is client
- * initiated, we do nothing
- */
 
 static void bc_destroy(struct rpc_xprt *xprt)
 {
@@ -3025,6 +3090,7 @@ static const struct rpc_xprt_ops xs_local_ops = {
 	.buf_free		= rpc_free,
 	.prepare_request	= xs_stream_prepare_request,
 	.send_request		= xs_local_send_request,
+	.abort_send_request	= xs_stream_abort_send_request,
 	.wait_for_reply_request	= xprt_wait_for_reply_request_def,
 	.close			= xs_close,
 	.destroy		= xs_destroy,
@@ -3072,6 +3138,7 @@ static const struct rpc_xprt_ops xs_tcp_ops = {
 	.buf_free		= rpc_free,
 	.prepare_request	= xs_stream_prepare_request,
 	.send_request		= xs_tcp_send_request,
+	.abort_send_request	= xs_stream_abort_send_request,
 	.wait_for_reply_request	= xprt_wait_for_reply_request_def,
 	.close			= xs_tcp_shutdown,
 	.destroy		= xs_destroy,

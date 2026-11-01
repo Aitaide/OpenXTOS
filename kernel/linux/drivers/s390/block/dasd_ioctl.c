@@ -10,10 +10,8 @@
  * i/o controls for the dasd driver.
  */
 
-#define KMSG_COMPONENT "dasd"
-
 #include <linux/interrupt.h>
-#include <linux/compat.h>
+#include <linux/export.h>
 #include <linux/major.h>
 #include <linux/fs.h>
 #include <linux/blkpg.h>
@@ -24,11 +22,7 @@
 #include <linux/uaccess.h>
 #include <linux/dasd_mod.h>
 
-/* This is ugly... */
-#define PRINTK_HEADER "dasd_ioctl:"
-
 #include "dasd_int.h"
-
 
 static int
 dasd_ioctl_api_version(void __user *argp)
@@ -221,7 +215,7 @@ dasd_format(struct dasd_block *block, struct format_data_t *fdata)
 	 * enabling the device later.
 	 */
 	if (fdata->start_unit == 0) {
-		block->gdp->part0->bd_inode->i_blkbits =
+		block->gdp->part0->bd_mapping->host->i_blkbits =
 			blksize_bits(fdata->blksize);
 	}
 
@@ -330,7 +324,7 @@ out_err:
 static int dasd_release_space(struct dasd_device *device,
 			      struct format_data_t *rdata)
 {
-	if (!device->discipline->is_ese && !device->discipline->is_ese(device))
+	if (!device->discipline->is_ese || !device->discipline->is_ese(device))
 		return -ENOTSUPP;
 	if (!device->discipline->release_space)
 		return -ENOTSUPP;
@@ -448,7 +442,7 @@ static int dasd_ioctl_read_profile(struct dasd_block *block, void __user *argp)
 	struct dasd_profile_info_t *data;
 	int rc = 0;
 
-	data = kmalloc(sizeof(*data), GFP_KERNEL);
+	data = kmalloc_obj(*data);
 	if (!data)
 		return -ENOMEM;
 
@@ -537,7 +531,7 @@ static int __dasd_ioctl_information(struct dasd_block *block,
 	 * This must be hidden from user-space.
 	 */
 	dasd_info->open_count = atomic_read(&block->open_count);
-	if (!block->bdev)
+	if (!block->bdev_file)
 		dasd_info->open_count++;
 
 	/*
@@ -566,7 +560,7 @@ static int dasd_ioctl_information(struct dasd_block *block, void __user *argp,
 	struct dasd_information2_t *dasd_info;
 	int error;
 
-	dasd_info = kzalloc(sizeof(*dasd_info), GFP_KERNEL);
+	dasd_info = kzalloc_obj(*dasd_info);
 	if (!dasd_info)
 		return -ENOMEM;
 
@@ -621,10 +615,7 @@ int dasd_ioctl(struct block_device *bdev, blk_mode_t mode,
 	void __user *argp;
 	int rc;
 
-	if (is_compat_task())
-		argp = compat_ptr(arg);
-	else
-		argp = (void __user *)arg;
+	argp = (void __user *)arg;
 
 	if ((_IOC_DIR(cmd) != _IOC_NONE) && !arg)
 		return -EINVAL;

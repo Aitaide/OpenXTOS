@@ -1,5 +1,5 @@
 #
-# Copyright 2017 Advanced Micro Devices, Inc.
+# Copyright 2017-2026 Advanced Micro Devices, Inc.
 #
 # Permission is hereby granted, free of charge, to any person obtaining a
 # copy of this software and associated documentation files (the "Software"),
@@ -28,18 +28,6 @@ CLK_MGR = clk_mgr.o
 AMD_DAL_CLK_MGR = $(addprefix $(AMDDALPATH)/dc/clk_mgr/,$(CLK_MGR))
 
 AMD_DISPLAY_FILES += $(AMD_DAL_CLK_MGR)
-
-
-ifdef CONFIG_DRM_AMD_DC_SI
-###############################################################################
-# DCE 60
-###############################################################################
-CLK_MGR_DCE60 = dce60_clk_mgr.o
-
-AMD_DAL_CLK_MGR_DCE60 = $(addprefix $(AMDDALPATH)/dc/clk_mgr/dce60/,$(CLK_MGR_DCE60))
-
-AMD_DISPLAY_FILES += $(AMD_DAL_CLK_MGR_DCE60)
-endif
 
 ###############################################################################
 # DCE 100 and DCE8x
@@ -83,7 +71,6 @@ CLK_MGR_DCN10 = rv1_clk_mgr.o rv1_clk_mgr_vbios_smu.o rv2_clk_mgr.o
 AMD_DAL_CLK_MGR_DCN10 = $(addprefix $(AMDDALPATH)/dc/clk_mgr/dcn10/,$(CLK_MGR_DCN10))
 
 AMD_DISPLAY_FILES += $(AMD_DAL_CLK_MGR_DCN10)
-
 ###############################################################################
 # DCN20
 ###############################################################################
@@ -113,7 +100,7 @@ AMD_DISPLAY_FILES += $(AMD_DAL_CLK_MGR_DCN21)
 ###############################################################################
 # DCN30
 ###############################################################################
-CLK_MGR_DCN30 = dcn30_clk_mgr.o dcn30_clk_mgr_smu_msg.o
+CLK_MGR_DCN30 = dcn30_clk_mgr.o dcn30_clk_mgr_smu_msg.o dcn30m_clk_mgr.o dcn30m_clk_mgr_smu_msg.o
 
 AMD_DAL_CLK_MGR_DCN30 = $(addprefix $(AMDDALPATH)/dc/clk_mgr/dcn30/,$(CLK_MGR_DCN30))
 
@@ -172,4 +159,49 @@ AMD_DAL_CLK_MGR_DCN32 = $(addprefix $(AMDDALPATH)/dc/clk_mgr/dcn32/,$(CLK_MGR_DC
 
 AMD_DISPLAY_FILES += $(AMD_DAL_CLK_MGR_DCN32)
 
+###############################################################################
+# DCN35
+###############################################################################
+CLK_MGR_DCN35 = dcn35_smu.o dcn351_clk_mgr.o dcn35_clk_mgr.o
+
+AMD_DAL_CLK_MGR_DCN35 = $(addprefix $(AMDDALPATH)/dc/clk_mgr/dcn35/,$(CLK_MGR_DCN35))
+
+AMD_DISPLAY_FILES += $(AMD_DAL_CLK_MGR_DCN35)
+
+###############################################################################
+# DCN401
+###############################################################################
+CLK_MGR_DCN401 = dcn401_clk_mgr.o dcn401_clk_mgr_smu_msg.o
+
+AMD_DAL_CLK_MGR_DCN401 = $(addprefix $(AMDDALPATH)/dc/clk_mgr/dcn401/,$(CLK_MGR_DCN401))
+
+AMD_DISPLAY_FILES += $(AMD_DAL_CLK_MGR_DCN401)
+
+###############################################################################
+# DCN42
+###############################################################################
+CLK_MGR_DCN42 = dcn42_smu.o dcn42_clk_mgr.o
+
+AMD_DAL_CLK_MGR_DCN42 = $(addprefix $(AMDDALPATH)/dc/clk_mgr/dcn42/,$(CLK_MGR_DCN42))
+
+AMD_DISPLAY_FILES += $(AMD_DAL_CLK_MGR_DCN42)
+
+###############################################################################
+# DCN42B
+###############################################################################
+CLK_MGR_DCN42B = dcn42b_clk_mgr.o
+
+AMD_DAL_CLK_MGR_DCN42B = $(addprefix $(AMDDALPATH)/dc/clk_mgr/dcn42b/,$(CLK_MGR_DCN42B))
+
+AMD_DISPLAY_FILES += $(AMD_DAL_CLK_MGR_DCN42B)
+
+
+###############################################################################
+# DCN60
+###############################################################################
+CLK_MGR_DCN60 = dcn60_clk_mgr.o dcn60_clk_mgr_smu_msg.o
+
+AMD_DAL_CLK_MGR_DCN60 = $(addprefix $(AMDDALPATH)/dc/clk_mgr/dcn60/,$(CLK_MGR_DCN60))
+
+AMD_DISPLAY_FILES += $(AMD_DAL_CLK_MGR_DCN60)
 endif

@@ -530,7 +530,7 @@ pxa3xx_gcu_add_buffer(struct device *dev,
 {
 	struct pxa3xx_gcu_batch *buffer;
 
-	buffer = kzalloc(sizeof(struct pxa3xx_gcu_batch), GFP_KERNEL);
+	buffer = kzalloc_obj(struct pxa3xx_gcu_batch);
 	if (!buffer)
 		return -ENOMEM;
 
@@ -594,8 +594,8 @@ static int pxa3xx_gcu_probe(struct platform_device *pdev)
 	 * container_of(). This isn't really necessary as we have a fixed minor
 	 * number anyway, but this is to avoid statics. */
 
-	priv->misc_dev.minor	= PXA3XX_GCU_MINOR,
-	priv->misc_dev.name	= DRV_NAME,
+	priv->misc_dev.minor	= PXA3XX_GCU_MINOR;
+	priv->misc_dev.name	= DRV_NAME;
 	priv->misc_dev.fops	= &pxa3xx_gcu_miscdev_fops;
 
 	/* handle IO resources */
@@ -615,10 +615,8 @@ static int pxa3xx_gcu_probe(struct platform_device *pdev)
 
 	ret = devm_request_irq(dev, irq, pxa3xx_gcu_handle_irq,
 			       0, DRV_NAME, priv);
-	if (ret < 0) {
-		dev_err(dev, "request_irq failed\n");
+	if (ret < 0)
 		return ret;
-	}
 
 	/* allocate dma memory */
 	priv->shared = dma_alloc_coherent(dev, SHARED_SIZE,
@@ -696,10 +694,10 @@ MODULE_DEVICE_TABLE(of, pxa3xx_gcu_of_match);
 #endif
 
 static struct platform_driver pxa3xx_gcu_driver = {
-	.probe	  = pxa3xx_gcu_probe,
-	.remove_new	 = pxa3xx_gcu_remove,
-	.driver	 = {
-		.name   = DRV_NAME,
+	.probe = pxa3xx_gcu_probe,
+	.remove = pxa3xx_gcu_remove,
+	.driver = {
+		.name = DRV_NAME,
 		.of_match_table = of_match_ptr(pxa3xx_gcu_of_match),
 	},
 };

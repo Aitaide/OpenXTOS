@@ -123,7 +123,7 @@ struct knav_pdsp_info {
 	const char					*name;
 	struct knav_reg_pdsp_regs  __iomem		*regs;
 	union {
-		void __iomem				*command;
+		u32 __iomem				*command;
 		struct knav_reg_acc_command __iomem	*acc_command;
 		u32 __iomem				*qos_command;
 	};
@@ -304,6 +304,7 @@ struct knav_device {
 	struct list_head			pools;
 	struct list_head			pdsps;
 	struct list_head			qmgrs;
+	struct dentry				*debugfs_file;
 	enum qmss_version			version;
 };
 
@@ -333,7 +334,7 @@ struct knav_range_info {
 	void				*queue_base_inst;
 	unsigned			flags;
 	struct list_head		list;
-	struct knav_range_ops		*ops;
+	const struct knav_range_ops	*ops;
 	struct knav_acc_info		acc_info;
 	struct knav_acc_channel	*acc;
 	unsigned			num_irqs;

@@ -10,7 +10,6 @@
 #include <linux/clk.h>
 #include <linux/module.h>
 #include <linux/of.h>
-#include <linux/of_device.h>
 
 #include <sound/soc.h>
 
@@ -26,8 +25,8 @@ static const struct snd_soc_dapm_widget atmel_asoc_wm8904_dapm_widgets[] = {
 static int atmel_asoc_wm8904_hw_params(struct snd_pcm_substream *substream,
 		struct snd_pcm_hw_params *params)
 {
-	struct snd_soc_pcm_runtime *rtd = asoc_substream_to_rtd(substream);
-	struct snd_soc_dai *codec_dai = asoc_rtd_to_codec(rtd, 0);
+	struct snd_soc_pcm_runtime *rtd = snd_soc_substream_to_rtd(substream);
+	struct snd_soc_dai *codec_dai = snd_soc_rtd_to_codec(rtd, 0);
 	int ret;
 
 	ret = snd_soc_dai_set_pll(codec_dai, WM8904_FLL_MCLK, WM8904_FLL_MCLK,
@@ -83,32 +82,33 @@ static struct snd_soc_card atmel_asoc_wm8904_card = {
 
 static int atmel_asoc_wm8904_dt_init(struct platform_device *pdev)
 {
-	struct device_node *np = pdev->dev.of_node;
+	struct device *dev = &pdev->dev;
+	struct device_node *np = dev->of_node;
 	struct device_node *codec_np, *cpu_np;
 	struct snd_soc_card *card = &atmel_asoc_wm8904_card;
 	struct snd_soc_dai_link *dailink = &atmel_asoc_wm8904_dailink;
 	int ret;
 
 	if (!np) {
-		dev_err(&pdev->dev, "only device tree supported\n");
+		dev_err(dev, "only device tree supported\n");
 		return -EINVAL;
 	}
 
 	ret = snd_soc_of_parse_card_name(card, "atmel,model");
 	if (ret) {
-		dev_err(&pdev->dev, "failed to parse card name\n");
+		dev_err(dev, "failed to parse card name\n");
 		return ret;
 	}
 
 	ret = snd_soc_of_parse_audio_routing(card, "atmel,audio-routing");
 	if (ret) {
-		dev_err(&pdev->dev, "failed to parse audio routing\n");
+		dev_err(dev, "failed to parse audio routing\n");
 		return ret;
 	}
 
 	cpu_np = of_parse_phandle(np, "atmel,ssc-controller", 0);
 	if (!cpu_np) {
-		dev_err(&pdev->dev, "failed to get dai and pcm info\n");
+		dev_err(dev, "failed to get dai and pcm info\n");
 		ret = -EINVAL;
 		return ret;
 	}
@@ -118,7 +118,7 @@ static int atmel_asoc_wm8904_dt_init(struct platform_device *pdev)
 
 	codec_np = of_parse_phandle(np, "atmel,audio-codec", 0);
 	if (!codec_np) {
-		dev_err(&pdev->dev, "failed to get codec info\n");
+		dev_err(dev, "failed to get codec info\n");
 		ret = -EINVAL;
 		return ret;
 	}
@@ -188,7 +188,7 @@ static struct platform_driver atmel_asoc_wm8904_driver = {
 		.pm		= &snd_soc_pm_ops,
 	},
 	.probe = atmel_asoc_wm8904_probe,
-	.remove_new = atmel_asoc_wm8904_remove,
+	.remove = atmel_asoc_wm8904_remove,
 };
 
 module_platform_driver(atmel_asoc_wm8904_driver);

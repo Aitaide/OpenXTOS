@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0
 // Copyright (C) 2016-2020 Arm Limited
-// CMN-600 Coherent Mesh Network PMU driver
+// ARM CMN/CI interconnect PMU driver
 
 #include <linux/acpi.h>
 #include <linux/bitfield.h>
@@ -24,24 +24,21 @@
 #define CMN_NI_NODE_ID			GENMASK_ULL(31, 16)
 #define CMN_NI_LOGICAL_ID		GENMASK_ULL(47, 32)
 
-#define CMN_NODEID_DEVID(reg)		((reg) & 3)
-#define CMN_NODEID_EXT_DEVID(reg)	((reg) & 1)
-#define CMN_NODEID_PID(reg)		(((reg) >> 2) & 1)
-#define CMN_NODEID_EXT_PID(reg)		(((reg) >> 1) & 3)
-#define CMN_NODEID_1x1_PID(reg)		(((reg) >> 2) & 7)
-#define CMN_NODEID_X(reg, bits)		((reg) >> (3 + (bits)))
-#define CMN_NODEID_Y(reg, bits)		(((reg) >> 3) & ((1U << (bits)) - 1))
-
 #define CMN_CHILD_INFO			0x0080
 #define CMN_CI_CHILD_COUNT		GENMASK_ULL(15, 0)
 #define CMN_CI_CHILD_PTR_OFFSET		GENMASK_ULL(31, 16)
 
 #define CMN_CHILD_NODE_ADDR		GENMASK(29, 0)
+#define CMN_CHILD_NODE_ISOLATED		BIT(30)
 #define CMN_CHILD_NODE_EXTERNAL		BIT(31)
 
-#define CMN_MAX_DIMENSION		12
+/* Some implementations use a mesh larger than the architectural max of 12 */
+#define CMN_MAX_DIMENSION		14
 #define CMN_MAX_XPS			(CMN_MAX_DIMENSION * CMN_MAX_DIMENSION)
 #define CMN_MAX_DTMS			(CMN_MAX_XPS + (CMN_MAX_DIMENSION - 1) * 4)
+
+/* Currently XPs are the node type we can have most of; others top out at 128 */
+#define CMN_MAX_NODES_PER_EVENT		CMN_MAX_XPS
 
 /* The CFG node has various info besides the discovery tree */
 #define CMN_CFGM_PERIPH_ID_01		0x0008
@@ -50,24 +47,33 @@
 #define CMN_CFGM_PERIPH_ID_23		0x0010
 #define CMN_CFGM_PID2_REVISION		GENMASK_ULL(7, 4)
 
-#define CMN_CFGM_INFO_GLOBAL		0x900
+#define CMN_CFGM_INFO_GLOBAL		0x0900
 #define CMN_INFO_MULTIPLE_DTM_EN	BIT_ULL(63)
+#define CMN_S3_R2_MULTIPLE_DTM_EN	BIT_ULL(59)
 #define CMN_INFO_RSP_VC_NUM		GENMASK_ULL(53, 52)
 #define CMN_INFO_DAT_VC_NUM		GENMASK_ULL(51, 50)
+#define CMN_INFO_DEVICE_ISO_ENABLE	BIT_ULL(44)
 
-#define CMN_CFGM_INFO_GLOBAL_1		0x908
+#define CMN_CFGM_INFO_GLOBAL_1		0x0908
+#define CMN_S3_R2_RSP_VC_NUM		GENMASK_ULL(11, 9)
+#define CMN_S3_R2_DAT_VC_NUM		GENMASK_ULL(8, 6)
+#define CMN_S3_R2_SNP_VC_NUM		GENMASK_ULL(5, 3)
+#define CMN_S3_R2_REQ_VC_NUM		GENMASK_ULL(2, 0)
 #define CMN_INFO_SNP_VC_NUM		GENMASK_ULL(3, 2)
 #define CMN_INFO_REQ_VC_NUM		GENMASK_ULL(1, 0)
 
 /* XPs also have some local topology info which has uses too */
 #define CMN_MXP__CONNECT_INFO(p)	(0x0008 + 8 * (p))
-#define CMN__CONNECT_INFO_DEVICE_TYPE	GENMASK_ULL(4, 0)
+#define CMN__CONNECT_INFO_DEVICE_TYPE	GENMASK_ULL(5, 0)
 
 #define CMN_MAX_PORTS			6
 #define CI700_CONNECT_INFO_P2_5_OFFSET	0x10
 
 /* PMU registers occupy the 3rd 4KB page of each node's region */
 #define CMN_PMU_OFFSET			0x2000
+/* ...except when they don't :( */
+#define CMN_S3_R1_DTM_OFFSET		0xa000
+#define CMN_S3_PMU_OFFSET		0xd900
 
 /* For most nodes, this is all there is */
 #define CMN_PMU_EVENT_SEL		0x000
@@ -78,7 +84,18 @@
 /* Technically this is 4 bits wide on DNs, but we only use 2 there anyway */
 #define CMN__PMU_OCCUP1_ID		GENMASK_ULL(34, 32)
 
-/* HN-Ps are weird... */
+/* But then... */
+#define CMN__PMU_EVICT_STATE_SEL	GENMASK_ULL(54, 52)
+#define CMN__PMU_ENHANCED_HBT_LBT_SEL	GENMASK_ULL(51, 48)
+#define CMN__PMU_SNP_VC_SEL		GENMASK_ULL(47, 46)
+#define CMN__S3_R2_CBUSY_SNTHROTTLE_SEL	GENMASK_ULL(45, 42)
+#define CMN__S3_R2_SN_HOME_SEL		GENMASK_ULL(41, 40)
+#define CMN__S3_R2_HBT_LBT_SEL		GENMASK_ULL(39, 38)
+#define CMN__S3_R2_CLASS_OCCUP_ID	GENMASK_ULL(37, 36)
+#define CMN__S3_R2_OCCUP1_ID		GENMASK_ULL(35, 32)
+
+/* Some types are designed to coexist with another device in the same node */
+#define CMN_CCLA_PMU_EVENT_SEL		0x008
 #define CMN_HNP_PMU_EVENT_SEL		0x008
 
 /* DTMs live in the PMU space of XP registers */
@@ -112,7 +129,9 @@
 
 #define CMN_DTM_PMEVCNTSR		0x240
 
-#define CMN_DTM_UNIT_INFO		0x0910
+#define CMN650_DTM_UNIT_INFO		0x0910
+#define CMN_DTM_UNIT_INFO		0x0960
+#define CMN_DTM_UNIT_INFO_DTC_DOMAIN	GENMASK_ULL(1, 0)
 
 #define CMN_DTM_NUM_COUNTERS		4
 /* Want more local counters? Why not replicate the whole DTM! Ugh... */
@@ -121,27 +140,28 @@
 /* The DTC node is where the magic happens */
 #define CMN_DT_DTC_CTL			0x0a00
 #define CMN_DT_DTC_CTL_DT_EN		BIT(0)
+#define CMN_DT_DTC_CTL_CG_DISABLE	BIT(10)
 
 /* DTC counters are paired in 64-bit registers on a 16-byte stride. Yuck */
 #define _CMN_DT_CNT_REG(n)		((((n) / 2) * 4 + (n) % 2) * 4)
-#define CMN_DT_PMEVCNT(n)		(CMN_PMU_OFFSET + _CMN_DT_CNT_REG(n))
-#define CMN_DT_PMCCNTR			(CMN_PMU_OFFSET + 0x40)
+#define CMN_DT_PMEVCNT(dtc, n)		((dtc)->pmu_base + _CMN_DT_CNT_REG(n))
+#define CMN_DT_PMCCNTR(dtc)		((dtc)->pmu_base + 0x40)
 
-#define CMN_DT_PMEVCNTSR(n)		(CMN_PMU_OFFSET + 0x50 + _CMN_DT_CNT_REG(n))
-#define CMN_DT_PMCCNTRSR		(CMN_PMU_OFFSET + 0x90)
+#define CMN_DT_PMEVCNTSR(dtc, n)	((dtc)->pmu_base + 0x50 + _CMN_DT_CNT_REG(n))
+#define CMN_DT_PMCCNTRSR(dtc)		((dtc)->pmu_base + 0x90)
 
-#define CMN_DT_PMCR			(CMN_PMU_OFFSET + 0x100)
+#define CMN_DT_PMCR(dtc)		((dtc)->pmu_base + 0x100)
 #define CMN_DT_PMCR_PMU_EN		BIT(0)
 #define CMN_DT_PMCR_CNTR_RST		BIT(5)
 #define CMN_DT_PMCR_OVFL_INTR_EN	BIT(6)
 
-#define CMN_DT_PMOVSR			(CMN_PMU_OFFSET + 0x118)
-#define CMN_DT_PMOVSR_CLR		(CMN_PMU_OFFSET + 0x120)
+#define CMN_DT_PMOVSR(dtc)		((dtc)->pmu_base + 0x118)
+#define CMN_DT_PMOVSR_CLR(dtc)		((dtc)->pmu_base + 0x120)
 
-#define CMN_DT_PMSSR			(CMN_PMU_OFFSET + 0x128)
+#define CMN_DT_PMSSR(dtc)		((dtc)->pmu_base + 0x128)
 #define CMN_DT_PMSSR_SS_STATUS(n)	BIT(n)
 
-#define CMN_DT_PMSRR			(CMN_PMU_OFFSET + 0x130)
+#define CMN_DT_PMSRR(dtc)		((dtc)->pmu_base + 0x130)
 #define CMN_DT_PMSRR_SS_REQ		BIT(0)
 
 #define CMN_DT_NUM_COUNTERS		8
@@ -159,22 +179,23 @@
 /* Event attributes */
 #define CMN_CONFIG_TYPE			GENMASK_ULL(15, 0)
 #define CMN_CONFIG_EVENTID		GENMASK_ULL(26, 16)
-#define CMN_CONFIG_OCCUPID		GENMASK_ULL(30, 27)
+#define CMN_CONFIG_FILTER		GENMASK_ULL(30, 27)
 #define CMN_CONFIG_BYNODEID		BIT_ULL(31)
 #define CMN_CONFIG_NODEID		GENMASK_ULL(47, 32)
+#define CMN_CONFIG_FILTER2		GENMASK_ULL(51, 48)
 
 #define CMN_EVENT_TYPE(event)		FIELD_GET(CMN_CONFIG_TYPE, (event)->attr.config)
 #define CMN_EVENT_EVENTID(event)	FIELD_GET(CMN_CONFIG_EVENTID, (event)->attr.config)
-#define CMN_EVENT_OCCUPID(event)	FIELD_GET(CMN_CONFIG_OCCUPID, (event)->attr.config)
+#define CMN_EVENT_FILTER(event)		FIELD_GET(CMN_CONFIG_FILTER, (event)->attr.config)
 #define CMN_EVENT_BYNODEID(event)	FIELD_GET(CMN_CONFIG_BYNODEID, (event)->attr.config)
 #define CMN_EVENT_NODEID(event)		FIELD_GET(CMN_CONFIG_NODEID, (event)->attr.config)
+#define CMN_EVENT_FILTER2(event)	FIELD_GET(CMN_CONFIG_FILTER2, (event)->attr.config)
 
 #define CMN_CONFIG_WP_COMBINE		GENMASK_ULL(30, 27)
 #define CMN_CONFIG_WP_DEV_SEL		GENMASK_ULL(50, 48)
 #define CMN_CONFIG_WP_CHN_SEL		GENMASK_ULL(55, 51)
-/* Note that we don't yet support the tertiary match group on newer IPs */
-#define CMN_CONFIG_WP_GRP		BIT_ULL(56)
-#define CMN_CONFIG_WP_EXCLUSIVE		BIT_ULL(57)
+#define CMN_CONFIG_WP_GRP		GENMASK_ULL(57, 56)
+#define CMN_CONFIG_WP_EXCLUSIVE		BIT_ULL(58)
 #define CMN_CONFIG1_WP_VAL		GENMASK_ULL(63, 0)
 #define CMN_CONFIG2_WP_MASK		GENMASK_ULL(63, 0)
 
@@ -195,20 +216,28 @@
 enum cmn_model {
 	CMN600 = 1,
 	CMN650 = 2,
-	CMN700 = 4,
-	CI700 = 8,
+	CI700 = 4,
+	CMN700 = 8,
+	CMNS3R01 = 16,
+	CMNS3R2 = 32,
 	/* ...and then we can use bitmap tricks for commonality */
 	CMN_ANY = -1,
 	NOT_CMN600 = -2,
-	CMN_650ON = CMN650 | CMN700,
+	CMN_700ON = ~(CMN700 - 1),
+	CMN_650ON = CMN_700ON | CMN650,
+	CMNS3 = CMNS3R01 | CMNS3R2,
 };
 
 /* Actual part numbers and revision IDs defined by the hardware */
 enum cmn_part {
 	PART_CMN600 = 0x434,
 	PART_CMN650 = 0x436,
+	PART_CMN600AE = 0x438,
 	PART_CMN700 = 0x43c,
 	PART_CI700 = 0x43a,
+	PART_CMN_S3 = 0x43e,
+	/* Synthetic part number, overridden to PART_CMN_S3 during discovery */
+	PART_GRAVITON5 = 0xa5,
 };
 
 /* CMN-600 r0px shouldn't exist in silicon, thankfully */
@@ -229,6 +258,13 @@ enum cmn_revision {
 	REV_CMN700_R1P0,
 	REV_CMN700_R2P0,
 	REV_CMN700_R3P0,
+	REV_CMNS3_R0P0 = 0,
+	REV_CMNS3_R0P1,
+	REV_CMNS3_R1P0,
+	REV_CMNS3_R2P0,
+	REV_CMNS3_R2P1,
+	REV_CMNS3_R2P2,
+	REV_CMNS3_R2P5,
 	REV_CI700_R0P0 = 0,
 	REV_CI700_R1P0,
 	REV_CI700_R2P0,
@@ -260,17 +296,21 @@ enum cmn_node_type {
 	CMN_TYPE_HNS = 0x200,
 	CMN_TYPE_HNS_MPAM_S,
 	CMN_TYPE_HNS_MPAM_NS,
+	CMN_TYPE_APB = 0x1000,
 	/* Not a real node type */
 	CMN_TYPE_WP = 0x7770
 };
 
 enum cmn_filter_select {
-	SEL_NONE = -1,
-	SEL_OCCUP1ID,
+	SEL_NONE,
+	SEL_OCCUP1_ID,
 	SEL_CLASS_OCCUP_ID,
-	SEL_CBUSY_SNTHROTTLE_SEL,
 	SEL_HBT_LBT_SEL,
 	SEL_SN_HOME_SEL,
+	SEL_CBUSY_SNTHROTTLE_SEL,
+	SEL_SNP_VC_SEL,
+	SEL_ENHANCED_HBT_LBT_SEL,
+	SEL_EVICT_STATE_SEL,
 	SEL_MAX
 };
 
@@ -279,16 +319,16 @@ struct arm_cmn_node {
 	u16 id, logid;
 	enum cmn_node_type type;
 
-	int dtm;
-	union {
-		/* DN/HN-F/CXHA */
-		struct {
-			u8 val : 4;
-			u8 count : 4;
-		} occupid[SEL_MAX];
-		/* XP */
-		u8 dtc;
-	};
+	/* XP properties really, but replicated to children for convenience */
+	u8 dtm;
+	s8 dtc;
+	u8 portid_bits:4;
+	u8 deviceid_bits:4;
+	/* DN/HN-F/CXHA */
+	struct {
+		u8 val : 4;
+		u8 count : 4;
+	} filter[SEL_MAX];
 	union {
 		u8 event[4];
 		__le32 event_sel;
@@ -309,8 +349,9 @@ struct arm_cmn_dtm {
 
 struct arm_cmn_dtc {
 	void __iomem *base;
+	void __iomem *pmu_base;
 	int irq;
-	int irq_friend;
+	s8 irq_friend;
 	bool cc_active;
 
 	struct perf_event *counters[CMN_DT_NUM_COUNTERS];
@@ -359,49 +400,33 @@ struct arm_cmn {
 static int arm_cmn_hp_state;
 
 struct arm_cmn_nodeid {
-	u8 x;
-	u8 y;
 	u8 port;
 	u8 dev;
 };
 
 static int arm_cmn_xyidbits(const struct arm_cmn *cmn)
 {
-	return fls((cmn->mesh_x - 1) | (cmn->mesh_y - 1) | 2);
+	return fls((cmn->mesh_x - 1) | (cmn->mesh_y - 1));
 }
 
-static struct arm_cmn_nodeid arm_cmn_nid(const struct arm_cmn *cmn, u16 id)
+static struct arm_cmn_nodeid arm_cmn_nid(const struct arm_cmn_node *dn)
 {
 	struct arm_cmn_nodeid nid;
 
-	if (cmn->num_xps == 1) {
-		nid.x = 0;
-		nid.y = 0;
-		nid.port = CMN_NODEID_1x1_PID(id);
-		nid.dev = CMN_NODEID_DEVID(id);
-	} else {
-		int bits = arm_cmn_xyidbits(cmn);
-
-		nid.x = CMN_NODEID_X(id, bits);
-		nid.y = CMN_NODEID_Y(id, bits);
-		if (cmn->ports_used & 0xc) {
-			nid.port = CMN_NODEID_EXT_PID(id);
-			nid.dev = CMN_NODEID_EXT_DEVID(id);
-		} else {
-			nid.port = CMN_NODEID_PID(id);
-			nid.dev = CMN_NODEID_DEVID(id);
-		}
-	}
+	nid.dev = dn->id & ((1U << dn->deviceid_bits) - 1);
+	nid.port = (dn->id >> dn->deviceid_bits) & ((1U << dn->portid_bits) - 1);
 	return nid;
 }
 
 static struct arm_cmn_node *arm_cmn_node_to_xp(const struct arm_cmn *cmn,
 					       const struct arm_cmn_node *dn)
 {
-	struct arm_cmn_nodeid nid = arm_cmn_nid(cmn, dn->id);
-	int xp_idx = cmn->mesh_x * nid.y + nid.x;
+	int id = dn->id >> (dn->portid_bits + dn->deviceid_bits);
+	int bits = arm_cmn_xyidbits(cmn);
+	int x = id >> bits;
+	int y = id & ((1U << bits) - 1);
 
-	return cmn->xps + xp_idx;
+	return cmn->xps + cmn->mesh_x * y + x;
 }
 static struct arm_cmn_node *arm_cmn_node(const struct arm_cmn *cmn,
 					 enum cmn_node_type type)
@@ -425,15 +450,29 @@ static enum cmn_model arm_cmn_model(const struct arm_cmn *cmn)
 		return CMN700;
 	case PART_CI700:
 		return CI700;
+	case PART_CMN_S3:
+		if (cmn->rev >= REV_CMNS3_R2P0)
+			return CMNS3R2;
+		return CMNS3R01;
 	default:
 		return 0;
 	};
 }
 
+static int arm_cmn_pmu_offset(const struct arm_cmn *cmn, const struct arm_cmn_node *dn)
+{
+	if (cmn->part == PART_CMN_S3) {
+		if (cmn->rev >= REV_CMNS3_R1P0 && dn->type == CMN_TYPE_XP)
+			return CMN_S3_R1_DTM_OFFSET;
+		return CMN_S3_PMU_OFFSET;
+	}
+	return CMN_PMU_OFFSET;
+}
+
 static u32 arm_cmn_device_connect_info(const struct arm_cmn *cmn,
 				       const struct arm_cmn_node *xp, int port)
 {
-	int offset = CMN_MXP__CONNECT_INFO(port);
+	int offset = CMN_MXP__CONNECT_INFO(port) - arm_cmn_pmu_offset(cmn, xp);
 
 	if (port >= 2) {
 		if (cmn->part == PART_CMN600 || cmn->part == PART_CMN650)
@@ -446,7 +485,7 @@ static u32 arm_cmn_device_connect_info(const struct arm_cmn *cmn,
 			offset += CI700_CONNECT_INFO_P2_5_OFFSET;
 	}
 
-	return readl_relaxed(xp->pmu_base - CMN_PMU_OFFSET + offset);
+	return readl_relaxed(xp->pmu_base + offset);
 }
 
 static struct dentry *arm_cmn_debugfs;
@@ -480,20 +519,26 @@ static const char *arm_cmn_device_type(u8 type)
 		case 0x17: return "RN-F_C_E|";
 		case 0x18: return " RN-F_E |";
 		case 0x19: return "RN-F_E_E|";
+		case 0x1a: return "  HN-S  |";
+		case 0x1b: return "  LCN   |";
 		case 0x1c: return "  MTSX  |";
 		case 0x1d: return "  HN-V  |";
 		case 0x1e: return "  CCG   |";
+		case 0x20: return " RN-F_F |";
+		case 0x21: return "RN-F_F_E|";
+		case 0x22: return " SN-F_F |";
 		default:   return "  ????  |";
 	}
 }
 
-static void arm_cmn_show_logid(struct seq_file *s, int x, int y, int p, int d)
+static void arm_cmn_show_logid(struct seq_file *s, const struct arm_cmn_node *xp, int p, int d)
 {
 	struct arm_cmn *cmn = s->private;
 	struct arm_cmn_node *dn;
+	u16 id = xp->id | d | (p << xp->deviceid_bits);
 
 	for (dn = cmn->dns; dn->type; dn++) {
-		struct arm_cmn_nodeid nid = arm_cmn_nid(cmn, dn->id);
+		int pad = dn->logid < 10;
 
 		if (dn->type == CMN_TYPE_XP)
 			continue;
@@ -501,10 +546,10 @@ static void arm_cmn_show_logid(struct seq_file *s, int x, int y, int p, int d)
 		if (dn->type < CMN_TYPE_HNI)
 			continue;
 
-		if (nid.x != x || nid.y != y || nid.port != p || nid.dev != d)
+		if (dn->id != id)
 			continue;
 
-		seq_printf(s, "   #%-2d  |", dn->logid);
+		seq_printf(s, " %*c#%-*d  |", pad + 1, ' ', 3 - pad, dn->logid);
 		return;
 	}
 	seq_puts(s, "        |");
@@ -517,33 +562,32 @@ static int arm_cmn_map_show(struct seq_file *s, void *data)
 
 	seq_puts(s, "     X");
 	for (x = 0; x < cmn->mesh_x; x++)
-		seq_printf(s, "    %d    ", x);
+		seq_printf(s, "    %-2d   ", x);
 	seq_puts(s, "\nY P D+");
 	y = cmn->mesh_y;
 	while (y--) {
 		int xp_base = cmn->mesh_x * y;
+		struct arm_cmn_node *xp = cmn->xps + xp_base;
 		u8 port[CMN_MAX_PORTS][CMN_MAX_DIMENSION];
 
 		for (x = 0; x < cmn->mesh_x; x++)
 			seq_puts(s, "--------+");
 
-		seq_printf(s, "\n%d    |", y);
+		seq_printf(s, "\n%-2d   |", y);
 		for (x = 0; x < cmn->mesh_x; x++) {
-			struct arm_cmn_node *xp = cmn->xps + xp_base + x;
-
 			for (p = 0; p < CMN_MAX_PORTS; p++)
-				port[p][x] = arm_cmn_device_connect_info(cmn, xp, p);
-			seq_printf(s, " XP #%-2d |", xp_base + x);
+				port[p][x] = arm_cmn_device_connect_info(cmn, xp + x, p);
+			seq_printf(s, " XP #%-3d|", xp_base + x);
 		}
 
 		seq_puts(s, "\n     |");
 		for (x = 0; x < cmn->mesh_x; x++) {
-			u8 dtc = cmn->xps[xp_base + x].dtc;
+			s8 dtc = xp[x].dtc;
 
-			if (dtc & (dtc - 1))
+			if (dtc < 0)
 				seq_puts(s, " DTC ?? |");
 			else
-				seq_printf(s, " DTC %ld  |", __ffs(dtc));
+				seq_printf(s, " DTC %d  |", dtc);
 		}
 		seq_puts(s, "\n     |");
 		for (x = 0; x < cmn->mesh_x; x++)
@@ -555,10 +599,10 @@ static int arm_cmn_map_show(struct seq_file *s, void *data)
 				seq_puts(s, arm_cmn_device_type(port[p][x]));
 			seq_puts(s, "\n    0|");
 			for (x = 0; x < cmn->mesh_x; x++)
-				arm_cmn_show_logid(s, x, y, p, 0);
+				arm_cmn_show_logid(s, xp + x, p, 0);
 			seq_puts(s, "\n    1|");
 			for (x = 0; x < cmn->mesh_x; x++)
-				arm_cmn_show_logid(s, x, y, p, 1);
+				arm_cmn_show_logid(s, xp + x, p, 1);
 		}
 		seq_puts(s, "\n-----+");
 	}
@@ -584,43 +628,150 @@ static void arm_cmn_debugfs_init(struct arm_cmn *cmn, int id)
 static void arm_cmn_debugfs_init(struct arm_cmn *cmn, int id) {}
 #endif
 
+enum cmn_filter_type {
+	FILT_NONE,
+	FILT_OCCUP1_ID,
+	FILT_HNF_700,
+	FILT_HNS,
+	FILT_HNS_S3R2,
+};
+#define CMN_FILTER(_sel)	[SEL_##_sel] = CMN__PMU_##_sel
+#define CMN_FILTER_V2(_sel)	[SEL_##_sel] = CMN__S3_R2_##_sel
+
+static const u64 arm_cmn_filters[][SEL_MAX] = {
+	[FILT_NONE] = {},
+	/* DVM etc. */
+	[FILT_OCCUP1_ID] = {
+		CMN_FILTER(OCCUP1_ID)
+	},
+	/* Newer HN-F */
+	[FILT_HNF_700] = {
+		CMN_FILTER(OCCUP1_ID),
+		CMN_FILTER(CLASS_OCCUP_ID),
+		CMN_FILTER(CBUSY_SNTHROTTLE_SEL)
+	},
+	/* HN-S */
+	[FILT_HNS] = {
+		CMN_FILTER(OCCUP1_ID),
+		CMN_FILTER(CLASS_OCCUP_ID),
+		CMN_FILTER(CBUSY_SNTHROTTLE_SEL),
+		CMN_FILTER(HBT_LBT_SEL),
+		CMN_FILTER(SN_HOME_SEL)
+	},
+	/* Newer HN-S */
+	[FILT_HNS_S3R2] = {
+		CMN_FILTER_V2(OCCUP1_ID),
+		CMN_FILTER_V2(CLASS_OCCUP_ID),
+		CMN_FILTER_V2(CBUSY_SNTHROTTLE_SEL),
+		CMN_FILTER_V2(HBT_LBT_SEL),
+		CMN_FILTER_V2(SN_HOME_SEL),
+		CMN_FILTER(SNP_VC_SEL),
+		CMN_FILTER(ENHANCED_HBT_LBT_SEL),
+		CMN_FILTER(EVICT_STATE_SEL)
+	}
+};
+
+static enum cmn_filter_type arm_cmn_filter(enum cmn_node_type node,
+					   enum cmn_model model)
+{
+	switch (node) {
+	default:
+		return FILT_NONE;
+	case CMN_TYPE_DVM:
+	case CMN_TYPE_CXRA:
+	case CMN_TYPE_CXHA:
+	case CMN_TYPE_CCRA:
+	case CMN_TYPE_CCHA:
+		return FILT_OCCUP1_ID;
+	case CMN_TYPE_HNF:
+		if (model < CMN700)
+			return FILT_OCCUP1_ID;
+		return FILT_HNF_700;
+	case CMN_TYPE_HNS:
+		if (model < CMNS3R2)
+			return FILT_HNS;
+		return FILT_HNS_S3R2;
+	};
+}
+
 struct arm_cmn_hw_event {
 	struct arm_cmn_node *dn;
-	u64 dtm_idx[4];
-	unsigned int dtc_idx;
-	u8 dtcs_used;
+	union {
+		unsigned long *dtm_idx;
+		int cc_idx;
+	};
+	unsigned long *wp_idx;
+	s8 dtc_idx[CMN_MAX_DTCS];
 	u8 num_dns;
 	u8 dtm_offset;
 	bool wide_sel;
 	enum cmn_filter_select filter_sel;
 };
+static_assert(sizeof(struct arm_cmn_hw_event) <= offsetof(struct hw_perf_event, target));
 
 #define for_each_hw_dn(hw, dn, i) \
 	for (i = 0, dn = hw->dn; i < hw->num_dns; i++, dn++)
 
+/* @i is the DTC number, @idx is the counter index on that DTC */
+#define for_each_hw_dtc_idx(hw, i, idx) \
+	for (int i = 0, idx; i < CMN_MAX_DTCS; i++) if ((idx = hw->dtc_idx[i]) >= 0)
+
 static struct arm_cmn_hw_event *to_cmn_hw(struct perf_event *event)
 {
-	BUILD_BUG_ON(sizeof(struct arm_cmn_hw_event) > offsetof(struct hw_perf_event, target));
 	return (struct arm_cmn_hw_event *)&event->hw;
 }
 
-static void arm_cmn_set_index(u64 x[], unsigned int pos, unsigned int val)
+#define BPL2 (BITS_PER_LONG / 2)
+
+static void arm_cmn_set_dtm_idx(struct arm_cmn_hw_event *hw, unsigned int pos, unsigned int val)
 {
-	x[pos / 32] |= (u64)val << ((pos % 32) * 2);
+	hw->dtm_idx[pos / BPL2] |= (unsigned long)val << ((pos % BPL2) * 2);
 }
 
-static unsigned int arm_cmn_get_index(u64 x[], unsigned int pos)
+static unsigned int arm_cmn_get_dtm_idx(struct arm_cmn_hw_event *hw, unsigned int pos)
 {
-	return (x[pos / 32] >> ((pos % 32) * 2)) & 3;
+	return (hw->dtm_idx[pos / BPL2] >> ((pos % BPL2) * 2)) & 3;
 }
+
+static unsigned long *arm_cmn_alloc_dtm_idx(void)
+{
+	return bitmap_zalloc(CMN_MAX_NODES_PER_EVENT * 2, GFP_KERNEL);
+}
+
+static void arm_cmn_set_wp_idx(struct arm_cmn_hw_event *hw, unsigned int pos, bool val)
+{
+	if (val)
+		set_bit(pos, hw->wp_idx);
+}
+
+static unsigned int arm_cmn_get_wp_idx(struct arm_cmn_hw_event *hw, unsigned int pos)
+{
+	return test_bit(pos, hw->wp_idx);
+}
+
+static unsigned long *arm_cmn_alloc_wp_idx(void)
+{
+	return bitmap_zalloc(CMN_MAX_XPS, GFP_KERNEL);
+}
+
+static void arm_cmn_clear_idx(struct arm_cmn_hw_event *hw)
+{
+	bitmap_zero(hw->dtm_idx, CMN_MAX_NODES_PER_EVENT * 2);
+	if (hw->wp_idx)
+		bitmap_zero(hw->wp_idx, CMN_MAX_XPS);
+}
+
+struct arm_cmn_filter_attr {
+	enum cmn_filter_select sel;
+	u8 val;
+};
 
 struct arm_cmn_event_attr {
 	struct device_attribute attr;
 	enum cmn_model model;
 	enum cmn_node_type type;
-	enum cmn_filter_select fsel;
 	u16 eventid;
-	u8 occupid;
+	struct arm_cmn_filter_attr filter[2];
 };
 
 struct arm_cmn_format_attr {
@@ -629,24 +780,25 @@ struct arm_cmn_format_attr {
 	int config;
 };
 
-#define _CMN_EVENT_ATTR(_model, _name, _type, _eventid, _occupid, _fsel)\
+#define _CMN_EVENT_ATTR(_model, _name, _type, _eventid, _fa, _fb, _fc, _fd, ...) \
 	(&((struct arm_cmn_event_attr[]) {{				\
 		.attr = __ATTR(_name, 0444, arm_cmn_event_show, NULL),	\
 		.model = _model,					\
 		.type = _type,						\
 		.eventid = _eventid,					\
-		.occupid = _occupid,					\
-		.fsel = _fsel,						\
+		.filter = {{_fa, _fb}, {_fc, _fd}},			\
 	}})[0].attr.attr)
-#define CMN_EVENT_ATTR(_model, _name, _type, _eventid)			\
-	_CMN_EVENT_ATTR(_model, _name, _type, _eventid, 0, SEL_NONE)
+#define CMN_EVENT_ATTR(_model, _name, _type, _eventid, _filter...)	\
+	_CMN_EVENT_ATTR(_model, _name, _type, _eventid, ##_filter, 0, 0, 0, 0)
 
 static ssize_t arm_cmn_event_show(struct device *dev,
 				  struct device_attribute *attr, char *buf)
 {
 	struct arm_cmn_event_attr *eattr;
+	struct arm_cmn_filter_attr *filter;
 
 	eattr = container_of(attr, typeof(*eattr), attr);
+	filter = eattr->filter;
 
 	if (eattr->type == CMN_TYPE_DTC)
 		return sysfs_emit(buf, "type=0x%x\n", eattr->type);
@@ -656,9 +808,13 @@ static ssize_t arm_cmn_event_show(struct device *dev,
 				  "type=0x%x,eventid=0x%x,wp_dev_sel=?,wp_chn_sel=?,wp_grp=?,wp_val=?,wp_mask=?\n",
 				  eattr->type, eattr->eventid);
 
-	if (eattr->fsel > SEL_NONE)
-		return sysfs_emit(buf, "type=0x%x,eventid=0x%x,occupid=0x%x\n",
-				  eattr->type, eattr->eventid, eattr->occupid);
+	if (filter[1].sel)
+		return sysfs_emit(buf, "type=0x%x,eventid=0x%x,filter=0x%x,filter2=0x%x\n",
+				  eattr->type, eattr->eventid, filter[0].val, filter[1].val);
+
+	if (filter[0].sel)
+		return sysfs_emit(buf, "type=0x%x,eventid=0x%x,filter=0x%x\n",
+				  eattr->type, eattr->eventid, filter[0].val);
 
 	return sysfs_emit(buf, "type=0x%x,eventid=0x%x\n", eattr->type,
 			  eattr->eventid);
@@ -699,8 +855,8 @@ static umode_t arm_cmn_event_attr_is_visible(struct kobject *kobj,
 
 		if ((chan == 5 && cmn->rsp_vc_num < 2) ||
 		    (chan == 6 && cmn->dat_vc_num < 2) ||
-		    (chan == 7 && cmn->snp_vc_num < 2) ||
-		    (chan == 8 && cmn->req_vc_num < 2))
+		    (chan == 7 && cmn->req_vc_num < 2) ||
+		    (chan == 8 && cmn->snp_vc_num < 2))
 			return 0;
 	}
 
@@ -746,8 +902,8 @@ static umode_t arm_cmn_event_attr_is_visible(struct kobject *kobj,
 	return attr->mode;
 }
 
-#define _CMN_EVENT_DVM(_model, _name, _event, _occup, _fsel)	\
-	_CMN_EVENT_ATTR(_model, dn_##_name, CMN_TYPE_DVM, _event, _occup, _fsel)
+#define CMN_EVENT_DVM(_model, _name, _event, _filter...)	\
+	CMN_EVENT_ATTR(_model, dn_##_name, CMN_TYPE_DVM, _event, ##_filter)
 #define CMN_EVENT_DTC(_name)					\
 	CMN_EVENT_ATTR(CMN_ANY, dtc_##_name, CMN_TYPE_DTC, 0)
 #define CMN_EVENT_HNF(_model, _name, _event)			\
@@ -770,66 +926,119 @@ static umode_t arm_cmn_event_attr_is_visible(struct kobject *kobj,
 	CMN_EVENT_ATTR(CMN_ANY, cxha_##_name, CMN_TYPE_CXHA, _event)
 #define CMN_EVENT_CCRA(_name, _event)				\
 	CMN_EVENT_ATTR(CMN_ANY, ccra_##_name, CMN_TYPE_CCRA, _event)
-#define CMN_EVENT_CCHA(_name, _event)				\
-	CMN_EVENT_ATTR(CMN_ANY, ccha_##_name, CMN_TYPE_CCHA, _event)
+#define CMN_EVENT_CCHA(_model, _name, _event)				\
+	CMN_EVENT_ATTR(_model, ccha_##_name, CMN_TYPE_CCHA, _event)
 #define CMN_EVENT_CCLA(_name, _event)				\
 	CMN_EVENT_ATTR(CMN_ANY, ccla_##_name, CMN_TYPE_CCLA, _event)
-#define CMN_EVENT_CCLA_RNI(_name, _event)				\
-	CMN_EVENT_ATTR(CMN_ANY, ccla_rni_##_name, CMN_TYPE_CCLA_RNI, _event)
-#define CMN_EVENT_HNS(_name, _event)				\
-	CMN_EVENT_ATTR(CMN_ANY, hns_##_name, CMN_TYPE_HNS, _event)
+#define _CMN_EVENT_HNS(_model, _name, _event, _filter...)		\
+	CMN_EVENT_ATTR(_model, hns_##_name, CMN_TYPE_HNS, _event, ##_filter)
 
-#define CMN_EVENT_DVM(_model, _name, _event)			\
-	_CMN_EVENT_DVM(_model, _name, _event, 0, SEL_NONE)
 #define CMN_EVENT_DVM_OCC(_model, _name, _event)			\
-	_CMN_EVENT_DVM(_model, _name##_all, _event, 0, SEL_OCCUP1ID),	\
-	_CMN_EVENT_DVM(_model, _name##_dvmop, _event, 1, SEL_OCCUP1ID),	\
-	_CMN_EVENT_DVM(_model, _name##_dvmsync, _event, 2, SEL_OCCUP1ID)
+	CMN_EVENT_DVM(_model, _name##_all, _event, SEL_OCCUP1_ID, 0),	\
+	CMN_EVENT_DVM(_model, _name##_dvmop, _event, SEL_OCCUP1_ID, 1),	\
+	CMN_EVENT_DVM(_model, _name##_dvmsync, _event, SEL_OCCUP1_ID, 2)
 
 #define CMN_EVENT_HN_OCC(_model, _name, _type, _event)		\
-	_CMN_EVENT_ATTR(_model, _name##_all, _type, _event, 0, SEL_OCCUP1ID), \
-	_CMN_EVENT_ATTR(_model, _name##_read, _type, _event, 1, SEL_OCCUP1ID), \
-	_CMN_EVENT_ATTR(_model, _name##_write, _type, _event, 2, SEL_OCCUP1ID), \
-	_CMN_EVENT_ATTR(_model, _name##_atomic, _type, _event, 3, SEL_OCCUP1ID), \
-	_CMN_EVENT_ATTR(_model, _name##_stash, _type, _event, 4, SEL_OCCUP1ID)
+	CMN_EVENT_ATTR(_model, _name##_all, _type, _event, SEL_OCCUP1_ID, 0), \
+	CMN_EVENT_ATTR(_model, _name##_read, _type, _event, SEL_OCCUP1_ID, 1), \
+	CMN_EVENT_ATTR(_model, _name##_write, _type, _event, SEL_OCCUP1_ID, 2), \
+	CMN_EVENT_ATTR(_model, _name##_atomic, _type, _event, SEL_OCCUP1_ID, 3), \
+	CMN_EVENT_ATTR(_model, _name##_stash, _type, _event, SEL_OCCUP1_ID, 4)
 #define CMN_EVENT_HN_CLS(_model, _name, _type, _event)			\
-	_CMN_EVENT_ATTR(_model, _name##_class0, _type, _event, 0, SEL_CLASS_OCCUP_ID), \
-	_CMN_EVENT_ATTR(_model, _name##_class1, _type, _event, 1, SEL_CLASS_OCCUP_ID), \
-	_CMN_EVENT_ATTR(_model, _name##_class2, _type, _event, 2, SEL_CLASS_OCCUP_ID), \
-	_CMN_EVENT_ATTR(_model, _name##_class3, _type, _event, 3, SEL_CLASS_OCCUP_ID)
+	CMN_EVENT_ATTR(_model, _name##_class0, _type, _event, SEL_CLASS_OCCUP_ID, 0), \
+	CMN_EVENT_ATTR(_model, _name##_class1, _type, _event, SEL_CLASS_OCCUP_ID, 1), \
+	CMN_EVENT_ATTR(_model, _name##_class2, _type, _event, SEL_CLASS_OCCUP_ID, 2), \
+	CMN_EVENT_ATTR(_model, _name##_class3, _type, _event, SEL_CLASS_OCCUP_ID, 3)
 #define CMN_EVENT_HN_SNT(_model, _name, _type, _event)			\
-	_CMN_EVENT_ATTR(_model, _name##_all, _type, _event, 0, SEL_CBUSY_SNTHROTTLE_SEL), \
-	_CMN_EVENT_ATTR(_model, _name##_group0_read, _type, _event, 1, SEL_CBUSY_SNTHROTTLE_SEL), \
-	_CMN_EVENT_ATTR(_model, _name##_group0_write, _type, _event, 2, SEL_CBUSY_SNTHROTTLE_SEL), \
-	_CMN_EVENT_ATTR(_model, _name##_group1_read, _type, _event, 3, SEL_CBUSY_SNTHROTTLE_SEL), \
-	_CMN_EVENT_ATTR(_model, _name##_group1_write, _type, _event, 4, SEL_CBUSY_SNTHROTTLE_SEL), \
-	_CMN_EVENT_ATTR(_model, _name##_read, _type, _event, 5, SEL_CBUSY_SNTHROTTLE_SEL), \
-	_CMN_EVENT_ATTR(_model, _name##_write, _type, _event, 6, SEL_CBUSY_SNTHROTTLE_SEL)
+	CMN_EVENT_ATTR(_model, _name##_all, _type, _event, SEL_CBUSY_SNTHROTTLE_SEL, 0), \
+	CMN_EVENT_ATTR(_model, _name##_group0_read, _type, _event, SEL_CBUSY_SNTHROTTLE_SEL, 1), \
+	CMN_EVENT_ATTR(_model, _name##_group0_write, _type, _event, SEL_CBUSY_SNTHROTTLE_SEL, 2), \
+	CMN_EVENT_ATTR(_model, _name##_group1_read, _type, _event, SEL_CBUSY_SNTHROTTLE_SEL, 3), \
+	CMN_EVENT_ATTR(_model, _name##_group1_write, _type, _event, SEL_CBUSY_SNTHROTTLE_SEL, 4), \
+	CMN_EVENT_ATTR(_model, _name##_read, _type, _event, SEL_CBUSY_SNTHROTTLE_SEL, 5), \
+	CMN_EVENT_ATTR(_model, _name##_write, _type, _event, SEL_CBUSY_SNTHROTTLE_SEL, 6), \
+	CMN_EVENT_ATTR(CMNS3R2, _name##_ccg_read, _type, _event, SEL_CBUSY_SNTHROTTLE_SEL, 9), \
+	CMN_EVENT_ATTR(CMNS3R2, _name##_ccg_write, _type, _event, SEL_CBUSY_SNTHROTTLE_SEL, 10), \
+	CMN_EVENT_ATTR(CMNS3R2, _name##_lbt_read, _type, _event, SEL_CBUSY_SNTHROTTLE_SEL, 11), \
+	CMN_EVENT_ATTR(CMNS3R2, _name##_lbt_write, _type, _event, SEL_CBUSY_SNTHROTTLE_SEL, 12), \
+	CMN_EVENT_ATTR(CMNS3R2, _name##_lbt, _type, _event, SEL_CBUSY_SNTHROTTLE_SEL, 13)
 
 #define CMN_EVENT_HNF_OCC(_model, _name, _event)			\
 	CMN_EVENT_HN_OCC(_model, hnf_##_name, CMN_TYPE_HNF, _event)
 #define CMN_EVENT_HNF_CLS(_model, _name, _event)			\
-	CMN_EVENT_HN_CLS(_model, hnf_##_name, CMN_TYPE_HNS, _event)
+	CMN_EVENT_HN_CLS(_model, hnf_##_name, CMN_TYPE_HNF, _event)
 #define CMN_EVENT_HNF_SNT(_model, _name, _event)			\
 	CMN_EVENT_HN_SNT(_model, hnf_##_name, CMN_TYPE_HNF, _event)
 
-#define CMN_EVENT_HNS_OCC(_name, _event)				\
-	CMN_EVENT_HN_OCC(CMN_ANY, hns_##_name, CMN_TYPE_HNS, _event),	\
-	_CMN_EVENT_ATTR(CMN_ANY, hns_##_name##_rxsnp, CMN_TYPE_HNS, _event, 5, SEL_OCCUP1ID), \
-	_CMN_EVENT_ATTR(CMN_ANY, hns_##_name##_lbt, CMN_TYPE_HNS, _event, 6, SEL_OCCUP1ID), \
-	_CMN_EVENT_ATTR(CMN_ANY, hns_##_name##_hbt, CMN_TYPE_HNS, _event, 7, SEL_OCCUP1ID)
+#define CMN_EVENT_HNS(_name, _event)					\
+	_CMN_EVENT_HNS(CMN_ANY, _name, _event)
+#define CMN_EVENT_HNSR0(_name, _event)					\
+	_CMN_EVENT_HNS(CMN700 | CMNS3R01, _name, _event)
+#define _CMN_EVENT_HNS_HBT(_model, _name, _event, _sel)			\
+	_CMN_EVENT_HNS(_model, _name##_all, _event, _sel, 0),		\
+	_CMN_EVENT_HNS(_model, _name##_hbt, _event, _sel, 1),		\
+	_CMN_EVENT_HNS(_model, _name##_lbt, _event, _sel, 2)
+#define _CMN_EVENT_HNS_EVICT(_model, _name, _event, _fsel1, f1)			\
+	_CMN_EVENT_HNS(_model, _name##_all, _event, _fsel1, f1, SEL_EVICT_STATE_SEL, 0), \
+	_CMN_EVENT_HNS(_model, _name##_eu, _event, _fsel1, f1, SEL_EVICT_STATE_SEL, 1), \
+	_CMN_EVENT_HNS(_model, _name##_en, _event, _fsel1, f1, SEL_EVICT_STATE_SEL, 2), \
+	_CMN_EVENT_HNS(_model, _name##_su, _event, _fsel1, f1, SEL_EVICT_STATE_SEL, 3), \
+	_CMN_EVENT_HNS(_model, _name##_sn, _event, _fsel1, f1, SEL_EVICT_STATE_SEL, 4), \
+	_CMN_EVENT_HNS(_model, _name##_mu, _event, _fsel1, f1, SEL_EVICT_STATE_SEL, 5), \
+	_CMN_EVENT_HNS(_model, _name##_mn, _event, _fsel1, f1, SEL_EVICT_STATE_SEL, 6)
+
+#define CMN_EVENT_HNS_OCC(_model, _name, _event)			\
+	CMN_EVENT_HN_OCC(_model, hns_##_name, CMN_TYPE_HNS, _event),	\
+	_CMN_EVENT_HNS(_model, _name##_rxsnp, _event, SEL_OCCUP1_ID, 5), \
+	_CMN_EVENT_HNS(_model, _name##_lbt, _event, SEL_OCCUP1_ID, 6),	\
+	_CMN_EVENT_HNS(_model, _name##_hbt, _event, SEL_OCCUP1_ID, 7),	\
+	_CMN_EVENT_HNS(CMNS3R2, _name##_rnf, _event, SEL_OCCUP1_ID, 8),	\
+	_CMN_EVENT_HNS(CMNS3R2, _name##_rni, _event, SEL_OCCUP1_ID, 9),	\
+	_CMN_EVENT_HNS(CMNS3R2, _name##_ccglcn, _event, SEL_OCCUP1_ID, 10), \
+	_CMN_EVENT_HNS(CMNS3R2, _name##_ccgrn, _event, SEL_OCCUP1_ID, 11)
 #define CMN_EVENT_HNS_CLS( _name, _event)				\
 	CMN_EVENT_HN_CLS(CMN_ANY, hns_##_name, CMN_TYPE_HNS, _event)
-#define CMN_EVENT_HNS_SNT(_name, _event)				\
-	CMN_EVENT_HN_SNT(CMN_ANY, hns_##_name, CMN_TYPE_HNS, _event)
-#define CMN_EVENT_HNS_HBT(_name, _event)				\
-	_CMN_EVENT_ATTR(CMN_ANY, hns_##_name##_all, CMN_TYPE_HNS, _event, 0, SEL_HBT_LBT_SEL), \
-	_CMN_EVENT_ATTR(CMN_ANY, hns_##_name##_hbt, CMN_TYPE_HNS, _event, 1, SEL_HBT_LBT_SEL), \
-	_CMN_EVENT_ATTR(CMN_ANY, hns_##_name##_lbt, CMN_TYPE_HNS, _event, 2, SEL_HBT_LBT_SEL)
-#define CMN_EVENT_HNS_SNH(_name, _event)				\
-	_CMN_EVENT_ATTR(CMN_ANY, hns_##_name##_all, CMN_TYPE_HNS, _event, 0, SEL_SN_HOME_SEL), \
-	_CMN_EVENT_ATTR(CMN_ANY, hns_##_name##_sn, CMN_TYPE_HNS, _event, 1, SEL_SN_HOME_SEL), \
-	_CMN_EVENT_ATTR(CMN_ANY, hns_##_name##_home, CMN_TYPE_HNS, _event, 2, SEL_SN_HOME_SEL)
+#define CMN_EVENT_HNSR0_CLS( _name, _event)				\
+	CMN_EVENT_HN_CLS(CMN700 | CMNS3R01, hns_##_name, CMN_TYPE_HNS, _event)
+#define CMN_EVENT_HNS_SNT(_model, _name, _event)			\
+	CMN_EVENT_HN_SNT(_model, hns_##_name, CMN_TYPE_HNS, _event)
+#define CMN_EVENT_HNS_SNH(_model, _name, _event)			\
+	_CMN_EVENT_HNS(_model, _name##_all, _event, SEL_SN_HOME_SEL, 0), \
+	_CMN_EVENT_HNS(_model, _name##_sn, _event, SEL_SN_HOME_SEL, 1),	\
+	_CMN_EVENT_HNS(_model, _name##_home, _event, SEL_SN_HOME_SEL, 2)
+#define CMN_EVENT_HNS_VC(_name, _event)					\
+	CMN_EVENT_HNSR0(_name, _event),					\
+	_CMN_EVENT_HNS(CMNS3R2, _name##_vc0, _event, SEL_SNP_VC_SEL, 0), \
+	_CMN_EVENT_HNS(CMNS3R2, _name##_vc1, _event, SEL_SNP_VC_SEL, 1), \
+	_CMN_EVENT_HNS(CMNS3R2, _name##_vc2, _event, SEL_SNP_VC_SEL, 2)
+#define CMN_EVENT_HNS_ENHBT(_name, _event)				\
+	_CMN_EVENT_HNS_HBT(CMNS3R2, _name, _event, SEL_ENHANCED_HBT_LBT_SEL), \
+	_CMN_EVENT_HNS(CMNS3R2, _name##_rnf, _event, SEL_ENHANCED_HBT_LBT_SEL, 3), \
+	_CMN_EVENT_HNS(CMNS3R2, _name##_rni, _event, SEL_ENHANCED_HBT_LBT_SEL, 4), \
+	_CMN_EVENT_HNS(CMNS3R2, _name##_ccglcn, _event, SEL_ENHANCED_HBT_LBT_SEL, 5), \
+	_CMN_EVENT_HNS(CMNS3R2, _name##_ccgrn, _event, SEL_ENHANCED_HBT_LBT_SEL, 6)
+#define CMN_EVENT_HNS_EVICT(_model, _name, _event)			\
+	_CMN_EVENT_HNS_EVICT(_model, _name##_all, _event, SEL_HBT_LBT_SEL, 0), \
+	_CMN_EVENT_HNS_EVICT(_model, _name##_hbt, _event, SEL_HBT_LBT_SEL, 1), \
+	_CMN_EVENT_HNS_EVICT(_model, _name##_lbt, _event, SEL_HBT_LBT_SEL, 2)
+
+#define CMN_EVENT_HNSR0_HBT(_name, _event)				\
+	_CMN_EVENT_HNS_HBT(CMN700 | CMNS3R01, _name, _event, SEL_HBT_LBT_SEL)
+#define CMN_EVENT_HNS_R2SNH(_name, _event)				\
+	CMN_EVENT_HNSR0(_name, _event),					\
+	CMN_EVENT_HNS_SNH(CMNS3R2, _name, _event)
+#define CMN_EVENT_HNS_R2HBT(_name, _event)				\
+	CMN_EVENT_HNSR0(_name, _event),					\
+	_CMN_EVENT_HNS_HBT(CMNS3R2, _name, _event, SEL_HBT_LBT_SEL)
+#define CMN_EVENT_HNS_HBT_ENHBT(_name, _event)				\
+	CMN_EVENT_HNSR0_HBT(_name, _event),				\
+	CMN_EVENT_HNS_ENHBT(_name, _event)
+#define CMN_EVENT_HNS_HBT_OCC(_name, _event)				\
+	CMN_EVENT_HNSR0_HBT(_name, _event),				\
+	CMN_EVENT_HNS_OCC(CMNS3R2, _name, _event)
+#define CMN_EVENT_HNS_HBT_EVICT(_name, _event)				\
+	CMN_EVENT_HNSR0_HBT(_name, _event),				\
+	CMN_EVENT_HNS_EVICT(CMNS3R2, _name, _event)
 
 #define _CMN_EVENT_XP_MESH(_name, _event)			\
 	__CMN_EVENT_XP(e_##_name, (_event) | (0 << 2)),		\
@@ -856,8 +1065,8 @@ static umode_t arm_cmn_event_attr_is_visible(struct kobject *kobj,
 	_CMN_EVENT_XP(pub_##_name, (_event) | (4 << 5)),	\
 	_CMN_EVENT_XP(rsp2_##_name, (_event) | (5 << 5)),	\
 	_CMN_EVENT_XP(dat2_##_name, (_event) | (6 << 5)),	\
-	_CMN_EVENT_XP(snp2_##_name, (_event) | (7 << 5)),	\
-	_CMN_EVENT_XP(req2_##_name, (_event) | (8 << 5))
+	_CMN_EVENT_XP(req2_##_name, (_event) | (7 << 5)),	\
+	_CMN_EVENT_XP(snp2_##_name, (_event) | (8 << 5))
 
 #define CMN_EVENT_XP_DAT(_name, _event)				\
 	_CMN_EVENT_XP_PORT(dat_##_name, (_event) | (3 << 5)),	\
@@ -889,14 +1098,14 @@ static struct attribute *arm_cmn_event_attrs[] = {
 	CMN_EVENT_DVM(NOT_CMN600, txsnp_stall,		0x0a),
 	CMN_EVENT_DVM(NOT_CMN600, trkfull,		0x0b),
 	CMN_EVENT_DVM_OCC(NOT_CMN600, trk_occupancy,	0x0c),
-	CMN_EVENT_DVM_OCC(CMN700, trk_occupancy_cxha,	0x0d),
-	CMN_EVENT_DVM_OCC(CMN700, trk_occupancy_pdn,	0x0e),
-	CMN_EVENT_DVM(CMN700, trk_alloc,		0x0f),
-	CMN_EVENT_DVM(CMN700, trk_cxha_alloc,		0x10),
-	CMN_EVENT_DVM(CMN700, trk_pdn_alloc,		0x11),
-	CMN_EVENT_DVM(CMN700, txsnp_stall_limit,	0x12),
-	CMN_EVENT_DVM(CMN700, rxsnp_stall_starv,	0x13),
-	CMN_EVENT_DVM(CMN700, txsnp_sync_stall_op,	0x14),
+	CMN_EVENT_DVM_OCC(CMN_700ON, trk_occupancy_cxha, 0x0d),
+	CMN_EVENT_DVM_OCC(CMN_700ON, trk_occupancy_pdn,	0x0e),
+	CMN_EVENT_DVM(CMN_700ON, trk_alloc,		0x0f),
+	CMN_EVENT_DVM(CMN_700ON, trk_cxha_alloc,	0x10),
+	CMN_EVENT_DVM(CMN_700ON, trk_pdn_alloc,		0x11),
+	CMN_EVENT_DVM(CMN_700ON, txsnp_stall_limit,	0x12),
+	CMN_EVENT_DVM(CMN_700ON, rxsnp_stall_starv,	0x13),
+	CMN_EVENT_DVM(CMN_700ON, txsnp_sync_stall_op,	0x14),
 
 	CMN_EVENT_HNF(CMN_ANY, cache_miss,		0x01),
 	CMN_EVENT_HNF(CMN_ANY, slc_sf_cache_access,	0x02),
@@ -1129,42 +1338,43 @@ static struct attribute *arm_cmn_event_attrs[] = {
 	CMN_EVENT_CCRA(wdb_alloc,			0x59),
 	CMN_EVENT_CCRA(ssb_alloc,			0x5a),
 
-	CMN_EVENT_CCHA(rddatbyp,			0x61),
-	CMN_EVENT_CCHA(chirsp_up_stall,			0x62),
-	CMN_EVENT_CCHA(chidat_up_stall,			0x63),
-	CMN_EVENT_CCHA(snppcrd_link0_stall,		0x64),
-	CMN_EVENT_CCHA(snppcrd_link1_stall,		0x65),
-	CMN_EVENT_CCHA(snppcrd_link2_stall,		0x66),
-	CMN_EVENT_CCHA(reqtrk_occ,			0x67),
-	CMN_EVENT_CCHA(rdb_occ,				0x68),
-	CMN_EVENT_CCHA(rdbyp_occ,			0x69),
-	CMN_EVENT_CCHA(wdb_occ,				0x6a),
-	CMN_EVENT_CCHA(snptrk_occ,			0x6b),
-	CMN_EVENT_CCHA(sdb_occ,				0x6c),
-	CMN_EVENT_CCHA(snphaz_occ,			0x6d),
-	CMN_EVENT_CCHA(reqtrk_alloc,			0x6e),
-	CMN_EVENT_CCHA(rdb_alloc,			0x6f),
-	CMN_EVENT_CCHA(rdbyp_alloc,			0x70),
-	CMN_EVENT_CCHA(wdb_alloc,			0x71),
-	CMN_EVENT_CCHA(snptrk_alloc,			0x72),
-	CMN_EVENT_CCHA(sdb_alloc,			0x73),
-	CMN_EVENT_CCHA(snphaz_alloc,			0x74),
-	CMN_EVENT_CCHA(pb_rhu_req_occ,			0x75),
-	CMN_EVENT_CCHA(pb_rhu_req_alloc,		0x76),
-	CMN_EVENT_CCHA(pb_rhu_pcie_req_occ,		0x77),
-	CMN_EVENT_CCHA(pb_rhu_pcie_req_alloc,		0x78),
-	CMN_EVENT_CCHA(pb_pcie_wr_req_occ,		0x79),
-	CMN_EVENT_CCHA(pb_pcie_wr_req_alloc,		0x7a),
-	CMN_EVENT_CCHA(pb_pcie_reg_req_occ,		0x7b),
-	CMN_EVENT_CCHA(pb_pcie_reg_req_alloc,		0x7c),
-	CMN_EVENT_CCHA(pb_pcie_rsvd_req_occ,		0x7d),
-	CMN_EVENT_CCHA(pb_pcie_rsvd_req_alloc,		0x7e),
-	CMN_EVENT_CCHA(pb_rhu_dat_occ,			0x7f),
-	CMN_EVENT_CCHA(pb_rhu_dat_alloc,		0x80),
-	CMN_EVENT_CCHA(pb_rhu_pcie_dat_occ,		0x81),
-	CMN_EVENT_CCHA(pb_rhu_pcie_dat_alloc,		0x82),
-	CMN_EVENT_CCHA(pb_pcie_wr_dat_occ,		0x83),
-	CMN_EVENT_CCHA(pb_pcie_wr_dat_alloc,		0x84),
+	CMN_EVENT_CCHA(CMN_ANY, rddatbyp,		0x61),
+	CMN_EVENT_CCHA(CMN_ANY, chirsp_up_stall,	0x62),
+	CMN_EVENT_CCHA(CMN_ANY, chidat_up_stall,	0x63),
+	CMN_EVENT_CCHA(CMN_ANY, snppcrd_link0_stall,	0x64),
+	CMN_EVENT_CCHA(CMN_ANY, snppcrd_link1_stall,	0x65),
+	CMN_EVENT_CCHA(CMN_ANY, snppcrd_link2_stall,	0x66),
+	CMN_EVENT_CCHA(CMN_ANY, reqtrk_occ,		0x67),
+	CMN_EVENT_CCHA(CMN_ANY, rdb_occ,		0x68),
+	CMN_EVENT_CCHA(CMN_ANY, rdbyp_occ,		0x69),
+	CMN_EVENT_CCHA(CMN_ANY, wdb_occ,		0x6a),
+	CMN_EVENT_CCHA(CMN_ANY, snptrk_occ,		0x6b),
+	CMN_EVENT_CCHA(CMN_ANY, sdb_occ,		0x6c),
+	CMN_EVENT_CCHA(CMN_ANY, snphaz_occ,		0x6d),
+	CMN_EVENT_CCHA(CMN_ANY, reqtrk_alloc,		0x6e),
+	CMN_EVENT_CCHA(CMN_ANY, rdb_alloc,		0x6f),
+	CMN_EVENT_CCHA(CMN_ANY, rdbyp_alloc,		0x70),
+	CMN_EVENT_CCHA(CMN_ANY, wdb_alloc,		0x71),
+	CMN_EVENT_CCHA(CMN_ANY, snptrk_alloc,		0x72),
+	CMN_EVENT_CCHA(CMN_ANY, db_alloc,		0x73),
+	CMN_EVENT_CCHA(CMN_ANY, snphaz_alloc,		0x74),
+	CMN_EVENT_CCHA(CMN_ANY, pb_rhu_req_occ,		0x75),
+	CMN_EVENT_CCHA(CMN_ANY, pb_rhu_req_alloc,	0x76),
+	CMN_EVENT_CCHA(CMN_ANY, pb_rhu_pcie_req_occ,	0x77),
+	CMN_EVENT_CCHA(CMN_ANY, pb_rhu_pcie_req_alloc,	0x78),
+	CMN_EVENT_CCHA(CMN_ANY, pb_pcie_wr_req_occ,	0x79),
+	CMN_EVENT_CCHA(CMN_ANY, pb_pcie_wr_req_alloc,	0x7a),
+	CMN_EVENT_CCHA(CMN_ANY, pb_pcie_reg_req_occ,	0x7b),
+	CMN_EVENT_CCHA(CMN_ANY, pb_pcie_reg_req_alloc,	0x7c),
+	CMN_EVENT_CCHA(CMN_ANY, pb_pcie_rsvd_req_occ,	0x7d),
+	CMN_EVENT_CCHA(CMN_ANY, pb_pcie_rsvd_req_alloc,	0x7e),
+	CMN_EVENT_CCHA(CMN_ANY, pb_rhu_dat_occ,		0x7f),
+	CMN_EVENT_CCHA(CMN_ANY, pb_rhu_dat_alloc,	0x80),
+	CMN_EVENT_CCHA(CMN_ANY, pb_rhu_pcie_dat_occ,	0x81),
+	CMN_EVENT_CCHA(CMN_ANY, pb_rhu_pcie_dat_alloc,	0x82),
+	CMN_EVENT_CCHA(CMN_ANY, pb_pcie_wr_dat_occ,	0x83),
+	CMN_EVENT_CCHA(CMN_ANY, pb_pcie_wr_dat_alloc,	0x84),
+	CMN_EVENT_CCHA(CMNS3, chirsp1_up_stall,		0x85),
 
 	CMN_EVENT_CCLA(rx_cxs,				0x21),
 	CMN_EVENT_CCLA(tx_cxs,				0x22),
@@ -1178,65 +1388,72 @@ static struct attribute *arm_cmn_event_attrs[] = {
 	CMN_EVENT_CCLA(pfwd_sndr_stalls_static_crd,	0x2a),
 	CMN_EVENT_CCLA(pfwd_sndr_stalls_dynmaic_crd,	0x2b),
 
-	CMN_EVENT_HNS_HBT(cache_miss,			0x01),
-	CMN_EVENT_HNS_HBT(slc_sf_cache_access,		0x02),
-	CMN_EVENT_HNS_HBT(cache_fill,			0x03),
-	CMN_EVENT_HNS_HBT(pocq_retry,			0x04),
-	CMN_EVENT_HNS_HBT(pocq_reqs_recvd,		0x05),
-	CMN_EVENT_HNS_HBT(sf_hit,			0x06),
-	CMN_EVENT_HNS_HBT(sf_evictions,			0x07),
-	CMN_EVENT_HNS(dir_snoops_sent,			0x08),
-	CMN_EVENT_HNS(brd_snoops_sent,			0x09),
-	CMN_EVENT_HNS_HBT(slc_eviction,			0x0a),
-	CMN_EVENT_HNS_HBT(slc_fill_invalid_way,		0x0b),
-	CMN_EVENT_HNS(mc_retries_local,			0x0c),
-	CMN_EVENT_HNS_SNH(mc_reqs_local,		0x0d),
+	CMN_EVENT_HNS_HBT_ENHBT(cache_miss,		0x01),
+	CMN_EVENT_HNS_HBT_ENHBT(slc_sf_cache_access,	0x02),
+	CMN_EVENT_HNS_HBT_ENHBT(cache_fill,		0x03),
+	CMN_EVENT_HNS_HBT_OCC(pocq_retry,		0x04),
+	CMN_EVENT_HNS_HBT_OCC(pocq_reqs_recvd,		0x05),
+	CMN_EVENT_HNS_HBT_ENHBT(sf_hit,			0x06),
+	CMN_EVENT_HNS_HBT_EVICT(sf_evictions,		0x07),
+	CMN_EVENT_HNS_VC(dir_snoops_sent,		0x08),
+	CMN_EVENT_HNS_VC(brd_snoops_sent,		0x09),
+	CMN_EVENT_HNS_HBT_EVICT(slc_eviction,		0x0a),
+	CMN_EVENT_HNS_HBT_ENHBT(slc_fill_invalid_way,	0x0b),
+	CMN_EVENT_HNS_R2SNH(mc_retries_local,		0x0c),
+	CMN_EVENT_HNS_SNH(CMN_ANY, mc_reqs_local,	0x0d),
 	CMN_EVENT_HNS(qos_hh_retry,			0x0e),
-	CMN_EVENT_HNS_OCC(qos_pocq_occupancy,		0x0f),
-	CMN_EVENT_HNS(pocq_addrhaz,			0x10),
-	CMN_EVENT_HNS(pocq_atomic_addrhaz,		0x11),
-	CMN_EVENT_HNS(ld_st_swp_adq_full,		0x12),
-	CMN_EVENT_HNS(cmp_adq_full,			0x13),
+	CMN_EVENT_HNS_OCC(CMN_ANY, qos_pocq_occupancy,	0x0f),
+	CMN_EVENT_HNS_HBT_ENHBT(pocq_addrhaz,		0x10),
+	CMN_EVENT_HNS_HBT_ENHBT(pocq_atomic_addrhaz,	0x11),
+	CMN_EVENT_HNSR0(ld_st_swp_adq_full,		0x12),
+	CMN_EVENT_HNSR0(cmp_adq_full,			0x13),
 	CMN_EVENT_HNS(txdat_stall,			0x14),
 	CMN_EVENT_HNS(txrsp_stall,			0x15),
-	CMN_EVENT_HNS(seq_full,				0x16),
+	CMN_EVENT_HNSR0(seq_full,			0x16),
 	CMN_EVENT_HNS(seq_hit,				0x17),
-	CMN_EVENT_HNS(snp_sent,				0x18),
-	CMN_EVENT_HNS(sfbi_dir_snp_sent,		0x19),
-	CMN_EVENT_HNS(sfbi_brd_snp_sent,		0x1a),
+	CMN_EVENT_HNS_VC(snp_sent,			0x18),
+	CMN_EVENT_HNS_VC(sfbi_dir_snp_sent,		0x19),
+	CMN_EVENT_HNS_VC(sfbi_brd_snp_sent,		0x1a),
 	CMN_EVENT_HNS(intv_dirty,			0x1c),
-	CMN_EVENT_HNS(stash_snp_sent,			0x1d),
-	CMN_EVENT_HNS(stash_data_pull,			0x1e),
-	CMN_EVENT_HNS(snp_fwded,			0x1f),
-	CMN_EVENT_HNS(atomic_fwd,			0x20),
+	CMN_EVENT_HNSR0(stash_snp_sent,			0x1d),
+	CMN_EVENT_HNSR0(stash_data_pull,		0x1e),
+	CMN_EVENT_HNS_VC(snp_fwded,			0x1f),
+	CMN_EVENT_HNSR0(atomic_fwd,			0x20),
 	CMN_EVENT_HNS(mpam_hardlim,			0x21),
 	CMN_EVENT_HNS(mpam_softlim,			0x22),
-	CMN_EVENT_HNS(snp_sent_cluster,			0x23),
-	CMN_EVENT_HNS(sf_imprecise_evict,		0x24),
+	CMN_EVENT_HNS_VC(snp_sent_cluster,		0x23),
+	CMN_EVENT_HNS_R2HBT(sf_imprecise_evict,		0x24),
 	CMN_EVENT_HNS(sf_evict_shared_line,		0x25),
 	CMN_EVENT_HNS_CLS(pocq_class_occup,		0x26),
 	CMN_EVENT_HNS_CLS(pocq_class_retry,		0x27),
 	CMN_EVENT_HNS_CLS(class_mc_reqs_local,		0x28),
-	CMN_EVENT_HNS_CLS(class_cgnt_cmin,		0x29),
-	CMN_EVENT_HNS_SNT(sn_throttle,			0x2a),
-	CMN_EVENT_HNS_SNT(sn_throttle_min,		0x2b),
+	CMN_EVENT_HNSR0_CLS(class_cgnt_cmin,		0x29),
+	CMN_EVENT_HNS_SNT(CMN_ANY, sn_throttle,		0x2a),
+	CMN_EVENT_HNS_SNT(CMN_ANY, sn_throttle_min,	0x2b),
 	CMN_EVENT_HNS(sf_precise_to_imprecise,		0x2c),
 	CMN_EVENT_HNS(snp_intv_cln,			0x2d),
 	CMN_EVENT_HNS(nc_excl,				0x2e),
-	CMN_EVENT_HNS(excl_mon_ovfl,			0x2f),
+	CMN_EVENT_HNSR0(excl_mon_ovfl,			0x2f),
 	CMN_EVENT_HNS(snp_req_recvd,			0x30),
 	CMN_EVENT_HNS(snp_req_byp_pocq,			0x31),
 	CMN_EVENT_HNS(dir_ccgha_snp_sent,		0x32),
 	CMN_EVENT_HNS(brd_ccgha_snp_sent,		0x33),
-	CMN_EVENT_HNS(ccgha_snp_stall,			0x34),
+	CMN_EVENT_HNSR0(ccgha_snp_stall,		0x34),
 	CMN_EVENT_HNS(lbt_req_hardlim,			0x35),
 	CMN_EVENT_HNS(hbt_req_hardlim,			0x36),
 	CMN_EVENT_HNS(sf_reupdate,			0x37),
-	CMN_EVENT_HNS(excl_sf_imprecise,		0x38),
+	CMN_EVENT_HNS_R2HBT(excl_sf_imprecise,		0x38),
 	CMN_EVENT_HNS(snp_pocq_addrhaz,			0x39),
-	CMN_EVENT_HNS(mc_retries_remote,		0x3a),
-	CMN_EVENT_HNS_SNH(mc_reqs_remote,		0x3b),
+	CMN_EVENT_HNS_R2SNH(mc_retries_remote,		0x3a),
+	CMN_EVENT_HNS_SNH(CMN_ANY, mc_reqs_remote,	0x3b),
 	CMN_EVENT_HNS_CLS(class_mc_reqs_remote,		0x3c),
+	CMN_EVENT_HNS_ENHBT(readonce_hazard_detected,	0x3d),
+	CMN_EVENT_HNS_ENHBT(readonce_fwd_data_completed, 0x3e),
+	CMN_EVENT_HNS_SNT(CMNS3R2, cbusy00,		0x40),
+	CMN_EVENT_HNS_SNT(CMNS3R2, cbusy01, 		0x41),
+	CMN_EVENT_HNS_SNT(CMNS3R2, cbusy10,		0x42),
+	CMN_EVENT_HNS_SNT(CMNS3R2, cbusy11,		0x43),
+	CMN_EVENT_HNS_ENHBT(ro_rnsd_new_alloc_hint,	0x44),
 
 	NULL
 };
@@ -1251,15 +1468,11 @@ static ssize_t arm_cmn_format_show(struct device *dev,
 				   struct device_attribute *attr, char *buf)
 {
 	struct arm_cmn_format_attr *fmt = container_of(attr, typeof(*fmt), attr);
-	int lo = __ffs(fmt->field), hi = __fls(fmt->field);
-
-	if (lo == hi)
-		return sysfs_emit(buf, "config:%d\n", lo);
 
 	if (!fmt->config)
-		return sysfs_emit(buf, "config:%d-%d\n", lo, hi);
+		return sysfs_emit(buf, "config:%*pbl\n", 64, &fmt->field);
 
-	return sysfs_emit(buf, "config%d:%d-%d\n", fmt->config, lo, hi);
+	return sysfs_emit(buf, "config%d:%*pbl\n", fmt->config, 64, &fmt->field);
 }
 
 #define _CMN_FORMAT_ATTR(_name, _cfg, _fld)				\
@@ -1273,9 +1486,10 @@ static ssize_t arm_cmn_format_show(struct device *dev,
 static struct attribute *arm_cmn_format_attrs[] = {
 	CMN_FORMAT_ATTR(type, CMN_CONFIG_TYPE),
 	CMN_FORMAT_ATTR(eventid, CMN_CONFIG_EVENTID),
-	CMN_FORMAT_ATTR(occupid, CMN_CONFIG_OCCUPID),
+	CMN_FORMAT_ATTR(filter, CMN_CONFIG_FILTER),
 	CMN_FORMAT_ATTR(bynodeid, CMN_CONFIG_BYNODEID),
 	CMN_FORMAT_ATTR(nodeid, CMN_CONFIG_NODEID),
+	CMN_FORMAT_ATTR(filter2, CMN_CONFIG_FILTER2),
 
 	CMN_FORMAT_ATTR(wp_dev_sel, CMN_CONFIG_WP_DEV_SEL),
 	CMN_FORMAT_ATTR(wp_chn_sel, CMN_CONFIG_WP_CHN_SEL),
@@ -1285,6 +1499,9 @@ static struct attribute *arm_cmn_format_attrs[] = {
 
 	_CMN_FORMAT_ATTR(wp_val, 1, CMN_CONFIG1_WP_VAL),
 	_CMN_FORMAT_ATTR(wp_mask, 2, CMN_CONFIG2_WP_MASK),
+
+	/* Old name for UAPI compatibility */
+	CMN_FORMAT_ATTR(occupid, CMN_CONFIG_FILTER),
 
 	NULL
 };
@@ -1299,7 +1516,7 @@ static ssize_t arm_cmn_cpumask_show(struct device *dev,
 {
 	struct arm_cmn *cmn = to_cmn(dev_get_drvdata(dev));
 
-	return cpumap_print_to_pagebuf(true, buf, cpumask_of(cmn->cpu));
+	return sysfs_emit(buf, "%*pbl\n", cpumask_pr_args(cpumask_of(cmn->cpu)));
 }
 
 static struct device_attribute arm_cmn_cpumask_attr =
@@ -1333,29 +1550,64 @@ static const struct attribute_group *arm_cmn_attr_groups[] = {
 	NULL
 };
 
-static int arm_cmn_wp_idx(struct perf_event *event)
+static int arm_cmn_find_free_wp_idx(struct arm_cmn_dtm *dtm,
+				    struct perf_event *event)
 {
-	return CMN_EVENT_EVENTID(event) + CMN_EVENT_WP_GRP(event);
+	int wp_idx = CMN_EVENT_EVENTID(event);
+
+	if (dtm->wp_event[wp_idx] >= 0)
+		if (dtm->wp_event[++wp_idx] >= 0)
+			return -ENOSPC;
+
+	return wp_idx;
 }
 
-static u32 arm_cmn_wp_config(struct perf_event *event)
+static int arm_cmn_get_assigned_wp_idx(struct perf_event *event,
+				       struct arm_cmn_hw_event *hw,
+				       unsigned int pos)
 {
+	return CMN_EVENT_EVENTID(event) + arm_cmn_get_wp_idx(hw, pos);
+}
+
+static void arm_cmn_claim_wp_idx(struct arm_cmn_dtm *dtm,
+				 struct perf_event *event,
+				 unsigned int dtc, int wp_idx,
+				 unsigned int pos)
+{
+	struct arm_cmn_hw_event *hw = to_cmn_hw(event);
+
+	dtm->wp_event[wp_idx] = hw->dtc_idx[dtc];
+	arm_cmn_set_wp_idx(hw, pos, wp_idx - CMN_EVENT_EVENTID(event));
+}
+
+static u32 arm_cmn_wp_config(struct perf_event *event, int wp_idx)
+{
+	struct arm_cmn *cmn = to_cmn(event->pmu);
 	u32 config;
 	u32 dev = CMN_EVENT_WP_DEV_SEL(event);
 	u32 chn = CMN_EVENT_WP_CHN_SEL(event);
 	u32 grp = CMN_EVENT_WP_GRP(event);
 	u32 exc = CMN_EVENT_WP_EXCLUSIVE(event);
 	u32 combine = CMN_EVENT_WP_COMBINE(event);
-	bool is_cmn600 = to_cmn(event->pmu)->part == PART_CMN600;
+	bool is_cmn600 = cmn->part == PART_CMN600;
+
+	/* CMN-600 supports only primary and secondary matching groups */
+	if (is_cmn600)
+		grp &= 1;
 
 	config = FIELD_PREP(CMN_DTM_WPn_CONFIG_WP_DEV_SEL, dev) |
 		 FIELD_PREP(CMN_DTM_WPn_CONFIG_WP_CHN_SEL, chn) |
-		 FIELD_PREP(CMN_DTM_WPn_CONFIG_WP_GRP, grp) |
-		 FIELD_PREP(CMN_DTM_WPn_CONFIG_WP_DEV_SEL2, dev >> 1);
+		 FIELD_PREP(CMN_DTM_WPn_CONFIG_WP_GRP, grp);
+
+	if (!cmn->multi_dtm)
+		config |= FIELD_PREP(CMN_DTM_WPn_CONFIG_WP_DEV_SEL2, dev >> 1);
+
 	if (exc)
 		config |= is_cmn600 ? CMN600_WPn_CONFIG_WP_EXCLUSIVE :
 				      CMN_DTM_WPn_CONFIG_WP_EXCLUSIVE;
-	if (combine && !grp)
+
+	/*  wp_combine is available only on WP0 and WP2 */
+	if (combine && !(wp_idx & 0x1))
 		config |= is_cmn600 ? CMN600_WPn_CONFIG_WP_COMBINE :
 				      CMN_DTM_WPn_CONFIG_WP_COMBINE;
 	return config;
@@ -1364,7 +1616,7 @@ static u32 arm_cmn_wp_config(struct perf_event *event)
 static void arm_cmn_set_state(struct arm_cmn *cmn, u32 state)
 {
 	if (!cmn->state)
-		writel_relaxed(0, cmn->dtc[0].base + CMN_DT_PMCR);
+		writel_relaxed(0, CMN_DT_PMCR(&cmn->dtc[0]));
 	cmn->state |= state;
 }
 
@@ -1373,7 +1625,7 @@ static void arm_cmn_clear_state(struct arm_cmn *cmn, u32 state)
 	cmn->state &= ~state;
 	if (!cmn->state)
 		writel_relaxed(CMN_DT_PMCR_PMU_EN | CMN_DT_PMCR_OVFL_INTR_EN,
-			       cmn->dtc[0].base + CMN_DT_PMCR);
+			       CMN_DT_PMCR(&cmn->dtc[0]));
 }
 
 static void arm_cmn_pmu_enable(struct pmu *pmu)
@@ -1400,7 +1652,7 @@ static u64 arm_cmn_read_dtm(struct arm_cmn *cmn, struct arm_cmn_hw_event *hw,
 			dtm = &cmn->dtms[dn->dtm] + hw->dtm_offset;
 			reg = readq_relaxed(dtm->base + offset);
 		}
-		dtm_idx = arm_cmn_get_index(hw->dtm_idx, i);
+		dtm_idx = arm_cmn_get_dtm_idx(hw, i);
 		count += (u16)(reg >> (dtm_idx * 16));
 	}
 	return count;
@@ -1408,18 +1660,19 @@ static u64 arm_cmn_read_dtm(struct arm_cmn *cmn, struct arm_cmn_hw_event *hw,
 
 static u64 arm_cmn_read_cc(struct arm_cmn_dtc *dtc)
 {
-	u64 val = readq_relaxed(dtc->base + CMN_DT_PMCCNTR);
+	void __iomem *pmccntr = CMN_DT_PMCCNTR(dtc);
+	u64 val = readq_relaxed(pmccntr);
 
-	writeq_relaxed(CMN_CC_INIT, dtc->base + CMN_DT_PMCCNTR);
+	writeq_relaxed(CMN_CC_INIT, pmccntr);
 	return (val - CMN_CC_INIT) & ((CMN_CC_INIT << 1) - 1);
 }
 
 static u32 arm_cmn_read_counter(struct arm_cmn_dtc *dtc, int idx)
 {
-	u32 val, pmevcnt = CMN_DT_PMEVCNT(idx);
+	void __iomem *pmevcnt = CMN_DT_PMEVCNT(dtc, idx);
+	u32 val = readl_relaxed(pmevcnt);
 
-	val = readl_relaxed(dtc->base + pmevcnt);
-	writel_relaxed(CMN_COUNTER_INIT, dtc->base + pmevcnt);
+	writel_relaxed(CMN_COUNTER_INIT, pmevcnt);
 	return val - CMN_COUNTER_INIT;
 }
 
@@ -1427,12 +1680,11 @@ static void arm_cmn_init_counter(struct perf_event *event)
 {
 	struct arm_cmn *cmn = to_cmn(event->pmu);
 	struct arm_cmn_hw_event *hw = to_cmn_hw(event);
-	unsigned int i, pmevcnt = CMN_DT_PMEVCNT(hw->dtc_idx);
 	u64 count;
 
-	for (i = 0; hw->dtcs_used & (1U << i); i++) {
-		writel_relaxed(CMN_COUNTER_INIT, cmn->dtc[i].base + pmevcnt);
-		cmn->dtc[i].counters[hw->dtc_idx] = event;
+	for_each_hw_dtc_idx(hw, i, idx) {
+		writel_relaxed(CMN_COUNTER_INIT, CMN_DT_PMEVCNT(&cmn->dtc[i], idx));
+		cmn->dtc[i].counters[idx] = event;
 	}
 
 	count = arm_cmn_read_dtm(cmn, hw, false);
@@ -1445,11 +1697,9 @@ static void arm_cmn_event_read(struct perf_event *event)
 	struct arm_cmn_hw_event *hw = to_cmn_hw(event);
 	u64 delta, new, prev;
 	unsigned long flags;
-	unsigned int i;
 
-	if (hw->dtc_idx == CMN_DT_NUM_COUNTERS) {
-		i = __ffs(hw->dtcs_used);
-		delta = arm_cmn_read_cc(cmn->dtc + i);
+	if (CMN_EVENT_TYPE(event) == CMN_TYPE_DTC) {
+		delta = arm_cmn_read_cc(cmn->dtc + hw->cc_idx);
 		local64_add(delta, &event->count);
 		return;
 	}
@@ -1459,8 +1709,8 @@ static void arm_cmn_event_read(struct perf_event *event)
 	delta = new - prev;
 
 	local_irq_save(flags);
-	for (i = 0; hw->dtcs_used & (1U << i); i++) {
-		new = arm_cmn_read_counter(cmn->dtc + i, hw->dtc_idx);
+	for_each_hw_dtc_idx(hw, i, idx) {
+		new = arm_cmn_read_counter(cmn->dtc + i, idx);
 		delta += new << 16;
 	}
 	local_irq_restore(flags);
@@ -1468,30 +1718,23 @@ static void arm_cmn_event_read(struct perf_event *event)
 }
 
 static int arm_cmn_set_event_sel_hi(struct arm_cmn_node *dn,
-				    enum cmn_filter_select fsel, u8 occupid)
+				    enum cmn_filter_select fsel, u8 val)
 {
-	u64 reg;
+	if (!dn->filter[fsel].count) {
+		const u64 *filter = arm_cmn_filters[dn->filter[SEL_NONE].val];
+		u64 reg = 0;
 
-	if (fsel == SEL_NONE)
-		return 0;
+		dn->filter[fsel].val = val;
+		for (int i = SEL_OCCUP1_ID; i < SEL_MAX; i++) {
+			if (filter[i])
+				reg |= field_prep(filter[i], dn->filter[i].val);
+		}
 
-	if (!dn->occupid[fsel].count) {
-		dn->occupid[fsel].val = occupid;
-		reg = FIELD_PREP(CMN__PMU_CBUSY_SNTHROTTLE_SEL,
-				 dn->occupid[SEL_CBUSY_SNTHROTTLE_SEL].val) |
-		      FIELD_PREP(CMN__PMU_SN_HOME_SEL,
-				 dn->occupid[SEL_SN_HOME_SEL].val) |
-		      FIELD_PREP(CMN__PMU_HBT_LBT_SEL,
-				 dn->occupid[SEL_HBT_LBT_SEL].val) |
-		      FIELD_PREP(CMN__PMU_CLASS_OCCUP_ID,
-				 dn->occupid[SEL_CLASS_OCCUP_ID].val) |
-		      FIELD_PREP(CMN__PMU_OCCUP1_ID,
-				 dn->occupid[SEL_OCCUP1ID].val);
 		writel_relaxed(reg >> 32, dn->pmu_base + CMN_PMU_EVENT_SEL + 4);
-	} else if (dn->occupid[fsel].val != occupid) {
+	} else if (dn->filter[fsel].val != val) {
 		return -EBUSY;
 	}
-	dn->occupid[fsel].count++;
+	dn->filter[fsel].count++;
 	return 0;
 }
 
@@ -1516,22 +1759,25 @@ static void arm_cmn_event_start(struct perf_event *event, int flags)
 	int i;
 
 	if (type == CMN_TYPE_DTC) {
-		i = __ffs(hw->dtcs_used);
-		writeq_relaxed(CMN_CC_INIT, cmn->dtc[i].base + CMN_DT_PMCCNTR);
-		cmn->dtc[i].cc_active = true;
+		struct arm_cmn_dtc *dtc = cmn->dtc + hw->cc_idx;
+
+		writel_relaxed(CMN_DT_DTC_CTL_DT_EN | CMN_DT_DTC_CTL_CG_DISABLE,
+			       dtc->base + CMN_DT_DTC_CTL);
+		writeq_relaxed(CMN_CC_INIT, CMN_DT_PMCCNTR(dtc));
+		dtc->cc_active = true;
 	} else if (type == CMN_TYPE_WP) {
-		int wp_idx = arm_cmn_wp_idx(event);
 		u64 val = CMN_EVENT_WP_VAL(event);
 		u64 mask = CMN_EVENT_WP_MASK(event);
 
 		for_each_hw_dn(hw, dn, i) {
 			void __iomem *base = dn->pmu_base + CMN_DTM_OFFSET(hw->dtm_offset);
+			int wp_idx = arm_cmn_get_assigned_wp_idx(event, hw, i);
 
 			writeq_relaxed(val, base + CMN_DTM_WPn_VAL(wp_idx));
 			writeq_relaxed(mask, base + CMN_DTM_WPn_MASK(wp_idx));
 		}
 	} else for_each_hw_dn(hw, dn, i) {
-		int dtm_idx = arm_cmn_get_index(hw->dtm_idx, i);
+		int dtm_idx = arm_cmn_get_dtm_idx(hw, i);
 
 		arm_cmn_set_event_sel_lo(dn, dtm_idx, CMN_EVENT_EVENTID(event),
 					 hw->wide_sel);
@@ -1547,19 +1793,20 @@ static void arm_cmn_event_stop(struct perf_event *event, int flags)
 	int i;
 
 	if (type == CMN_TYPE_DTC) {
-		i = __ffs(hw->dtcs_used);
-		cmn->dtc[i].cc_active = false;
-	} else if (type == CMN_TYPE_WP) {
-		int wp_idx = arm_cmn_wp_idx(event);
+		struct arm_cmn_dtc *dtc = cmn->dtc + hw->cc_idx;
 
+		dtc->cc_active = false;
+		writel_relaxed(CMN_DT_DTC_CTL_DT_EN, dtc->base + CMN_DT_DTC_CTL);
+	} else if (type == CMN_TYPE_WP) {
 		for_each_hw_dn(hw, dn, i) {
 			void __iomem *base = dn->pmu_base + CMN_DTM_OFFSET(hw->dtm_offset);
+			int wp_idx = arm_cmn_get_assigned_wp_idx(event, hw, i);
 
 			writeq_relaxed(0, base + CMN_DTM_WPn_MASK(wp_idx));
 			writeq_relaxed(~0ULL, base + CMN_DTM_WPn_VAL(wp_idx));
 		}
 	} else for_each_hw_dn(hw, dn, i) {
-		int dtm_idx = arm_cmn_get_index(hw->dtm_idx, i);
+		int dtm_idx = arm_cmn_get_dtm_idx(hw, i);
 
 		arm_cmn_set_event_sel_lo(dn, dtm_idx, 0, hw->wide_sel);
 	}
@@ -1569,11 +1816,24 @@ static void arm_cmn_event_stop(struct perf_event *event, int flags)
 
 struct arm_cmn_val {
 	u8 dtm_count[CMN_MAX_DTMS];
-	u8 occupid[CMN_MAX_DTMS][SEL_MAX];
+	u8 filter[CMN_MAX_DTMS][SEL_MAX];
 	u8 wp[CMN_MAX_DTMS][4];
-	int dtc_count;
+	u8 wp_combine[CMN_MAX_DTMS][2];
+	int dtc_count[CMN_MAX_DTCS];
 	bool cycles;
 };
+
+static int arm_cmn_val_find_free_wp_config(struct perf_event *event,
+					  struct arm_cmn_val *val, int dtm)
+{
+	int wp_idx = CMN_EVENT_EVENTID(event);
+
+	if (val->wp[dtm][wp_idx])
+		if (val->wp[dtm][++wp_idx])
+			return -ENOSPC;
+
+	return wp_idx;
+}
 
 static void arm_cmn_val_add_event(struct arm_cmn *cmn, struct arm_cmn_val *val,
 				  struct perf_event *event)
@@ -1592,21 +1852,27 @@ static void arm_cmn_val_add_event(struct arm_cmn *cmn, struct arm_cmn_val *val,
 		return;
 	}
 
-	val->dtc_count++;
+	for_each_hw_dtc_idx(hw, dtc, idx)
+		val->dtc_count[dtc]++;
 
 	for_each_hw_dn(hw, dn, i) {
 		int wp_idx, dtm = dn->dtm, sel = hw->filter_sel;
 
 		val->dtm_count[dtm]++;
 
-		if (sel > SEL_NONE)
-			val->occupid[dtm][sel] = CMN_EVENT_OCCUPID(event) + 1;
+		if (sel == SEL_EVICT_STATE_SEL) {
+			val->filter[dtm][sel] = CMN_EVENT_FILTER2(event) + 1;
+			sel = SEL_HBT_LBT_SEL;
+		}
+		if (sel)
+			val->filter[dtm][sel] = CMN_EVENT_FILTER(event) + 1;
 
 		if (type != CMN_TYPE_WP)
 			continue;
 
-		wp_idx = arm_cmn_wp_idx(event);
-		val->wp[dtm][wp_idx] = CMN_EVENT_WP_COMBINE(event) + 1;
+		wp_idx = arm_cmn_val_find_free_wp_config(event, val, dtm);
+		val->wp[dtm][wp_idx] = 1;
+		val->wp_combine[dtm][wp_idx >> 1] += !!CMN_EVENT_WP_COMBINE(event);
 	}
 }
 
@@ -1625,11 +1891,12 @@ static int arm_cmn_validate_group(struct arm_cmn *cmn, struct perf_event *event)
 	if (event->pmu != leader->pmu && !is_software_event(leader))
 		return -EINVAL;
 
-	val = kzalloc(sizeof(*val), GFP_KERNEL);
+	val = kzalloc_obj(*val);
 	if (!val)
 		return -ENOMEM;
 
 	arm_cmn_val_add_event(cmn, val, leader);
+
 	for_each_sibling_event(sibling, leader)
 		arm_cmn_val_add_event(cmn, val, sibling);
 
@@ -1639,28 +1906,36 @@ static int arm_cmn_validate_group(struct arm_cmn *cmn, struct perf_event *event)
 		goto done;
 	}
 
-	if (val->dtc_count == CMN_DT_NUM_COUNTERS)
-		goto done;
+	for_each_hw_dtc_idx(hw, dtc, idx)
+		if (val->dtc_count[dtc] == CMN_DT_NUM_COUNTERS)
+			goto done;
 
 	for_each_hw_dn(hw, dn, i) {
-		int wp_idx, wp_cmb, dtm = dn->dtm, sel = hw->filter_sel;
+		int wp_idx, dtm = dn->dtm, sel = hw->filter_sel;
 
 		if (val->dtm_count[dtm] == CMN_DTM_NUM_COUNTERS)
 			goto done;
 
-		if (sel > SEL_NONE && val->occupid[dtm][sel] &&
-		    val->occupid[dtm][sel] != CMN_EVENT_OCCUPID(event) + 1)
+		if (sel == SEL_EVICT_STATE_SEL) {
+			if (val->filter[dtm][sel] &&
+			    val->filter[dtm][sel] != CMN_EVENT_FILTER2(event) + 1)
+				goto done;
+			sel = SEL_HBT_LBT_SEL;
+		}
+
+		if (sel && val->filter[dtm][sel] &&
+		    val->filter[dtm][sel] != CMN_EVENT_FILTER(event) + 1)
 			goto done;
 
 		if (type != CMN_TYPE_WP)
 			continue;
 
-		wp_idx = arm_cmn_wp_idx(event);
-		if (val->wp[dtm][wp_idx])
+		wp_idx = arm_cmn_val_find_free_wp_config(event, val, dtm);
+		if (wp_idx < 0)
 			goto done;
 
-		wp_cmb = val->wp[dtm][wp_idx ^ 1];
-		if (wp_cmb && wp_cmb != CMN_EVENT_WP_COMBINE(event) + 1)
+		if (wp_idx & 1 &&
+		    val->wp_combine[dtm][wp_idx >> 1] != !!CMN_EVENT_WP_COMBINE(event))
 			goto done;
 	}
 
@@ -1670,9 +1945,9 @@ done:
 	return ret;
 }
 
-static enum cmn_filter_select arm_cmn_filter_sel(const struct arm_cmn *cmn,
-						 enum cmn_node_type type,
-						 unsigned int eventid)
+static enum cmn_filter_select arm_cmn_event_filter(const struct arm_cmn *cmn,
+						   enum cmn_node_type type,
+						   unsigned int eventid)
 {
 	struct arm_cmn_event_attr *e;
 	enum cmn_model model = arm_cmn_model(cmn);
@@ -1680,11 +1955,19 @@ static enum cmn_filter_select arm_cmn_filter_sel(const struct arm_cmn *cmn,
 	for (int i = 0; i < ARRAY_SIZE(arm_cmn_event_attrs) - 1; i++) {
 		e = container_of(arm_cmn_event_attrs[i], typeof(*e), attr.attr);
 		if (e->model & model && e->type == type && e->eventid == eventid)
-			return e->fsel;
+			return e->filter[1].sel ?: e->filter[0].sel;
 	}
 	return SEL_NONE;
 }
 
+
+static void arm_cmn_event_destroy(struct perf_event *event)
+{
+	struct arm_cmn_hw_event *hw = to_cmn_hw(event);
+
+	bitmap_free(hw->dtm_idx);
+	bitmap_free(hw->wp_idx);
+}
 
 static int arm_cmn_event_init(struct perf_event *event)
 {
@@ -1710,6 +1993,11 @@ static int arm_cmn_event_init(struct perf_event *event)
 	if (type == CMN_TYPE_DTC)
 		return arm_cmn_validate_group(cmn, event);
 
+	event->destroy = arm_cmn_event_destroy;
+	hw->dtm_idx = arm_cmn_alloc_dtm_idx();
+	if (!hw->dtm_idx)
+		return -ENOMEM;
+
 	eventid = CMN_EVENT_EVENTID(event);
 	/* For watchpoints we need the actual XP node here */
 	if (type == CMN_TYPE_WP) {
@@ -1720,12 +2008,19 @@ static int arm_cmn_event_init(struct perf_event *event)
 		/* ...but the DTM may depend on which port we're watching */
 		if (cmn->multi_dtm)
 			hw->dtm_offset = CMN_EVENT_WP_DEV_SEL(event) / 2;
-	} else if (type == CMN_TYPE_XP && cmn->part == PART_CMN700) {
+		hw->wp_idx = arm_cmn_alloc_wp_idx();
+		if (!hw->wp_idx)
+			return -ENOMEM;
+	} else if (type == CMN_TYPE_XP &&
+		   (cmn->part == PART_CMN700 || cmn->part == PART_CMN_S3)) {
 		hw->wide_sel = true;
+	} else if (type == CMN_TYPE_RND) {
+		/* Secretly permit this as an alias for "rnid" events */
+		type = CMN_TYPE_RNI;
 	}
 
 	/* This is sufficiently annoying to recalculate, so cache it */
-	hw->filter_sel = arm_cmn_filter_sel(cmn, type, eventid);
+	hw->filter_sel = arm_cmn_event_filter(cmn, type, eventid);
 
 	bynodeid = CMN_EVENT_BYNODEID(event);
 	nodeid = CMN_EVENT_NODEID(event);
@@ -1733,29 +2028,27 @@ static int arm_cmn_event_init(struct perf_event *event)
 	hw->dn = arm_cmn_node(cmn, type);
 	if (!hw->dn)
 		return -EINVAL;
+
+	memset(hw->dtc_idx, -1, sizeof(hw->dtc_idx));
 	for (dn = hw->dn; dn->type == type; dn++) {
 		if (bynodeid && dn->id != nodeid) {
 			hw->dn++;
 			continue;
 		}
 		hw->num_dns++;
+		if (dn->dtc < 0)
+			memset(hw->dtc_idx, 0, cmn->num_dtcs);
+		else
+			hw->dtc_idx[dn->dtc] = 0;
+
 		if (bynodeid)
 			break;
 	}
 
 	if (!hw->num_dns) {
-		struct arm_cmn_nodeid nid = arm_cmn_nid(cmn, nodeid);
-
-		dev_dbg(cmn->dev, "invalid node 0x%x (%d,%d,%d,%d) type 0x%x\n",
-			nodeid, nid.x, nid.y, nid.port, nid.dev, type);
+		dev_dbg(cmn->dev, "invalid node 0x%x type 0x%x\n", nodeid, type);
 		return -EINVAL;
 	}
-	/*
-	 * Keep assuming non-cycles events count in all DTC domains; turns out
-	 * it's hard to make a worthwhile optimisation around this, short of
-	 * going all-in with domain-local counter allocation as well.
-	 */
-	hw->dtcs_used = (1U << cmn->num_dtcs) - 1;
 
 	return arm_cmn_validate_group(cmn, event);
 }
@@ -1768,59 +2061,87 @@ static void arm_cmn_event_clear(struct arm_cmn *cmn, struct perf_event *event,
 
 	while (i--) {
 		struct arm_cmn_dtm *dtm = &cmn->dtms[hw->dn[i].dtm] + hw->dtm_offset;
-		unsigned int dtm_idx = arm_cmn_get_index(hw->dtm_idx, i);
+		unsigned int dtm_idx = arm_cmn_get_dtm_idx(hw, i);
 
-		if (type == CMN_TYPE_WP)
-			dtm->wp_event[arm_cmn_wp_idx(event)] = -1;
+		if (type == CMN_TYPE_WP) {
+			int wp_idx = arm_cmn_get_assigned_wp_idx(event, hw, i);
 
-		if (hw->filter_sel > SEL_NONE)
-			hw->dn[i].occupid[hw->filter_sel].count--;
+			dtm->wp_event[wp_idx] = -1;
+		}
+
+		if (hw->filter_sel)
+			hw->dn[i].filter[hw->filter_sel].count--;
+		if (hw->filter_sel == SEL_EVICT_STATE_SEL)
+			hw->dn[i].filter[SEL_HBT_LBT_SEL].count--;
 
 		dtm->pmu_config_low &= ~CMN__PMEVCNT_PAIRED(dtm_idx);
 		writel_relaxed(dtm->pmu_config_low, dtm->base + CMN_DTM_PMU_CONFIG);
 	}
-	memset(hw->dtm_idx, 0, sizeof(hw->dtm_idx));
+	arm_cmn_clear_idx(hw);
 
-	for (i = 0; hw->dtcs_used & (1U << i); i++)
-		cmn->dtc[i].counters[hw->dtc_idx] = NULL;
+	for_each_hw_dtc_idx(hw, j, idx)
+		cmn->dtc[j].counters[idx] = NULL;
+}
+
+static int arm_cmn_set_event_filter(struct arm_cmn_node *dn, struct perf_event *event)
+{
+	enum cmn_filter_select fsel = to_cmn_hw(event)->filter_sel;
+	bool evict_state = fsel == SEL_EVICT_STATE_SEL;
+	int ret = 0;
+
+	if (evict_state) {
+		ret = arm_cmn_set_event_sel_hi(dn, fsel, CMN_EVENT_FILTER2(event));
+		if (ret)
+			return ret;
+		fsel = SEL_HBT_LBT_SEL;
+	}
+	if (fsel)
+		ret = arm_cmn_set_event_sel_hi(dn, fsel, CMN_EVENT_FILTER(event));
+
+	if (ret && evict_state)
+		dn->filter[SEL_EVICT_STATE_SEL].count--;
+
+	return ret;
 }
 
 static int arm_cmn_event_add(struct perf_event *event, int flags)
 {
 	struct arm_cmn *cmn = to_cmn(event->pmu);
 	struct arm_cmn_hw_event *hw = to_cmn_hw(event);
-	struct arm_cmn_dtc *dtc = &cmn->dtc[0];
 	struct arm_cmn_node *dn;
 	enum cmn_node_type type = CMN_EVENT_TYPE(event);
-	unsigned int i, dtc_idx, input_sel;
+	unsigned int input_sel, i = 0;
 
 	if (type == CMN_TYPE_DTC) {
-		i = 0;
 		while (cmn->dtc[i].cycles)
 			if (++i == cmn->num_dtcs)
 				return -ENOSPC;
 
 		cmn->dtc[i].cycles = event;
-		hw->dtc_idx = CMN_DT_NUM_COUNTERS;
-		hw->dtcs_used = 1U << i;
+		hw->cc_idx = i;
 
 		if (flags & PERF_EF_START)
 			arm_cmn_event_start(event, 0);
 		return 0;
 	}
 
-	/* Grab a free global counter first... */
-	dtc_idx = 0;
-	while (dtc->counters[dtc_idx])
-		if (++dtc_idx == CMN_DT_NUM_COUNTERS)
-			return -ENOSPC;
+	/* Grab the global counters first... */
+	for_each_hw_dtc_idx(hw, j, idx) {
+		if (cmn->part == PART_CMN600 && j > 0) {
+			idx = hw->dtc_idx[0];
+		} else {
+			idx = 0;
+			while (cmn->dtc[j].counters[idx])
+				if (++idx == CMN_DT_NUM_COUNTERS)
+					return -ENOSPC;
+		}
+		hw->dtc_idx[j] = idx;
+	}
 
-	hw->dtc_idx = dtc_idx;
-
-	/* ...then the local counters to feed it. */
+	/* ...then the local counters to feed them */
 	for_each_hw_dn(hw, dn, i) {
 		struct arm_cmn_dtm *dtm = &cmn->dtms[dn->dtm] + hw->dtm_offset;
-		unsigned int dtm_idx, shift;
+		unsigned int dtm_idx, shift, d = max_t(int, dn->dtc, 0);
 		u64 reg;
 
 		dtm_idx = 0;
@@ -1831,22 +2152,26 @@ static int arm_cmn_event_add(struct perf_event *event, int flags)
 		if (type == CMN_TYPE_XP) {
 			input_sel = CMN__PMEVCNT0_INPUT_SEL_XP + dtm_idx;
 		} else if (type == CMN_TYPE_WP) {
-			int tmp, wp_idx = arm_cmn_wp_idx(event);
-			u32 cfg = arm_cmn_wp_config(event);
+			int tmp, wp_idx;
+			u32 cfg;
 
-			if (dtm->wp_event[wp_idx] >= 0)
+			wp_idx = arm_cmn_find_free_wp_idx(dtm, event);
+			if (wp_idx < 0)
 				goto free_dtms;
+
+			cfg = arm_cmn_wp_config(event, wp_idx);
 
 			tmp = dtm->wp_event[wp_idx ^ 1];
 			if (tmp >= 0 && CMN_EVENT_WP_COMBINE(event) !=
-					CMN_EVENT_WP_COMBINE(dtc->counters[tmp]))
+					CMN_EVENT_WP_COMBINE(cmn->dtc[d].counters[tmp]))
 				goto free_dtms;
 
 			input_sel = CMN__PMEVCNT0_INPUT_SEL_WP + wp_idx;
-			dtm->wp_event[wp_idx] = dtc_idx;
+
+			arm_cmn_claim_wp_idx(dtm, event, d, wp_idx, i);
 			writel_relaxed(cfg, dtm->base + CMN_DTM_WPn_CONFIG(wp_idx));
 		} else {
-			struct arm_cmn_nodeid nid = arm_cmn_nid(cmn, dn->id);
+			struct arm_cmn_nodeid nid = arm_cmn_nid(dn);
 
 			if (cmn->multi_dtm)
 				nid.port %= 2;
@@ -1854,16 +2179,16 @@ static int arm_cmn_event_add(struct perf_event *event, int flags)
 			input_sel = CMN__PMEVCNT0_INPUT_SEL_DEV + dtm_idx +
 				    (nid.port << 4) + (nid.dev << 2);
 
-			if (arm_cmn_set_event_sel_hi(dn, hw->filter_sel, CMN_EVENT_OCCUPID(event)))
+			if (arm_cmn_set_event_filter(dn, event))
 				goto free_dtms;
 		}
 
-		arm_cmn_set_index(hw->dtm_idx, i, dtm_idx);
+		arm_cmn_set_dtm_idx(hw, i, dtm_idx);
 
 		dtm->input_sel[dtm_idx] = input_sel;
 		shift = CMN__PMEVCNTn_GLOBAL_NUM_SHIFT(dtm_idx);
 		dtm->pmu_config_low &= ~(CMN__PMEVCNT0_GLOBAL_NUM << shift);
-		dtm->pmu_config_low |= FIELD_PREP(CMN__PMEVCNT0_GLOBAL_NUM, dtc_idx) << shift;
+		dtm->pmu_config_low |= FIELD_PREP(CMN__PMEVCNT0_GLOBAL_NUM, hw->dtc_idx[d]) << shift;
 		dtm->pmu_config_low |= CMN__PMEVCNT_PAIRED(dtm_idx);
 		reg = (u64)le32_to_cpu(dtm->pmu_config_high) << 32 | dtm->pmu_config_low;
 		writeq_relaxed(reg, dtm->base + CMN_DTM_PMU_CONFIG);
@@ -1891,7 +2216,7 @@ static void arm_cmn_event_del(struct perf_event *event, int flags)
 	arm_cmn_event_stop(event, PERF_EF_UPDATE);
 
 	if (type == CMN_TYPE_DTC)
-		cmn->dtc[__ffs(hw->dtcs_used)].cycles = NULL;
+		cmn->dtc[hw->cc_idx].cycles = NULL;
 	else
 		arm_cmn_event_clear(cmn, event, hw->num_dns);
 }
@@ -1935,7 +2260,7 @@ static int arm_cmn_pmu_online_cpu(unsigned int cpu, struct hlist_node *cpuhp_nod
 
 	cmn = hlist_entry_safe(cpuhp_node, struct arm_cmn, cpuhp_node);
 	node = dev_to_node(cmn->dev);
-	if (node != NUMA_NO_NODE && cpu_to_node(cmn->cpu) != node && cpu_to_node(cpu) == node)
+	if (cpu_to_node(cmn->cpu) != node && cpu_to_node(cpu) == node)
 		arm_cmn_migrate(cmn, cpu);
 	return 0;
 }
@@ -1945,20 +2270,20 @@ static int arm_cmn_pmu_offline_cpu(unsigned int cpu, struct hlist_node *cpuhp_no
 	struct arm_cmn *cmn;
 	unsigned int target;
 	int node;
-	cpumask_t mask;
 
 	cmn = hlist_entry_safe(cpuhp_node, struct arm_cmn, cpuhp_node);
 	if (cpu != cmn->cpu)
 		return 0;
 
 	node = dev_to_node(cmn->dev);
-	if (cpumask_and(&mask, cpumask_of_node(node), cpu_online_mask) &&
-	    cpumask_andnot(&mask, &mask, cpumask_of(cpu)))
-		target = cpumask_any(&mask);
-	else
+
+	target = cpumask_any_and_but(cpumask_of_node(node), cpu_online_mask, cpu);
+	if (target >= nr_cpu_ids)
 		target = cpumask_any_but(cpu_online_mask, cpu);
+
 	if (target < nr_cpu_ids)
 		arm_cmn_migrate(cmn, target);
+
 	return 0;
 }
 
@@ -1968,7 +2293,7 @@ static irqreturn_t arm_cmn_handle_irq(int irq, void *dev_id)
 	irqreturn_t ret = IRQ_NONE;
 
 	for (;;) {
-		u32 status = readl_relaxed(dtc->base + CMN_DT_PMOVSR);
+		u32 status = readl_relaxed(CMN_DT_PMOVSR(dtc));
 		u64 delta;
 		int i;
 
@@ -1990,7 +2315,7 @@ static irqreturn_t arm_cmn_handle_irq(int irq, void *dev_id)
 			}
 		}
 
-		writel_relaxed(status, dtc->base + CMN_DT_PMOVSR_CLR);
+		writel_relaxed(status, CMN_DT_PMOVSR_CLR(dtc));
 
 		if (!dtc->irq_friend)
 			return ret;
@@ -2043,16 +2368,26 @@ static void arm_cmn_init_dtm(struct arm_cmn_dtm *dtm, struct arm_cmn_node *xp, i
 static int arm_cmn_init_dtc(struct arm_cmn *cmn, struct arm_cmn_node *dn, int idx)
 {
 	struct arm_cmn_dtc *dtc = cmn->dtc + idx;
+	const struct resource *cfg;
+	resource_size_t base, size;
 
-	dtc->base = dn->pmu_base - CMN_PMU_OFFSET;
+	dtc->pmu_base = dn->pmu_base;
+	dtc->base = dtc->pmu_base - arm_cmn_pmu_offset(cmn, dn);
 	dtc->irq = platform_get_irq(to_platform_device(cmn->dev), idx);
 	if (dtc->irq < 0)
 		return dtc->irq;
 
+	cfg = platform_get_resource(to_platform_device(cmn->dev), IORESOURCE_MEM, 0);
+	base = dtc->base - cmn->base + cfg->start;
+	size = cmn->part == PART_CMN600 ? SZ_16K : SZ_64K;
+	if (!devm_request_mem_region(cmn->dev, base, size, dev_name(cmn->dev)))
+		return dev_err_probe(cmn->dev, -EBUSY,
+				     "Failed to request DTC region 0x%pa\n", &base);
+
 	writel_relaxed(CMN_DT_DTC_CTL_DT_EN, dtc->base + CMN_DT_DTC_CTL);
-	writel_relaxed(CMN_DT_PMCR_PMU_EN | CMN_DT_PMCR_OVFL_INTR_EN, dtc->base + CMN_DT_PMCR);
-	writeq_relaxed(0, dtc->base + CMN_DT_PMCCNTR);
-	writel_relaxed(0x1ff, dtc->base + CMN_DT_PMOVSR_CLR);
+	writel_relaxed(CMN_DT_PMCR_PMU_EN | CMN_DT_PMCR_OVFL_INTR_EN, CMN_DT_PMCR(dtc));
+	writeq_relaxed(0, CMN_DT_PMCCNTR(dtc));
+	writel_relaxed(0x1ff, CMN_DT_PMOVSR_CLR(dtc));
 
 	return 0;
 }
@@ -2072,7 +2407,6 @@ static int arm_cmn_init_dtcs(struct arm_cmn *cmn)
 {
 	struct arm_cmn_node *dn, *xp;
 	int dtc_idx = 0;
-	u8 dtcs_present = (1 << cmn->num_dtcs) - 1;
 
 	cmn->dtc = devm_kcalloc(cmn->dev, cmn->num_dtcs, sizeof(cmn->dtc[0]), GFP_KERNEL);
 	if (!cmn->dtc)
@@ -2083,22 +2417,18 @@ static int arm_cmn_init_dtcs(struct arm_cmn *cmn)
 	cmn->xps = arm_cmn_node(cmn, CMN_TYPE_XP);
 
 	for (dn = cmn->dns; dn->type; dn++) {
-		if (dn->type == CMN_TYPE_XP) {
-			dn->dtc &= dtcs_present;
+		if (dn->type == CMN_TYPE_XP)
 			continue;
-		}
 
 		xp = arm_cmn_node_to_xp(cmn, dn);
+		dn->dtc = xp->dtc;
 		dn->dtm = xp->dtm;
 		if (cmn->multi_dtm)
-			dn->dtm += arm_cmn_nid(cmn, dn->id).port / 2;
+			dn->dtm += arm_cmn_nid(dn).port / 2;
 
 		if (dn->type == CMN_TYPE_DTC) {
-			int err;
-			/* We do at least know that a DTC's XP must be in that DTC's domain */
-			if (xp->dtc == 0xf)
-				xp->dtc = 1 << dtc_idx;
-			err = arm_cmn_init_dtc(cmn, dn, dtc_idx++);
+			int err = arm_cmn_init_dtc(cmn, dn, dtc_idx++);
+
 			if (err)
 				return err;
 		}
@@ -2117,6 +2447,28 @@ static int arm_cmn_init_dtcs(struct arm_cmn *cmn)
 	return 0;
 }
 
+static unsigned int arm_cmn_dtc_domain(struct arm_cmn *cmn, void __iomem *xp_region)
+{
+	int offset = CMN_DTM_UNIT_INFO;
+
+	if (cmn->part == PART_CMN650 || cmn->part == PART_CI700)
+		offset = CMN650_DTM_UNIT_INFO;
+
+	return FIELD_GET(CMN_DTM_UNIT_INFO_DTC_DOMAIN, readl_relaxed(xp_region + offset));
+}
+
+static unsigned int arm_cmn_graviton5_dtc_domain(u16 xp_id)
+{
+	unsigned int x = (xp_id >> 7) & 0xf;
+	unsigned int y = (xp_id >> 3) & 0xf;
+
+	/*
+	 * The unit info register reads as zero; derive the DTC domain from
+	 * the XP's mesh coordinates over the 10x14 mesh.
+	 */
+	return (x / 5) + (y / 7) * 2;
+}
+
 static void arm_cmn_init_node_info(struct arm_cmn *cmn, u32 offset, struct arm_cmn_node *node)
 {
 	int level;
@@ -2126,7 +2478,7 @@ static void arm_cmn_init_node_info(struct arm_cmn *cmn, u32 offset, struct arm_c
 	node->id = FIELD_GET(CMN_NI_NODE_ID, reg);
 	node->logid = FIELD_GET(CMN_NI_LOGICAL_ID, reg);
 
-	node->pmu_base = cmn->base + offset + CMN_PMU_OFFSET;
+	node->pmu_base = cmn->base + offset + arm_cmn_pmu_offset(cmn, node);
 
 	if (node->type == CMN_TYPE_CFG)
 		level = 0;
@@ -2154,15 +2506,16 @@ static enum cmn_node_type arm_cmn_subtype(enum cmn_node_type type)
 
 static int arm_cmn_discover(struct arm_cmn *cmn, unsigned int rgn_offset)
 {
-	void __iomem *cfg_region;
+	void __iomem *cfg_region, __iomem *xp_region;
 	struct arm_cmn_node cfg, *dn;
 	struct arm_cmn_dtm *dtm;
+	enum cmn_model model;
 	enum cmn_part part;
 	u16 child_count, child_poff;
-	u32 xp_offset[CMN_MAX_XPS];
 	u64 reg;
 	int i, j;
 	size_t sz;
+	bool graviton5_workaround = false;
 
 	arm_cmn_init_node_info(cmn, rgn_offset, &cfg);
 	if (cfg.type != CMN_TYPE_CFG)
@@ -2173,25 +2526,59 @@ static int arm_cmn_discover(struct arm_cmn *cmn, unsigned int rgn_offset)
 	reg = readq_relaxed(cfg_region + CMN_CFGM_PERIPH_ID_01);
 	part = FIELD_GET(CMN_CFGM_PID0_PART_0, reg);
 	part |= FIELD_GET(CMN_CFGM_PID1_PART_1, reg) << 8;
+
+	/* Graviton5 has a customised CMN-S3 which needs some fixups */
+	if (cmn->part == PART_GRAVITON5) {
+		cmn->part = PART_CMN_S3;
+		graviton5_workaround = true;
+	}
+
+	/* 600AE is close enough that it's not really worth more complexity */
+	if (part == PART_CMN600AE)
+		part = PART_CMN600;
 	if (cmn->part && cmn->part != part)
 		dev_warn(cmn->dev,
 			 "Firmware binding mismatch: expected part number 0x%x, found 0x%x\n",
 			 cmn->part, part);
 	cmn->part = part;
-	if (!arm_cmn_model(cmn))
-		dev_warn(cmn->dev, "Unknown part number: 0x%x\n", part);
 
 	reg = readl_relaxed(cfg_region + CMN_CFGM_PERIPH_ID_23);
 	cmn->rev = FIELD_GET(CMN_CFGM_PID2_REVISION, reg);
 
+	model = arm_cmn_model(cmn);
+	if (!model)
+		dev_warn(cmn->dev, "Unknown part number: 0x%x\n", part);
+
+	/*
+	 * With the device isolation feature, if firmware has neglected to enable
+	 * an XP port then we risk locking up if we try to access anything behind
+	 * it; however prior to CMN S3 r2p0 we also have no way to tell from
+	 * Non-Secure whether any given port is disabled or not, so in that case
+	 * the only way to win is not to play...
+	 */
 	reg = readq_relaxed(cfg_region + CMN_CFGM_INFO_GLOBAL);
-	cmn->multi_dtm = reg & CMN_INFO_MULTIPLE_DTM_EN;
-	cmn->rsp_vc_num = FIELD_GET(CMN_INFO_RSP_VC_NUM, reg);
-	cmn->dat_vc_num = FIELD_GET(CMN_INFO_DAT_VC_NUM, reg);
+	if (reg & CMN_INFO_DEVICE_ISO_ENABLE && model == CMNS3R01) {
+		dev_err(cmn->dev, "Device isolation enabled, not continuing due to risk of lockup\n");
+		return -ENODEV;
+	}
+	if (model < CMNS3R2) {
+		cmn->multi_dtm = reg & CMN_INFO_MULTIPLE_DTM_EN;
+		cmn->rsp_vc_num = FIELD_GET(CMN_INFO_RSP_VC_NUM, reg);
+		cmn->dat_vc_num = FIELD_GET(CMN_INFO_DAT_VC_NUM, reg);
+	} else {
+		cmn->multi_dtm = reg & CMN_S3_R2_MULTIPLE_DTM_EN;
+	}
 
 	reg = readq_relaxed(cfg_region + CMN_CFGM_INFO_GLOBAL_1);
-	cmn->snp_vc_num = FIELD_GET(CMN_INFO_SNP_VC_NUM, reg);
-	cmn->req_vc_num = FIELD_GET(CMN_INFO_REQ_VC_NUM, reg);
+	if (model < CMNS3R2) {
+		cmn->snp_vc_num = FIELD_GET(CMN_INFO_SNP_VC_NUM, reg);
+		cmn->req_vc_num = FIELD_GET(CMN_INFO_REQ_VC_NUM, reg);
+	} else {
+		cmn->rsp_vc_num = FIELD_GET(CMN_S3_R2_RSP_VC_NUM, reg);
+		cmn->dat_vc_num = FIELD_GET(CMN_S3_R2_DAT_VC_NUM, reg);
+		cmn->snp_vc_num = FIELD_GET(CMN_S3_R2_SNP_VC_NUM, reg);
+		cmn->req_vc_num = FIELD_GET(CMN_S3_R2_REQ_VC_NUM, reg);
+	}
 
 	reg = readq_relaxed(cfg_region + CMN_CHILD_INFO);
 	child_count = FIELD_GET(CMN_CI_CHILD_COUNT, reg);
@@ -2201,11 +2588,12 @@ static int arm_cmn_discover(struct arm_cmn *cmn, unsigned int rgn_offset)
 	cmn->num_dns = cmn->num_xps;
 
 	/* Pass 1: visit the XPs, enumerate their children */
+	cfg_region += child_poff;
 	for (i = 0; i < cmn->num_xps; i++) {
-		reg = readq_relaxed(cfg_region + child_poff + i * 8);
-		xp_offset[i] = reg & CMN_CHILD_NODE_ADDR;
+		reg = readq_relaxed(cfg_region + i * 8);
+		xp_region = cmn->base + (reg & CMN_CHILD_NODE_ADDR);
 
-		reg = readq_relaxed(cmn->base + xp_offset[i] + CMN_CHILD_INFO);
+		reg = readq_relaxed(xp_region + CMN_CHILD_INFO);
 		cmn->num_dns += FIELD_GET(CMN_CI_CHILD_COUNT, reg);
 	}
 
@@ -2231,11 +2619,12 @@ static int arm_cmn_discover(struct arm_cmn *cmn, unsigned int rgn_offset)
 	cmn->dns = dn;
 	cmn->dtms = dtm;
 	for (i = 0; i < cmn->num_xps; i++) {
-		void __iomem *xp_region = cmn->base + xp_offset[i];
 		struct arm_cmn_node *xp = dn++;
 		unsigned int xp_ports = 0;
 
-		arm_cmn_init_node_info(cmn, xp_offset[i], xp);
+		reg = readq_relaxed(cfg_region + i * 8);
+		xp_region = cmn->base + (reg & CMN_CHILD_NODE_ADDR);
+		arm_cmn_init_node_info(cmn, reg & CMN_CHILD_NODE_ADDR, xp);
 		/*
 		 * Thanks to the order in which XP logical IDs seem to be
 		 * assigned, we can handily infer the mesh X dimension by
@@ -2246,26 +2635,37 @@ static int arm_cmn_discover(struct arm_cmn *cmn, unsigned int rgn_offset)
 			cmn->mesh_x = xp->logid;
 
 		if (cmn->part == PART_CMN600)
-			xp->dtc = 0xf;
+			xp->dtc = -1;
+		else if (graviton5_workaround)
+			xp->dtc = arm_cmn_graviton5_dtc_domain(xp->id);
 		else
-			xp->dtc = 1 << readl_relaxed(xp_region + CMN_DTM_UNIT_INFO);
+			xp->dtc = arm_cmn_dtc_domain(cmn, xp_region);
 
 		xp->dtm = dtm - cmn->dtms;
 		arm_cmn_init_dtm(dtm++, xp, 0);
 		/*
 		 * Keeping track of connected ports will let us filter out
-		 * unnecessary XP events easily. We can also reliably infer the
-		 * "extra device ports" configuration for the node ID format
-		 * from this, since in that case we will see at least one XP
-		 * with port 2 connected, for the HN-D.
+		 * unnecessary XP events easily, and also infer the per-XP
+		 * part of the node ID format.
 		 */
 		for (int p = 0; p < CMN_MAX_PORTS; p++)
 			if (arm_cmn_device_connect_info(cmn, xp, p))
 				xp_ports |= BIT(p);
 
-		if (cmn->multi_dtm && (xp_ports & 0xc))
+		if (cmn->num_xps == 1) {
+			xp->portid_bits = 3;
+			xp->deviceid_bits = 2;
+		} else if (xp_ports > 0x3) {
+			xp->portid_bits = 2;
+			xp->deviceid_bits = 1;
+		} else {
+			xp->portid_bits = 1;
+			xp->deviceid_bits = 2;
+		}
+
+		if (cmn->multi_dtm && (xp_ports > 0x3))
 			arm_cmn_init_dtm(dtm++, xp, 1);
-		if (cmn->multi_dtm && (xp_ports & 0x30))
+		if (cmn->multi_dtm && (xp_ports > 0xf))
 			arm_cmn_init_dtm(dtm++, xp, 2);
 
 		cmn->ports_used |= xp_ports;
@@ -2278,22 +2678,50 @@ static int arm_cmn_discover(struct arm_cmn *cmn, unsigned int rgn_offset)
 			reg = readq_relaxed(xp_region + child_poff + j * 8);
 			/*
 			 * Don't even try to touch anything external, since in general
-			 * we haven't a clue how to power up arbitrary CHI requesters.
-			 * As of CMN-600r1 these could only be RN-SAMs or CXLAs,
-			 * neither of which have any PMU events anyway.
-			 * (Actually, CXLAs do seem to have grown some events in r1p2,
-			 * but they don't go to regular XP DTMs, and they depend on
-			 * secure configuration which we can't easily deal with)
+			 * we haven't a clue how to power up arbitrary CHI requesters,
+			 * and none of them have standard PMU events anyway. Isolated
+			 * nodes effectively just do not exist at all from our PoV.
 			 */
-			if (reg & CMN_CHILD_NODE_EXTERNAL) {
-				dev_dbg(cmn->dev, "ignoring external node %llx\n", reg);
+			if (reg & (CMN_CHILD_NODE_EXTERNAL | CMN_CHILD_NODE_ISOLATED)) {
+				dev_dbg(cmn->dev, "ignoring external/isolated node %llx\n", reg);
+				continue;
+			}
+			/*
+			 * AmpereOneX erratum AC04_MESH_1 makes some XPs report a bogus
+			 * child count larger than the number of valid child pointers.
+			 * A child offset of 0 can only occur on CMN-600; otherwise it
+			 * would imply the root node being its own grandchild, which
+			 * we can safely dismiss in general.
+			 */
+			if (reg == 0 && cmn->part != PART_CMN600) {
+				dev_dbg(cmn->dev, "bogus child pointer?\n");
 				continue;
 			}
 
 			arm_cmn_init_node_info(cmn, reg & CMN_CHILD_NODE_ADDR, dn);
+			dn->portid_bits = xp->portid_bits;
+			dn->deviceid_bits = xp->deviceid_bits;
+			/*
+			 * Logical IDs are assigned from 0 per node type, so as
+			 * soon as we see one bigger than expected, we can assume
+			 * there are more than we can cope with.
+			 */
+			if (dn->logid > CMN_MAX_NODES_PER_EVENT) {
+				dev_err(cmn->dev, "Node ID invalid for supported CMN versions: %d\n", dn->logid);
+				return -ENODEV;
+			}
+			/*
+			 * We can utilise the "wasted" filter array slot to store
+			 * the index for referencing the filter encodings later.
+			 */
+			dn->filter[SEL_NONE].val = arm_cmn_filter(dn->type, model);
 
 			switch (dn->type) {
 			case CMN_TYPE_DTC:
+				if (graviton5_workaround) {
+					/* Node info logical ID is zeroed; use the XP's */
+					dn->logid = xp->logid;
+				}
 				cmn->num_dtcs++;
 				dn++;
 				break;
@@ -2309,8 +2737,11 @@ static int arm_cmn_discover(struct arm_cmn *cmn, unsigned int rgn_offset)
 			case CMN_TYPE_CXHA:
 			case CMN_TYPE_CCRA:
 			case CMN_TYPE_CCHA:
-			case CMN_TYPE_CCLA:
 			case CMN_TYPE_HNS:
+				dn++;
+				break;
+			case CMN_TYPE_CCLA:
+				dn->pmu_base += CMN_CCLA_PMU_EVENT_SEL;
 				dn++;
 				break;
 			/* Nothing to see here */
@@ -2320,6 +2751,7 @@ static int arm_cmn_discover(struct arm_cmn *cmn, unsigned int rgn_offset)
 			case CMN_TYPE_CXLA:
 			case CMN_TYPE_HNS_MPAM_S:
 			case CMN_TYPE_HNS_MPAM_NS:
+			case CMN_TYPE_APB:
 				break;
 			/*
 			 * Split "optimised" combination nodes into separate
@@ -2330,13 +2762,13 @@ static int arm_cmn_discover(struct arm_cmn *cmn, unsigned int rgn_offset)
 			case CMN_TYPE_HNP:
 			case CMN_TYPE_CCLA_RNI:
 				dn[1] = dn[0];
-				dn[0].pmu_base += CMN_HNP_PMU_EVENT_SEL;
+				dn[0].pmu_base += CMN_CCLA_PMU_EVENT_SEL;
 				dn[1].type = arm_cmn_subtype(dn->type);
 				dn += 2;
 				break;
 			/* Something has gone horribly wrong */
 			default:
-				dev_err(cmn->dev, "invalid device node type: 0x%x\n", dn->type);
+				dev_err(cmn->dev, "Device node type invalid for supported CMN versions: 0x%x\n", dn->type);
 				return -ENODEV;
 			}
 		}
@@ -2364,6 +2796,10 @@ static int arm_cmn_discover(struct arm_cmn *cmn, unsigned int rgn_offset)
 		cmn->mesh_x = cmn->num_xps;
 	cmn->mesh_y = cmn->num_xps / cmn->mesh_x;
 
+	if (max(cmn->mesh_x, cmn->mesh_y) > CMN_MAX_DIMENSION) {
+		dev_err(cmn->dev, "Mesh size invalid for supported CMN versions: %dx%d\n", cmn->mesh_x, cmn->mesh_y);
+		return -ENODEV;
+	}
 	/* 1x1 config plays havoc with XP event encodings */
 	if (cmn->num_xps == 1)
 		dev_warn(cmn->dev, "1x1 config not fully supported, translate XP events manually\n");
@@ -2377,43 +2813,26 @@ static int arm_cmn_discover(struct arm_cmn *cmn, unsigned int rgn_offset)
 	return 0;
 }
 
-static int arm_cmn600_acpi_probe(struct platform_device *pdev, struct arm_cmn *cmn)
+static int arm_cmn_get_root(struct arm_cmn *cmn, const struct resource *cfg)
 {
-	struct resource *cfg, *root;
-
-	cfg = platform_get_resource(pdev, IORESOURCE_MEM, 0);
-	if (!cfg)
-		return -EINVAL;
-
-	root = platform_get_resource(pdev, IORESOURCE_MEM, 1);
-	if (!root)
-		return -EINVAL;
-
-	if (!resource_contains(cfg, root))
-		swap(cfg, root);
-	/*
-	 * Note that devm_ioremap_resource() is dumb and won't let the platform
-	 * device claim cfg when the ACPI companion device has already claimed
-	 * root within it. But since they *are* already both claimed in the
-	 * appropriate name, we don't really need to do it again here anyway.
-	 */
-	cmn->base = devm_ioremap(cmn->dev, cfg->start, resource_size(cfg));
-	if (!cmn->base)
-		return -ENOMEM;
-
-	return root->start - cfg->start;
-}
-
-static int arm_cmn600_of_probe(struct device_node *np)
-{
+	const struct device_node *np = cmn->dev->of_node;
+	const struct resource *root;
 	u32 rootnode;
 
-	return of_property_read_u32(np, "arm,root-node", &rootnode) ?: rootnode;
+	if (cmn->part != PART_CMN600)
+		return 0;
+
+	if (np)
+		return of_property_read_u32(np, "arm,root-node", &rootnode) ?: rootnode;
+
+	root = platform_get_resource(to_platform_device(cmn->dev), IORESOURCE_MEM, 1);
+	return root ? root->start - cfg->start : -EINVAL;
 }
 
 static int arm_cmn_probe(struct platform_device *pdev)
 {
 	struct arm_cmn *cmn;
+	const struct resource *cfg;
 	const char *name;
 	static atomic_t id;
 	int err, rootnode, this_id;
@@ -2424,18 +2843,19 @@ static int arm_cmn_probe(struct platform_device *pdev)
 
 	cmn->dev = &pdev->dev;
 	cmn->part = (unsigned long)device_get_match_data(cmn->dev);
+	cmn->cpu = cpumask_local_spread(0, dev_to_node(cmn->dev));
 	platform_set_drvdata(pdev, cmn);
 
-	if (cmn->part == PART_CMN600 && has_acpi_companion(cmn->dev)) {
-		rootnode = arm_cmn600_acpi_probe(pdev, cmn);
-	} else {
-		rootnode = 0;
-		cmn->base = devm_platform_ioremap_resource(pdev, 0);
-		if (IS_ERR(cmn->base))
-			return PTR_ERR(cmn->base);
-		if (cmn->part == PART_CMN600)
-			rootnode = arm_cmn600_of_probe(pdev->dev.of_node);
-	}
+	cfg = platform_get_resource(pdev, IORESOURCE_MEM, 0);
+	if (!cfg)
+		return -EINVAL;
+
+	/* Map the whole region now, claim the DTCs once we've found them */
+	cmn->base = devm_ioremap(cmn->dev, cfg->start, resource_size(cfg));
+	if (!cmn->base)
+		return -ENOMEM;
+
+	rootnode = arm_cmn_get_root(cmn, cfg);
 	if (rootnode < 0)
 		return rootnode;
 
@@ -2451,9 +2871,9 @@ static int arm_cmn_probe(struct platform_device *pdev)
 	if (err)
 		return err;
 
-	cmn->cpu = cpumask_local_spread(0, dev_to_node(cmn->dev));
 	cmn->pmu = (struct pmu) {
 		.module = THIS_MODULE,
+		.parent = cmn->dev,
 		.attr_groups = arm_cmn_attr_groups,
 		.capabilities = PERF_PMU_CAP_NO_EXCLUDE,
 		.task_ctx_nr = perf_invalid_context,
@@ -2488,7 +2908,7 @@ static int arm_cmn_probe(struct platform_device *pdev)
 	return err;
 }
 
-static int arm_cmn_remove(struct platform_device *pdev)
+static void arm_cmn_remove(struct platform_device *pdev)
 {
 	struct arm_cmn *cmn = platform_get_drvdata(pdev);
 
@@ -2497,7 +2917,6 @@ static int arm_cmn_remove(struct platform_device *pdev)
 	perf_pmu_unregister(&cmn->pmu);
 	cpuhp_state_remove_instance_nocalls(arm_cmn_hp_state, &cmn->cpuhp_node);
 	debugfs_remove(cmn->debug);
-	return 0;
 }
 
 #ifdef CONFIG_OF
@@ -2505,6 +2924,7 @@ static const struct of_device_id arm_cmn_of_match[] = {
 	{ .compatible = "arm,cmn-600", .data = (void *)PART_CMN600 },
 	{ .compatible = "arm,cmn-650" },
 	{ .compatible = "arm,cmn-700" },
+	{ .compatible = "arm,cmn-s3" },
 	{ .compatible = "arm,ci-700" },
 	{}
 };
@@ -2516,6 +2936,8 @@ static const struct acpi_device_id arm_cmn_acpi_match[] = {
 	{ "ARMHC600", PART_CMN600 },
 	{ "ARMHC650" },
 	{ "ARMHC700" },
+	{ "ARMHC003" },
+	{ "AMZN0070", PART_GRAVITON5 },
 	{}
 };
 MODULE_DEVICE_TABLE(acpi, arm_cmn_acpi_match);
@@ -2526,6 +2948,7 @@ static struct platform_driver arm_cmn_driver = {
 		.name = "arm-cmn",
 		.of_match_table = of_match_ptr(arm_cmn_of_match),
 		.acpi_match_table = ACPI_PTR(arm_cmn_acpi_match),
+		.suppress_bind_attrs = true,
 	},
 	.probe = arm_cmn_probe,
 	.remove = arm_cmn_remove,
@@ -2564,5 +2987,5 @@ module_init(arm_cmn_init);
 module_exit(arm_cmn_exit);
 
 MODULE_AUTHOR("Robin Murphy <robin.murphy@arm.com>");
-MODULE_DESCRIPTION("Arm CMN-600 PMU driver");
+MODULE_DESCRIPTION("Arm CMN/CI interconnect PMU driver");
 MODULE_LICENSE("GPL v2");

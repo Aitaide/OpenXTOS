@@ -27,6 +27,7 @@
 #include <linux/clk.h>
 #include <linux/console.h>
 #include <linux/io.h>
+#include <linux/string_choices.h>
 
 #include <linux/uaccess.h>
 #include <asm/div64.h>
@@ -95,6 +96,7 @@ struct sm501fb_info {
 	void __iomem		*fbmem;		/* remapped framebuffer */
 	size_t			 fbmem_len;	/* length of remapped region */
 	u8 *edid_data;
+	char *fb_mode;
 };
 
 /* per-framebuffer private data */
@@ -324,6 +326,13 @@ static int sm501fb_check_var(struct fb_var_screeninfo *var,
 	/* check the virtual size */
 
 	if (var->xres_virtual > 4096 || var->yres_virtual > 2048)
+		return -EINVAL;
+
+	/* geometry sanity checks */
+	if (var->xres + var->xoffset > var->xres_virtual)
+		return -EINVAL;
+
+	if (var->yres + var->yoffset > var->yres_virtual)
 		return -EINVAL;
 
 	/* can cope with 8,16 or 32bpp */
@@ -1452,6 +1461,7 @@ static void sm501fb_fillrect(struct fb_info *info, const struct fb_fillrect *rec
 
 static struct fb_ops sm501fb_ops_crt = {
 	.owner		= THIS_MODULE,
+	__FB_DEFAULT_IOMEM_OPS_RDWR,
 	.fb_check_var	= sm501fb_check_var_crt,
 	.fb_set_par	= sm501fb_set_par_crt,
 	.fb_blank	= sm501fb_blank_crt,
@@ -1462,10 +1472,12 @@ static struct fb_ops sm501fb_ops_crt = {
 	.fb_copyarea	= sm501fb_copyarea,
 	.fb_imageblit	= cfb_imageblit,
 	.fb_sync	= sm501fb_sync,
+	__FB_DEFAULT_IOMEM_OPS_MMAP,
 };
 
 static struct fb_ops sm501fb_ops_pnl = {
 	.owner		= THIS_MODULE,
+	__FB_DEFAULT_IOMEM_OPS_RDWR,
 	.fb_check_var	= sm501fb_check_var_pnl,
 	.fb_set_par	= sm501fb_set_par_pnl,
 	.fb_pan_display	= sm501fb_pan_pnl,
@@ -1476,6 +1488,7 @@ static struct fb_ops sm501fb_ops_pnl = {
 	.fb_copyarea	= sm501fb_copyarea,
 	.fb_imageblit	= cfb_imageblit,
 	.fb_sync	= sm501fb_sync,
+	__FB_DEFAULT_IOMEM_OPS_MMAP,
 };
 
 /* sm501_init_cursor
@@ -1708,8 +1721,8 @@ static int sm501fb_init_fb(struct fb_info *fb, enum sm501_controller head,
 		BUG();
 	}
 
-	dev_info(info->dev, "fb %s %sabled at start\n",
-		 fbname, enable ? "en" : "dis");
+	dev_info(info->dev, "fb %s %s at start\n",
+		 fbname, str_enabled_disabled(enable));
 
 	/* check to see if our routing allows this */
 
@@ -1781,12 +1794,11 @@ static int sm501fb_init_fb(struct fb_info *fb, enum sm501_controller head,
 			fb->var.yres_virtual = fb->var.yres;
 		} else {
 			if (info->edid_data) {
-				ret = fb_find_mode(&fb->var, fb, fb_mode,
+				ret = fb_find_mode(&fb->var, fb,
+					info->fb_mode ?: fb_mode,
 					fb->monspecs.modedb,
 					fb->monspecs.modedb_len,
 					&sm501_default_mode, default_bpp);
-				/* edid_data is no longer needed, free it */
-				kfree(info->edid_data);
 			} else {
 				ret = fb_find_mode(&fb->var, fb,
 					   NULL, NULL, 0, NULL, 8);
@@ -1935,7 +1947,7 @@ static int sm501fb_probe(struct platform_device *pdev)
 	int ret;
 
 	/* allocate our framebuffers */
-	info = kzalloc(sizeof(*info), GFP_KERNEL);
+	info = kzalloc_obj(*info);
 	if (!info) {
 		dev_err(dev, "failed to allocate state\n");
 		return -ENOMEM;
@@ -1962,7 +1974,7 @@ static int sm501fb_probe(struct platform_device *pdev)
 			/* Get EDID */
 			cp = of_get_property(np, "mode", &len);
 			if (cp)
-				strcpy(fb_mode, cp);
+				info->fb_mode = kstrdup(cp, GFP_KERNEL);
 			prop = of_get_property(np, "edid", &len);
 			if (prop && len == EDID_LENGTH) {
 				info->edid_data = kmemdup(prop, EDID_LENGTH,
@@ -2019,6 +2031,12 @@ static int sm501fb_probe(struct platform_device *pdev)
 		goto err_started_crt;
 	}
 
+	/* These aren't needed any more */
+	kfree(info->edid_data);
+	kfree(info->fb_mode);
+	info->edid_data = NULL;
+	info->fb_mode = NULL;
+
 	/* we registered, return ok */
 	return 0;
 
@@ -2036,6 +2054,8 @@ err_probed_crt:
 	framebuffer_release(info->fb[HEAD_CRT]);
 
 err_alloc:
+	kfree(info->edid_data);
+	kfree(info->fb_mode);
 	kfree(info);
 
 	return ret;
@@ -2207,7 +2227,7 @@ static int sm501fb_resume(struct platform_device *pdev)
 
 static struct platform_driver sm501fb_driver = {
 	.probe		= sm501fb_probe,
-	.remove_new	= sm501fb_remove,
+	.remove		= sm501fb_remove,
 	.suspend	= sm501fb_suspend,
 	.resume		= sm501fb_resume,
 	.driver		= {

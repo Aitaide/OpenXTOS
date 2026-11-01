@@ -24,7 +24,6 @@
 #include <linux/ioport.h>
 #include <linux/iopoll.h>
 #include <linux/crc32.h>
-#include <linux/mod_devicetable.h>
 #include <linux/of.h>
 #include <linux/platform_device.h>
 #include <soc/fsl/qe/immap_qe.h>
@@ -88,6 +87,9 @@ void qe_reset(void)
 {
 	if (qe_immr == NULL)
 		qe_immr = ioremap(get_qe_base(), QE_IMMAP_SIZE);
+
+	if (!qe_immr)
+		panic("QE:ioremap failed!");
 
 	qe_snums_init();
 
@@ -430,7 +432,7 @@ static void qe_upload_microcode(const void *base,
 /*
  * Upload a microcode to the I-RAM at a specific address.
  *
- * See Documentation/powerpc/qe_firmware.rst for information on QE microcode
+ * See Documentation/arch/powerpc/qe_firmware.rst for information on QE microcode
  * uploading.
  *
  * Currently, only version 1 is supported, so the 'version' field must be

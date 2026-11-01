@@ -104,7 +104,7 @@ static struct atmel_pdmic_pdata *atmel_pdmic_dt_init(struct device *dev)
 static int atmel_pdmic_cpu_dai_startup(struct snd_pcm_substream *substream,
 					struct snd_soc_dai *cpu_dai)
 {
-	struct snd_soc_pcm_runtime *rtd = asoc_substream_to_rtd(substream);
+	struct snd_soc_pcm_runtime *rtd = snd_soc_substream_to_rtd(substream);
 	struct atmel_pdmic *dd = snd_soc_card_get_drvdata(rtd->card);
 	int ret;
 
@@ -132,7 +132,7 @@ static int atmel_pdmic_cpu_dai_startup(struct snd_pcm_substream *substream,
 static void atmel_pdmic_cpu_dai_shutdown(struct snd_pcm_substream *substream,
 					struct snd_soc_dai *cpu_dai)
 {
-	struct snd_soc_pcm_runtime *rtd = asoc_substream_to_rtd(substream);
+	struct snd_soc_pcm_runtime *rtd = snd_soc_substream_to_rtd(substream);
 	struct atmel_pdmic *dd = snd_soc_card_get_drvdata(rtd->card);
 
 	/* Disable the overrun error interrupt */
@@ -145,7 +145,7 @@ static void atmel_pdmic_cpu_dai_shutdown(struct snd_pcm_substream *substream,
 static int atmel_pdmic_cpu_dai_prepare(struct snd_pcm_substream *substream,
 					struct snd_soc_dai *cpu_dai)
 {
-	struct snd_soc_pcm_runtime *rtd = asoc_substream_to_rtd(substream);
+	struct snd_soc_pcm_runtime *rtd = snd_soc_substream_to_rtd(substream);
 	struct atmel_pdmic *dd = snd_soc_card_get_drvdata(rtd->card);
 	struct snd_soc_component *component = cpu_dai->component;
 	u32 val;
@@ -191,7 +191,7 @@ atmel_pdmic_platform_configure_dma(struct snd_pcm_substream *substream,
 				struct snd_pcm_hw_params *params,
 				struct dma_slave_config *slave_config)
 {
-	struct snd_soc_pcm_runtime *rtd = asoc_substream_to_rtd(substream);
+	struct snd_soc_pcm_runtime *rtd = snd_soc_substream_to_rtd(substream);
 	struct atmel_pdmic *dd = snd_soc_card_get_drvdata(rtd->card);
 	int ret;
 
@@ -280,7 +280,7 @@ static const DECLARE_TLV_DB_RANGE(mic_gain_tlv,
 static int pdmic_get_mic_volsw(struct snd_kcontrol *kcontrol,
 	struct snd_ctl_elem_value *ucontrol)
 {
-	struct snd_soc_component *component = snd_soc_kcontrol_component(kcontrol);
+	struct snd_soc_component *component = snd_kcontrol_chip(kcontrol);
 	unsigned int dgain_val, scale_val;
 	int i;
 
@@ -304,7 +304,7 @@ static int pdmic_put_mic_volsw(struct snd_kcontrol *kcontrol,
 {
 	struct soc_mixer_control *mc =
 		(struct soc_mixer_control *)kcontrol->private_value;
-	struct snd_soc_component *component = snd_soc_kcontrol_component(kcontrol);
+	struct snd_soc_component *component = snd_kcontrol_chip(kcontrol);
 	int max = mc->max;
 	unsigned int val;
 	int ret;
@@ -356,7 +356,7 @@ atmel_pdmic_cpu_dai_hw_params(struct snd_pcm_substream *substream,
 			      struct snd_pcm_hw_params *params,
 			      struct snd_soc_dai *cpu_dai)
 {
-	struct snd_soc_pcm_runtime *rtd = asoc_substream_to_rtd(substream);
+	struct snd_soc_pcm_runtime *rtd = snd_soc_substream_to_rtd(substream);
 	struct atmel_pdmic *dd = snd_soc_card_get_drvdata(rtd->card);
 	struct snd_soc_component *component = cpu_dai->component;
 	unsigned int rate_min = substream->runtime->hw.rate_min;
@@ -501,7 +501,7 @@ static int atmel_pdmic_asoc_card_init(struct device *dev,
 		return -ENOMEM;
 
 	dai_link->cpus		= comp;
-	dai_link->codecs	= &asoc_dummy_dlc;
+	dai_link->codecs	= &snd_soc_dummy_dlc;
 
 	dai_link->num_cpus	= 1;
 	dai_link->num_codecs	= 1;

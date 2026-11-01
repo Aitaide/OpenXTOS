@@ -13,6 +13,9 @@
 #include <linux/hiddev.h>
 #include <linux/hyperv.h>
 
+#if IS_ENABLED(CONFIG_HID_HYPERV_MOUSE_KUNIT_TEST)
+#include <kunit/test.h>
+#endif
 
 struct hv_input_dev_info {
 	unsigned int size;
@@ -149,7 +152,7 @@ static struct mousevsc_dev *mousevsc_alloc_device(struct hv_device *device)
 {
 	struct mousevsc_dev *input_dev;
 
-	input_dev = kzalloc(sizeof(struct mousevsc_dev), GFP_KERNEL);
+	input_dev = kzalloc_obj(struct mousevsc_dev);
 
 	if (!input_dev)
 		return NULL;
@@ -171,18 +174,32 @@ static void mousevsc_free_device(struct mousevsc_dev *device)
 }
 
 static void mousevsc_on_receive_device_info(struct mousevsc_dev *input_device,
-				struct synthhid_device_info *device_info)
+					    struct synthhid_device_info *device_info,
+					    u32 device_info_size)
 {
 	int ret = 0;
 	struct hid_descriptor *desc;
 	struct mousevsc_prt_msg ack;
+	size_t desc_offset;
+	size_t desc_size;
 
 	input_device->dev_info_status = -ENOMEM;
 
+	if (device_info_size < sizeof(*device_info)) {
+		input_device->dev_info_status = -EINVAL;
+		goto cleanup;
+	}
+
 	input_device->hid_dev_info = device_info->hid_dev_info;
 	desc = &device_info->hid_descriptor;
+	desc_offset = offsetof(struct synthhid_device_info, hid_descriptor);
+	desc_size = device_info_size - desc_offset;
 	if (desc->bLength == 0)
 		goto cleanup;
+	if (desc->bLength < sizeof(*desc) || desc->bLength > desc_size) {
+		input_device->dev_info_status = -EINVAL;
+		goto cleanup;
+	}
 
 	/* The pointer is not NULL when we resume from hibernation */
 	kfree(input_device->hid_desc);
@@ -192,8 +209,12 @@ static void mousevsc_on_receive_device_info(struct mousevsc_dev *input_device,
 		goto cleanup;
 
 	input_device->report_desc_size = le16_to_cpu(
-					desc->desc[0].wDescriptorLength);
+					desc->rpt_desc.wDescriptorLength);
 	if (input_device->report_desc_size == 0) {
+		input_device->dev_info_status = -EINVAL;
+		goto cleanup;
+	}
+	if (input_device->report_desc_size > desc_size - desc->bLength) {
 		input_device->dev_info_status = -EINVAL;
 		goto cleanup;
 	}
@@ -210,7 +231,7 @@ static void mousevsc_on_receive_device_info(struct mousevsc_dev *input_device,
 
 	memcpy(input_device->report_desc,
 	       ((unsigned char *)desc) + desc->bLength,
-	       le16_to_cpu(desc->desc[0].wDescriptorLength));
+	       le16_to_cpu(desc->rpt_desc.wDescriptorLength));
 
 	/* Send the ack */
 	memset(&ack, 0, sizeof(struct mousevsc_prt_msg));
@@ -222,13 +243,18 @@ static void mousevsc_on_receive_device_info(struct mousevsc_dev *input_device,
 	ack.ack.header.size = 1;
 	ack.ack.reserved = 0;
 
-	ret = vmbus_sendpacket(input_device->device->channel,
-			&ack,
-			sizeof(struct pipe_prt_msg) +
-			sizeof(struct synthhid_device_info_ack),
-			(unsigned long)&ack,
-			VM_PKT_DATA_INBAND,
-			VMBUS_DATA_PACKET_FLAG_COMPLETION_REQUESTED);
+	if (IS_ENABLED(CONFIG_HID_HYPERV_MOUSE_KUNIT_TEST) &&
+	    !input_device->device) {
+		ret = 0;
+	} else {
+		ret = vmbus_sendpacket(input_device->device->channel,
+				       &ack,
+				       sizeof(struct pipe_prt_msg) +
+				       sizeof(struct synthhid_device_info_ack),
+				       (unsigned long)&ack,
+				       VM_PKT_DATA_INBAND,
+				       VMBUS_DATA_PACKET_FLAG_COMPLETION_REQUESTED);
+	}
 
 	if (!ret)
 		input_device->dev_info_status = 0;
@@ -273,14 +299,17 @@ static void mousevsc_on_receive(struct hv_device *device,
 		break;
 
 	case SYNTH_HID_INITIAL_DEVICE_INFO:
-		WARN_ON(pipe_msg->size < sizeof(struct hv_input_dev_info));
+		if (WARN_ON_ONCE(pipe_msg->size <
+				 sizeof(struct synthhid_device_info)))
+			break;
 
 		/*
 		 * Parse out the device info into device attr,
 		 * hid desc and report desc
 		 */
 		mousevsc_on_receive_device_info(input_dev,
-			(struct synthhid_device_info *)pipe_msg->data);
+						(struct synthhid_device_info *)pipe_msg->data,
+						pipe_msg->size);
 		break;
 	case SYNTH_HID_INPUT_REPORT:
 		input_report =
@@ -422,6 +451,25 @@ static int mousevsc_hid_raw_request(struct hid_device *hid,
 	return 0;
 }
 
+static int mousevsc_hid_probe(struct hid_device *hid_dev, const struct hid_device_id *id)
+{
+	int ret;
+
+	ret = hid_parse(hid_dev);
+	if (ret) {
+		hid_err(hid_dev, "parse failed\n");
+		return ret;
+	}
+
+	ret = hid_hw_start(hid_dev, HID_CONNECT_HIDINPUT | HID_CONNECT_HIDDEV);
+	if (ret) {
+		hid_err(hid_dev, "hw start failed\n");
+		return ret;
+	}
+
+	return 0;
+}
+
 static const struct hid_ll_driver mousevsc_ll_driver = {
 	.parse = mousevsc_hid_parse,
 	.open = mousevsc_hid_open,
@@ -431,7 +479,16 @@ static const struct hid_ll_driver mousevsc_ll_driver = {
 	.raw_request = mousevsc_hid_raw_request,
 };
 
-static struct hid_driver mousevsc_hid_driver;
+static const struct hid_device_id mousevsc_devices[] = {
+	{ HID_DEVICE(BUS_VIRTUAL, HID_GROUP_ANY, 0x045E, 0x0621) },
+	{ }
+};
+
+static struct hid_driver mousevsc_hid_driver = {
+	.name = "hid-hyperv",
+	.id_table = mousevsc_devices,
+	.probe = mousevsc_hid_probe,
+};
 
 static int mousevsc_probe(struct hv_device *device,
 			const struct hv_vmbus_device_id *dev_id)
@@ -473,7 +530,6 @@ static int mousevsc_probe(struct hv_device *device,
 	}
 
 	hid_dev->ll_driver = &mousevsc_ll_driver;
-	hid_dev->driver = &mousevsc_hid_driver;
 	hid_dev->bus = BUS_VIRTUAL;
 	hid_dev->vendor = input_dev->hid_dev_info.vendor;
 	hid_dev->product = input_dev->hid_dev_info.product;
@@ -487,20 +543,6 @@ static int mousevsc_probe(struct hv_device *device,
 	ret = hid_add_device(hid_dev);
 	if (ret)
 		goto probe_err2;
-
-
-	ret = hid_parse(hid_dev);
-	if (ret) {
-		hid_err(hid_dev, "parse failed\n");
-		goto probe_err2;
-	}
-
-	ret = hid_hw_start(hid_dev, HID_CONNECT_HIDINPUT | HID_CONNECT_HIDDEV);
-
-	if (ret) {
-		hid_err(hid_dev, "hw start failed\n");
-		goto probe_err2;
-	}
 
 	device_init_wakeup(&device->device, true);
 
@@ -579,16 +621,122 @@ static struct  hv_driver mousevsc_drv = {
 
 static int __init mousevsc_init(void)
 {
-	return vmbus_driver_register(&mousevsc_drv);
+	int ret;
+
+	ret = hid_register_driver(&mousevsc_hid_driver);
+	if (ret)
+		return ret;
+
+	ret = vmbus_driver_register(&mousevsc_drv);
+	if (ret)
+		hid_unregister_driver(&mousevsc_hid_driver);
+
+	return ret;
 }
 
 static void __exit mousevsc_exit(void)
 {
 	vmbus_driver_unregister(&mousevsc_drv);
+	hid_unregister_driver(&mousevsc_hid_driver);
 }
 
 MODULE_LICENSE("GPL");
 MODULE_DESCRIPTION("Microsoft Hyper-V Synthetic HID Driver");
+
+#if IS_ENABLED(CONFIG_HID_HYPERV_MOUSE_KUNIT_TEST)
+static struct mousevsc_dev *mousevsc_kunit_alloc_dev(struct kunit *test)
+{
+	struct mousevsc_dev *input_dev;
+
+	input_dev = kunit_kzalloc(test, sizeof(*input_dev), GFP_KERNEL);
+	if (!input_dev)
+		return NULL;
+
+	init_completion(&input_dev->wait_event);
+
+	return input_dev;
+}
+
+static void mousevsc_device_info_zero_blength(struct kunit *test)
+{
+	struct synthhid_device_info *info;
+	struct mousevsc_dev *input_dev;
+
+	input_dev = mousevsc_kunit_alloc_dev(test);
+	KUNIT_ASSERT_NOT_NULL(test, input_dev);
+	info = kunit_kzalloc(test, sizeof(*info), GFP_KERNEL);
+	KUNIT_ASSERT_NOT_NULL(test, info);
+
+	info->hid_descriptor.bLength = 0;
+
+	mousevsc_on_receive_device_info(input_dev, info, sizeof(*info));
+
+	KUNIT_EXPECT_EQ(test, input_dev->dev_info_status, -ENOMEM);
+}
+
+static void mousevsc_device_info_valid_descriptor(struct kunit *test)
+{
+	struct synthhid_device_info *info;
+	struct mousevsc_dev *input_dev;
+	u8 *report;
+
+	input_dev = mousevsc_kunit_alloc_dev(test);
+	KUNIT_ASSERT_NOT_NULL(test, input_dev);
+	info = kunit_kzalloc(test, sizeof(*info) + 4, GFP_KERNEL);
+	KUNIT_ASSERT_NOT_NULL(test, info);
+
+	info->hid_descriptor.bLength = sizeof(struct hid_descriptor);
+	info->hid_descriptor.rpt_desc.wDescriptorLength = cpu_to_le16(4);
+	report = (u8 *)(info + 1);
+	memset(report, 0x42, 4);
+
+	mousevsc_on_receive_device_info(input_dev, info, sizeof(*info) + 4);
+
+	KUNIT_EXPECT_EQ(test, input_dev->dev_info_status, 0);
+	KUNIT_EXPECT_EQ(test, input_dev->report_desc_size, 4);
+	KUNIT_EXPECT_MEMEQ(test, input_dev->report_desc, report, 4);
+
+	kfree(input_dev->hid_desc);
+	kfree(input_dev->report_desc);
+}
+
+static void mousevsc_device_info_report_desc_oob(struct kunit *test)
+{
+	struct synthhid_device_info *info;
+	struct mousevsc_dev *input_dev;
+	u8 *report;
+
+	input_dev = mousevsc_kunit_alloc_dev(test);
+	KUNIT_ASSERT_NOT_NULL(test, input_dev);
+	info = kunit_kzalloc(test, sizeof(*info) + 8, GFP_KERNEL);
+	KUNIT_ASSERT_NOT_NULL(test, info);
+
+	info->hid_descriptor.bLength = sizeof(struct hid_descriptor);
+	info->hid_descriptor.rpt_desc.wDescriptorLength = cpu_to_le16(64);
+	report = (u8 *)(info + 1);
+	memset(report, 0x42, 8);
+
+	mousevsc_on_receive_device_info(input_dev, info, sizeof(*info) + 8);
+
+	KUNIT_EXPECT_EQ(test, input_dev->dev_info_status, -EINVAL);
+
+	kfree(input_dev->hid_desc);
+}
+
+static struct kunit_case mousevsc_test_cases[] = {
+	KUNIT_CASE(mousevsc_device_info_zero_blength),
+	KUNIT_CASE(mousevsc_device_info_valid_descriptor),
+	KUNIT_CASE(mousevsc_device_info_report_desc_oob),
+	{}
+};
+
+static struct kunit_suite mousevsc_test_suite = {
+	.name = "hid_hyperv_mouse",
+	.test_cases = mousevsc_test_cases,
+};
+
+kunit_test_suite(mousevsc_test_suite);
+#endif
 
 module_init(mousevsc_init);
 module_exit(mousevsc_exit);

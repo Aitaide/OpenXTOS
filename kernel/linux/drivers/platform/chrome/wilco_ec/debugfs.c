@@ -155,7 +155,6 @@ static const struct file_operations fops_raw = {
 	.owner = THIS_MODULE,
 	.read = raw_read,
 	.write = raw_write,
-	.llseek = no_llseek,
 };
 
 #define CMD_KB_CHROME		0x88
@@ -260,12 +259,16 @@ static int wilco_ec_debugfs_probe(struct platform_device *pdev)
 	return 0;
 }
 
-static int wilco_ec_debugfs_remove(struct platform_device *pdev)
+static void wilco_ec_debugfs_remove(struct platform_device *pdev)
 {
 	debugfs_remove_recursive(debug_info->dir);
-
-	return 0;
 }
+
+static const struct platform_device_id wilco_ec_debugfs_id[] = {
+	{ .name = DRV_NAME },
+	{ }
+};
+MODULE_DEVICE_TABLE(platform, wilco_ec_debugfs_id);
 
 static struct platform_driver wilco_ec_debugfs_driver = {
 	.driver = {
@@ -273,11 +276,11 @@ static struct platform_driver wilco_ec_debugfs_driver = {
 	},
 	.probe = wilco_ec_debugfs_probe,
 	.remove = wilco_ec_debugfs_remove,
+	.id_table = wilco_ec_debugfs_id,
 };
 
 module_platform_driver(wilco_ec_debugfs_driver);
 
-MODULE_ALIAS("platform:" DRV_NAME);
 MODULE_AUTHOR("Nick Crews <ncrews@chromium.org>");
 MODULE_LICENSE("GPL v2");
 MODULE_DESCRIPTION("Wilco EC debugfs driver");

@@ -341,13 +341,14 @@ static const struct of_device_id mt8173_pctrl_match[] = {
 	},
 	{ }
 };
+MODULE_DEVICE_TABLE(of, mt8173_pctrl_match);
 
 static struct platform_driver mtk_pinctrl_driver = {
 	.probe = mt8173_pinctrl_probe,
 	.driver = {
 		.name = "mediatek-mt8173-pinctrl",
 		.of_match_table = mt8173_pctrl_match,
-		.pm = &mtk_eint_pm_ops,
+		.pm = pm_sleep_ptr(&mtk_eint_pm_ops),
 	},
 };
 
@@ -356,3 +357,7 @@ static int __init mtk_pinctrl_init(void)
 	return platform_driver_register(&mtk_pinctrl_driver);
 }
 arch_initcall(mtk_pinctrl_init);
+
+MODULE_DESCRIPTION("MediaTek MT8173 Pinctrl Driver");
+MODULE_LICENSE("GPL v2");
+MODULE_IMPORT_NS("MTK_PINCTRL");

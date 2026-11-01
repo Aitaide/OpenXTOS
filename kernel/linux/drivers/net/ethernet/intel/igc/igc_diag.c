@@ -172,9 +172,8 @@ bool igc_link_test(struct igc_adapter *adapter, u64 *data)
 
 	*data = 0;
 
-	/* add delay to give enough time for autonegotioation to finish */
-	if (adapter->hw.mac.autoneg)
-		ssleep(5);
+	/* add delay to give enough time for autonegotiation to finish */
+	ssleep(5);
 
 	link_up = igc_has_link(adapter);
 	if (!link_up) {

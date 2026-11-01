@@ -28,8 +28,8 @@ class SchedulerHookCoverageTests(unittest.TestCase):
     def test_smp_and_optional_callbacks_are_marked_with_their_config_guards(self):
         matrix = MATRIX.read_text(encoding="utf-8")
         for callback, guard in (
-            ("balance", "CONFIG_SMP"), ("select_task_rq", "CONFIG_SMP"),
-            ("pick_task", "CONFIG_SMP"), ("migrate_task_rq", "CONFIG_SMP"),
+            ("balance", "always"), ("select_task_rq", "always"),
+            ("pick_task", "always"), ("migrate_task_rq", "always"),
             ("task_change_group", "CONFIG_FAIR_GROUP_SCHED"),
             ("task_is_throttled", "CONFIG_SCHED_CORE"),
         ):

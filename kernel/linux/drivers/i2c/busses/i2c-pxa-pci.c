@@ -4,7 +4,7 @@
  * Author: Sebastian Andrzej Siewior <bigeasy@linutronix.de>
  *
  * The CE4100's I2C device is more or less the same one as found on PXA.
- * It does not support slave mode, the register slightly moved. This PCI
+ * It does not support target mode, the register slightly moved. This PCI
  * device provides three bars, every contains a single I2C controller.
  */
 #include <linux/init.h>
@@ -76,7 +76,8 @@ static struct platform_device *add_i2c_device(struct pci_dev *dev, int bar)
 		goto out;
 	}
 	pdev->dev.parent = &dev->dev;
-	pdev->dev.of_node = child;
+
+	platform_device_set_of_node(pdev, child);
 
 	ret = platform_device_add_resources(pdev, res, ARRAY_SIZE(res));
 	if (ret)
@@ -112,7 +113,7 @@ static int ce4100_i2c_probe(struct pci_dev *dev,
 		dev_err(&dev->dev, "Missing device tree node.\n");
 		return -EINVAL;
 	}
-	sds = kzalloc(sizeof(*sds), GFP_KERNEL);
+	sds = kzalloc_obj(*sds);
 	if (!sds)
 		return -ENOMEM;
 
@@ -135,7 +136,7 @@ err_dev_add:
 
 static const struct pci_device_id ce4100_i2c_devices[] = {
 	{ PCI_DEVICE(PCI_VENDOR_ID_INTEL, 0x2e68)},
-	{ },
+	{ }
 };
 
 static struct pci_driver ce4100_i2c_driver = {

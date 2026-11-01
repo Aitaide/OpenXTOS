@@ -92,7 +92,7 @@ static int vmw_overlay_send_put(struct vmw_private *dev_priv,
 {
 	struct vmw_escape_video_flush *flush;
 	size_t fifo_size;
-	bool have_so = (dev_priv->active_display_unit == vmw_du_screen_object);
+	bool have_so = (dev_priv->active_display_unit != vmw_du_legacy);
 	int i, num_items;
 	SVGAGuestPtr ptr;
 
@@ -539,7 +539,7 @@ int vmw_overlay_init(struct vmw_private *dev_priv)
 	if (dev_priv->overlay_priv)
 		return -EINVAL;
 
-	overlay = kzalloc(sizeof(*overlay), GFP_KERNEL);
+	overlay = kzalloc_obj(*overlay);
 	if (!overlay)
 		return -ENOMEM;
 

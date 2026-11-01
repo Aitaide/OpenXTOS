@@ -170,13 +170,13 @@ struct ab8500_chargalg_events {
  * @original_iset_ua:	the non optimized/maximised charger current
  * @current_iset_ua:	the charging current used at this moment
  * @condition_cnt:	number of iterations needed before a new charger current
-			is set
+ *			is set
  * @max_current_ua:	maximum charger current
  * @wait_cnt:		to avoid too fast current step down in case of charger
  *			voltage collapse, we insert this delay between step
  *			down
  * @level:		tells in how many steps the charging current has been
-			increased
+ *			increased
  */
 struct ab8500_charge_curr_maximization {
 	int original_iset_ua;
@@ -199,18 +199,20 @@ enum maxim_ret {
  * @charge_status:	battery operating status
  * @eoc_cnt:		counter used to determine end-of_charge
  * @maintenance_chg:	indicate if maintenance charge is active
- * @t_hyst_norm		temperature hysteresis when the temperature has been
+ * @t_hyst_norm:	temperature hysteresis when the temperature has been
  *			over or under normal limits
- * @t_hyst_lowhigh	temperature hysteresis when the temperature has been
+ * @t_hyst_lowhigh:	temperature hysteresis when the temperature has been
  *			over or under the high or low limits
  * @charge_state:	current state of the charging algorithm
- * @ccm			charging current maximization parameters
+ * @ccm:		charging current maximization parameters
  * @chg_info:		information about connected charger types
  * @batt_data:		data of the battery
  * @bm:           	Platform specific battery management information
  * @parent:		pointer to the struct ab8500
  * @chargalg_psy:	structure that holds the battery properties exposed by
  *			the charging algorithm
+ * @ac_chg:		AC charger power supply
+ * @usb_chg:		USB charger power supply
  * @events:		structure for information about events triggered
  * @chargalg_wq:		work queue for running the charging algorithm
  * @chargalg_periodic_work:	work to run the charging algorithm periodically
@@ -300,6 +302,7 @@ ab8500_chargalg_maintenance_timer_expired(struct hrtimer *timer)
 /**
  * ab8500_chargalg_state_to() - Change charge state
  * @di:		pointer to the ab8500_chargalg structure
+ * @state:	new charge algorithm state
  *
  * This function gets called when a charge state change should occur
  */
@@ -763,7 +766,7 @@ static void init_maxim_chg_curr(struct ab8500_chargalg *di)
 /**
  * ab8500_chargalg_chg_curr_maxim - increases the charger current to
  *			compensate for the system load
- * @di		pointer to the ab8500_chargalg structure
+ * @di:		pointer to the ab8500_chargalg structure
  *
  * This maximization function is used to raise the charger current to get the
  * battery current as close to the optimal value as possible. The battery
@@ -844,10 +847,9 @@ static void handle_maxim_chg_curr(struct ab8500_chargalg *di)
 	}
 }
 
-static int ab8500_chargalg_get_ext_psy_data(struct device *dev, void *data)
+static int ab8500_chargalg_get_ext_psy_data(struct power_supply *ext, void *data)
 {
 	struct power_supply *psy;
-	struct power_supply *ext = dev_get_drvdata(dev);
 	const char **supplicants = (const char **)ext->supplied_to;
 	struct ab8500_chargalg *di;
 	union power_supply_propval ret;
@@ -1225,14 +1227,13 @@ static bool ab8500_chargalg_time_to_restart(struct ab8500_chargalg *di)
  */
 static void ab8500_chargalg_algorithm(struct ab8500_chargalg *di)
 {
+	const struct power_supply_maintenance_charge_table *mt;
 	struct power_supply_battery_info *bi = di->bm->bi;
-	struct power_supply_maintenance_charge_table *mt;
 	int charger_status;
 	int ret;
 
 	/* Collect data from all power_supply class devices */
-	class_for_each_device(power_supply_class, NULL,
-		di->chargalg_psy, ab8500_chargalg_get_ext_psy_data);
+	power_supply_for_each_psy(di->chargalg_psy, ab8500_chargalg_get_ext_psy_data);
 
 	ab8500_chargalg_end_of_charge(di);
 	ab8500_chargalg_check_temp(di);
@@ -1789,13 +1790,12 @@ static int ab8500_chargalg_probe(struct platform_device *pdev)
 	psy_cfg.drv_data = di;
 
 	/* Initilialize safety timer */
-	hrtimer_init(&di->safety_timer, CLOCK_MONOTONIC, HRTIMER_MODE_REL);
-	di->safety_timer.function = ab8500_chargalg_safety_timer_expired;
+	hrtimer_setup(&di->safety_timer, ab8500_chargalg_safety_timer_expired, CLOCK_MONOTONIC,
+		      HRTIMER_MODE_REL);
 
 	/* Initilialize maintenance timer */
-	hrtimer_init(&di->maintenance_timer, CLOCK_MONOTONIC, HRTIMER_MODE_REL);
-	di->maintenance_timer.function =
-		ab8500_chargalg_maintenance_timer_expired;
+	hrtimer_setup(&di->maintenance_timer, ab8500_chargalg_maintenance_timer_expired,
+		      CLOCK_MONOTONIC, HRTIMER_MODE_REL);
 
 	/* Init work for chargalg */
 	INIT_DEFERRABLE_WORK(&di->chargalg_periodic_work,
@@ -1824,11 +1824,9 @@ static int ab8500_chargalg_probe(struct platform_device *pdev)
 	return component_add(dev, &ab8500_chargalg_component_ops);
 }
 
-static int ab8500_chargalg_remove(struct platform_device *pdev)
+static void ab8500_chargalg_remove(struct platform_device *pdev)
 {
 	component_del(&pdev->dev, &ab8500_chargalg_component_ops);
-
-	return 0;
 }
 
 static SIMPLE_DEV_PM_OPS(ab8500_chargalg_pm_ops, ab8500_chargalg_suspend, ab8500_chargalg_resume);

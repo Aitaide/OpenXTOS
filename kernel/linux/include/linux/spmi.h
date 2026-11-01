@@ -76,6 +76,7 @@ void spmi_device_remove(struct spmi_device *sdev);
  * @cmd:	sends a non-data command sequence on the SPMI bus.
  * @read_cmd:	sends a register read command sequence on the SPMI bus.
  * @write_cmd:	sends a register write command sequence on the SPMI bus.
+ * @priv:	array of private data.
  */
 struct spmi_controller {
 	struct device		dev;
@@ -85,6 +86,7 @@ struct spmi_controller {
 			    u8 sid, u16 addr, u8 *buf, size_t len);
 	int	(*write_cmd)(struct spmi_controller *ctrl, u8 opcode,
 			     u8 sid, u16 addr, const u8 *buf, size_t len);
+	u8	priv[];
 };
 
 static inline struct spmi_controller *to_spmi_controller(struct device *d)
@@ -109,7 +111,7 @@ struct spmi_controller *spmi_controller_alloc(struct device *parent,
 
 /**
  * spmi_controller_put() - decrement controller refcount
- * @ctrl	SPMI controller.
+ * @ctrl:	SPMI controller.
  */
 static inline void spmi_controller_put(struct spmi_controller *ctrl)
 {
@@ -120,12 +122,16 @@ static inline void spmi_controller_put(struct spmi_controller *ctrl)
 int spmi_controller_add(struct spmi_controller *ctrl);
 void spmi_controller_remove(struct spmi_controller *ctrl);
 
+struct spmi_controller *devm_spmi_controller_alloc(struct device *parent, size_t size);
+int devm_spmi_controller_add(struct device *parent, struct spmi_controller *ctrl);
+
 /**
  * struct spmi_driver - SPMI slave device driver
  * @driver:	SPMI device drivers should initialize name and owner field of
  *		this structure.
  * @probe:	binds this driver to a SPMI device.
  * @remove:	unbinds this driver from the SPMI device.
+ * @shutdown:	shuts down this driver.
  *
  * If PM runtime support is desired for a slave, a device driver can call
  * pm_runtime_put() from their probe() routine (and a balancing
@@ -166,7 +172,7 @@ static inline void spmi_driver_unregister(struct spmi_driver *sdrv)
 
 struct device_node;
 
-struct spmi_device *spmi_device_from_of(struct device_node *np);
+struct spmi_device *spmi_find_device_by_of_node(struct device_node *np);
 int spmi_register_read(struct spmi_device *sdev, u8 addr, u8 *buf);
 int spmi_ext_register_read(struct spmi_device *sdev, u8 addr, u8 *buf,
 			   size_t len);

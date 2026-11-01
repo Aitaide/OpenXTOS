@@ -37,7 +37,7 @@ static int brcm_u_boot_parse(struct mtd_info *mtd,
 	int err;
 	int i = 0;
 
-	parts = kcalloc(BRCM_U_BOOT_MAX_PARTS, sizeof(*parts), GFP_KERNEL);
+	parts = kzalloc_objs(*parts, BRCM_U_BOOT_MAX_PARTS);
 	if (!parts)
 		return -ENOMEM;
 
@@ -81,4 +81,5 @@ static struct mtd_part_parser brcm_u_boot_mtd_parser = {
 };
 module_mtd_part_parser(brcm_u_boot_mtd_parser);
 
+MODULE_DESCRIPTION("Broadcom's U-Boot partition parser");
 MODULE_LICENSE("GPL");

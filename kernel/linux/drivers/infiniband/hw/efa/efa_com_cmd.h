@@ -1,6 +1,6 @@
 /* SPDX-License-Identifier: GPL-2.0 OR BSD-2-Clause */
 /*
- * Copyright 2018-2023 Amazon.com, Inc. or its affiliates. All rights reserved.
+ * Copyright 2018-2026 Amazon.com, Inc. or its affiliates. All rights reserved.
  */
 
 #ifndef _EFA_COM_CMD_H_
@@ -27,6 +27,9 @@ struct efa_com_create_qp_params {
 	u16 pd;
 	u16 uarn;
 	u8 qp_type;
+	u8 sl;
+	u8 unsolicited_write_recv : 1;
+	u8 sq_64_bit_req_id : 1;
 };
 
 struct efa_com_create_qp_result {
@@ -70,13 +73,14 @@ struct efa_com_create_cq_params {
 	/* cq physical base address in OS memory */
 	dma_addr_t dma_addr;
 	/* completion queue depth in # of entries */
-	u16 cq_depth;
+	u16 sub_cq_depth;
 	u16 num_sub_cqs;
 	u16 uarn;
 	u16 eqn;
 	u8 entry_size_in_bytes;
 	u8 interrupt_mode_enabled : 1;
 	u8 set_src_addr : 1;
+	u8 sq_comp_64_bit_req_id : 1;
 };
 
 struct efa_com_create_cq_result {
@@ -104,6 +108,7 @@ struct efa_com_create_ah_result {
 
 struct efa_com_destroy_ah_params {
 	u16 ah;
+	u8 gid[EFA_GID_SIZE];
 	u16 pdn;
 };
 
@@ -111,6 +116,7 @@ struct efa_com_get_device_attr_result {
 	u8 addr[EFA_GID_SIZE];
 	u64 page_size_cap;
 	u64 max_mr_pages;
+	u64 guid;
 	u32 mtu;
 	u32 fw_version;
 	u32 admin_api_version;
@@ -124,6 +130,7 @@ struct efa_com_get_device_attr_result {
 	u32 max_cq;
 	u32 max_cq_depth; /* cqes */
 	u32 inline_buf_size;
+	u32 inline_buf_size_ex;
 	u32 max_mr;
 	u32 max_pd;
 	u32 max_ah;
@@ -139,7 +146,11 @@ struct efa_com_get_device_attr_result {
 	u16 max_wr_rdma_sge;
 	u16 max_tx_batch;
 	u16 min_sq_depth;
+	u16 max_link_speed_gbps;
 	u8 db_bar;
+	u32 max_event_counters;
+	u64 event_counter_max_val;
+	u32 supported_event_counter_qp_events;
 };
 
 struct efa_com_get_hw_hints_result {
@@ -199,6 +210,15 @@ struct efa_com_reg_mr_params {
 	u8 indirect;
 };
 
+struct efa_com_mr_interconnect_info {
+	u16 recv_ic_id;
+	u16 rdma_read_ic_id;
+	u16 rdma_recv_ic_id;
+	u8 recv_ic_id_valid : 1;
+	u8 rdma_read_ic_id_valid : 1;
+	u8 rdma_recv_ic_id_valid : 1;
+};
+
 struct efa_com_reg_mr_result {
 	/*
 	 * To be used in conjunction with local buffers references in SQ and
@@ -210,6 +230,7 @@ struct efa_com_reg_mr_result {
 	 * accessed memory region
 	 */
 	u32 r_key;
+	struct efa_com_mr_interconnect_info ic_info;
 };
 
 struct efa_com_dereg_mr_params {
@@ -269,11 +290,51 @@ struct efa_com_rdma_write_stats {
 	u64 write_recv_bytes;
 };
 
+struct efa_com_network_stats {
+	u64 retrans_bytes;
+	u64 retrans_pkts;
+	u64 retrans_timeout_events;
+	u64 unresponsive_remote_events;
+	u64 impaired_remote_conn_events;
+};
+
 union efa_com_get_stats_result {
 	struct efa_com_basic_stats basic_stats;
 	struct efa_com_messages_stats messages_stats;
 	struct efa_com_rdma_read_stats rdma_read_stats;
 	struct efa_com_rdma_write_stats rdma_write_stats;
+	struct efa_com_network_stats network_stats;
+};
+
+struct efa_com_create_event_counter_params {
+	dma_addr_t dma_addr;
+	u16 uarn;
+};
+
+struct efa_com_create_event_counter_result {
+	u32 cntr_handle;
+};
+
+struct efa_com_destroy_event_counter_params {
+	u32 cntr_handle;
+};
+
+struct efa_com_attach_event_counter_params {
+	u32 cntr_handle;
+	u32 qp_handle;
+	u32 events;
+};
+
+struct efa_com_detach_event_counter_params {
+	u32 cntr_handle;
+	u32 qp_handle;
+	u32 events;
+};
+
+struct efa_com_modify_event_counter_params {
+	u32 cntr_handle;
+	u8 operation;
+	u64 value;
 };
 
 int efa_com_create_qp(struct efa_com_dev *edev,
@@ -326,5 +387,16 @@ int efa_com_dealloc_uar(struct efa_com_dev *edev,
 int efa_com_get_stats(struct efa_com_dev *edev,
 		      struct efa_com_get_stats_params *params,
 		      union efa_com_get_stats_result *result);
+int efa_com_create_event_counter(struct efa_com_dev *edev,
+				 struct efa_com_create_event_counter_params *params,
+				 struct efa_com_create_event_counter_result *result);
+int efa_com_destroy_event_counter(struct efa_com_dev *edev,
+				  struct efa_com_destroy_event_counter_params *params);
+int efa_com_attach_event_counter(struct efa_com_dev *edev,
+				 struct efa_com_attach_event_counter_params *params);
+int efa_com_detach_event_counter(struct efa_com_dev *edev,
+				 struct efa_com_detach_event_counter_params *params);
+int efa_com_modify_event_counter(struct efa_com_dev *edev,
+				 struct efa_com_modify_event_counter_params *params);
 
 #endif /* _EFA_COM_CMD_H_ */

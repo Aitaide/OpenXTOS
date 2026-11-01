@@ -10,13 +10,13 @@
 
 #include <linux/delay.h>
 #include <linux/regmap.h>
-#include <linux/gpio.h>
+#include <linux/gpio/consumer.h>
 #include <linux/leds.h>
 #include <linux/dsa/tag_qca.h>
 
 #define QCA8K_ETHERNET_MDIO_PRIORITY			7
 #define QCA8K_ETHERNET_PHY_PRIORITY			6
-#define QCA8K_ETHERNET_TIMEOUT				5
+#define QCA8K_ETHERNET_TIMEOUT				msecs_to_jiffies(5)
 
 #define QCA8K_NUM_PORTS					7
 #define QCA8K_NUM_CPU_PORTS				2
@@ -58,6 +58,7 @@
 #define	  QCA8K_PORT_PAD_RGMII_TX_DELAY_EN		BIT(25)
 #define   QCA8K_PORT_PAD_RGMII_RX_DELAY_EN		BIT(24)
 #define   QCA8K_PORT_PAD_SGMII_EN			BIT(7)
+#define   QCA8K_PORT_PAD_SGMII_FORCE_MODE		BIT(3)
 #define QCA8K_REG_PWS					0x010
 #define   QCA8K_PWS_POWER_ON_SEL			BIT(31)
 /* This reg is only valid for QCA832x and toggle the package
@@ -451,14 +452,16 @@ struct qca8k_priv {
 	 * Bit 1: port enabled. Bit 0: port disabled.
 	 */
 	u8 port_enabled_map;
+	u8 port_isolated_map;
 	struct qca8k_ports_config ports_config;
 	struct regmap *regmap;
 	struct mii_bus *bus;
+	struct mii_bus *internal_mdio_bus;
 	struct dsa_switch *ds;
 	struct mutex reg_mutex;
 	struct device *dev;
 	struct gpio_desc *reset_gpio;
-	struct net_device *mgmt_master; /* Track if mdio/mib Ethernet is available */
+	struct net_device *mgmt_conduit; /* Track if mdio/mib Ethernet is available */
 	struct qca8k_mgmt_eth_data mgmt_eth_data;
 	struct qca8k_mib_eth_data mib_eth_data;
 	struct qca8k_mdio_cache mdio_cache;
@@ -517,8 +520,7 @@ void qca8k_get_ethtool_stats(struct dsa_switch *ds, int port,
 int qca8k_get_sset_count(struct dsa_switch *ds, int port, int sset);
 
 /* Common eee function */
-int qca8k_set_mac_eee(struct dsa_switch *ds, int port, struct ethtool_eee *eee);
-int qca8k_get_mac_eee(struct dsa_switch *ds, int port, struct ethtool_eee *e);
+int qca8k_set_mac_eee(struct dsa_switch *ds, int port, struct ethtool_keee *eee);
 
 /* Common bridge function */
 void qca8k_port_stp_state_set(struct dsa_switch *ds, int port, u8 state);

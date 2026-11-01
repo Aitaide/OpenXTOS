@@ -20,11 +20,10 @@
 #include <acpi/processor.h>
 #ifdef CONFIG_X86
 #include <asm/cpufeature.h>
+#include <asm/msr.h>
 #endif
 
 #define ACPI_PROCESSOR_FILE_PERFORMANCE	"performance"
-
-static DEFINE_MUTEX(performance_mutex);
 
 /*
  * _PPC support is implemented as a CPUfreq policy notifier:
@@ -174,6 +173,9 @@ void acpi_processor_ppc_init(struct cpufreq_policy *policy)
 {
 	unsigned int cpu;
 
+	if (ignore_ppc == 1)
+		return;
+
 	for_each_cpu(cpu, policy->related_cpus) {
 		struct acpi_processor *pr = per_cpu(processors, cpu);
 		int ret;
@@ -194,6 +196,14 @@ void acpi_processor_ppc_init(struct cpufreq_policy *policy)
 		if (ret < 0)
 			pr_err("Failed to add freq constraint for CPU%d (%d)\n",
 			       cpu, ret);
+
+		if (!pr->performance)
+			continue;
+
+		ret = acpi_processor_get_platform_limit(pr);
+		if (ret)
+			pr_err("Failed to update freq constraint for CPU%d (%d)\n",
+			       cpu, ret);
 	}
 }
 
@@ -208,6 +218,10 @@ void acpi_processor_ppc_exit(struct cpufreq_policy *policy)
 			freq_qos_remove_request(&pr->perflib_req);
 	}
 }
+
+#ifdef CONFIG_X86
+
+static DEFINE_MUTEX(performance_mutex);
 
 static int acpi_processor_get_performance_control(struct acpi_processor *pr)
 {
@@ -267,14 +281,14 @@ end:
 	return result;
 }
 
-#ifdef CONFIG_X86
 /*
  * Some AMDs have 50MHz frequency multiples, but only provide 100MHz rounding
  * in their ACPI data. Calculate the real values and fix up the _PSS data.
  */
 static void amd_fixup_frequency(struct acpi_processor_px *px, int i)
 {
-	u32 hi, lo, fid, did;
+	struct msr val;
+	u32 fid, did;
 	int index = px->control & 0x00000007;
 
 	if (boot_cpu_data.x86_vendor != X86_VENDOR_AMD)
@@ -282,25 +296,22 @@ static void amd_fixup_frequency(struct acpi_processor_px *px, int i)
 
 	if ((boot_cpu_data.x86 == 0x10 && boot_cpu_data.x86_model < 10) ||
 	    boot_cpu_data.x86 == 0x11) {
-		rdmsr(MSR_AMD_PSTATE_DEF_BASE + index, lo, hi);
+		rdmsrq(MSR_AMD_PSTATE_DEF_BASE + index, val.q);
 		/*
 		 * MSR C001_0064+:
 		 * Bit 63: PstateEn. Read-write. If set, the P-state is valid.
 		 */
-		if (!(hi & BIT(31)))
+		if (!(val.h & BIT(31)))
 			return;
 
-		fid = lo & 0x3f;
-		did = (lo >> 6) & 7;
+		fid = val.l & 0x3f;
+		did = (val.l >> 6) & 7;
 		if (boot_cpu_data.x86 == 0x10)
 			px->core_frequency = (100 * (fid + 0x10)) >> did;
 		else
 			px->core_frequency = (100 * (fid + 8)) >> did;
 	}
 }
-#else
-static void amd_fixup_frequency(struct acpi_processor_px *px, int i) {};
-#endif
 
 static int acpi_processor_get_performance_states(struct acpi_processor *pr)
 {
@@ -331,9 +342,7 @@ static int acpi_processor_get_performance_states(struct acpi_processor *pr)
 
 	pr->performance->state_count = pss->package.count;
 	pr->performance->states =
-	    kmalloc_array(pss->package.count,
-			  sizeof(struct acpi_processor_px),
-			  GFP_KERNEL);
+	    kmalloc_objs(struct acpi_processor_px, pss->package.count);
 	if (!pr->performance->states) {
 		result = -ENOMEM;
 		goto end;
@@ -440,13 +449,11 @@ int acpi_processor_get_performance_info(struct acpi_processor *pr)
 	 * the BIOS is older than the CPU and does not know its frequencies
 	 */
  update_bios:
-#ifdef CONFIG_X86
 	if (acpi_has_method(pr->handle, "_PPC")) {
 		if(boot_cpu_has(X86_FEATURE_EST))
 			pr_warn(FW_BUG "BIOS needs update for CPU "
 			       "frequency support\n");
 	}
-#endif
 	return result;
 }
 EXPORT_SYMBOL_GPL(acpi_processor_get_performance_info);
@@ -788,3 +795,4 @@ unlock:
 	mutex_unlock(&performance_mutex);
 }
 EXPORT_SYMBOL(acpi_processor_unregister_performance);
+#endif

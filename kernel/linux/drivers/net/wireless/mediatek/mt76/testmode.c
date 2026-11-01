@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: ISC
+// SPDX-License-Identifier: BSD-3-Clause-Clear
 /* Copyright (C) 2020 Felix Fietkau <nbd@nbd.name> */
 
 #include <linux/random.h>
@@ -53,7 +53,7 @@ void mt76_testmode_tx_pending(struct mt76_phy *phy)
 	       q->queued < q->ndesc / 2) {
 		int ret;
 
-		ret = dev->queue_ops->tx_queue_skb(dev, q, qid, skb_get(skb),
+		ret = dev->queue_ops->tx_queue_skb(phy, q, qid, skb_get(skb),
 						   wcid, NULL);
 		if (ret < 0)
 			break;

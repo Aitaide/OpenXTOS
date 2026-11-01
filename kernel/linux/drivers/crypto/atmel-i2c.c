@@ -51,7 +51,7 @@ static void atmel_i2c_checksum(struct atmel_i2c_cmd *cmd)
 	*__crc16 = cpu_to_le16(bitrev16(crc16(0, data, len)));
 }
 
-void atmel_i2c_init_read_cmd(struct atmel_i2c_cmd *cmd)
+void atmel_i2c_init_read_config_cmd(struct atmel_i2c_cmd *cmd)
 {
 	cmd->word_addr = COMMAND;
 	cmd->opcode = OPCODE_READ;
@@ -68,7 +68,31 @@ void atmel_i2c_init_read_cmd(struct atmel_i2c_cmd *cmd)
 	cmd->msecs = MAX_EXEC_TIME_READ;
 	cmd->rxsize = READ_RSP_SIZE;
 }
-EXPORT_SYMBOL(atmel_i2c_init_read_cmd);
+EXPORT_SYMBOL(atmel_i2c_init_read_config_cmd);
+
+int atmel_i2c_init_read_otp_cmd(struct atmel_i2c_cmd *cmd, u16 addr)
+{
+	if (addr >= OTP_ZONE_SIZE / 4)
+		return -EINVAL;
+
+	cmd->word_addr = COMMAND;
+	cmd->opcode = OPCODE_READ;
+	/*
+	 * Read the word from OTP zone that may contain e.g. serial
+	 * numbers or similar if persistently pre-initialized and locked
+	 */
+	cmd->param1 = OTP_ZONE;
+	cmd->param2 = cpu_to_le16(addr);
+	cmd->count = READ_COUNT;
+
+	atmel_i2c_checksum(cmd);
+
+	cmd->msecs = MAX_EXEC_TIME_READ;
+	cmd->rxsize = READ_RSP_SIZE;
+
+	return 0;
+}
+EXPORT_SYMBOL(atmel_i2c_init_read_otp_cmd);
 
 void atmel_i2c_init_random_cmd(struct atmel_i2c_cmd *cmd)
 {
@@ -114,9 +138,8 @@ int atmel_i2c_init_ecdh_cmd(struct atmel_i2c_cmd *cmd,
 	cmd->param2 = cpu_to_le16(DATA_SLOT_2);
 
 	/*
-	 * The device only supports NIST P256 ECC keys. The public key size will
-	 * always be the same. Use a macro for the key size to avoid unnecessary
-	 * computations.
+	 * The device only supports P-256. Its public key is encoded as
+	 * two 32-byte coordinates.
 	 */
 	copied = sg_copy_to_buffer(pubkey,
 				   sg_nents_for_len(pubkey,
@@ -270,7 +293,7 @@ void atmel_i2c_enqueue(struct atmel_i2c_work_data *work_data,
 				   void *areq, int status),
 		       void *areq)
 {
-	work_data->cbk = (void *)cbk;
+	work_data->cbk = cbk;
 	work_data->areq = areq;
 
 	INIT_WORK(&work_data->work, atmel_i2c_work_handler);
@@ -297,11 +320,11 @@ static int device_sanity_check(struct i2c_client *client)
 	struct atmel_i2c_cmd *cmd;
 	int ret;
 
-	cmd = kmalloc(sizeof(*cmd), GFP_KERNEL);
+	cmd = kmalloc_obj(*cmd);
 	if (!cmd)
 		return -ENOMEM;
 
-	atmel_i2c_init_read_cmd(cmd);
+	atmel_i2c_init_read_config_cmd(cmd);
 
 	ret = atmel_i2c_send_receive(client, cmd);
 	if (ret)
@@ -346,7 +369,7 @@ int atmel_i2c_probe(struct i2c_client *client)
 		}
 	}
 
-	if (bus_clk_rate > 1000000L) {
+	if (bus_clk_rate > I2C_MAX_FAST_MODE_PLUS_FREQ) {
 		dev_err(dev, "%u exceeds maximum supported clock frequency (1MHz)\n",
 			bus_clk_rate);
 		return -EINVAL;
@@ -378,7 +401,7 @@ EXPORT_SYMBOL(atmel_i2c_probe);
 
 static int __init atmel_i2c_init(void)
 {
-	atmel_wq = alloc_workqueue("atmel_wq", 0, 0);
+	atmel_wq = alloc_workqueue("atmel_wq", WQ_PERCPU, 0);
 	return atmel_wq ? 0 : -ENOMEM;
 }
 

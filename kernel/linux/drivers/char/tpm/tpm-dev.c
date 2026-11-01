@@ -30,13 +30,13 @@ static int tpm_open(struct inode *inode, struct file *file)
 		return -EBUSY;
 	}
 
-	priv = kzalloc(sizeof(*priv), GFP_KERNEL);
+	priv = kzalloc_obj(*priv);
 	if (priv == NULL)
 		goto out;
 
 	tpm_common_open(file, chip, priv, NULL);
 
-	return 0;
+	return nonseekable_open(inode, file);
 
  out:
 	clear_bit(0, &chip->is_open);
@@ -59,7 +59,6 @@ static int tpm_release(struct inode *inode, struct file *file)
 
 const struct file_operations tpm_fops = {
 	.owner = THIS_MODULE,
-	.llseek = no_llseek,
 	.open = tpm_open,
 	.read = tpm_common_read,
 	.write = tpm_common_write,

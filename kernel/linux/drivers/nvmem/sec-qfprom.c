@@ -4,7 +4,6 @@
  */
 
 #include <linux/firmware/qcom/qcom_scm.h>
-#include <linux/mod_devicetable.h>
 #include <linux/nvmem-provider.h>
 #include <linux/platform_device.h>
 #include <linux/pm_runtime.h>
@@ -47,6 +46,7 @@ static int sec_qfprom_probe(struct platform_device *pdev)
 {
 	struct nvmem_config econfig = {
 		.name = "sec-qfprom",
+		.add_legacy_fixed_of_cells = true,
 		.stride = 1,
 		.word_size = 1,
 		.id = NVMEM_DEVID_AUTO,

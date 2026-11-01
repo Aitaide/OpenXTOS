@@ -365,7 +365,7 @@ static int cb_pcidda_auto_attach(struct comedi_device *dev,
 	/* two 8255 digital io subdevices */
 	for (i = 0; i < 2; i++) {
 		s = &dev->subdevices[1 + i];
-		ret = subdev_8255_init(dev, s, NULL, i * I8255_SIZE);
+		ret = subdev_8255_io_init(dev, s, i * I8255_SIZE);
 		if (ret)
 			return ret;
 	}
@@ -396,13 +396,13 @@ static int cb_pcidda_pci_probe(struct pci_dev *dev,
 }
 
 static const struct pci_device_id cb_pcidda_pci_table[] = {
-	{ PCI_VDEVICE(CB, 0x0020), BOARD_DDA02_12 },
-	{ PCI_VDEVICE(CB, 0x0021), BOARD_DDA04_12 },
-	{ PCI_VDEVICE(CB, 0x0022), BOARD_DDA08_12 },
-	{ PCI_VDEVICE(CB, 0x0023), BOARD_DDA02_16 },
-	{ PCI_VDEVICE(CB, 0x0024), BOARD_DDA04_16 },
-	{ PCI_VDEVICE(CB, 0x0025), BOARD_DDA08_16 },
-	{ 0 }
+	{ PCI_VDEVICE(CB, 0x0020), .driver_data = BOARD_DDA02_12 },
+	{ PCI_VDEVICE(CB, 0x0021), .driver_data = BOARD_DDA04_12 },
+	{ PCI_VDEVICE(CB, 0x0022), .driver_data = BOARD_DDA08_12 },
+	{ PCI_VDEVICE(CB, 0x0023), .driver_data = BOARD_DDA02_16 },
+	{ PCI_VDEVICE(CB, 0x0024), .driver_data = BOARD_DDA04_16 },
+	{ PCI_VDEVICE(CB, 0x0025), .driver_data = BOARD_DDA08_16 },
+	{ }
 };
 MODULE_DEVICE_TABLE(pci, cb_pcidda_pci_table);
 

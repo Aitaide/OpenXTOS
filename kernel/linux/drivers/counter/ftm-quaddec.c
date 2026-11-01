@@ -292,7 +292,9 @@ static int ftm_quaddec_probe(struct platform_device *pdev)
 	counter->signals = ftm_quaddec_signals;
 	counter->num_signals = ARRAY_SIZE(ftm_quaddec_signals);
 
-	mutex_init(&ftm->ftm_quaddec_mutex);
+	ret = devm_mutex_init(&pdev->dev, &ftm->ftm_quaddec_mutex);
+	if (ret)
+		return ret;
 
 	ftm_quaddec_init(ftm);
 
@@ -311,6 +313,7 @@ static const struct of_device_id ftm_quaddec_match[] = {
 	{ .compatible = "fsl,ftm-quaddec" },
 	{},
 };
+MODULE_DEVICE_TABLE(of, ftm_quaddec_match);
 
 static struct platform_driver ftm_quaddec_driver = {
 	.driver = {
@@ -322,7 +325,8 @@ static struct platform_driver ftm_quaddec_driver = {
 
 module_platform_driver(ftm_quaddec_driver);
 
+MODULE_DESCRIPTION("Flex Timer Module Quadrature decoder");
 MODULE_LICENSE("GPL");
 MODULE_AUTHOR("Kjeld Flarup <kfa@deif.com>");
 MODULE_AUTHOR("Patrick Havelange <patrick.havelange@essensium.com>");
-MODULE_IMPORT_NS(COUNTER);
+MODULE_IMPORT_NS("COUNTER");

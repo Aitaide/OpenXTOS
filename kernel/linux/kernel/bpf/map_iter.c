@@ -112,6 +112,10 @@ static int bpf_iter_attach_map(struct bpf_prog *prog,
 	map = bpf_map_get_with_uref(linfo->map.map_fd);
 	if (IS_ERR(map))
 		return PTR_ERR(map);
+	if (map->excl_prog_sha) {
+		err = -EPERM;
+		goto put_map;
+	}
 
 	if (map->map_type == BPF_MAP_TYPE_PERCPU_HASH ||
 	    map->map_type == BPF_MAP_TYPE_LRU_PERCPU_HASH ||
@@ -119,7 +123,8 @@ static int bpf_iter_attach_map(struct bpf_prog *prog,
 		is_percpu = true;
 	else if (map->map_type != BPF_MAP_TYPE_HASH &&
 		 map->map_type != BPF_MAP_TYPE_LRU_HASH &&
-		 map->map_type != BPF_MAP_TYPE_ARRAY)
+		 map->map_type != BPF_MAP_TYPE_ARRAY &&
+		 map->map_type != BPF_MAP_TYPE_RHASH)
 		goto put_map;
 
 	key_acc_size = prog->aux->max_rdonly_access;
@@ -193,9 +198,7 @@ static int __init bpf_map_iter_init(void)
 
 late_initcall(bpf_map_iter_init);
 
-__diag_push();
-__diag_ignore_all("-Wmissing-prototypes",
-		  "Global functions as their definitions will be in vmlinux BTF");
+__bpf_kfunc_start_defs();
 
 __bpf_kfunc s64 bpf_map_sum_elem_count(const struct bpf_map *map)
 {
@@ -213,11 +216,11 @@ __bpf_kfunc s64 bpf_map_sum_elem_count(const struct bpf_map *map)
 	return ret;
 }
 
-__diag_pop();
+__bpf_kfunc_end_defs();
 
-BTF_SET8_START(bpf_map_iter_kfunc_ids)
-BTF_ID_FLAGS(func, bpf_map_sum_elem_count, KF_TRUSTED_ARGS)
-BTF_SET8_END(bpf_map_iter_kfunc_ids)
+BTF_KFUNCS_START(bpf_map_iter_kfunc_ids)
+BTF_ID_FLAGS(func, bpf_map_sum_elem_count)
+BTF_KFUNCS_END(bpf_map_iter_kfunc_ids)
 
 static const struct btf_kfunc_id_set bpf_map_iter_kfunc_set = {
 	.owner = THIS_MODULE,

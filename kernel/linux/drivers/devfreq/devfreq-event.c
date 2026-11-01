@@ -17,7 +17,13 @@
 #include <linux/list.h>
 #include <linux/of.h>
 
-static struct class *devfreq_event_class;
+static struct attribute *devfreq_event_attrs[];
+ATTRIBUTE_GROUPS(devfreq_event);
+
+static const struct class devfreq_event_class = {
+	.name		= "devfreq-event",
+	.dev_groups	= devfreq_event_groups
+};
 
 /* The list of all devfreq event list */
 static LIST_HEAD(devfreq_event_list);
@@ -244,13 +250,9 @@ struct devfreq_event_dev *devfreq_event_get_edev_by_phandle(struct device *dev,
 	edev = NULL;
 out:
 	mutex_unlock(&devfreq_event_list_lock);
-
-	if (!edev) {
-		of_node_put(node);
-		return ERR_PTR(-ENODEV);
-	}
-
 	of_node_put(node);
+	if (!edev)
+		return ERR_PTR(-ENODEV);
 
 	return edev;
 }
@@ -317,7 +319,7 @@ struct devfreq_event_dev *devfreq_event_add_edev(struct device *dev,
 	if (!desc->ops->set_event || !desc->ops->get_event)
 		return ERR_PTR(-EINVAL);
 
-	edev = kzalloc(sizeof(struct devfreq_event_dev), GFP_KERNEL);
+	edev = kzalloc_obj(struct devfreq_event_dev);
 	if (!edev)
 		return ERR_PTR(-ENOMEM);
 
@@ -325,7 +327,7 @@ struct devfreq_event_dev *devfreq_event_add_edev(struct device *dev,
 	edev->desc = desc;
 	edev->enable_count = 0;
 	edev->dev.parent = dev;
-	edev->dev.class = devfreq_event_class;
+	edev->dev.class = &devfreq_event_class;
 	edev->dev.release = devfreq_event_release_edev;
 
 	dev_set_name(&edev->dev, "event%d", atomic_inc_return(&event_no));
@@ -465,18 +467,15 @@ static struct attribute *devfreq_event_attrs[] = {
 	&dev_attr_enable_count.attr,
 	NULL,
 };
-ATTRIBUTE_GROUPS(devfreq_event);
 
 static int __init devfreq_event_init(void)
 {
-	devfreq_event_class = class_create("devfreq-event");
-	if (IS_ERR(devfreq_event_class)) {
+	int err;
+
+	err = class_register(&devfreq_event_class);
+	if (err)
 		pr_err("%s: couldn't create class\n", __FILE__);
-		return PTR_ERR(devfreq_event_class);
-	}
 
-	devfreq_event_class->dev_groups = devfreq_event_groups;
-
-	return 0;
+	return err;
 }
 subsys_initcall(devfreq_event_init);

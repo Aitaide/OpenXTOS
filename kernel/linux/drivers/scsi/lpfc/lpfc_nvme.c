@@ -1,7 +1,7 @@
 /*******************************************************************
  * This file is part of the Emulex Linux Device Driver for         *
  * Fibre Channel Host Bus Adapters.                                *
- * Copyright (C) 2017-2023 Broadcom. All Rights Reserved. The term *
+ * Copyright (C) 2017-2026 Broadcom. All Rights Reserved. The term *
  * “Broadcom” refers to Broadcom Inc. and/or its subsidiaries.  *
  * Copyright (C) 2004-2016 Emulex.  All rights reserved.           *
  * EMULEX and SLI are trademarks of Emulex.                        *
@@ -24,7 +24,7 @@
 #include <linux/slab.h>
 #include <linux/interrupt.h>
 #include <linux/delay.h>
-#include <asm/unaligned.h>
+#include <linux/unaligned.h>
 #include <linux/crc-t10dif.h>
 #include <net/checksum.h>
 
@@ -94,11 +94,11 @@ lpfc_nvme_create_queue(struct nvme_fc_local_port *pnvme_lport,
 	lport = (struct lpfc_nvme_lport *)pnvme_lport->private;
 	vport = lport->vport;
 
-	if (!vport || vport->load_flag & FC_UNLOADING ||
-	    vport->phba->hba_flag & HBA_IOQ_FLUSH)
+	if (!vport || test_bit(FC_UNLOADING, &vport->load_flag) ||
+	    test_bit(HBA_IOQ_FLUSH, &vport->phba->hba_flag))
 		return -ENODEV;
 
-	qhandle = kzalloc(sizeof(struct lpfc_nvme_qhandle), GFP_KERNEL);
+	qhandle = kzalloc_obj(struct lpfc_nvme_qhandle);
 	if (qhandle == NULL)
 		return -ENOMEM;
 
@@ -242,7 +242,7 @@ lpfc_nvme_remoteport_delete(struct nvme_fc_remote_port *remoteport)
  * @phba: pointer to lpfc hba data structure.
  * @axchg: pointer to exchange context for the NVME LS request
  *
- * This routine is used for processing an asychronously received NVME LS
+ * This routine is used for processing an asynchronously received NVME LS
  * request. Any remaining validation is done and the LS is then forwarded
  * to the nvme-fc transport via nvme_fc_rcv_ls_req().
  *
@@ -272,7 +272,7 @@ lpfc_nvme_handle_lsreq(struct lpfc_hba *phba,
 
 	remoteport = lpfc_rport->remoteport;
 	if (!vport->localport ||
-	    vport->phba->hba_flag & HBA_IOQ_FLUSH)
+	    test_bit(HBA_IOQ_FLUSH, &vport->phba->hba_flag))
 		return -EINVAL;
 
 	lport = vport->localport->private;
@@ -569,7 +569,7 @@ __lpfc_nvme_ls_req(struct lpfc_vport *vport, struct lpfc_nodelist *ndlp,
 				 ndlp->nlp_DID, ntype, nstate);
 		return -ENODEV;
 	}
-	if (vport->phba->hba_flag & HBA_IOQ_FLUSH)
+	if (test_bit(HBA_IOQ_FLUSH, &vport->phba->hba_flag))
 		return -ENODEV;
 
 	if (!vport->phba->sli4_hba.nvmels_wq)
@@ -587,7 +587,7 @@ __lpfc_nvme_ls_req(struct lpfc_vport *vport, struct lpfc_nodelist *ndlp,
 	 * in the nvme-fc layer.
 	 */
 
-	bmp = kmalloc(sizeof(*bmp), GFP_KERNEL);
+	bmp = kmalloc_obj(*bmp);
 	if (!bmp) {
 		lpfc_printf_vlog(vport, KERN_ERR, LOG_TRACE_EVENT,
 				 "6044 NVMEx LS REQ: Could not alloc LS buf "
@@ -674,8 +674,8 @@ lpfc_nvme_ls_req(struct nvme_fc_local_port *pnvme_lport,
 		return -EINVAL;
 
 	vport = lport->vport;
-	if (vport->load_flag & FC_UNLOADING ||
-	    vport->phba->hba_flag & HBA_IOQ_FLUSH)
+	if (test_bit(FC_UNLOADING, &vport->load_flag) ||
+	    test_bit(HBA_IOQ_FLUSH, &vport->phba->hba_flag))
 		return -ENODEV;
 
 	atomic_inc(&lport->fc4NvmeLsRequests);
@@ -765,7 +765,7 @@ lpfc_nvme_xmt_ls_rsp(struct nvme_fc_local_port *localport,
 	struct lpfc_nvme_lport *lport;
 	int rc;
 
-	if (axchg->phba->pport->load_flag & FC_UNLOADING)
+	if (test_bit(FC_UNLOADING, &axchg->phba->pport->load_flag))
 		return -ENODEV;
 
 	lport = (struct lpfc_nvme_lport *)localport->private;
@@ -810,7 +810,7 @@ lpfc_nvme_ls_abort(struct nvme_fc_local_port *pnvme_lport,
 		return;
 	vport = lport->vport;
 
-	if (vport->load_flag & FC_UNLOADING)
+	if (test_bit(FC_UNLOADING, &vport->load_flag))
 		return;
 
 	ndlp = lpfc_findnode_did(vport, pnvme_rport->port_id);
@@ -950,7 +950,7 @@ lpfc_nvme_io_cmd_cmpl(struct lpfc_hba *phba, struct lpfc_iocbq *pwqeIn,
 #ifdef CONFIG_SCSI_LPFC_DEBUG_FS
 	int cpu;
 #endif
-	int offline = 0;
+	bool offline = false;
 
 	/* Sanity check on return of outstanding command */
 	if (!lpfc_ncmd) {
@@ -1124,7 +1124,9 @@ out_err:
 			nCmd->transferred_length = 0;
 			nCmd->rcv_rsplen = 0;
 			nCmd->status = NVME_SC_INTERNAL;
-			offline = pci_channel_offline(vport->phba->pcidev);
+			if (pci_channel_offline(vport->phba->pcidev) ||
+			    lpfc_ncmd->result == IOERR_SLI_DOWN)
+				offline = true;
 		}
 	}
 
@@ -1230,14 +1232,10 @@ lpfc_nvme_prep_io_cmd(struct lpfc_vport *vport,
 
 			/* Word 5 */
 			if ((phba->cfg_nvme_enable_fb) &&
-			    (pnode->nlp_flag & NLP_FIRSTBURST)) {
+			    test_bit(NLP_FIRSTBURST, &pnode->nlp_flag)) {
 				req_len = lpfc_ncmd->nvmeCmd->payload_length;
-				if (req_len < pnode->nvme_fb_size)
-					wqe->fcp_iwrite.initial_xfer_len =
-						req_len;
-				else
-					wqe->fcp_iwrite.initial_xfer_len =
-						pnode->nvme_fb_size;
+				wqe->fcp_iwrite.initial_xfer_len = min(req_len,
+								       pnode->nvme_fb_size);
 			} else {
 				wqe->fcp_iwrite.initial_xfer_len = 0;
 			}
@@ -1298,8 +1296,6 @@ lpfc_nvme_prep_io_cmd(struct lpfc_vport *vport,
 	/* Word 10 */
 	bf_set(wqe_xchg, &wqe->fcp_iwrite.wqe_com, LPFC_NVME_XCHG);
 
-	/* Words 13 14 15 are for PBDE support */
-
 	/* add the VMID tags as per switch response */
 	if (unlikely(lpfc_ncmd->cur_iocbq.cmd_flag & LPFC_IO_VMID)) {
 		if (phba->pport->vmid_priority_tagging) {
@@ -1337,16 +1333,13 @@ lpfc_nvme_prep_io_dma(struct lpfc_vport *vport,
 {
 	struct lpfc_hba *phba = vport->phba;
 	struct nvmefc_fcp_req *nCmd = lpfc_ncmd->nvmeCmd;
-	union lpfc_wqe128 *wqe = &lpfc_ncmd->cur_iocbq.wqe;
 	struct sli4_sge *sgl = lpfc_ncmd->dma_sgl;
 	struct sli4_hybrid_sgl *sgl_xtra = NULL;
 	struct scatterlist *data_sg;
-	struct sli4_sge *first_data_sgl;
-	struct ulp_bde64 *bde;
 	dma_addr_t physaddr = 0;
 	uint32_t dma_len = 0;
 	uint32_t dma_offset = 0;
-	int nseg, i, j;
+	int nseg, i, j, k;
 	bool lsp_just_set = false;
 
 	/* Fix up the command and response DMA stuff. */
@@ -1363,7 +1356,6 @@ lpfc_nvme_prep_io_dma(struct lpfc_vport *vport,
 		 */
 		sgl += 2;
 
-		first_data_sgl = sgl;
 		lpfc_ncmd->seg_cnt = nCmd->sg_cnt;
 		if (lpfc_ncmd->seg_cnt > lpfc_nvme_template.max_sgl_segments) {
 			lpfc_printf_log(phba, KERN_ERR, LOG_TRACE_EVENT,
@@ -1387,6 +1379,9 @@ lpfc_nvme_prep_io_dma(struct lpfc_vport *vport,
 
 		/* for tracking the segment boundaries */
 		j = 2;
+		k = 5;
+		if (unlikely(!phba->cfg_xpsgl))
+			k = 1;
 		for (i = 0; i < nseg; i++) {
 			if (data_sg == NULL) {
 				lpfc_printf_log(phba, KERN_ERR, LOG_TRACE_EVENT,
@@ -1405,9 +1400,8 @@ lpfc_nvme_prep_io_dma(struct lpfc_vport *vport,
 				bf_set(lpfc_sli4_sge_last, sgl, 0);
 
 				/* expand the segment */
-				if (!lsp_just_set &&
-				    !((j + 1) % phba->border_sge_num) &&
-				    ((nseg - 1) != i)) {
+				if (!lsp_just_set && (nseg != (i + k)) &&
+				    !((j + k) % phba->border_sge_num)) {
 					/* set LSP type */
 					bf_set(lpfc_sli4_sge_type, sgl,
 					       LPFC_SGE_TYPE_LSP);
@@ -1430,8 +1424,8 @@ lpfc_nvme_prep_io_dma(struct lpfc_vport *vport,
 				}
 			}
 
-			if (!(bf_get(lpfc_sli4_sge_type, sgl) &
-				     LPFC_SGE_TYPE_LSP)) {
+			if (bf_get(lpfc_sli4_sge_type, sgl) !=
+			    LPFC_SGE_TYPE_LSP) {
 				if ((nseg - 1) == i)
 					bf_set(lpfc_sli4_sge_last, sgl, 1);
 
@@ -1452,40 +1446,26 @@ lpfc_nvme_prep_io_dma(struct lpfc_vport *vport,
 				sgl++;
 
 				lsp_just_set = false;
+				j++;
 			} else {
 				sgl->word2 = cpu_to_le32(sgl->word2);
-
-				sgl->sge_len = cpu_to_le32(
-						     phba->cfg_sg_dma_buf_size);
+				/* will remaining SGEs fill the next SGL? */
+				if ((nseg - i) < phba->border_sge_num)
+					sgl->sge_len =
+						cpu_to_le32((nseg - i) *
+								sizeof(*sgl));
+				else
+					sgl->sge_len =
+						cpu_to_le32(phba->cfg_sg_dma_buf_size);
 
 				sgl = (struct sli4_sge *)sgl_xtra->dma_sgl;
 				i = i - 1;
 
 				lsp_just_set = true;
+				j += k;
+				k = 1;
 			}
-
-			j++;
 		}
-
-		/* PBDE support for first data SGE only */
-		if (nseg == 1 && phba->cfg_enable_pbde) {
-			/* Words 13-15 */
-			bde = (struct ulp_bde64 *)
-				&wqe->words[13];
-			bde->addrLow = first_data_sgl->addr_lo;
-			bde->addrHigh = first_data_sgl->addr_hi;
-			bde->tus.f.bdeSize =
-				le32_to_cpu(first_data_sgl->sge_len);
-			bde->tus.f.bdeFlags = BUFF_TYPE_BDE_64;
-			bde->tus.w = cpu_to_le32(bde->tus.w);
-
-			/* Word 11 - set PBDE bit */
-			bf_set(wqe_pbde, &wqe->generic.wqe_com, 1);
-		} else {
-			memset(&wqe->words[13], 0, (sizeof(uint32_t) * 3));
-			/* Word 11 - PBDE bit disabled by default template */
-		}
-
 	} else {
 		lpfc_ncmd->seg_cnt = 0;
 
@@ -1565,8 +1545,8 @@ lpfc_nvme_fcp_io_submit(struct nvme_fc_local_port *pnvme_lport,
 
 	phba = vport->phba;
 
-	if ((unlikely(vport->load_flag & FC_UNLOADING)) ||
-	    phba->hba_flag & HBA_IOQ_FLUSH) {
+	if ((unlikely(test_bit(FC_UNLOADING, &vport->load_flag))) ||
+	    test_bit(HBA_IOQ_FLUSH, &phba->hba_flag)) {
 		lpfc_printf_vlog(vport, KERN_INFO, LOG_NVME_IOERR,
 				 "6124 Fail IO, Driver unload\n");
 		atomic_inc(&lport->xmt_fcp_err);
@@ -1884,7 +1864,7 @@ lpfc_nvme_fcp_abort(struct nvme_fc_local_port *pnvme_lport,
 
 	if (unlikely(!freqpriv))
 		return;
-	if (vport->load_flag & FC_UNLOADING)
+	if (test_bit(FC_UNLOADING, &vport->load_flag))
 		return;
 
 	/* Announce entry to new IO submit field. */
@@ -1907,23 +1887,18 @@ lpfc_nvme_fcp_abort(struct nvme_fc_local_port *pnvme_lport,
 		return;
 	}
 
-	/* Guard against IO completion being called at same time */
-	spin_lock_irqsave(&lpfc_nbuf->buf_lock, flags);
-
-	/* If the hba is getting reset, this flag is set.  It is
-	 * cleared when the reset is complete and rings reestablished.
-	 */
-	spin_lock(&phba->hbalock);
 	/* driver queued commands are in process of being flushed */
-	if (phba->hba_flag & HBA_IOQ_FLUSH) {
-		spin_unlock(&phba->hbalock);
-		spin_unlock_irqrestore(&lpfc_nbuf->buf_lock, flags);
+	if (test_bit(HBA_IOQ_FLUSH, &phba->hba_flag)) {
 		lpfc_printf_vlog(vport, KERN_ERR, LOG_TRACE_EVENT,
 				 "6139 Driver in reset cleanup - flushing "
-				 "NVME Req now.  hba_flag x%x\n",
+				 "NVME Req now.  hba_flag x%lx\n",
 				 phba->hba_flag);
 		return;
 	}
+
+	/* Guard against IO completion being called at same time */
+	spin_lock_irqsave(&lpfc_nbuf->buf_lock, flags);
+	spin_lock(&phba->hbalock);
 
 	nvmereq_wqe = &lpfc_nbuf->cur_iocbq;
 
@@ -2234,18 +2209,20 @@ lpfc_nvme_lport_unreg_wait(struct lpfc_vport *vport,
 	struct lpfc_hba  *phba = vport->phba;
 	struct lpfc_sli4_hdw_queue *qp;
 	int abts_scsi, abts_nvme;
+	u16 nvmels_cnt;
 
 	/* Host transport has to clean up and confirm requiring an indefinite
 	 * wait. Print a message if a 10 second wait expires and renew the
 	 * wait. This is unexpected.
 	 */
-	wait_tmo = msecs_to_jiffies(LPFC_NVME_WAIT_TMO * 1000);
+	wait_tmo = secs_to_jiffies(LPFC_NVME_WAIT_TMO);
 	while (true) {
 		ret = wait_for_completion_timeout(lport_unreg_cmp, wait_tmo);
 		if (unlikely(!ret)) {
 			pending = 0;
 			abts_scsi = 0;
 			abts_nvme = 0;
+			nvmels_cnt = 0;
 			for (i = 0; i < phba->cfg_hdw_queue; i++) {
 				qp = &phba->sli4_hba.hdwq[i];
 				if (!vport->localport || !qp || !qp->io_wq)
@@ -2258,18 +2235,23 @@ lpfc_nvme_lport_unreg_wait(struct lpfc_vport *vport,
 				abts_scsi += qp->abts_scsi_io_bufs;
 				abts_nvme += qp->abts_nvme_io_bufs;
 			}
+			if (phba->sli4_hba.nvmels_wq) {
+				pring = phba->sli4_hba.nvmels_wq->pring;
+				if (pring)
+					nvmels_cnt = pring->txcmplq_cnt;
+			}
 			if (!vport->localport ||
 			    test_bit(HBA_PCI_ERR, &vport->phba->bit_flags) ||
 			    phba->link_state == LPFC_HBA_ERROR ||
-			    vport->load_flag & FC_UNLOADING)
+			    test_bit(FC_UNLOADING, &vport->load_flag))
 				return;
 
 			lpfc_printf_vlog(vport, KERN_ERR, LOG_TRACE_EVENT,
 					 "6176 Lport x%px Localport x%px wait "
-					 "timed out. Pending %d [%d:%d]. "
+					 "timed out. Pending %d [%d:%d:%d]. "
 					 "Renewing.\n",
 					 lport, vport->localport, pending,
-					 abts_scsi, abts_nvme);
+					 abts_scsi, abts_nvme, nvmels_cnt);
 			continue;
 		}
 		break;
@@ -2504,7 +2486,10 @@ lpfc_nvme_register_port(struct lpfc_vport *vport, struct lpfc_nodelist *ndlp)
 				 "6031 RemotePort Registration failed "
 				 "err: %d, DID x%06x ref %u\n",
 				 ret, ndlp->nlp_DID, kref_read(&ndlp->kref));
-		lpfc_nlp_put(ndlp);
+
+		/* Only release reference if one was taken for this request */
+		if (!oldrport)
+			lpfc_nlp_put(ndlp);
 	}
 
 	return ret;
@@ -2610,20 +2595,21 @@ lpfc_nvme_unregister_port(struct lpfc_vport *vport, struct lpfc_nodelist *ndlp)
 	 * clear any rport state until the transport calls back.
 	 */
 
-	if (ndlp->nlp_type & NLP_NVME_TARGET) {
+	if ((ndlp->nlp_type & NLP_NVME_TARGET) ||
+	    (remoteport->port_role & FC_PORT_ROLE_NVME_TARGET)) {
 		/* No concern about the role change on the nvme remoteport.
 		 * The transport will update it.
 		 */
-		spin_lock_irq(&vport->phba->hbalock);
+		spin_lock_irq(&ndlp->lock);
 		ndlp->fc4_xpt_flags |= NVME_XPT_UNREG_WAIT;
-		spin_unlock_irq(&vport->phba->hbalock);
+		spin_unlock_irq(&ndlp->lock);
 
 		/* Don't let the host nvme transport keep sending keep-alives
 		 * on this remoteport. Vport is unloading, no recovery. The
 		 * return values is ignored.  The upcall is a courtesy to the
 		 * transport.
 		 */
-		if (vport->load_flag & FC_UNLOADING ||
+		if (test_bit(FC_UNLOADING, &vport->load_flag) ||
 		    unlikely(vport->phba->link_state == LPFC_HBA_ERROR))
 			(void)nvme_fc_set_remoteport_devloss(remoteport, 0);
 
@@ -2642,19 +2628,16 @@ lpfc_nvme_unregister_port(struct lpfc_vport *vport, struct lpfc_nodelist *ndlp)
 					 "port_state x%x\n",
 					 ret, remoteport->port_state);
 
-			if (vport->load_flag & FC_UNLOADING) {
+			if (test_bit(FC_UNLOADING, &vport->load_flag)) {
 				/* Only 1 thread can drop the initial node
 				 * reference. Check if another thread has set
 				 * NLP_DROPPED.
 				 */
-				spin_lock_irq(&ndlp->lock);
-				if (!(ndlp->nlp_flag & NLP_DROPPED)) {
-					ndlp->nlp_flag |= NLP_DROPPED;
-					spin_unlock_irq(&ndlp->lock);
+				if (!test_and_set_bit(NLP_DROPPED,
+						      &ndlp->nlp_flag)) {
 					lpfc_nlp_put(ndlp);
 					return;
 				}
-				spin_unlock_irq(&ndlp->lock);
 			}
 		}
 	}
@@ -2842,5 +2825,93 @@ lpfc_nvme_cancel_iocb(struct lpfc_hba *phba, struct lpfc_iocbq *pwqeIn,
 
 	memcpy(&pwqeIn->wcqe_cmpl, wcqep, sizeof(*wcqep));
 	(pwqeIn->cmd_cmpl)(phba, pwqeIn, pwqeIn);
+#endif
+}
+
+/**
+ * lpfc_nvme_flush_abts_list - Clean up nvme commands from the abts list
+ * @phba: Pointer to HBA context object.
+ *
+ **/
+void
+lpfc_nvme_flush_abts_list(struct lpfc_hba *phba)
+{
+#if (IS_ENABLED(CONFIG_NVME_FC))
+	struct lpfc_io_buf *psb, *psb_next;
+	struct lpfc_sli4_hdw_queue *qp;
+	LIST_HEAD(aborts);
+	int i;
+
+	/* abts_xxxx_buf_list_lock required because worker thread uses this
+	 * list.
+	 */
+	spin_lock_irq(&phba->hbalock);
+	for (i = 0; i < phba->cfg_hdw_queue; i++) {
+		qp = &phba->sli4_hba.hdwq[i];
+
+		spin_lock(&qp->abts_io_buf_list_lock);
+		list_for_each_entry_safe(psb, psb_next,
+					 &qp->lpfc_abts_io_buf_list, list) {
+			if (!(psb->cur_iocbq.cmd_flag & LPFC_IO_NVME))
+				continue;
+			list_move(&psb->list, &aborts);
+			qp->abts_nvme_io_bufs--;
+		}
+		spin_unlock(&qp->abts_io_buf_list_lock);
+	}
+	spin_unlock_irq(&phba->hbalock);
+
+	list_for_each_entry_safe(psb, psb_next, &aborts, list) {
+		list_del_init(&psb->list);
+		lpfc_printf_log(phba, KERN_INFO, LOG_NVME_ABTS,
+				"6195 %s: lpfc_ncmd x%px flags x%x "
+				"cmd_flag x%x xri x%x\n", __func__,
+				psb, psb->flags,
+				psb->cur_iocbq.cmd_flag,
+				psb->cur_iocbq.sli4_xritag);
+		psb->flags &= ~LPFC_SBUF_XBUSY;
+		psb->status = IOSTAT_SUCCESS;
+		lpfc_sli4_nvme_pci_offline_aborted(phba, psb);
+	}
+#endif
+}
+
+/**
+ * lpfc_nvmels_flush_cmd - Clean up outstanding nvmels commands for a port
+ * @phba: Pointer to HBA context object.
+ *
+ **/
+void
+lpfc_nvmels_flush_cmd(struct lpfc_hba *phba)
+{
+#if (IS_ENABLED(CONFIG_NVME_FC))
+	LIST_HEAD(cancel_list);
+	struct lpfc_sli_ring *pring = NULL;
+	struct lpfc_iocbq *piocb, *tmp_iocb;
+	unsigned long iflags;
+
+	if (phba->sli4_hba.nvmels_wq)
+		pring = phba->sli4_hba.nvmels_wq->pring;
+
+	if (unlikely(!pring))
+		return;
+
+	spin_lock_irqsave(&phba->hbalock, iflags);
+	spin_lock(&pring->ring_lock);
+	list_splice_init(&pring->txq, &cancel_list);
+	pring->txq_cnt = 0;
+	list_for_each_entry_safe(piocb, tmp_iocb, &pring->txcmplq, list) {
+		if (piocb->cmd_flag & LPFC_IO_NVME_LS) {
+			list_move_tail(&piocb->list, &cancel_list);
+			pring->txcmplq_cnt--;
+			piocb->cmd_flag &= ~LPFC_IO_ON_TXCMPLQ;
+		}
+	}
+	spin_unlock(&pring->ring_lock);
+	spin_unlock_irqrestore(&phba->hbalock, iflags);
+
+	if (!list_empty(&cancel_list))
+		lpfc_sli_cancel_iocbs(phba, &cancel_list, IOSTAT_LOCAL_REJECT,
+				      IOERR_SLI_DOWN);
 #endif
 }

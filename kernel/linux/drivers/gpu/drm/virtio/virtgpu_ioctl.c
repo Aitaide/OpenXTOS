@@ -42,12 +42,19 @@
 static void virtio_gpu_create_context_locked(struct virtio_gpu_device *vgdev,
 					     struct virtio_gpu_fpriv *vfpriv)
 {
-	char dbgname[TASK_COMM_LEN];
+	if (vfpriv->explicit_debug_name) {
+		virtio_gpu_cmd_context_create(vgdev, vfpriv->ctx_id,
+					      vfpriv->context_init,
+					      strlen(vfpriv->debug_name),
+					      vfpriv->debug_name);
+	} else {
+		char dbgname[TASK_COMM_LEN];
 
-	get_task_comm(dbgname, current);
-	virtio_gpu_cmd_context_create(vgdev, vfpriv->ctx_id,
-				      vfpriv->context_init, strlen(dbgname),
-				      dbgname);
+		get_task_comm(dbgname, current);
+		virtio_gpu_cmd_context_create(vgdev, vfpriv->ctx_id,
+					      vfpriv->context_init, strlen(dbgname),
+					      dbgname);
+	}
 
 	vfpriv->context_created = true;
 }
@@ -73,9 +80,9 @@ static int virtio_gpu_map_ioctl(struct drm_device *dev, void *data,
 	struct virtio_gpu_device *vgdev = dev->dev_private;
 	struct drm_virtgpu_map *virtio_gpu_map = data;
 
-	return virtio_gpu_mode_dumb_mmap(file, vgdev->ddev,
-					 virtio_gpu_map->handle,
-					 &virtio_gpu_map->offset);
+	return drm_gem_dumb_map_offset(file, vgdev->ddev,
+				       virtio_gpu_map->handle,
+				       &virtio_gpu_map->offset);
 }
 
 static int virtio_gpu_getparam_ioctl(struct drm_device *dev, void *data,
@@ -106,6 +113,14 @@ static int virtio_gpu_getparam_ioctl(struct drm_device *dev, void *data,
 		break;
 	case VIRTGPU_PARAM_SUPPORTED_CAPSET_IDs:
 		value = vgdev->capset_id_mask;
+		break;
+	case VIRTGPU_PARAM_EXPLICIT_DEBUG_NAME:
+		value = vgdev->has_context_init ? 1 : 0;
+		break;
+	case VIRTGPU_PARAM_BLOB_ALIGNMENT:
+		if (!vgdev->has_blob_alignment)
+			return -ENOENT;
+		value = vgdev->blob_alignment;
 		break;
 	default:
 		return -EINVAL;
@@ -170,7 +185,7 @@ static int virtio_gpu_resource_create_ioctl(struct drm_device *dev, void *data,
 
 	ret = drm_gem_handle_create(file, obj, &handle);
 	if (ret) {
-		drm_gem_object_release(obj);
+		drm_gem_object_put(obj);
 		return ret;
 	}
 
@@ -246,6 +261,27 @@ static int virtio_gpu_transfer_from_host_ioctl(struct drm_device *dev,
 	if (ret != 0)
 		goto err_put_free;
 
+	if (virtio_gpu_is_shmem(bo) && virtio_gpu_use_dma_api(vgdev->vdev)) {
+		/*
+		 * The sync on completion restores the whole mapping, so an
+		 * earlier transfer has to be done before this one snapshots it.
+		 * Otherwise the snapshot predates anything the CPU wrote once
+		 * that transfer's fence signalled, and the later sync would
+		 * discard it. Nothing can add a fence behind our back here,
+		 * since doing so takes the reservation we already hold.
+		 * This writes the pages, so it waits as a writer does. READ
+		 * usage covers existing readers.
+		 */
+		long wait = dma_resv_wait_timeout(objs->objs[0]->resv,
+						  DMA_RESV_USAGE_READ, true,
+						  MAX_SCHEDULE_TIMEOUT);
+
+		if (wait < 0) {
+			ret = wait;
+			goto err_unlock;
+		}
+	}
+
 	fence = virtio_gpu_fence_alloc(vgdev, vgdev->fence_drv.context, 0);
 	if (!fence) {
 		ret = -ENOMEM;
@@ -304,6 +340,28 @@ static int virtio_gpu_transfer_to_host_ioctl(struct drm_device *dev, void *data,
 		ret = virtio_gpu_array_lock_resv(objs);
 		if (ret != 0)
 			goto err_put_free;
+
+		/*
+		 * A transfer the other way may have queued without yet syncing
+		 * its mapping. Pushing the guest pages into it now would
+		 * discard what the device wrote there, so wait for that sync:
+		 * it runs before the fence it belongs to is signalled. The
+		 * flag is only set under this reservation, so it cannot appear
+		 * behind our back, and the acquire pairs with the release in
+		 * that sync, so finding it clear means the pages it wrote are
+		 * visible here too.
+		 */
+		if (smp_load_acquire(&bo->from_host_pending)) {
+			long wait = dma_resv_wait_timeout(objs->objs[0]->resv,
+							  DMA_RESV_USAGE_WRITE,
+							  true,
+							  MAX_SCHEDULE_TIMEOUT);
+
+			if (wait < 0) {
+				ret = wait;
+				goto err_unlock;
+			}
+		}
 
 		ret = -ENOMEM;
 		fence = virtio_gpu_fence_alloc(vgdev, vgdev->fence_drv.context,
@@ -479,6 +537,12 @@ static int verify_blob(struct virtio_gpu_device *vgdev,
 	params->size = rc_blob->size;
 	params->blob = true;
 	params->blob_flags = rc_blob->blob_flags;
+	params->blob_hints = rc_blob->blob_hints;
+
+	if (vgdev->has_blob_alignment &&
+	    !IS_ALIGNED(params->size, vgdev->blob_alignment))
+		return -EINVAL;
+
 	return 0;
 }
 
@@ -536,14 +600,14 @@ static int virtio_gpu_resource_create_blob_ioctl(struct drm_device *dev,
 	if (params.blob_flags & VIRTGPU_BLOB_FLAG_USE_CROSS_DEVICE) {
 		ret = virtio_gpu_resource_assign_uuid(vgdev, bo);
 		if (ret) {
-			drm_gem_object_release(obj);
+			drm_gem_object_put(obj);
 			return ret;
 		}
 	}
 
 	ret = drm_gem_handle_create(file, obj, &handle);
 	if (ret) {
-		drm_gem_object_release(obj);
+		drm_gem_object_put(obj);
 		return ret;
 	}
 
@@ -565,8 +629,8 @@ static int virtio_gpu_context_init_ioctl(struct drm_device *dev,
 					 void *data, struct drm_file *file)
 {
 	int ret = 0;
-	uint32_t num_params, i, param, value;
-	uint64_t valid_ring_mask;
+	uint32_t num_params, i;
+	uint64_t valid_ring_mask, param, value;
 	size_t len;
 	struct drm_virtgpu_context_set_param *ctx_set_params = NULL;
 	struct virtio_gpu_device *vgdev = dev->dev_private;
@@ -580,7 +644,7 @@ static int virtio_gpu_context_init_ioctl(struct drm_device *dev,
 		return -EINVAL;
 
 	/* Number of unique parameters supported at this time. */
-	if (num_params > 3)
+	if (num_params > 4)
 		return -EINVAL;
 
 	ctx_set_params = memdup_user(u64_to_user_ptr(args->ctx_set_params),
@@ -641,6 +705,21 @@ static int virtio_gpu_context_init_ioctl(struct drm_device *dev,
 			}
 
 			vfpriv->ring_idx_mask = value;
+			break;
+		case VIRTGPU_CONTEXT_PARAM_DEBUG_NAME:
+			if (vfpriv->explicit_debug_name) {
+				ret = -EINVAL;
+				goto out_unlock;
+			}
+
+			ret = strncpy_from_user(vfpriv->debug_name,
+						u64_to_user_ptr(value),
+						DEBUG_NAME_MAX_LEN - 1);
+			if (ret < 0)
+				goto out_unlock;
+
+			vfpriv->explicit_debug_name = true;
+			ret = 0;
 			break;
 		default:
 			ret = -EINVAL;

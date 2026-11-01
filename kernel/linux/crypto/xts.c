@@ -16,6 +16,7 @@
 #include <linux/module.h>
 #include <linux/scatterlist.h>
 #include <linux/slab.h>
+#include <linux/string.h>
 
 #include <crypto/xts.h>
 #include <crypto/b128ops.h>
@@ -28,7 +29,7 @@ struct xts_tfm_ctx {
 
 struct xts_instance_ctx {
 	struct crypto_skcipher_spawn spawn;
-	char name[CRYPTO_MAX_ALG_NAME];
+	struct crypto_cipher_spawn tweak_spawn;
 };
 
 struct xts_request_ctx {
@@ -76,7 +77,7 @@ static int xts_setkey(struct crypto_skcipher *parent, const u8 *key,
 /*
  * We compute the tweak masks twice (both before and after the ECB encryption or
  * decryption) to avoid having to allocate a temporary buffer and/or make
- * mutliple calls to the 'ecb(..)' instance, which usually would be slower than
+ * multiple calls to the 'ecb(..)' instance, which usually would be slower than
  * just doing the gf128mul_x_ble() calls again.
  */
 static int xts_xor_tweak(struct skcipher_request *req, bool second_pass,
@@ -99,7 +100,7 @@ static int xts_xor_tweak(struct skcipher_request *req, bool second_pass,
 
 	while (w.nbytes) {
 		unsigned int avail = w.nbytes;
-		le128 *wsrc;
+		const le128 *wsrc;
 		le128 *wdst;
 
 		wsrc = w.src.virt.addr;
@@ -306,7 +307,7 @@ static int xts_init_tfm(struct crypto_skcipher *tfm)
 
 	ctx->child = child;
 
-	tweak = crypto_alloc_cipher(ictx->name, 0, 0);
+	tweak = crypto_spawn_cipher(&ictx->tweak_spawn);
 	if (IS_ERR(tweak)) {
 		crypto_free_skcipher(ctx->child);
 		return PTR_ERR(tweak);
@@ -333,14 +334,16 @@ static void xts_free_instance(struct skcipher_instance *inst)
 	struct xts_instance_ctx *ictx = skcipher_instance_ctx(inst);
 
 	crypto_drop_skcipher(&ictx->spawn);
+	crypto_drop_cipher(&ictx->tweak_spawn);
 	kfree(inst);
 }
 
 static int xts_create(struct crypto_template *tmpl, struct rtattr **tb)
 {
+	struct skcipher_alg_common *alg;
+	char name[CRYPTO_MAX_ALG_NAME];
 	struct skcipher_instance *inst;
 	struct xts_instance_ctx *ctx;
-	struct skcipher_alg *alg;
 	const char *cipher_name;
 	u32 mask;
 	int err;
@@ -361,27 +364,27 @@ static int xts_create(struct crypto_template *tmpl, struct rtattr **tb)
 
 	err = crypto_grab_skcipher(&ctx->spawn, skcipher_crypto_instance(inst),
 				   cipher_name, 0, mask);
-	if (err == -ENOENT) {
+	if (err == -ENOENT && memcmp(cipher_name, "ecb(", 4)) {
 		err = -ENAMETOOLONG;
-		if (snprintf(ctx->name, CRYPTO_MAX_ALG_NAME, "ecb(%s)",
+		if (snprintf(name, CRYPTO_MAX_ALG_NAME, "ecb(%s)",
 			     cipher_name) >= CRYPTO_MAX_ALG_NAME)
 			goto err_free_inst;
 
 		err = crypto_grab_skcipher(&ctx->spawn,
 					   skcipher_crypto_instance(inst),
-					   ctx->name, 0, mask);
+					   name, 0, mask);
 	}
 
 	if (err)
 		goto err_free_inst;
 
-	alg = crypto_skcipher_spawn_alg(&ctx->spawn);
+	alg = crypto_spawn_skcipher_alg_common(&ctx->spawn);
 
 	err = -EINVAL;
 	if (alg->base.cra_blocksize != XTS_BLOCK_SIZE)
 		goto err_free_inst;
 
-	if (crypto_skcipher_alg_ivsize(alg))
+	if (alg->ivsize)
 		goto err_free_inst;
 
 	err = crypto_inst_setname(skcipher_crypto_instance(inst), "xts",
@@ -395,24 +398,29 @@ static int xts_create(struct crypto_template *tmpl, struct rtattr **tb)
 	/* Alas we screwed up the naming so we have to mangle the
 	 * cipher name.
 	 */
-	if (!strncmp(cipher_name, "ecb(", 4)) {
+	if (!memcmp(cipher_name, "ecb(", 4)) {
 		int len;
 
-		len = strscpy(ctx->name, cipher_name + 4, sizeof(ctx->name));
+		len = strscpy(name, cipher_name + 4);
 		if (len < 2)
 			goto err_free_inst;
 
-		if (ctx->name[len - 1] != ')')
+		if (name[len - 1] != ')')
 			goto err_free_inst;
 
-		ctx->name[len - 1] = 0;
+		name[len - 1] = 0;
 
 		if (snprintf(inst->alg.base.cra_name, CRYPTO_MAX_ALG_NAME,
-			     "xts(%s)", ctx->name) >= CRYPTO_MAX_ALG_NAME) {
+			     "xts(%s)", name) >= CRYPTO_MAX_ALG_NAME) {
 			err = -ENAMETOOLONG;
 			goto err_free_inst;
 		}
 	} else
+		goto err_free_inst;
+
+	err = crypto_grab_cipher(&ctx->tweak_spawn,
+				 skcipher_crypto_instance(inst), name, 0, mask);
+	if (err)
 		goto err_free_inst;
 
 	inst->alg.base.cra_priority = alg->base.cra_priority;
@@ -421,8 +429,8 @@ static int xts_create(struct crypto_template *tmpl, struct rtattr **tb)
 				       (__alignof__(u64) - 1);
 
 	inst->alg.ivsize = XTS_BLOCK_SIZE;
-	inst->alg.min_keysize = crypto_skcipher_alg_min_keysize(alg) * 2;
-	inst->alg.max_keysize = crypto_skcipher_alg_max_keysize(alg) * 2;
+	inst->alg.min_keysize = alg->min_keysize * 2;
+	inst->alg.max_keysize = alg->max_keysize * 2;
 
 	inst->alg.base.cra_ctxsize = sizeof(struct xts_tfm_ctx);
 
@@ -459,11 +467,11 @@ static void __exit xts_module_exit(void)
 	crypto_unregister_template(&xts_tmpl);
 }
 
-subsys_initcall(xts_module_init);
+module_init(xts_module_init);
 module_exit(xts_module_exit);
 
 MODULE_LICENSE("GPL");
 MODULE_DESCRIPTION("XTS block cipher mode");
 MODULE_ALIAS_CRYPTO("xts");
-MODULE_IMPORT_NS(CRYPTO_INTERNAL);
+MODULE_IMPORT_NS("CRYPTO_INTERNAL");
 MODULE_SOFTDEP("pre: ecb");

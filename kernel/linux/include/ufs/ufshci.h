@@ -18,6 +18,8 @@ enum {
 	TASK_REQ_UPIU_SIZE_DWORDS	= 8,
 	TASK_RSP_UPIU_SIZE_DWORDS	= 8,
 	ALIGNED_UPIU_SIZE		= 512,
+	/* Larger response area, only for the devman UCD */
+	ALIGNED_DEVMAN_RSP_SIZE		= 4096,
 };
 
 /* UFSHCI Registers */
@@ -25,8 +27,9 @@ enum {
 	REG_CONTROLLER_CAPABILITIES		= 0x00,
 	REG_MCQCAP				= 0x04,
 	REG_UFS_VERSION				= 0x08,
-	REG_CONTROLLER_DEV_ID			= 0x10,
-	REG_CONTROLLER_PROD_ID			= 0x14,
+	REG_EXT_CONTROLLER_CAPABILITIES		= 0x0C,
+	REG_CONTROLLER_PID			= 0x10,
+	REG_CONTROLLER_MID			= 0x14,
 	REG_AUTO_HIBERNATE_IDLE_TIMER		= 0x18,
 	REG_INTERRUPT_STATUS			= 0x20,
 	REG_INTERRUPT_ENABLE			= 0x24,
@@ -67,7 +70,9 @@ enum {
 
 /* Controller capability masks */
 enum {
-	MASK_TRANSFER_REQUESTS_SLOTS		= 0x0000001F,
+	MASK_TRANSFER_REQUESTS_SLOTS_SDB	= 0x0000001F,
+	MASK_TRANSFER_REQUESTS_SLOTS_MCQ	= 0x000000FF,
+	MASK_NUMBER_OUTSTANDING_RTT		= 0x0000FF00,
 	MASK_TASK_MANAGEMENT_REQUEST_SLOTS	= 0x00070000,
 	MASK_EHSLUTRD_SUPPORTED			= 0x00400000,
 	MASK_AUTO_HIBERN8_SUPPORT		= 0x00800000,
@@ -75,21 +80,19 @@ enum {
 	MASK_OUT_OF_ORDER_DATA_DELIVERY_SUPPORT	= 0x02000000,
 	MASK_UIC_DME_TEST_MODE_SUPPORT		= 0x04000000,
 	MASK_CRYPTO_SUPPORT			= 0x10000000,
+	MASK_LSDB_SUPPORT			= 0x20000000,
 	MASK_MCQ_SUPPORT			= 0x40000000,
 };
 
-/* MCQ capability mask */
 enum {
-	MASK_EXT_IID_SUPPORT = 0x00000400,
-};
-
-enum {
+	/* Submission Queue (SQ) Configuration Registers */
 	REG_SQATTR		= 0x0,
 	REG_SQLBA		= 0x4,
 	REG_SQUBA		= 0x8,
 	REG_SQDAO		= 0xC,
 	REG_SQISAO		= 0x10,
 
+	/* Completion Queue (CQ) Configuration Registers */
 	REG_CQATTR		= 0x20,
 	REG_CQLBA		= 0x24,
 	REG_CQUBA		= 0x28,
@@ -97,6 +100,7 @@ enum {
 	REG_CQISAO		= 0x30,
 };
 
+/* Operation and Runtime Registers - Submission Queues and Completion Queues */
 enum {
 	REG_SQHP		= 0x0,
 	REG_SQTP		= 0x4,
@@ -113,6 +117,7 @@ enum {
 enum {
 	REG_CQIS		= 0x0,
 	REG_CQIE		= 0x4,
+	REG_MCQIACR		= 0x8,
 };
 
 enum {
@@ -181,10 +186,12 @@ static inline u32 ufshci_version(u32 major, u32 minor)
 #define UTP_TASK_REQ_COMPL			0x200
 #define UIC_COMMAND_COMPL			0x400
 #define DEVICE_FATAL_ERROR			0x800
+#define UTP_ERROR				0x1000
 #define CONTROLLER_FATAL_ERROR			0x10000
 #define SYSTEM_BUS_FATAL_ERROR			0x20000
 #define CRYPTO_ENGINE_FATAL_ERROR		0x40000
 #define MCQ_CQ_EVENT_STATUS			0x100000
+#define MCQ_IAG_EVENT_STATUS			0x200000
 
 #define UFSHCD_UIC_HIBERN8_MASK	(UIC_HIBERNATE_ENTER |\
 				UIC_HIBERNATE_EXIT)
@@ -200,7 +207,8 @@ static inline u32 ufshci_version(u32 major, u32 minor)
 				CONTROLLER_FATAL_ERROR |\
 				SYSTEM_BUS_FATAL_ERROR |\
 				CRYPTO_ENGINE_FATAL_ERROR |\
-				UIC_LINK_LOST)
+				UIC_LINK_LOST |\
+				UTP_ERROR)
 
 /* HCS - Host Controller Status 30h */
 #define DEVICE_PRESENT				0x1
@@ -267,6 +275,7 @@ enum {
 /* UECDME - Host UIC Error Code DME 48h */
 #define UIC_DME_ERROR			0x80000000
 #define UIC_DME_ERROR_CODE_MASK		0x1
+#define UIC_DME_QOS_MASK		0xE
 
 /* UTRIACR - Interrupt Aggregation control register - 0x4Ch */
 #define INT_AGGR_TIMEOUT_VAL_MASK		0xFF
@@ -281,6 +290,10 @@ enum {
 
 /* UTMRLRSR - UTP Task Management Request Run-Stop Register 80h */
 #define UTP_TASK_REQ_LIST_RUN_STOP_BIT		0x1
+
+/* REG_UFS_MEM_CFG - Global Config Registers 300h */
+#define MCQ_MODE_SELECT	BIT(0)
+#define ESI_ENABLE	BIT(1)
 
 /* CQISy - CQ y Interrupt Status Register  */
 #define UFSHCD_MCQ_CQIS_TAIL_ENT_PUSH_STS	0x1
@@ -352,12 +365,8 @@ enum {
 
 /* Interrupt disable masks */
 enum {
-	/* Interrupt disable mask for UFSHCI v1.0 */
-	INTERRUPT_MASK_ALL_VER_10	= 0x30FFF,
-	INTERRUPT_MASK_RW_VER_10	= 0x30000,
-
 	/* Interrupt disable mask for UFSHCI v1.1 */
-	INTERRUPT_MASK_ALL_VER_11	= 0x31FFF,
+	INTERRUPT_MASK_ALL_VER_11       = 0x31FFF,
 
 	/* Interrupt disable mask for UFSHCI v2.1 */
 	INTERRUPT_MASK_ALL_VER_21	= 0x71FFF,
@@ -421,13 +430,6 @@ union ufs_crypto_cfg_entry {
 /*
  * Request Descriptor Definitions
  */
-
-/* Transfer request command type */
-enum {
-	UTP_CMD_TYPE_SCSI		= 0x0,
-	UTP_CMD_TYPE_UFS		= 0x1,
-	UTP_CMD_TYPE_DEV_MANAGE		= 0x2,
-};
 
 /* To accommodate UFS2.0 required Command type */
 enum {
@@ -500,6 +502,16 @@ struct utp_transfer_cmd_desc {
 	u8 response_upiu[ALIGNED_UPIU_SIZE];
 	u8 prd_table[];
 };
+
+/* Dedicated UCD for the devman/reserved slot */
+struct utp_devman_cmd_desc {
+	u8 command_upiu[ALIGNED_UPIU_SIZE];
+	u8 response_upiu[ALIGNED_DEVMAN_RSP_SIZE];
+	u8 prd_table[];
+};
+
+static_assert(sizeof(struct utp_upiu_req) + QUERY_AGGREGATED_MAX_SIZE <=
+	      ALIGNED_DEVMAN_RSP_SIZE);
 
 /**
  * struct request_desc_header - Descriptor Header common to both UTRD and UTMRD
@@ -576,10 +588,26 @@ struct cq_entry {
 	__le16  prd_table_offset;
 
 	/* DW 4 */
-	__le32 status;
+	u8 overall_status;
+	u8 extended_error_code;
+	__le16 reserved_1;
 
-	/* DW 5-7 */
-	__le32 reserved[3];
+	/* DW 5 */
+	u8 task_tag;
+	u8 lun;
+#if defined(__BIG_ENDIAN)
+	u8 ext_iid:4;
+	u8 iid:4;
+#elif defined(__LITTLE_ENDIAN)
+	u8 iid:4;
+	u8 ext_iid:4;
+#else
+#error
+#endif
+	u8 reserved_2;
+
+	/* DW 6-7 */
+	__le32 reserved_3[2];
 };
 
 static_assert(sizeof(struct cq_entry) == 32);

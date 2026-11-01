@@ -197,7 +197,7 @@ static void update_rsi(struct cache_head *cnew, struct cache_head *citem)
 
 static struct cache_head *rsi_alloc(void)
 {
-	struct rsi *rsii = kmalloc(sizeof(*rsii), GFP_KERNEL);
+	struct rsi *rsii = kmalloc_obj(*rsii);
 	if (rsii)
 		return &rsii->h;
 	else
@@ -206,7 +206,7 @@ static struct cache_head *rsi_alloc(void)
 
 static int rsi_upcall(struct cache_detail *cd, struct cache_head *h)
 {
-	return sunrpc_cache_pipe_upcall_timeout(cd, h);
+	return sunrpc_cache_upcall_warn(cd, h);
 }
 
 static void rsi_request(struct cache_detail *cd,
@@ -449,7 +449,7 @@ update_rsc(struct cache_head *cnew, struct cache_head *ctmp)
 static struct cache_head *
 rsc_alloc(void)
 {
-	struct rsc *rsci = kmalloc(sizeof(*rsci), GFP_KERNEL);
+	struct rsc *rsci = kmalloc_obj(*rsci);
 	if (rsci)
 		return &rsci->h;
 	else
@@ -724,7 +724,7 @@ svcauth_gss_verify_header(struct svc_rqst *rqstp, struct rsc *rsci,
 		rqstp->rq_auth_stat = rpc_autherr_badverf;
 		return SVC_DENIED;
 	}
-	if (flavor != RPC_AUTH_GSS) {
+	if (flavor != RPC_AUTH_GSS || checksum.len < XDR_UNIT) {
 		rqstp->rq_auth_stat = rpc_autherr_badverf;
 		return SVC_DENIED;
 	}
@@ -814,7 +814,7 @@ svcauth_gss_register_pseudoflavor(u32 pseudoflavor, char * name)
 	struct auth_domain	*test;
 	int			stat = -ENOMEM;
 
-	new = kmalloc(sizeof(*new), GFP_KERNEL);
+	new = kmalloc_obj(*new);
 	if (!new)
 		goto out;
 	kref_init(&new->h.ref);
@@ -865,14 +865,6 @@ svcauth_gss_unwrap_integ(struct svc_rqst *rqstp, u32 seq, struct gss_ctx *ctx)
 	struct xdr_buf *buf = xdr->buf;
 	struct xdr_buf databody_integ;
 	struct xdr_netobj checksum;
-
-	/* NFS READ normally uses splice to send data in-place. However
-	 * the data in cache can change after the reply's MIC is computed
-	 * but before the RPC reply is sent. To prevent the client from
-	 * rejecting the server-computed MIC in this somewhat rare case,
-	 * do not use splice with the GSS integrity service.
-	 */
-	clear_bit(RQ_SPLICE_OK, &rqstp->rq_flags);
 
 	/* Did we already verify the signature on the original pass through? */
 	if (rqstp->rq_deferred)
@@ -948,8 +940,6 @@ svcauth_gss_unwrap_priv(struct svc_rqst *rqstp, u32 seq, struct gss_ctx *ctx)
 	struct xdr_buf *buf = xdr->buf;
 	unsigned int saved_len;
 
-	clear_bit(RQ_SPLICE_OK, &rqstp->rq_flags);
-
 	if (xdr_stream_decode_u32(xdr, &len) < 0)
 		goto unwrap_failed;
 	if (rqstp->rq_deferred) {
@@ -958,6 +948,8 @@ svcauth_gss_unwrap_priv(struct svc_rqst *rqstp, u32 seq, struct gss_ctx *ctx)
 		goto out_seq;
 	}
 	if (len > xdr_stream_remaining(xdr))
+		goto unwrap_failed;
+	if (len <= GSS_KRB5_TOK_HDR_LEN)
 		goto unwrap_failed;
 	offset = xdr_stream_pos(xdr);
 
@@ -1043,17 +1035,11 @@ null_verifier:
 
 static void gss_free_in_token_pages(struct gssp_in_token *in_token)
 {
-	u32 inlen;
 	int i;
 
 	i = 0;
-	inlen = in_token->page_len;
-	while (inlen) {
-		if (in_token->pages[i])
-			put_page(in_token->pages[i]);
-		inlen -= inlen > PAGE_SIZE ? PAGE_SIZE : inlen;
-	}
-
+	while (in_token->pages[i])
+		put_page(in_token->pages[i++]);
 	kfree(in_token->pages);
 	in_token->pages = NULL;
 }
@@ -1085,7 +1071,7 @@ static int gss_read_proxy_verf(struct svc_rqst *rqstp,
 		goto out_denied_free;
 
 	pages = DIV_ROUND_UP(inlen, PAGE_SIZE);
-	in_token->pages = kcalloc(pages, sizeof(struct page *), GFP_KERNEL);
+	in_token->pages = kzalloc_objs(struct page *, pages + 1);
 	if (!in_token->pages)
 		goto out_denied_free;
 	in_token->page_base = 0;
@@ -1099,7 +1085,8 @@ static int gss_read_proxy_verf(struct svc_rqst *rqstp,
 	}
 
 	length = min_t(unsigned int, inlen, (char *)xdr->end - (char *)xdr->p);
-	memcpy(page_address(in_token->pages[0]), xdr->p, length);
+	if (length)
+		memcpy(page_address(in_token->pages[0]), xdr->p, length);
 	inlen -= length;
 
 	to_offs = length;
@@ -1481,7 +1468,6 @@ static int create_use_gss_proxy_proc_entry(struct net *net)
 			      &use_gss_proxy_proc_ops, net);
 	if (!*p)
 		return -ENOMEM;
-	init_gssp_clnt(sn);
 	return 0;
 }
 
@@ -1588,6 +1574,9 @@ svcauth_gss_decode_credbody(struct xdr_stream *xdr,
 	u32 body_len;
 	__be32 *p;
 
+	/* Early-return paths leave deterministic state, not stale residue. */
+	memset(gc, 0, sizeof(*gc));
+
 	p = xdr_inline_decode(xdr, XDR_UNIT);
 	if (!p)
 		return false;
@@ -1644,9 +1633,9 @@ svcauth_gss_accept(struct svc_rqst *rqstp)
 	int		ret;
 	struct sunrpc_net *sn = net_generic(SVC_NET(rqstp), sunrpc_net_id);
 
-	rqstp->rq_auth_stat = rpc_autherr_badcred;
+	rqstp->rq_auth_stat = rpc_autherr_failed;
 	if (!svcdata)
-		svcdata = kmalloc(sizeof(*svcdata), GFP_KERNEL);
+		svcdata = kmalloc_obj(*svcdata);
 	if (!svcdata)
 		goto auth_err;
 	rqstp->rq_auth_data = svcdata;
@@ -1654,6 +1643,7 @@ svcauth_gss_accept(struct svc_rqst *rqstp)
 	svcdata->rsci = NULL;
 	gc = &svcdata->clcred;
 
+	rqstp->rq_auth_stat = rpc_autherr_badcred;
 	if (!svcauth_gss_decode_credbody(&rqstp->rq_arg_stream, gc, &rpcstart))
 		goto auth_err;
 	if (gc->gc_v != RPC_GSS_VERSION)
@@ -1956,6 +1946,8 @@ svcauth_gss_release(struct svc_rqst *rqstp)
 
 	if (!gsd)
 		goto out;
+	if (rqstp->rq_auth_stat != rpc_auth_ok)
+		goto out;
 	gc = &gsd->clcred;
 	if (gc->gc_proc != RPC_GSS_PROC_DATA)
 		goto out;
@@ -2014,6 +2006,11 @@ svcauth_gss_domain_release(struct auth_domain *dom)
 	call_rcu(&dom->rcu_head, svcauth_gss_domain_release_rcu);
 }
 
+static rpc_authflavor_t svcauth_gss_pseudoflavor(struct svc_rqst *rqstp)
+{
+	return svcauth_gss_flavor(rqstp->rq_gssclient);
+}
+
 static struct auth_ops svcauthops_gss = {
 	.name		= "rpcsec_gss",
 	.owner		= THIS_MODULE,
@@ -2022,6 +2019,7 @@ static struct auth_ops svcauthops_gss = {
 	.release	= svcauth_gss_release,
 	.domain_release = svcauth_gss_domain_release,
 	.set_client	= svcauth_gss_set_client,
+	.pseudoflavor	= svcauth_gss_pseudoflavor,
 };
 
 static int rsi_cache_create_net(struct net *net)

@@ -103,7 +103,7 @@ struct snd_emux {
 	int ports[SNDRV_EMUX_MAX_PORTS];	/* The ports for this device */
 	struct snd_emux_port *portptrs[SNDRV_EMUX_MAX_PORTS];
 	int used;	/* use counter */
-	char *name;	/* name of the device (internal) */
+	const char *name;	/* name of the device (internal) */
 	struct snd_rawmidi **vmidi;
 	struct timer_list tlist;	/* for pending note-offs */
 	int timer_active;
@@ -125,7 +125,6 @@ struct snd_emux {
  */
 struct snd_emux_port {
 
-	struct snd_midi_channel_set chset;
 	struct snd_emux *emu;
 
 	char port_mode;			/* operation mode */
@@ -138,6 +137,7 @@ struct snd_emux_port {
 #if IS_ENABLED(CONFIG_SND_SEQUENCER_OSS)
 	struct snd_seq_oss_arg *oss_arg;
 #endif
+	struct snd_midi_channel_set chset;
 };
 
 /* port_mode */

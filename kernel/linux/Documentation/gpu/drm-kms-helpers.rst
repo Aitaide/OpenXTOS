@@ -33,6 +33,8 @@ There are a few areas these helpers can grouped into:
   pipeline: Planes, handling rectangles for visibility checking and scissoring,
   flip queues and assorted bits.
 
+.. contents::
+
 Modeset Helper Reference for Common Vtables
 ===========================================
 
@@ -92,16 +94,16 @@ GEM Atomic Helper Reference
 .. kernel-doc:: drivers/gpu/drm/drm_gem_atomic_helper.c
    :export:
 
-Simple KMS Helper Reference
-===========================
+VBLANK Helper Reference
+-----------------------
 
-.. kernel-doc:: drivers/gpu/drm/drm_simple_kms_helper.c
+.. kernel-doc:: drivers/gpu/drm/drm_vblank_helper.c
    :doc: overview
 
-.. kernel-doc:: include/drm/drm_simple_kms_helper.h
+.. kernel-doc:: include/drm/drm_vblank_helper.h
    :internal:
 
-.. kernel-doc:: drivers/gpu/drm/drm_simple_kms_helper.c
+.. kernel-doc:: drivers/gpu/drm/drm_vblank_helper.c
    :export:
 
 fbdev Helper Functions Reference
@@ -114,9 +116,6 @@ fbdev Helper Functions Reference
    :internal:
 
 .. kernel-doc:: drivers/gpu/drm/drm_fb_helper.c
-   :export:
-
-.. kernel-doc:: drivers/gpu/drm/drm_fbdev_generic.c
    :export:
 
 format Helper Functions Reference
@@ -172,10 +171,16 @@ Bridge Operations
 .. kernel-doc:: drivers/gpu/drm/drm_bridge.c
    :doc: bridge operations
 
+Bridge Chain Format Selection
+-----------------------------
+
+.. kernel-doc:: drivers/gpu/drm/drm_bridge.c
+   :doc: bridge chain format selection
+
 Bridge Connector Helper
 -----------------------
 
-.. kernel-doc:: drivers/gpu/drm/drm_bridge_connector.c
+.. kernel-doc:: drivers/gpu/drm/display/drm_bridge_connector.c
    :doc: overview
 
 
@@ -198,7 +203,7 @@ MIPI-DSI bridge operation
 Bridge Connector Helper Reference
 ---------------------------------
 
-.. kernel-doc:: drivers/gpu/drm/drm_bridge_connector.c
+.. kernel-doc:: drivers/gpu/drm/display/drm_bridge_connector.c
    :export:
 
 Panel-Bridge Helper Reference
@@ -224,6 +229,9 @@ Panel Helper Reference
 .. kernel-doc:: drivers/gpu/drm/drm_panel_orientation_quirks.c
    :export:
 
+.. kernel-doc:: drivers/gpu/drm/drm_panel_backlight_quirks.c
+   :export:
+
 Panel Self Refresh Helper Reference
 ===================================
 
@@ -231,6 +239,21 @@ Panel Self Refresh Helper Reference
    :doc: overview
 
 .. kernel-doc:: drivers/gpu/drm/drm_self_refresh_helper.c
+   :export:
+
+HDMI Atomic State Helpers
+=========================
+
+Overview
+--------
+
+.. kernel-doc:: drivers/gpu/drm/display/drm_hdmi_state_helper.c
+   :doc: hdmi helpers
+
+Functions Reference
+-------------------
+
+.. kernel-doc:: drivers/gpu/drm/display/drm_hdmi_state_helper.c
    :export:
 
 HDCP Helper Functions Reference
@@ -361,6 +384,12 @@ EDID Helper Functions Reference
    :internal:
 
 .. kernel-doc:: drivers/gpu/drm/drm_edid.c
+   :export:
+
+.. kernel-doc:: include/drm/drm_eld.h
+   :internal:
+
+.. kernel-doc:: drivers/gpu/drm/drm_eld.c
    :export:
 
 SCDC Helper Functions Reference

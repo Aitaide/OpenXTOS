@@ -12,12 +12,10 @@
 #include <linux/kernel.h>
 #include <linux/init.h>
 #include <linux/delay.h>
-#include <linux/gpio.h>
 #include <linux/gpio/consumer.h>
 #include <linux/platform_device.h>
 #include <linux/pm.h>
 #include <linux/i2c.h>
-#include <linux/of_device.h>
 #include <linux/regmap.h>
 #include <linux/slab.h>
 #include <sound/core.h>
@@ -313,7 +311,6 @@ static void cs4349_i2c_remove(struct i2c_client *client)
 	gpiod_set_value_cansleep(cs4349->reset_gpio, 0);
 }
 
-#ifdef CONFIG_PM
 static int cs4349_runtime_suspend(struct device *dev)
 {
 	struct cs4349_private *cs4349 = dev_get_drvdata(dev);
@@ -343,15 +340,19 @@ static int cs4349_runtime_resume(struct device *dev)
 	gpiod_set_value_cansleep(cs4349->reset_gpio, 1);
 
 	regcache_cache_only(cs4349->regmap, false);
-	regcache_sync(cs4349->regmap);
+	ret = regcache_sync(cs4349->regmap);
+	if (ret) {
+		regcache_cache_only(cs4349->regmap, true);
+		regcache_mark_dirty(cs4349->regmap);
+		gpiod_set_value_cansleep(cs4349->reset_gpio, 0);
+		return ret;
+	}
 
 	return 0;
 }
-#endif
 
 static const struct dev_pm_ops cs4349_runtime_pm = {
-	SET_RUNTIME_PM_OPS(cs4349_runtime_suspend, cs4349_runtime_resume,
-			   NULL)
+	RUNTIME_PM_OPS(cs4349_runtime_suspend, cs4349_runtime_resume, NULL)
 };
 
 static const struct of_device_id cs4349_of_match[] = {
@@ -362,8 +363,8 @@ static const struct of_device_id cs4349_of_match[] = {
 MODULE_DEVICE_TABLE(of, cs4349_of_match);
 
 static const struct i2c_device_id cs4349_i2c_id[] = {
-	{"cs4349", 0},
-	{}
+	{ .name = "cs4349" },
+	{ }
 };
 
 MODULE_DEVICE_TABLE(i2c, cs4349_i2c_id);
@@ -372,7 +373,7 @@ static struct i2c_driver cs4349_i2c_driver = {
 	.driver = {
 		.name		= "cs4349",
 		.of_match_table	= cs4349_of_match,
-		.pm = &cs4349_runtime_pm,
+		.pm = pm_ptr(&cs4349_runtime_pm),
 	},
 	.id_table	= cs4349_i2c_id,
 	.probe		= cs4349_i2c_probe,

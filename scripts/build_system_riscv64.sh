@@ -46,6 +46,8 @@ KERNEL_SRC="$ROOT/kernel/linux"
 KERNEL_BUILD="$BUILD_ROOT/kernel-build-riscv64"
 KERNEL_INSTALL="$BUILD_ROOT/kernel-install-riscv64"
 
+KERNEL_DIR="$KERNEL_SRC" "$ROOT/scripts/prepare_linux.sh"
+
 mkdir -p "$KERNEL_BUILD" "$KERNEL_INSTALL"
 
 if [ ! -f "$KERNEL_BUILD/.config" ]; then
@@ -54,52 +56,53 @@ if [ ! -f "$KERNEL_BUILD/.config" ]; then
         ARCH=riscv CROSS_COMPILE=riscv64-linux-gnu- \
         defconfig
 
-    # Enable PREEMPT_RT
-    "$ROOT/scripts/enable_rt_config.sh" "$KERNEL_BUILD/.config"
-
-    # Merge XTOS configuration fragment (scheduler helper + BCI modules),
-    # same as the x86_64 build in scripts/build_kernel.sh
-    KCONFIG_MERGE="$KERNEL_SRC/scripts/kconfig/merge_config.sh"
-    if [ -f "$KCONFIG_MERGE" ] && [ -f "$ROOT/kernel/xtos_defconfig" ]; then
-        log "Merging XTOS kernel configuration fragment..."
-        KCONFIG_CONFIG="$KERNEL_BUILD/.config" "$KCONFIG_MERGE" -m \
-            "$KERNEL_BUILD/.config" "$ROOT/kernel/xtos_defconfig"
-    else
-        warn "merge_config.sh or kernel/xtos_defconfig not found; XTOS kernel components disabled"
-    fi
-
-    # QEMU virt platform requirements:
-    #   - rv64 gc (G = IMAFD + C compressed)
-    #   - serial console on 16550 UART at 0x10000000
-    #   - virtio-mmio devices
-    "$KERNEL_SRC/scripts/config" --file "$KERNEL_BUILD/.config" \
-        --enable SERIAL_8250 \
-        --enable SERIAL_8250_CONSOLE \
-        --enable SERIAL_EARLYCON \
-        --enable SERIAL_OF_PLATFORM \
-        --enable VIRTIO_MMIO \
-        --enable VIRTIO_BLK \
-        --enable VIRTIO_NET \
-        --enable VIRTIO_CONSOLE \
-        --enable HW_RANDOM_VIRTIO \
-        --enable DRM_VIRTIO_GPU \
-        --enable SERIAL_DEV_BUS \
-        --enable SERIAL_DEV_CTRL_TTYPORT
-
-    # Regenerate after changes
-    make -C "$KERNEL_SRC" O="$KERNEL_BUILD" \
-        ARCH=riscv CROSS_COMPILE=riscv64-linux-gnu- \
-        olddefconfig
-
-    # Verify required settings actually took effect
-    for setting in CONFIG_PREEMPT_RT=y CONFIG_XTOS_SCHED=y CONFIG_XTOS_BCI=m CONFIG_XTOS_BCI_OPENBCI=m; do
-        if ! grep -qx "$setting" "$KERNEL_BUILD/.config"; then
-            error "Required kernel setting missing after olddefconfig: $setting"
-            exit 1
-        fi
-    done
-    log "XTOS kernel settings verified: XTOS_SCHED=y XTOS_BCI=m XTOS_BCI_OPENBCI=m"
 fi
+
+# Enable PREEMPT_RT
+"$ROOT/scripts/enable_rt_config.sh" "$KERNEL_BUILD/.config"
+
+# Merge XTOS configuration fragment (scheduler helper + BCI modules),
+# same as the x86_64 build in scripts/build_kernel.sh
+KCONFIG_MERGE="$KERNEL_SRC/scripts/kconfig/merge_config.sh"
+if [ -f "$KCONFIG_MERGE" ] && [ -f "$ROOT/kernel/xtos_defconfig" ]; then
+    log "Merging XTOS kernel configuration fragment..."
+    KCONFIG_CONFIG="$KERNEL_BUILD/.config" "$KCONFIG_MERGE" -m \
+        "$KERNEL_BUILD/.config" "$ROOT/kernel/xtos_defconfig"
+else
+    warn "merge_config.sh or kernel/xtos_defconfig not found; XTOS kernel components disabled"
+fi
+
+# QEMU virt platform requirements:
+#   - rv64 gc (G = IMAFD + C compressed)
+#   - serial console on 16550 UART at 0x10000000
+#   - virtio-mmio devices
+"$KERNEL_SRC/scripts/config" --file "$KERNEL_BUILD/.config" \
+    --enable SERIAL_8250 \
+    --enable SERIAL_8250_CONSOLE \
+    --enable SERIAL_EARLYCON \
+    --enable SERIAL_OF_PLATFORM \
+    --enable VIRTIO_MMIO \
+    --enable VIRTIO_BLK \
+    --enable VIRTIO_NET \
+    --enable VIRTIO_CONSOLE \
+    --enable HW_RANDOM_VIRTIO \
+    --enable DRM_VIRTIO_GPU \
+    --enable SERIAL_DEV_BUS \
+    --enable SERIAL_DEV_CTRL_TTYPORT
+
+# Regenerate after changes
+make -C "$KERNEL_SRC" O="$KERNEL_BUILD" \
+    ARCH=riscv CROSS_COMPILE=riscv64-linux-gnu- \
+    olddefconfig
+
+# Verify required settings actually took effect
+for setting in CONFIG_PREEMPT_RT=y CONFIG_HIGH_RES_TIMERS=y CONFIG_IKCONFIG=y CONFIG_IKCONFIG_PROC=y CONFIG_SERIAL_DEV_BUS=y CONFIG_SERIAL_DEV_CTRL_TTYPORT=y CONFIG_XTOS_SCHED=y CONFIG_XTOS_BCI=m CONFIG_XTOS_BCI_OPENBCI=m; do
+    if ! grep -qx "$setting" "$KERNEL_BUILD/.config"; then
+        error "Required kernel setting missing after olddefconfig: $setting"
+        exit 1
+    fi
+done
+log "XTOS kernel settings verified: XTOS_SCHED=y XTOS_BCI=m XTOS_BCI_OPENBCI=m"
 
 log "Building RISC-V 64 kernel image..."
 make -C "$KERNEL_SRC" O="$KERNEL_BUILD" \
@@ -273,6 +276,8 @@ log "=== Stage 5: Creating RISC-V 64 initramfs ==="
 
 # Create essential directories
 mkdir -p "$ROOTFS"/{dev,proc,sys,tmp,root,etc,mnt}
+mkdir -p "$ROOTFS/usr/bin"
+install -m 0755 "$ROOT/system/rootfs/usr/bin/xtos-rt-status" "$ROOTFS/usr/bin/xtos-rt-status"
 
 # Optional XTOS_* metadata is passed literally; regenerate even in reused build roots.
 KERNEL_RELEASE="$(cat "$KERNEL_BUILD/include/config/kernel.release")"

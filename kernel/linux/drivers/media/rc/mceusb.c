@@ -28,7 +28,6 @@
 #include <linux/workqueue.h>
 #include <linux/usb.h>
 #include <linux/usb/input.h>
-#include <linux/pm_wakeup.h>
 #include <media/rc-core.h>
 
 #define DRIVER_VERSION	"1.95"
@@ -398,6 +397,8 @@ static const struct usb_device_id mceusb_dev_table[] = {
 	{ USB_DEVICE(VENDOR_COMPRO, 0x3082) },
 	/* Northstar Systems, Inc. eHome Infrared Transceiver */
 	{ USB_DEVICE(VENDOR_NORTHSTAR, 0xe004) },
+	/* Northstar Systems, Inc. eHome Infrared Transceiver - variant */
+	{ USB_DEVICE(VENDOR_NORTHSTAR, 0xe033) },
 	/* TiVo PC IR Receiver */
 	{ USB_DEVICE(VENDOR_TIVO, 0x2000),
 	  .driver_info = TIVO_KIT },
@@ -494,7 +495,6 @@ struct mceusb_dev {
 	u32 carrier;
 	unsigned char tx_mask;
 
-	char name[128];
 	char phys[64];
 	enum mceusb_model_type model;
 
@@ -659,8 +659,8 @@ static void mceusb_dev_printdata(struct mceusb_dev *ir, u8 *buf, int buf_len,
 			if (len == 2)
 				dev_dbg(dev, "Get hw/sw rev?");
 			else
-				dev_dbg(dev, "hw/sw rev %*ph",
-					4, &buf[offset + 2]);
+				dev_dbg(dev, "hw/sw rev %4ph",
+					&buf[offset + 2]);
 			break;
 		case MCE_CMD_RESUME:
 			dev_dbg(dev, "Device resume requested");
@@ -774,7 +774,7 @@ static void mceusb_dev_printdata(struct mceusb_dev *ir, u8 *buf, int buf_len,
 
 /*
  * Schedule work that can't be done in interrupt handlers
- * (mceusb_dev_recv() and mce_write_callback()) nor tasklets.
+ * (mceusb_dev_recv() and mce_write_callback()) nor BH work.
  * Invokes mceusb_deferred_kevent() for recovering from
  * error events specified by the kevent bit field.
  */
@@ -1591,16 +1591,10 @@ static struct rc_dev *mceusb_init_rc_dev(struct mceusb_dev *ir)
 		goto out;
 	}
 
-	snprintf(ir->name, sizeof(ir->name), "%s (%04x:%04x)",
-		 mceusb_model[ir->model].name ?
-			mceusb_model[ir->model].name :
-			"Media Center Ed. eHome Infrared Remote Transceiver",
-		 le16_to_cpu(ir->usbdev->descriptor.idVendor),
-		 le16_to_cpu(ir->usbdev->descriptor.idProduct));
-
 	usb_make_path(ir->usbdev, ir->phys, sizeof(ir->phys));
 
-	rc->device_name = ir->name;
+	rc->device_name = mceusb_model[ir->model].name ? :
+		"Media Center Ed. eHome Infrared Remote Transceiver";
 	rc->input_phys = ir->phys;
 	usb_to_input_id(ir->usbdev, &rc->input_id);
 	rc->dev.parent = dev;
@@ -1723,7 +1717,7 @@ static int mceusb_dev_probe(struct usb_interface *intf,
 		pipe = usb_rcvbulkpipe(dev, ep_in->bEndpointAddress);
 	maxp = usb_maxpacket(dev, pipe);
 
-	ir = kzalloc(sizeof(struct mceusb_dev), GFP_KERNEL);
+	ir = kzalloc_obj(struct mceusb_dev);
 	if (!ir)
 		goto mem_alloc_fail;
 
@@ -1737,7 +1731,7 @@ static int mceusb_dev_probe(struct usb_interface *intf,
 		goto urb_in_alloc_fail;
 
 	ir->usbintf = intf;
-	ir->usbdev = usb_get_dev(dev);
+	ir->usbdev = dev;
 	ir->dev = &intf->dev;
 	ir->len_in = maxp;
 	ir->flags.microsoft_gen1 = is_microsoft_gen1;
@@ -1825,7 +1819,6 @@ static int mceusb_dev_probe(struct usb_interface *intf,
 	/* Error-handling path */
 rc_dev_fail:
 	cancel_work_sync(&ir->kevent);
-	usb_put_dev(ir->usbdev);
 	usb_kill_urb(ir->urb_in);
 	usb_free_urb(ir->urb_in);
 urb_in_alloc_fail:
@@ -1857,7 +1850,7 @@ static void mceusb_dev_disconnect(struct usb_interface *intf)
 	usb_kill_urb(ir->urb_in);
 	usb_free_urb(ir->urb_in);
 	usb_free_coherent(dev, ir->len_in, ir->buf_in, ir->dma_in);
-	usb_put_dev(dev);
+	rc_free_device(ir->rc);
 
 	kfree(ir);
 }

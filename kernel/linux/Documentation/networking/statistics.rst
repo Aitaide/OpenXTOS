@@ -41,6 +41,15 @@ If `-s` is specified once the detailed errors won't be shown.
 
 `ip` supports JSON formatting via the `-j` option.
 
+Queue statistics
+~~~~~~~~~~~~~~~~
+
+Queue statistics are accessible via the netdev netlink family.
+
+Currently no widely distributed CLI exists to access those statistics.
+Kernel development tools (ynl) can be used to experiment with them,
+see `Documentation/userspace-api/netlink/intro-specs.rst`.
+
 Protocol-specific statistics
 ----------------------------
 
@@ -134,7 +143,7 @@ reading multiple stats as it internally performs a full dump of
 and reports only the stat corresponding to the accessed file.
 
 Sysfs files are documented in
-`Documentation/ABI/testing/sysfs-class-net-statistics`.
+Documentation/ABI/testing/sysfs-class-net-statistics.
 
 
 netlink
@@ -146,6 +155,12 @@ netlink
 Statistics are reported both in the responses to link information
 requests (`RTM_GETLINK`) and statistic requests (`RTM_GETSTATS`,
 when `IFLA_STATS_LINK_64` bit is set in the `.filter_mask` of the request).
+
+netdev (netlink)
+~~~~~~~~~~~~~~~~
+
+`netdev` generic netlink family allows accessing page pool and per queue
+statistics.
 
 ethtool
 -------
@@ -169,9 +184,11 @@ Protocol-related statistics can be requested in get commands by setting
 the `ETHTOOL_FLAG_STATS` flag in `ETHTOOL_A_HEADER_FLAGS`. Currently
 statistics are supported in the following commands:
 
-  - `ETHTOOL_MSG_PAUSE_GET`
   - `ETHTOOL_MSG_FEC_GET`
+  - `ETHTOOL_MSG_LINKSTATE_GET`
   - `ETHTOOL_MSG_MM_GET`
+  - `ETHTOOL_MSG_PAUSE_GET`
+  - `ETHTOOL_MSG_TSINFO_GET`
 
 debugfs
 -------
@@ -214,8 +231,19 @@ Kernel-internal data structures
 -------------------------------
 
 The following structures are internal to the kernel, their members are
-translated to netlink attributes when dumped. Drivers must not overwrite
-the statistics they don't report with 0.
+translated to netlink attributes when dumped. Fields are pre-initialized
+to ``ETHTOOL_STAT_NOT_SET`` (by ``ethtool_stats_init()``); drivers must
+leave fields they do not report at that value rather than overwriting
+them with 0.
 
-- ethtool_pause_stats()
-- ethtool_fec_stats()
+- ``struct ethtool_eth_ctrl_stats``
+- ``struct ethtool_eth_mac_stats``
+- ``struct ethtool_eth_phy_stats``
+- ``struct ethtool_fec_hist``
+- ``struct ethtool_fec_stats``
+- ``struct ethtool_link_ext_stats``
+- ``struct ethtool_mm_stats``
+- ``struct ethtool_pause_stats``
+- ``struct ethtool_phy_stats``
+- ``struct ethtool_rmon_stats``
+- ``struct ethtool_ts_stats``

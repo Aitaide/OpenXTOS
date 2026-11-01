@@ -20,7 +20,8 @@ properties:
   compatible:
     const: samsung,s6d27a1
 
-  reg: true
+  reg:
+    maxItems: 1
 
   interrupts:
     description: provides an optional ESD (electrostatic discharge)
@@ -28,8 +29,6 @@ properties:
       This can also be raised for other reasons like erroneous
       configuration.
     maxItems: 1
-
-  reset-gpios: true
 
   vci-supply:
     description: regulator that supplies the VCI analog voltage
@@ -39,16 +38,12 @@ properties:
     description: regulator that supplies the VCCIO voltage usually
       around 1.8 V
 
-  backlight: true
-
   spi-cpha: true
 
   spi-cpol: true
 
   spi-max-frequency:
     maximum: 1200000
-
-  port: true
 
 required:
   - compatible

@@ -7,7 +7,6 @@
  */
 
 #include <linux/ctype.h>
-#include <linux/mod_devicetable.h>
 #include <linux/module.h>
 #include <linux/init.h>
 #include <linux/err.h>
@@ -16,7 +15,7 @@
 #include <linux/iio/iio.h>
 #include <linux/iio/sysfs.h>
 #include <linux/util_macros.h>
-#include <asm/unaligned.h>
+#include <linux/unaligned.h>
 #include <dt-bindings/iio/temperature/thermocouple.h>
 /*
  * The MSB of the register value determines whether the following byte will
@@ -462,7 +461,7 @@ static int max31856_probe(struct spi_device *spi)
 }
 
 static const struct spi_device_id max31856_id[] = {
-	{ "max31856", 0 },
+	{ .name = "max31856" },
 	{ }
 };
 MODULE_DEVICE_TABLE(spi, max31856_id);

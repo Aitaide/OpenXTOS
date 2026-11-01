@@ -4,9 +4,10 @@
  */
 
 #include <linux/device.h>
+#include <linux/host1x_context_bus.h>
 #include <linux/of.h>
 
-struct bus_type host1x_context_device_bus_type = {
+const struct bus_type host1x_context_device_bus_type = {
 	.name = "host1x-context",
 };
 EXPORT_SYMBOL_GPL(host1x_context_device_bus_type);

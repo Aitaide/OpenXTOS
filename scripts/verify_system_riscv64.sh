@@ -69,6 +69,7 @@ log "Output: $OUTPUT"
 # QEMU command
 # virt machine, RV64GC with 2 CPUs. OpenSBI is the boot firmware; the kernel
 # is loaded as the payload. Console is the 16550 UART at 0x10000000.
+set +e
 timeout "$QEMU_TIMEOUT" qemu-system-riscv64 \
     -machine virt \
     -cpu rv64 \
@@ -81,7 +82,13 @@ timeout "$QEMU_TIMEOUT" qemu-system-riscv64 \
     -nographic \
     -no-reboot \
     -serial mon:stdio \
-    2>&1 | tee "$OUTPUT" || true
+    2>&1 | tee "$OUTPUT"
+PIPE_RESULTS=("${PIPESTATUS[@]}")
+set -e
+if { [ "${PIPE_RESULTS[0]}" -ne 0 ] && [ "${PIPE_RESULTS[0]}" -ne 124 ]; } || [ "${PIPE_RESULTS[1]}" -ne 0 ]; then
+    error "QEMU/capture failed: ${PIPE_RESULTS[*]}"
+    exit 1
+fi
 
 # Wait for output to flush
 sleep 1
@@ -116,20 +123,7 @@ FAIL=0
 check_pattern "Linux version" "Kernel boot" && PASS=$((PASS+1)) || FAIL=$((FAIL+1))
 # OpenSBI boot banner confirms the platform came up before the kernel
 check_pattern "OpenSBI" "OpenSBI firmware" && PASS=$((PASS+1)) || FAIL=$((FAIL+1))
-# PREEMPT_RT detection: modern RT kernels (6.6-rt15+) print "-rtN" in the
-# version string instead of the literal "PREEMPT_RT" boot banner.
-if grep -qE "Linux version [0-9.]+-rt[0-9]+" "$OUTPUT" 2>/dev/null; then
-    log "[✓] PREEMPT_RT enabled (rt kernel release)"
-    PASS=$((PASS+1))
-else
-    if grep -q "PREEMPT_RT" "$OUTPUT" 2>/dev/null; then
-        log "[✓] PREEMPT_RT enabled (boot banner)"
-        PASS=$((PASS+1))
-    else
-        error "[✗] PREEMPT_RT enabled"
-        FAIL=$((FAIL+1))
-    fi
-fi
+# RT is verified from the running validation guest below, never from a suffix/banner.
 check_pattern "Run /init as init process" "Init started" && PASS=$((PASS+1)) || FAIL=$((FAIL+1))
 
 # XTOS modules (optional, may not load on RISC-V without adaptation)
@@ -158,14 +152,14 @@ log "=== Summary ==="
 log "Passed: $PASS"
 log "Failed: $FAIL"
 
-if [ "$FAIL" -gt 2 ]; then
+if [ "$FAIL" -gt 0 ]; then
     error "RISC-V 64 verification FAILED (critical errors: $FAIL)"
     error "Check $OUTPUT for details"
     exit 1
 else
-    log "RISC-V 64 verification PASSED"
-    if [ "$FAIL" -gt 0 ]; then
-        warn "Note: $FAIL non-critical checks failed"
-    fi
+    # The normal BusyBox init does not emit RT ground truth. Boot the same
+    # kernel with the existing validation initramfs before claiming system PASS.
+    "$ROOT/scripts/verify_guest_riscv64.sh"
+    log "RISC-V 64 verification PASSED (boot + in-guest validation)"
     exit 0
 fi

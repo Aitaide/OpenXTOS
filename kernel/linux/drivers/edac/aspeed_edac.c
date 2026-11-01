@@ -214,10 +214,8 @@ static int config_irq(void *ctx, struct platform_device *pdev)
 
 	rc = devm_request_irq(&pdev->dev, irq, mcr_isr, IRQF_TRIGGER_HIGH,
 			      DRV_NAME, ctx);
-	if (rc) {
-		dev_err(&pdev->dev, "unable to request irq %d\n", irq);
+	if (rc)
 		return rc;
-	}
 
 	/* enable interrupts */
 	regmap_update_bits(aspeed_regmap, ASPEED_MCR_INTR_CTRL,
@@ -357,7 +355,7 @@ probe_exit02:
 }
 
 
-static int aspeed_remove(struct platform_device *pdev)
+static void aspeed_remove(struct platform_device *pdev)
 {
 	struct mem_ctl_info *mci;
 
@@ -369,8 +367,6 @@ static int aspeed_remove(struct platform_device *pdev)
 	mci = edac_mc_del_mc(&pdev->dev);
 	if (mci)
 		edac_mc_free(mci);
-
-	return 0;
 }
 
 

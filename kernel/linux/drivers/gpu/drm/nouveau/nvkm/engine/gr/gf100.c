@@ -285,7 +285,7 @@ gf100_gr_object_new(const struct nvkm_oclass *oclass, void *data, u32 size,
 	struct gf100_gr_chan *chan = gf100_gr_chan(oclass->parent);
 	struct gf100_gr_object *object;
 
-	if (!(object = kzalloc(sizeof(*object), GFP_KERNEL)))
+	if (!(object = kzalloc_obj(*object)))
 		return -ENOMEM;
 	*pobject = &object->object;
 
@@ -384,7 +384,7 @@ gf100_gr_chan_new(struct nvkm_gr *base, struct nvkm_chan *fifoch,
 	struct nvkm_device *device = gr->base.engine.subdev.device;
 	int ret;
 
-	if (!(chan = kzalloc(sizeof(*chan), GFP_KERNEL)))
+	if (!(chan = kzalloc_obj(*chan)))
 		return -ENOMEM;
 	nvkm_object_ctor(&gf100_gr_chan, oclass, &chan->object);
 	chan->gr = gr;
@@ -420,7 +420,7 @@ gf100_gr_chan_new(struct nvkm_gr *base, struct nvkm_chan *fifoch,
 			return ret;
 	} else {
 		ret = nvkm_memory_map(gr->attrib_cb, 0, chan->vmm, chan->attrib_cb,
-				      &args, sizeof(args));;
+				      &args, sizeof(args));
 		if (ret)
 			return ret;
 	}
@@ -443,6 +443,7 @@ gf100_gr_chan_new(struct nvkm_gr *base, struct nvkm_chan *fifoch,
 		ret = gf100_grctx_generate(gr, chan, fifoch->inst);
 		if (ret) {
 			nvkm_error(&base->engine.subdev, "failed to construct context\n");
+			mutex_unlock(&gr->fecs.mutex);
 			return ret;
 		}
 	}
@@ -1040,7 +1041,7 @@ gf100_gr_zbc_init(struct gf100_gr *gr)
 	}
 }
 
-/**
+/*
  * Wait until GR goes idle. GR is considered idle if it is disabled by the
  * MC (0x200) register, or GR is not busy and a context switch is not in
  * progress.
@@ -2032,18 +2033,18 @@ gf100_gr_oneinit(struct nvkm_gr *base)
 	}
 
 	/* Allocate global context buffers. */
-	ret = nvkm_memory_new(device, NVKM_MEM_TARGET_INST, gr->func->grctx->pagepool_size,
-			      0x100, false, &gr->pagepool);
+	ret = nvkm_memory_new(device, NVKM_MEM_TARGET_INST_SR_LOST,
+			      gr->func->grctx->pagepool_size, 0x100, false, &gr->pagepool);
 	if (ret)
 		return ret;
 
-	ret = nvkm_memory_new(device, NVKM_MEM_TARGET_INST, gr->func->grctx->bundle_size,
+	ret = nvkm_memory_new(device, NVKM_MEM_TARGET_INST_SR_LOST, gr->func->grctx->bundle_size,
 			      0x100, false, &gr->bundle_cb);
 	if (ret)
 		return ret;
 
-	ret = nvkm_memory_new(device, NVKM_MEM_TARGET_INST, gr->func->grctx->attrib_cb_size(gr),
-			      0x1000, false, &gr->attrib_cb);
+	ret = nvkm_memory_new(device, NVKM_MEM_TARGET_INST_SR_LOST,
+			      gr->func->grctx->attrib_cb_size(gr), 0x1000, false, &gr->attrib_cb);
 	if (ret)
 		return ret;
 
@@ -2329,7 +2330,7 @@ gf100_gr_reset(struct nvkm_gr *base)
 
 	WARN_ON(gf100_gr_fecs_halt_pipeline(gr));
 
-	subdev->func->fini(subdev, false);
+	subdev->func->fini(subdev, NVKM_POWEROFF);
 	nvkm_mc_disable(device, subdev->type, subdev->inst);
 	if (gr->func->gpccs.reset)
 		gr->func->gpccs.reset(gr);
@@ -2623,7 +2624,7 @@ gf100_gr_new_(const struct gf100_gr_fwif *fwif, struct nvkm_device *device,
 	struct gf100_gr *gr;
 	int ret;
 
-	if (!(gr = kzalloc(sizeof(*gr), GFP_KERNEL)))
+	if (!(gr = kzalloc_obj(*gr)))
 		return -ENOMEM;
 	*pgr = &gr->base;
 

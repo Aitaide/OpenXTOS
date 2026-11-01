@@ -1555,7 +1555,7 @@ static irqreturn_t rt2500pci_interrupt(int irq, void *dev_instance)
  */
 static int rt2500pci_validate_eeprom(struct rt2x00_dev *rt2x00dev)
 {
-	struct eeprom_93cx6 eeprom;
+	struct eeprom_93cx6 eeprom = {};
 	u32 reg;
 	u16 word;
 	u8 *mac;
@@ -1907,7 +1907,7 @@ static int rt2500pci_probe_hw_mode(struct rt2x00_dev *rt2x00dev)
 	/*
 	 * Create channel information array
 	 */
-	info = kcalloc(spec->num_channels, sizeof(*info), GFP_KERNEL);
+	info = kzalloc_objs(*info, spec->num_channels);
 	if (!info)
 		return -ENOMEM;
 
@@ -2003,6 +2003,10 @@ static int rt2500pci_tx_last_beacon(struct ieee80211_hw *hw)
 }
 
 static const struct ieee80211_ops rt2500pci_mac80211_ops = {
+	.add_chanctx = ieee80211_emulate_add_chanctx,
+	.remove_chanctx = ieee80211_emulate_remove_chanctx,
+	.change_chanctx = ieee80211_emulate_change_chanctx,
+	.switch_vif_chanctx = ieee80211_emulate_switch_vif_chanctx,
 	.tx			= rt2x00mac_tx,
 	.wake_tx_queue		= ieee80211_handle_wake_tx_queue,
 	.start			= rt2x00mac_start,

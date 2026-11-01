@@ -28,6 +28,7 @@ properties:
       - national,lp5523
       - ti,lp55231
       - ti,lp5562
+      - ti,lp5569
       - ti,lp8501
 
   reg:
@@ -151,6 +152,16 @@ patternProperties:
         $ref: /schemas/types.yaml#/definitions/string
         description: name of channel
 
+if:
+  not:
+    properties:
+      compatible:
+        contains:
+          const: ti,lp8501
+then:
+  properties:
+    pwr-sel: false
+
 required:
   - compatible
   - reg
@@ -172,7 +183,7 @@ examples:
             compatible = "ti,lp8501";
             reg = <0x32>;
             clock-mode = /bits/ 8 <2>;
-            pwr-sel = /bits/ 8 <3>;	/* D1~9 connected to VOUT */
+            pwr-sel = /bits/ 8 <3>; /* D1~9 connected to VOUT */
             ti,charge-pump-mode = <LP55XX_CP_BYPASS>;
 
             led@0 {

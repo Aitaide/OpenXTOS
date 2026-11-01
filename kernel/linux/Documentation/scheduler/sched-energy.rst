@@ -141,7 +141,7 @@ in its previous activation.
 find_energy_efficient_cpu() uses compute_energy() to estimate what will be the
 energy consumed by the system if the waking task was migrated. compute_energy()
 looks at the current utilization landscape of the CPUs and adjusts it to
-'simulate' the task migration. The EM framework provides the em_pd_energy() API
+'simulate' the task migration. The EM framework provides the em_cpu_energy() API
 which computes the expected energy consumption of each performance domain for
 the given utilization landscape.
 
@@ -244,7 +244,7 @@ Example 2.
 
 
     From these calculations, the Case 1 has the lowest total energy. So CPU 1
-    is be the best candidate from an energy-efficiency standpoint.
+    is the best candidate from an energy-efficiency standpoint.
 
 Big CPUs are generally more power hungry than the little ones and are thus used
 mainly when a task doesn't fit the littles. However, little CPUs aren't always
@@ -252,7 +252,7 @@ necessarily more energy-efficient than big CPUs. For some systems, the high OPPs
 of the little CPUs can be less energy-efficient than the lowest OPPs of the
 bigs, for example. So, if the little CPUs happen to have enough utilization at
 a specific point in time, a small task waking up at that moment could be better
-of executing on the big side in order to save energy, even though it would fit
+off executing on the big side in order to save energy, even though it would fit
 on the little side.
 
 And even in the case where all OPPs of the big CPUs are less energy-efficient
@@ -285,7 +285,7 @@ much that can be done by the scheduler to save energy without severely harming
 throughput. In order to avoid hurting performance with EAS, CPUs are flagged as
 'over-utilized' as soon as they are used at more than 80% of their compute
 capacity. As long as no CPUs are over-utilized in a root domain, load balancing
-is disabled and EAS overridess the wake-up balancing code. EAS is likely to load
+is disabled and EAS overrides the wake-up balancing code. EAS is likely to load
 the most energy efficient CPUs of the system more than the others if that can be
 done without harming throughput. So, the load-balancer is disabled to prevent
 it from breaking the energy-efficient task placement found by EAS. It is safe to
@@ -359,32 +359,9 @@ in milli-Watts or in an 'abstract scale'.
 6.3 - Energy Model complexity
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
-The task wake-up path is very latency-sensitive. When the EM of a platform is
-too complex (too many CPUs, too many performance domains, too many performance
-states, ...), the cost of using it in the wake-up path can become prohibitive.
-The energy-aware wake-up algorithm has a complexity of:
-
-	C = Nd * (Nc + Ns)
-
-with: Nd the number of performance domains; Nc the number of CPUs; and Ns the
-total number of OPPs (ex: for two perf. domains with 4 OPPs each, Ns = 8).
-
-A complexity check is performed at the root domain level, when scheduling
-domains are built. EAS will not start on a root domain if its C happens to be
-higher than the completely arbitrary EM_MAX_COMPLEXITY threshold (2048 at the
-time of writing).
-
-If you really want to use EAS but the complexity of your platform's Energy
-Model is too high to be used with a single root domain, you're left with only
-two possible options:
-
-    1. split your system into separate, smaller, root domains using exclusive
-       cpusets and enable EAS locally on each of them. This option has the
-       benefit to work out of the box but the drawback of preventing load
-       balance between root domains, which can result in an unbalanced system
-       overall;
-    2. submit patches to reduce the complexity of the EAS wake-up algorithm,
-       hence enabling it to cope with larger EMs in reasonable time.
+EAS does not impose any complexity limit on the number of PDs/OPPs/CPUs but
+restricts the number of CPUs to EM_MAX_NUM_CPUS to prevent overflows during
+the energy estimation.
 
 
 6.4 - Schedutil governor
@@ -408,7 +385,7 @@ Using EAS with any other governor than schedutil is not supported.
 6.5 Scale-invariant utilization signals
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
-In order to make accurate prediction across CPUs and for all performance
+In order to make accurate predictions across CPUs and for all performance
 states, EAS needs frequency-invariant and CPU-invariant PELT signals. These can
 be obtained using the architecture-defined arch_scale{cpu,freq}_capacity()
 callbacks.

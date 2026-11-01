@@ -1,4 +1,6 @@
 // SPDX-License-Identifier: LGPL-2.1
+#include "trace/beauty/beauty.h"
+
 #include <sys/types.h>
 #include <sys/socket.h>
 
@@ -10,6 +12,9 @@
 #endif
 #ifndef MSG_BATCH
 #define MSG_BATCH		   0x40000
+#endif
+#ifndef MSG_SOCK_DEVMEM
+#define MSG_SOCK_DEVMEM		 0x2000000
 #endif
 #ifndef MSG_ZEROCOPY
 #define MSG_ZEROCOPY		 0x4000000
@@ -24,8 +29,8 @@
 # define MSG_CMSG_CLOEXEC	0x40000000
 #endif
 
-static size_t syscall_arg__scnprintf_msg_flags(char *bf, size_t size,
-					       struct syscall_arg *arg)
+size_t syscall_arg__scnprintf_msg_flags(char *bf, size_t size,
+					struct syscall_arg *arg)
 {
 	bool show_prefix = arg->show_string_prefix;
 	const char *prefix = "MSG_";
@@ -57,6 +62,7 @@ static size_t syscall_arg__scnprintf_msg_flags(char *bf, size_t size,
 	P_MSG_FLAG(MORE);
 	P_MSG_FLAG(WAITFORONE);
 	P_MSG_FLAG(BATCH);
+	P_MSG_FLAG(SOCK_DEVMEM);
 	P_MSG_FLAG(ZEROCOPY);
 	P_MSG_FLAG(SPLICE_PAGES);
 	P_MSG_FLAG(FASTOPEN);
@@ -68,5 +74,3 @@ static size_t syscall_arg__scnprintf_msg_flags(char *bf, size_t size,
 
 	return printed;
 }
-
-#define SCA_MSG_FLAGS syscall_arg__scnprintf_msg_flags

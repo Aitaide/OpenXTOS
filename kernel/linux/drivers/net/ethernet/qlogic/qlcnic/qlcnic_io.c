@@ -29,7 +29,7 @@
 #define QLCNIC_FLAGS_VLAN_OOB		0x40
 
 #define qlcnic_set_tx_vlan_tci(cmd_desc, v)	\
-	(cmd_desc)->vlan_TCI = cpu_to_le16(v);
+	(cmd_desc)->vlan_TCI = cpu_to_le16(v)
 #define qlcnic_set_cmd_desc_port(cmd_desc, var)	\
 	((cmd_desc)->port_ctxid |= ((var) & 0x0F))
 #define qlcnic_set_cmd_desc_ctxid(cmd_desc, var)	\
@@ -220,7 +220,7 @@ static void qlcnic_add_lb_filter(struct qlcnic_adapter *adapter,
 			return;
 		}
 
-		fil = kzalloc(sizeof(struct qlcnic_filter), GFP_ATOMIC);
+		fil = kzalloc_obj(struct qlcnic_filter, GFP_ATOMIC);
 		if (!fil)
 			return;
 
@@ -346,7 +346,7 @@ static void qlcnic_send_filter(struct qlcnic_adapter *adapter,
 		return;
 	}
 
-	fil = kzalloc(sizeof(struct qlcnic_filter), GFP_ATOMIC);
+	fil = kzalloc_obj(struct qlcnic_filter, GFP_ATOMIC);
 	if (!fil)
 		return;
 
@@ -446,8 +446,7 @@ static int qlcnic_tx_encap_pkt(struct qlcnic_adapter *adapter,
 	encap_descr |= skb_network_offset(skb) << 10;
 	first_desc->encap_descr = cpu_to_le16(encap_descr);
 
-	first_desc->tcp_hdr_offset = skb_inner_transport_header(skb) -
-				     skb->data;
+	first_desc->tcp_hdr_offset = skb_inner_transport_offset(skb);
 	first_desc->ip_hdr_offset = skb_inner_network_offset(skb);
 
 	qlcnic_set_tx_flags_opcode(first_desc, flags, opcode);

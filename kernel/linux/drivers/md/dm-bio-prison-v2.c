@@ -36,7 +36,7 @@ static struct kmem_cache *_cell_cache;
  */
 struct dm_bio_prison_v2 *dm_bio_prison_create_v2(struct workqueue_struct *wq)
 {
-	struct dm_bio_prison_v2 *prison = kzalloc(sizeof(*prison), GFP_KERNEL);
+	struct dm_bio_prison_v2 *prison = kzalloc_obj(*prison);
 	int ret;
 
 	if (!prison)
@@ -321,8 +321,7 @@ static bool __unlock(struct dm_bio_prison_v2 *prison,
 {
 	BUG_ON(!cell->exclusive_lock);
 
-	bio_list_merge(bios, &cell->bios);
-	bio_list_init(&cell->bios);
+	bio_list_merge_init(bios, &cell->bios);
 
 	if (cell->shared_count) {
 		cell->exclusive_lock = false;

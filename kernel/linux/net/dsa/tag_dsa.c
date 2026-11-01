@@ -129,7 +129,7 @@ enum dsa_code {
 static struct sk_buff *dsa_xmit_ll(struct sk_buff *skb, struct net_device *dev,
 				   u8 extra)
 {
-	struct dsa_port *dp = dsa_slave_to_port(dev);
+	struct dsa_port *dp = dsa_user_to_port(dev);
 	struct net_device *br_dev;
 	u8 tag_dev, tag_port;
 	enum dsa_cmd cmd;
@@ -224,6 +224,7 @@ static struct sk_buff *dsa_rcv_ll(struct sk_buff *skb, struct net_device *dev,
 			/* Remote management is not implemented yet,
 			 * drop.
 			 */
+			kfree_skb(skb);
 			return NULL;
 		case DSA_CODE_ARP_MIRROR:
 		case DSA_CODE_POLICY_MIRROR:
@@ -244,12 +245,14 @@ static struct sk_buff *dsa_rcv_ll(struct sk_buff *skb, struct net_device *dev,
 			/* Reserved code, this could be anything. Drop
 			 * seems like the safest option.
 			 */
+			kfree_skb(skb);
 			return NULL;
 		}
 
 		break;
 
 	default:
+		kfree_skb(skb);
 		return NULL;
 	}
 
@@ -267,14 +270,16 @@ static struct sk_buff *dsa_rcv_ll(struct sk_buff *skb, struct net_device *dev,
 		lag = dsa_lag_by_id(cpu_dp->dst, source_port + 1);
 		skb->dev = lag ? lag->dev : NULL;
 	} else {
-		skb->dev = dsa_master_find_slave(dev, source_device,
+		skb->dev = dsa_conduit_find_user(dev, source_device,
 						 source_port);
 	}
 
-	if (!skb->dev)
+	if (!skb->dev) {
+		kfree_skb(skb);
 		return NULL;
+	}
 
-	/* When using LAG offload, skb->dev is not a DSA slave interface,
+	/* When using LAG offload, skb->dev is not a DSA user interface,
 	 * so we cannot call dsa_default_offload_fwd_mark and we need to
 	 * special-case it.
 	 */
@@ -335,8 +340,10 @@ static struct sk_buff *dsa_xmit(struct sk_buff *skb, struct net_device *dev)
 
 static struct sk_buff *dsa_rcv(struct sk_buff *skb, struct net_device *dev)
 {
-	if (unlikely(!pskb_may_pull(skb, DSA_HLEN)))
+	if (unlikely(!pskb_may_pull(skb, DSA_HLEN))) {
+		kfree_skb(skb);
 		return NULL;
+	}
 
 	return dsa_rcv_ll(skb, dev, 0);
 }
@@ -375,8 +382,10 @@ static struct sk_buff *edsa_xmit(struct sk_buff *skb, struct net_device *dev)
 
 static struct sk_buff *edsa_rcv(struct sk_buff *skb, struct net_device *dev)
 {
-	if (unlikely(!pskb_may_pull(skb, EDSA_HLEN)))
+	if (unlikely(!pskb_may_pull(skb, EDSA_HLEN))) {
+		kfree_skb(skb);
 		return NULL;
+	}
 
 	skb_pull_rcsum(skb, EDSA_HLEN - DSA_HLEN);
 
@@ -406,4 +415,5 @@ static struct dsa_tag_driver *dsa_tag_drivers[] = {
 
 module_dsa_tag_drivers(dsa_tag_drivers);
 
+MODULE_DESCRIPTION("DSA tag driver for Marvell switches using DSA headers");
 MODULE_LICENSE("GPL");

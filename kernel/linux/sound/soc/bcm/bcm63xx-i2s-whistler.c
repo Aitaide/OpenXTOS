@@ -285,6 +285,7 @@ static const struct of_device_id snd_soc_bcm_audio_match[] = {
 	{.compatible = "brcm,bcm63xx-i2s"},
 	{ }
 };
+MODULE_DEVICE_TABLE(of, snd_soc_bcm_audio_match);
 #endif
 
 static struct platform_driver bcm63xx_i2s_driver = {
@@ -293,7 +294,7 @@ static struct platform_driver bcm63xx_i2s_driver = {
 		.of_match_table = of_match_ptr(snd_soc_bcm_audio_match),
 	},
 	.probe = bcm63xx_i2s_dev_probe,
-	.remove_new = bcm63xx_i2s_dev_remove,
+	.remove = bcm63xx_i2s_dev_remove,
 };
 
 module_platform_driver(bcm63xx_i2s_driver);

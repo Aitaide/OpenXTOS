@@ -87,6 +87,8 @@ struct waveform_private {
 	struct comedi_device *dev;	/* parent comedi device */
 	u64 ao_last_scan_time;		/* time of previous AO scan in usec */
 	unsigned int ao_scan_period;	/* AO scan period in usec */
+	bool ai_timer_enable:1;		/* should AI timer be running? */
+	bool ao_timer_enable:1;		/* should AO timer be running? */
 	unsigned short ao_loopbacks[N_CHANS];
 };
 
@@ -195,7 +197,8 @@ static unsigned short fake_waveform(struct comedi_device *dev,
  */
 static void waveform_ai_timer(struct timer_list *t)
 {
-	struct waveform_private *devpriv = from_timer(devpriv, t, ai_timer);
+	struct waveform_private *devpriv = timer_container_of(devpriv, t,
+							      ai_timer);
 	struct comedi_device *dev = devpriv->dev;
 	struct comedi_subdevice *s = dev->read_subdev;
 	struct comedi_async *async = s->async;
@@ -236,8 +239,12 @@ static void waveform_ai_timer(struct timer_list *t)
 			time_increment = devpriv->ai_convert_time - now;
 		else
 			time_increment = 1;
-		mod_timer(&devpriv->ai_timer,
-			  jiffies + usecs_to_jiffies(time_increment));
+		spin_lock(&dev->spinlock);
+		if (devpriv->ai_timer_enable) {
+			mod_timer(&devpriv->ai_timer,
+				  jiffies + usecs_to_jiffies(time_increment));
+		}
+		spin_unlock(&dev->spinlock);
 	}
 
 overrun:
@@ -267,6 +274,7 @@ static int waveform_ai_cmdtest(struct comedi_device *dev,
 	/* Step 2a : make sure trigger sources are unique */
 
 	err |= comedi_check_trigger_is_unique(cmd->convert_src);
+	err |= comedi_check_trigger_is_unique(cmd->scan_begin_src);
 	err |= comedi_check_trigger_is_unique(cmd->stop_src);
 
 	/* Step 2b : and mutually compatible */
@@ -317,10 +325,10 @@ static int waveform_ai_cmdtest(struct comedi_device *dev,
 		arg = min(arg,
 			  rounddown(UINT_MAX, (unsigned int)NSEC_PER_USEC));
 		arg = NSEC_PER_USEC * DIV_ROUND_CLOSEST(arg, NSEC_PER_USEC);
-		if (cmd->scan_begin_arg == TRIG_TIMER) {
+		if (cmd->scan_begin_src == TRIG_TIMER) {
 			/* limit convert_arg to keep scan_begin_arg in range */
 			limit = UINT_MAX / cmd->scan_end_arg;
-			limit = rounddown(limit, (unsigned int)NSEC_PER_SEC);
+			limit = rounddown(limit, (unsigned int)NSEC_PER_USEC);
 			arg = min(arg, limit);
 		}
 		err |= comedi_check_trigger_arg_is(&cmd->convert_arg, arg);
@@ -393,9 +401,12 @@ static int waveform_ai_cmd(struct comedi_device *dev,
 	 * Seem to need an extra jiffy here, otherwise timer expires slightly
 	 * early!
 	 */
+	spin_lock_bh(&dev->spinlock);
+	devpriv->ai_timer_enable = true;
 	devpriv->ai_timer.expires =
 		jiffies + usecs_to_jiffies(devpriv->ai_convert_period) + 1;
 	add_timer(&devpriv->ai_timer);
+	spin_unlock_bh(&dev->spinlock);
 	return 0;
 }
 
@@ -404,11 +415,14 @@ static int waveform_ai_cancel(struct comedi_device *dev,
 {
 	struct waveform_private *devpriv = dev->private;
 
+	spin_lock_bh(&dev->spinlock);
+	devpriv->ai_timer_enable = false;
+	spin_unlock_bh(&dev->spinlock);
 	if (in_softirq()) {
 		/* Assume we were called from the timer routine itself. */
-		del_timer(&devpriv->ai_timer);
+		timer_delete(&devpriv->ai_timer);
 	} else {
-		del_timer_sync(&devpriv->ai_timer);
+		timer_delete_sync(&devpriv->ai_timer);
 	}
 	return 0;
 }
@@ -432,7 +446,8 @@ static int waveform_ai_insn_read(struct comedi_device *dev,
  */
 static void waveform_ao_timer(struct timer_list *t)
 {
-	struct waveform_private *devpriv = from_timer(devpriv, t, ao_timer);
+	struct waveform_private *devpriv = timer_container_of(devpriv, t,
+							      ao_timer);
 	struct comedi_device *dev = devpriv->dev;
 	struct comedi_subdevice *s = dev->write_subdev;
 	struct comedi_async *async = s->async;
@@ -495,8 +510,12 @@ static void waveform_ao_timer(struct timer_list *t)
 		unsigned int time_inc = devpriv->ao_last_scan_time +
 					devpriv->ao_scan_period - now;
 
-		mod_timer(&devpriv->ao_timer,
-			  jiffies + usecs_to_jiffies(time_inc));
+		spin_lock(&dev->spinlock);
+		if (devpriv->ao_timer_enable) {
+			mod_timer(&devpriv->ao_timer,
+				  jiffies + usecs_to_jiffies(time_inc));
+		}
+		spin_unlock(&dev->spinlock);
 	}
 
 underrun:
@@ -517,9 +536,12 @@ static int waveform_ao_inttrig_start(struct comedi_device *dev,
 	async->inttrig = NULL;
 
 	devpriv->ao_last_scan_time = ktime_to_us(ktime_get());
+	spin_lock_bh(&dev->spinlock);
+	devpriv->ao_timer_enable = true;
 	devpriv->ao_timer.expires =
 		jiffies + usecs_to_jiffies(devpriv->ao_scan_period);
 	add_timer(&devpriv->ao_timer);
+	spin_unlock_bh(&dev->spinlock);
 
 	return 1;
 }
@@ -604,11 +626,14 @@ static int waveform_ao_cancel(struct comedi_device *dev,
 	struct waveform_private *devpriv = dev->private;
 
 	s->async->inttrig = NULL;
+	spin_lock_bh(&dev->spinlock);
+	devpriv->ao_timer_enable = false;
+	spin_unlock_bh(&dev->spinlock);
 	if (in_softirq()) {
 		/* Assume we were called from the timer routine itself. */
-		del_timer(&devpriv->ao_timer);
+		timer_delete(&devpriv->ao_timer);
 	} else {
-		del_timer_sync(&devpriv->ao_timer);
+		timer_delete_sync(&devpriv->ao_timer);
 	}
 	return 0;
 }
@@ -668,6 +693,44 @@ static int waveform_ao_insn_config(struct comedi_device *dev,
 	return -EINVAL;
 }
 
+static int waveform_dio_insn_bits(struct comedi_device *dev,
+				  struct comedi_subdevice *s,
+				  struct comedi_insn *insn,
+				  unsigned int *data)
+{
+	u32 driven_low;
+	u16 wires;
+
+	/* Update the channel outputs. */
+	comedi_dio_update_state(s, data);
+	/*
+	 * We are modelling the outputs as NPN open collector (0 = driven low,
+	 * 1 = high impedance), with the lower 16 channels wired to the upper
+	 * 16 channels in pairs (0 to 16, 1 to 17, ..., 15 to 31), with a
+	 * pull-up resistor on each wire.  When reading back each channel, we
+	 * read back the state of the wire to which it is connected.
+	 *
+	 * The state of each wire and the value read back from both channels
+	 * connected to it will be logic 1 unless either channel connected to
+	 * the wire is configured as an output in the logic 0 state.
+	 */
+	driven_low = s->io_bits & ~s->state;
+	wires = 0xFFFF & ~driven_low & ~(driven_low >> 16);
+	/* Read back the state of the wires for each pair of channels. */
+	data[1] = wires | (wires << 16);
+
+	return insn->n;
+}
+
+static int waveform_dio_insn_config(struct comedi_device *dev,
+				    struct comedi_subdevice *s,
+				    struct comedi_insn *insn,
+				    unsigned int *data)
+{
+	/* configure each channel as input or output individually */
+	return comedi_dio_insn_config(dev, s, insn, data, 0);
+}
+
 static int waveform_common_attach(struct comedi_device *dev,
 				  int amplitude, int period)
 {
@@ -683,7 +746,7 @@ static int waveform_common_attach(struct comedi_device *dev,
 	devpriv->wf_amplitude = amplitude;
 	devpriv->wf_period = period;
 
-	ret = comedi_alloc_subdevices(dev, 2);
+	ret = comedi_alloc_subdevices(dev, 3);
 	if (ret)
 		return ret;
 
@@ -721,6 +784,16 @@ static int waveform_common_attach(struct comedi_device *dev,
 	/* Our default loopback value is just a 0V flatline */
 	for (i = 0; i < s->n_chan; i++)
 		devpriv->ao_loopbacks[i] = s->maxdata / 2;
+
+	s = &dev->subdevices[2];
+	/* digital input/output subdevice */
+	s->type = COMEDI_SUBD_DIO;
+	s->subdev_flags = SDF_READABLE | SDF_WRITABLE;
+	s->n_chan = 32;
+	s->maxdata = 1;
+	s->range_table = &range_digital;
+	s->insn_bits = waveform_dio_insn_bits;
+	s->insn_config = waveform_dio_insn_config;
 
 	devpriv->dev = dev;
 	timer_setup(&devpriv->ai_timer, waveform_ai_timer, 0);
@@ -768,9 +841,9 @@ static void waveform_detach(struct comedi_device *dev)
 {
 	struct waveform_private *devpriv = dev->private;
 
-	if (devpriv) {
-		del_timer_sync(&devpriv->ai_timer);
-		del_timer_sync(&devpriv->ao_timer);
+	if (devpriv && dev->n_subdevices) {
+		timer_delete_sync(&devpriv->ai_timer);
+		timer_delete_sync(&devpriv->ao_timer);
 	}
 }
 

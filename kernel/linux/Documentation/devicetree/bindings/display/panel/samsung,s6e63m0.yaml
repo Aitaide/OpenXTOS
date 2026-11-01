@@ -18,9 +18,9 @@ properties:
   compatible:
     const: samsung,s6e63m0
 
-  reg: true
-  reset-gpios: true
-  port: true
+  reg:
+    maxItems: 1
+
   default-brightness: true
   max-brightness: true
 

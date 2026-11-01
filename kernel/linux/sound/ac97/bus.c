@@ -15,6 +15,7 @@
 #include <linux/pm_runtime.h>
 #include <linux/slab.h>
 #include <linux/sysfs.h>
+#include <sound/ac97_codec.h>
 #include <sound/ac97/codec.h>
 #include <sound/ac97/controller.h>
 #include <sound/ac97/regs.h>
@@ -27,8 +28,6 @@
 static DEFINE_MUTEX(ac97_controllers_mutex);
 static DEFINE_IDR(ac97_adapter_idr);
 static LIST_HEAD(ac97_controllers);
-
-static struct bus_type ac97_bus_type;
 
 static inline struct ac97_controller*
 to_ac97_controller(struct device *ac97_adapter)
@@ -105,7 +104,7 @@ static int ac97_codec_add(struct ac97_controller *ac97_ctrl, int idx,
 	struct ac97_codec_device *codec;
 	int ret;
 
-	codec = kzalloc(sizeof(*codec), GFP_KERNEL);
+	codec = kzalloc_obj(*codec);
 	if (!codec)
 		return -ENOMEM;
 	ac97_ctrl->codecs[idx] = codec;
@@ -181,7 +180,7 @@ static int ac97_bus_reset(struct ac97_controller *ac97_ctrl)
 
 /**
  * snd_ac97_codec_driver_register - register an AC97 codec driver
- * @dev: AC97 driver codec to register
+ * @drv: AC97 driver codec to register
  *
  * Register an AC97 codec driver to the ac97 bus driver, aka. the AC97 digital
  * controller.
@@ -197,7 +196,7 @@ EXPORT_SYMBOL_GPL(snd_ac97_codec_driver_register);
 
 /**
  * snd_ac97_codec_driver_unregister - unregister an AC97 codec driver
- * @dev: AC97 codec driver to unregister
+ * @drv: AC97 codec driver to unregister
  *
  * Unregister a previously registered ac97 codec driver.
  */
@@ -206,24 +205,6 @@ void snd_ac97_codec_driver_unregister(struct ac97_codec_driver *drv)
 	driver_unregister(&drv->driver);
 }
 EXPORT_SYMBOL_GPL(snd_ac97_codec_driver_unregister);
-
-/**
- * snd_ac97_codec_get_platdata - get platform_data
- * @adev: the ac97 codec device
- *
- * For legacy platforms, in order to have platform_data in codec drivers
- * available, while ac97 device are auto-created upon probe, this retrieves the
- * platdata which was setup on ac97 controller registration.
- *
- * Returns the platform data pointer
- */
-void *snd_ac97_codec_get_platdata(const struct ac97_codec_device *adev)
-{
-	struct ac97_controller *ac97_ctrl = adev->ac97_ctrl;
-
-	return ac97_ctrl->codecs_pdata[adev->num];
-}
-EXPORT_SYMBOL_GPL(snd_ac97_codec_get_platdata);
 
 static void ac97_ctrl_codecs_unregister(struct ac97_controller *ac97_ctrl)
 {
@@ -242,10 +223,9 @@ static ssize_t cold_reset_store(struct device *dev,
 {
 	struct ac97_controller *ac97_ctrl;
 
-	mutex_lock(&ac97_controllers_mutex);
+	guard(mutex)(&ac97_controllers_mutex);
 	ac97_ctrl = to_ac97_controller(dev);
 	ac97_ctrl->ops->reset(ac97_ctrl);
-	mutex_unlock(&ac97_controllers_mutex);
 	return len;
 }
 static DEVICE_ATTR_WO(cold_reset);
@@ -259,10 +239,9 @@ static ssize_t warm_reset_store(struct device *dev,
 	if (!dev)
 		return -ENODEV;
 
-	mutex_lock(&ac97_controllers_mutex);
+	guard(mutex)(&ac97_controllers_mutex);
 	ac97_ctrl = to_ac97_controller(dev);
 	ac97_ctrl->ops->warm_reset(ac97_ctrl);
-	mutex_unlock(&ac97_controllers_mutex);
 	return len;
 }
 static DEVICE_ATTR_WO(warm_reset);
@@ -285,10 +264,10 @@ static const struct attribute_group *ac97_adapter_groups[] = {
 
 static void ac97_del_adapter(struct ac97_controller *ac97_ctrl)
 {
-	mutex_lock(&ac97_controllers_mutex);
-	ac97_ctrl_codecs_unregister(ac97_ctrl);
-	list_del(&ac97_ctrl->controllers);
-	mutex_unlock(&ac97_controllers_mutex);
+	scoped_guard(mutex, &ac97_controllers_mutex) {
+		ac97_ctrl_codecs_unregister(ac97_ctrl);
+		list_del(&ac97_ctrl->controllers);
+	}
 
 	device_unregister(&ac97_ctrl->adap);
 }
@@ -301,6 +280,7 @@ static void ac97_adapter_release(struct device *dev)
 	idr_remove(&ac97_adapter_idr, ac97_ctrl->nr);
 	dev_dbg(&ac97_ctrl->adap, "adapter unregistered by %s\n",
 		dev_name(ac97_ctrl->parent));
+	kfree(ac97_ctrl);
 }
 
 static const struct device_type ac97_adapter_type = {
@@ -312,7 +292,7 @@ static int ac97_add_adapter(struct ac97_controller *ac97_ctrl)
 {
 	int ret;
 
-	mutex_lock(&ac97_controllers_mutex);
+	guard(mutex)(&ac97_controllers_mutex);
 	ret = idr_alloc(&ac97_adapter_idr, ac97_ctrl, 0, 0, GFP_KERNEL);
 	ac97_ctrl->nr = ret;
 	if (ret >= 0) {
@@ -322,14 +302,14 @@ static int ac97_add_adapter(struct ac97_controller *ac97_ctrl)
 		ret = device_register(&ac97_ctrl->adap);
 		if (ret)
 			put_device(&ac97_ctrl->adap);
-	}
-	if (!ret)
-		list_add(&ac97_ctrl->controllers, &ac97_controllers);
-	mutex_unlock(&ac97_controllers_mutex);
+	} else
+		kfree(ac97_ctrl);
 
-	if (!ret)
+	if (!ret) {
+		list_add(&ac97_ctrl->controllers, &ac97_controllers);
 		dev_dbg(&ac97_ctrl->adap, "adapter registered by %s\n",
 			dev_name(ac97_ctrl->parent));
+	}
 	return ret;
 }
 
@@ -347,17 +327,14 @@ static int ac97_add_adapter(struct ac97_controller *ac97_ctrl)
  */
 struct ac97_controller *snd_ac97_controller_register(
 	const struct ac97_controller_ops *ops, struct device *dev,
-	unsigned short slots_available, void **codecs_pdata)
+	unsigned short slots_available)
 {
 	struct ac97_controller *ac97_ctrl;
-	int ret, i;
+	int ret;
 
-	ac97_ctrl = kzalloc(sizeof(*ac97_ctrl), GFP_KERNEL);
+	ac97_ctrl = kzalloc_obj(*ac97_ctrl);
 	if (!ac97_ctrl)
 		return ERR_PTR(-ENOMEM);
-
-	for (i = 0; i < AC97_BUS_MAX_CODECS && codecs_pdata; i++)
-		ac97_ctrl->codecs_pdata[i] = codecs_pdata[i];
 
 	ac97_ctrl->ops = ops;
 	ac97_ctrl->slots_available = slots_available;
@@ -365,14 +342,11 @@ struct ac97_controller *snd_ac97_controller_register(
 	ret = ac97_add_adapter(ac97_ctrl);
 
 	if (ret)
-		goto err;
+		return ERR_PTR(ret);
 	ac97_bus_reset(ac97_ctrl);
 	ac97_bus_scan(ac97_ctrl);
 
 	return ac97_ctrl;
-err:
-	kfree(ac97_ctrl);
-	return ERR_PTR(ret);
 }
 EXPORT_SYMBOL_GPL(snd_ac97_controller_register);
 
@@ -387,7 +361,6 @@ void snd_ac97_controller_unregister(struct ac97_controller *ac97_ctrl)
 }
 EXPORT_SYMBOL_GPL(snd_ac97_controller_unregister);
 
-#ifdef CONFIG_PM
 static int ac97_pm_runtime_suspend(struct device *dev)
 {
 	struct ac97_codec_device *codec = to_ac97_device(dev);
@@ -419,7 +392,6 @@ static int ac97_pm_runtime_resume(struct device *dev)
 
 	return pm_generic_runtime_resume(dev);
 }
-#endif /* CONFIG_PM */
 
 static const struct dev_pm_ops ac97_pm = {
 	.suspend	= pm_generic_suspend,
@@ -428,10 +400,7 @@ static const struct dev_pm_ops ac97_pm = {
 	.thaw		= pm_generic_thaw,
 	.poweroff	= pm_generic_poweroff,
 	.restore	= pm_generic_restore,
-	SET_RUNTIME_PM_OPS(
-		ac97_pm_runtime_suspend,
-		ac97_pm_runtime_resume,
-		NULL)
+	RUNTIME_PM_OPS(ac97_pm_runtime_suspend, ac97_pm_runtime_resume, NULL)
 };
 
 static int ac97_get_enable_clk(struct ac97_codec_device *adev)
@@ -470,10 +439,10 @@ static struct attribute *ac97_dev_attrs[] = {
 };
 ATTRIBUTE_GROUPS(ac97_dev);
 
-static int ac97_bus_match(struct device *dev, struct device_driver *drv)
+static int ac97_bus_match(struct device *dev, const struct device_driver *drv)
 {
 	struct ac97_codec_device *adev = to_ac97_device(dev);
-	struct ac97_codec_driver *adrv = to_ac97_driver(drv);
+	const struct ac97_codec_driver *adrv = to_ac97_driver(drv);
 	const struct ac97_id *id = adrv->id_table;
 	int i = 0;
 
@@ -531,11 +500,11 @@ static void ac97_bus_remove(struct device *dev)
 	pm_runtime_disable(dev);
 }
 
-static struct bus_type ac97_bus_type = {
+const struct bus_type ac97_bus_type = {
 	.name		= "ac97bus",
 	.dev_groups	= ac97_dev_groups,
 	.match		= ac97_bus_match,
-	.pm		= &ac97_pm,
+	.pm		= pm_ptr(&ac97_pm),
 	.probe		= ac97_bus_probe,
 	.remove		= ac97_bus_remove,
 };
@@ -552,5 +521,6 @@ static void __exit ac97_bus_exit(void)
 }
 module_exit(ac97_bus_exit);
 
+MODULE_DESCRIPTION("AC97 bus interface");
 MODULE_LICENSE("GPL");
 MODULE_AUTHOR("Robert Jarzmik <robert.jarzmik@free.fr>");

@@ -8,13 +8,15 @@
 #include <linux/bitfield.h>
 #include <linux/device.h>
 #include <linux/module.h>
-#include <linux/of.h>
+#include <linux/property.h>
 #include <linux/regulator/consumer.h>
 #include <linux/spi/spi.h>
 
 #include <linux/iio/iio.h>
 
 #define ADI_VENDOR_ID 0x0018
+
+#define AD7292_INTERNAL_REF_MV 1250
 
 /* AD7292 registers definition */
 #define AD7292_REG_VENDOR_ID		0x00
@@ -78,7 +80,6 @@ static const struct iio_chan_spec ad7292_channels_diff[] = {
 
 struct ad7292_state {
 	struct spi_device *spi;
-	struct regulator *reg;
 	unsigned short vref_mv;
 
 	__be16 d16 __aligned(IIO_DMA_MINALIGN);
@@ -249,22 +250,15 @@ static const struct iio_info ad7292_info = {
 	.read_raw = ad7292_read_raw,
 };
 
-static void ad7292_regulator_disable(void *data)
-{
-	struct ad7292_state *st = data;
-
-	regulator_disable(st->reg);
-}
-
 static int ad7292_probe(struct spi_device *spi)
 {
+	struct device *dev = &spi->dev;
 	struct ad7292_state *st;
 	struct iio_dev *indio_dev;
-	struct device_node *child;
 	bool diff_channels = false;
 	int ret;
 
-	indio_dev = devm_iio_device_alloc(&spi->dev, sizeof(*st));
+	indio_dev = devm_iio_device_alloc(dev, sizeof(*st));
 	if (!indio_dev)
 		return -ENOMEM;
 
@@ -272,45 +266,25 @@ static int ad7292_probe(struct spi_device *spi)
 	st->spi = spi;
 
 	ret = ad7292_spi_reg_read(st, AD7292_REG_VENDOR_ID);
-	if (ret != ADI_VENDOR_ID) {
-		dev_err(&spi->dev, "Wrong vendor id 0x%x\n", ret);
-		return -EINVAL;
-	}
+	if (ret != ADI_VENDOR_ID)
+		return dev_err_probe(dev, -EINVAL,
+				     "Wrong vendor id 0x%x\n", ret);
 
-	st->reg = devm_regulator_get_optional(&spi->dev, "vref");
-	if (!IS_ERR(st->reg)) {
-		ret = regulator_enable(st->reg);
-		if (ret) {
-			dev_err(&spi->dev,
-				"Failed to enable external vref supply\n");
-			return ret;
-		}
+	ret = devm_regulator_get_enable_read_voltage(dev, "vref");
+	if (ret < 0 && ret != -ENODEV)
+		return ret;
 
-		ret = devm_add_action_or_reset(&spi->dev,
-					       ad7292_regulator_disable, st);
-		if (ret)
-			return ret;
-
-		ret = regulator_get_voltage(st->reg);
-		if (ret < 0)
-			return ret;
-
-		st->vref_mv = ret / 1000;
-	} else {
-		/* Use the internal voltage reference. */
-		st->vref_mv = 1250;
-	}
+	st->vref_mv = ret == -ENODEV ? AD7292_INTERNAL_REF_MV : ret / 1000;
 
 	indio_dev->name = spi_get_device_id(spi)->name;
 	indio_dev->modes = INDIO_DIRECT_MODE;
 	indio_dev->info = &ad7292_info;
 
-	for_each_available_child_of_node(spi->dev.of_node, child) {
-		diff_channels = of_property_read_bool(child, "diff-channels");
-		if (diff_channels) {
-			of_node_put(child);
+	device_for_each_child_node_scoped(dev, child) {
+		diff_channels = fwnode_property_read_bool(child,
+							  "diff-channels");
+		if (diff_channels)
 			break;
-		}
 	}
 
 	if (diff_channels) {
@@ -321,18 +295,18 @@ static int ad7292_probe(struct spi_device *spi)
 		indio_dev->channels = ad7292_channels;
 	}
 
-	return devm_iio_device_register(&spi->dev, indio_dev);
+	return devm_iio_device_register(dev, indio_dev);
 }
 
 static const struct spi_device_id ad7292_id_table[] = {
-	{ "ad7292", 0 },
-	{}
+	{ .name = "ad7292" },
+	{ }
 };
 MODULE_DEVICE_TABLE(spi, ad7292_id_table);
 
 static const struct of_device_id ad7292_of_match[] = {
 	{ .compatible = "adi,ad7292" },
-	{ },
+	{ }
 };
 MODULE_DEVICE_TABLE(of, ad7292_of_match);
 

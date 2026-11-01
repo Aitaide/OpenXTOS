@@ -576,7 +576,7 @@ static int wcn36xx_smd_start_rsp(struct wcn36xx *wcn, void *buf, size_t len)
 	if (len < sizeof(*rsp))
 		return -EIO;
 
-	rsp = (struct wcn36xx_hal_mac_start_rsp_msg *)buf;
+	rsp = buf;
 
 	if (WCN36XX_FW_MSG_RESULT_SUCCESS != rsp->start_rsp_params.status)
 		return -EIO;
@@ -847,7 +847,7 @@ int wcn36xx_smd_start_hw_scan(struct wcn36xx *wcn, struct ieee80211_vif *vif,
 		return -EINVAL;
 
 	mutex_lock(&wcn->hal_mutex);
-	msg_body = kzalloc(sizeof(*msg_body), GFP_KERNEL);
+	msg_body = kzalloc_obj(*msg_body);
 	if (!msg_body) {
 		ret = -ENOMEM;
 		goto out;
@@ -942,7 +942,7 @@ int wcn36xx_smd_update_channel_list(struct wcn36xx *wcn, struct cfg80211_scan_re
 	struct wcn36xx_hal_update_channel_list_req_msg *msg_body;
 	int ret, i;
 
-	msg_body = kzalloc(sizeof(*msg_body), GFP_KERNEL);
+	msg_body = kzalloc_obj(*msg_body);
 	if (!msg_body)
 		return -ENOMEM;
 
@@ -1025,7 +1025,7 @@ static int wcn36xx_smd_switch_channel_rsp(void *buf, size_t len)
 	ret = wcn36xx_smd_rsp_status_check(buf, len);
 	if (ret)
 		return ret;
-	rsp = (struct wcn36xx_hal_switch_channel_rsp_msg *)buf;
+	rsp = buf;
 	wcn36xx_dbg(WCN36XX_DBG_HAL, "channel switched to: %d, status: %d\n",
 		    rsp->channel_number, rsp->status);
 	return ret;
@@ -1072,7 +1072,7 @@ static int wcn36xx_smd_process_ptt_msg_rsp(void *buf, size_t len,
 	if (ret)
 		return ret;
 
-	rsp = (struct wcn36xx_hal_process_ptt_msg_rsp_msg *)buf;
+	rsp = buf;
 
 	wcn36xx_dbg(WCN36XX_DBG_HAL, "process ptt msg responded with length %d\n",
 		    rsp->header.len);
@@ -1127,66 +1127,6 @@ out_nomem:
 	return ret;
 }
 
-static int wcn36xx_smd_update_scan_params_rsp(void *buf, size_t len)
-{
-	struct wcn36xx_hal_update_scan_params_resp *rsp;
-
-	rsp = (struct wcn36xx_hal_update_scan_params_resp *)buf;
-
-	/* Remove the PNO version bit */
-	rsp->status &= (~(WCN36XX_FW_MSG_PNO_VERSION_MASK));
-
-	if (WCN36XX_FW_MSG_RESULT_SUCCESS != rsp->status) {
-		wcn36xx_warn("error response from update scan\n");
-		return rsp->status;
-	}
-
-	return 0;
-}
-
-int wcn36xx_smd_update_scan_params(struct wcn36xx *wcn,
-				   u8 *channels, size_t channel_count)
-{
-	struct wcn36xx_hal_update_scan_params_req_ex msg_body;
-	int ret;
-
-	mutex_lock(&wcn->hal_mutex);
-	INIT_HAL_MSG(msg_body, WCN36XX_HAL_UPDATE_SCAN_PARAM_REQ);
-
-	msg_body.dot11d_enabled	= false;
-	msg_body.dot11d_resolved = true;
-
-	msg_body.channel_count = channel_count;
-	memcpy(msg_body.channels, channels, channel_count);
-	msg_body.active_min_ch_time = 60;
-	msg_body.active_max_ch_time = 120;
-	msg_body.passive_min_ch_time = 60;
-	msg_body.passive_max_ch_time = 110;
-	msg_body.state = PHY_SINGLE_CHANNEL_CENTERED;
-
-	PREPARE_HAL_BUF(wcn->hal_buf, msg_body);
-
-	wcn36xx_dbg(WCN36XX_DBG_HAL,
-		    "hal update scan params channel_count %d\n",
-		    msg_body.channel_count);
-
-	ret = wcn36xx_smd_send_and_wait(wcn, msg_body.header.len);
-	if (ret) {
-		wcn36xx_err("Sending hal_update_scan_params failed\n");
-		goto out;
-	}
-	ret = wcn36xx_smd_update_scan_params_rsp(wcn->hal_buf,
-						 wcn->hal_rsp_len);
-	if (ret) {
-		wcn36xx_err("hal_update_scan_params response failed err=%d\n",
-			    ret);
-		goto out;
-	}
-out:
-	mutex_unlock(&wcn->hal_mutex);
-	return ret;
-}
-
 static int wcn36xx_smd_add_sta_self_rsp(struct wcn36xx *wcn,
 					struct ieee80211_vif *vif,
 					void *buf,
@@ -1198,7 +1138,7 @@ static int wcn36xx_smd_add_sta_self_rsp(struct wcn36xx *wcn,
 	if (len < sizeof(*rsp))
 		return -EINVAL;
 
-	rsp = (struct wcn36xx_hal_add_sta_self_rsp_msg *)buf;
+	rsp = buf;
 
 	if (rsp->status != WCN36XX_FW_MSG_RESULT_SUCCESS) {
 		wcn36xx_warn("hal add sta self failure: %d\n",
@@ -1316,7 +1256,7 @@ static int wcn36xx_smd_join_rsp(void *buf, size_t len)
 	if (wcn36xx_smd_rsp_status_check(buf, len))
 		return -EIO;
 
-	rsp = (struct wcn36xx_hal_join_rsp_msg *)buf;
+	rsp = buf;
 
 	wcn36xx_dbg(WCN36XX_DBG_HAL,
 		    "hal rsp join status %d tx_mgmt_power %d\n",
@@ -1481,7 +1421,7 @@ static int wcn36xx_smd_config_sta_rsp(struct wcn36xx *wcn,
 	if (len < sizeof(*rsp))
 		return -EINVAL;
 
-	rsp = (struct wcn36xx_hal_config_sta_rsp_msg *)buf;
+	rsp = buf;
 	params = &rsp->params;
 
 	if (params->status != WCN36XX_FW_MSG_RESULT_SUCCESS) {
@@ -1684,7 +1624,7 @@ static int wcn36xx_smd_config_bss_v1(struct wcn36xx *wcn,
 	struct cfg80211_chan_def *chandef;
 	int ret;
 
-	msg_body = kzalloc(sizeof(*msg_body), GFP_KERNEL);
+	msg_body = kzalloc_obj(*msg_body);
 	if (!msg_body)
 		return -ENOMEM;
 
@@ -1804,7 +1744,7 @@ static int wcn36xx_smd_config_bss_v0(struct wcn36xx *wcn,
 	struct wcn36xx_hal_config_sta_params *sta_params;
 	int ret;
 
-	msg = kzalloc(sizeof(*msg), GFP_KERNEL);
+	msg = kzalloc_obj(*msg);
 	if (!msg)
 		return -ENOMEM;
 
@@ -1849,7 +1789,7 @@ static int wcn36xx_smd_config_bss_rsp(struct wcn36xx *wcn,
 	if (len < sizeof(*rsp))
 		return -EINVAL;
 
-	rsp = (struct wcn36xx_hal_config_bss_rsp_msg *)buf;
+	rsp = buf;
 	params = &rsp->bss_rsp_params;
 
 	if (params->status != WCN36XX_FW_MSG_RESULT_SUCCESS) {
@@ -2476,7 +2416,7 @@ static int wcn36xx_smd_add_ba_session_rsp(void *buf, int len, u8 *session)
 	if (len < sizeof(*rsp))
 		return -EINVAL;
 
-	rsp = (struct wcn36xx_hal_add_ba_session_rsp_msg *)buf;
+	rsp = buf;
 	if (rsp->status != WCN36XX_FW_MSG_RESULT_SUCCESS)
 		return rsp->status;
 
@@ -2654,10 +2594,13 @@ static int wcn36xx_smd_trigger_ba_rsp(void *buf, int len, struct add_ba_info *ba
 	if (len < sizeof(*rsp))
 		return -EINVAL;
 
-	rsp = (struct wcn36xx_hal_trigger_ba_rsp_msg *) buf;
+	rsp = buf;
 
 	if (rsp->candidate_cnt < 1)
 		return rsp->status ? rsp->status : -EINVAL;
+
+	if (len < sizeof(*rsp) + sizeof(*candidate))
+		return -EINVAL;
 
 	candidate = (struct wcn36xx_hal_trigger_ba_rsp_candidate *)(buf + sizeof(*rsp));
 
@@ -2862,6 +2805,12 @@ static int wcn36xx_smd_print_reg_info_ind(struct wcn36xx *wcn,
 
 	if (len < sizeof(*rsp)) {
 		wcn36xx_warn("Corrupted print reg info indication\n");
+		return -EIO;
+	}
+
+	if (rsp->count > (len - sizeof(*rsp)) / sizeof(rsp->regs[0])) {
+		wcn36xx_warn("Truncated print reg info indication: count %u, len %zu\n",
+			     rsp->count, len);
 		return -EIO;
 	}
 
@@ -3353,6 +3302,10 @@ int wcn36xx_smd_rsp_process(struct rpmsg_device *rpdev,
 	case WCN36XX_HAL_EXIT_IMPS_RSP:
 	case WCN36XX_HAL_UPDATE_CHANNEL_LIST_RSP:
 	case WCN36XX_HAL_ADD_BCN_FILTER_RSP:
+		if (len > WCN36XX_HAL_BUF_SIZE) {
+			wcn36xx_warn("HAL response too large: %d\n", len);
+			break;
+		}
 		memcpy(wcn->hal_buf, buf, len);
 		wcn->hal_rsp_len = len;
 		complete(&wcn->hal_rsp_compl);
@@ -3366,7 +3319,7 @@ int wcn36xx_smd_rsp_process(struct rpmsg_device *rpdev,
 	case WCN36XX_HAL_DELETE_STA_CONTEXT_IND:
 	case WCN36XX_HAL_PRINT_REG_INFO_IND:
 	case WCN36XX_HAL_SCAN_OFFLOAD_IND:
-		msg_ind = kmalloc(struct_size(msg_ind, msg, len), GFP_ATOMIC);
+		msg_ind = kmalloc_flex(*msg_ind, msg, len, GFP_ATOMIC);
 		if (!msg_ind) {
 			wcn36xx_err("Run out of memory while handling SMD_EVENT (%d)\n",
 				    msg_header->msg_type);

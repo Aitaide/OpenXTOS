@@ -32,7 +32,8 @@ void rtw_tx_stats(struct rtw_dev *rtwdev, struct ieee80211_vif *vif,
 	}
 }
 
-void rtw_tx_fill_tx_desc(struct rtw_tx_pkt_info *pkt_info, struct sk_buff *skb)
+void rtw_tx_fill_tx_desc(struct rtw_dev *rtwdev,
+			 struct rtw_tx_pkt_info *pkt_info, struct sk_buff *skb)
 {
 	struct rtw_tx_desc *tx_desc = (struct rtw_tx_desc *)skb->data;
 	bool more_data = false;
@@ -46,7 +47,8 @@ void rtw_tx_fill_tx_desc(struct rtw_tx_pkt_info *pkt_info, struct sk_buff *skb)
 		      le32_encode_bits(pkt_info->ls, RTW_TX_DESC_W0_LS) |
 		      le32_encode_bits(pkt_info->dis_qselseq, RTW_TX_DESC_W0_DISQSELSEQ);
 
-	tx_desc->w1 = le32_encode_bits(pkt_info->qsel, RTW_TX_DESC_W1_QSEL) |
+	tx_desc->w1 = le32_encode_bits(pkt_info->mac_id, RTW_TX_DESC_W1_MACID) |
+		      le32_encode_bits(pkt_info->qsel, RTW_TX_DESC_W1_QSEL) |
 		      le32_encode_bits(pkt_info->rate_id, RTW_TX_DESC_W1_RATE_ID) |
 		      le32_encode_bits(pkt_info->sec_type, RTW_TX_DESC_W1_SEC_TYPE) |
 		      le32_encode_bits(pkt_info->pkt_offset, RTW_TX_DESC_W1_PKT_OFFSET) |
@@ -65,6 +67,9 @@ void rtw_tx_fill_tx_desc(struct rtw_tx_pkt_info *pkt_info, struct sk_buff *skb)
 		      le32_encode_bits(pkt_info->ampdu_factor, RTW_TX_DESC_W3_MAX_AGG_NUM);
 
 	tx_desc->w4 = le32_encode_bits(pkt_info->rate, RTW_TX_DESC_W4_DATARATE);
+
+	if (rtwdev->chip->old_datarate_fb_limit)
+		tx_desc->w4 |= le32_encode_bits(0x1f, RTW_TX_DESC_W4_DATARATE_FB_LIMIT);
 
 	tx_desc->w5 = le32_encode_bits(pkt_info->short_gi, RTW_TX_DESC_W5_DATA_SHORT) |
 		      le32_encode_bits(pkt_info->bw, RTW_TX_DESC_W5_DATA_BW) |
@@ -173,7 +178,8 @@ static void rtw_tx_report_enable(struct rtw_dev *rtwdev,
 
 void rtw_tx_report_purge_timer(struct timer_list *t)
 {
-	struct rtw_dev *rtwdev = from_timer(rtwdev, t, tx_report.purge_timer);
+	struct rtw_dev *rtwdev = timer_container_of(rtwdev, t,
+						    tx_report.purge_timer);
 	struct rtw_tx_report *tx_report = &rtwdev->tx_report;
 	unsigned long flags;
 
@@ -190,6 +196,7 @@ void rtw_tx_report_purge_timer(struct timer_list *t)
 void rtw_tx_report_enqueue(struct rtw_dev *rtwdev, struct sk_buff *skb, u8 sn)
 {
 	struct rtw_tx_report *tx_report = &rtwdev->tx_report;
+	unsigned long timeout = RTW_TX_PROBE_TIMEOUT;
 	unsigned long flags;
 	u8 *drv_data;
 
@@ -201,7 +208,11 @@ void rtw_tx_report_enqueue(struct rtw_dev *rtwdev, struct sk_buff *skb, u8 sn)
 	__skb_queue_tail(&tx_report->queue, skb);
 	spin_unlock_irqrestore(&tx_report->q_lock, flags);
 
-	mod_timer(&tx_report->purge_timer, jiffies + RTW_TX_PROBE_TIMEOUT);
+	if (rtwdev->chip->id == RTW_CHIP_TYPE_8723D &&
+	    rtwdev->hci.type == RTW_HCI_TYPE_USB)
+		timeout = msecs_to_jiffies(2500);
+
+	mod_timer(&tx_report->purge_timer, jiffies + timeout);
 }
 EXPORT_SYMBOL(rtw_tx_report_enqueue);
 
@@ -401,17 +412,21 @@ void rtw_tx_pkt_info_update(struct rtw_dev *rtwdev,
 	const struct rtw_chip_info *chip = rtwdev->chip;
 	struct ieee80211_tx_info *info = IEEE80211_SKB_CB(skb);
 	struct ieee80211_hdr *hdr = (struct ieee80211_hdr *)skb->data;
+	struct ieee80211_vif *vif = info->control.vif;
 	struct rtw_sta_info *si;
-	struct ieee80211_vif *vif = NULL;
+	struct rtw_vif *rtwvif;
 	__le16 fc = hdr->frame_control;
 	bool bmc;
 
 	if (sta) {
 		si = (struct rtw_sta_info *)sta->drv_priv;
-		vif = si->vif;
+		pkt_info->mac_id = si->mac_id;
+	} else if (vif) {
+		rtwvif = (struct rtw_vif *)vif->drv_priv;
+		pkt_info->mac_id = rtwvif->mac_id;
 	}
 
-	if (ieee80211_is_mgmt(fc) || ieee80211_is_nullfunc(fc))
+	if (ieee80211_is_mgmt(fc) || ieee80211_is_any_nullfunc(fc))
 		rtw_tx_mgmt_pkt_info_update(rtwdev, pkt_info, sta, skb);
 	else if (ieee80211_is_data(fc))
 		rtw_tx_data_pkt_info_update(rtwdev, pkt_info, sta, skb);
@@ -604,36 +619,25 @@ static int rtw_txq_push_skb(struct rtw_dev *rtwdev,
 	ret = rtw_hci_tx_write(rtwdev, &pkt_info, skb);
 	if (ret) {
 		rtw_err(rtwdev, "failed to write TX skb to HCI\n");
+		ieee80211_free_txskb(rtwdev->hw, skb);
 		return ret;
 	}
 	return 0;
-}
-
-static struct sk_buff *rtw_txq_dequeue(struct rtw_dev *rtwdev,
-				       struct rtw_txq *rtwtxq)
-{
-	struct ieee80211_txq *txq = rtwtxq_to_txq(rtwtxq);
-	struct sk_buff *skb;
-
-	skb = ieee80211_tx_dequeue(rtwdev->hw, txq);
-	if (!skb)
-		return NULL;
-
-	return skb;
 }
 
 static void rtw_txq_push(struct rtw_dev *rtwdev,
 			 struct rtw_txq *rtwtxq,
 			 unsigned long frames)
 {
+	struct ieee80211_txq *txq = rtwtxq_to_txq(rtwtxq);
 	struct sk_buff *skb;
+	unsigned long i;
 	int ret;
-	int i;
 
 	rcu_read_lock();
 
 	for (i = 0; i < frames; i++) {
-		skb = rtw_txq_dequeue(rtwdev, rtwtxq);
+		skb = ieee80211_tx_dequeue(rtwdev->hw, txq);
 		if (!skb)
 			break;
 
@@ -656,9 +660,8 @@ void __rtw_tx_work(struct rtw_dev *rtwdev)
 	list_for_each_entry_safe(rtwtxq, tmp, &rtwdev->txqs, list) {
 		struct ieee80211_txq *txq = rtwtxq_to_txq(rtwtxq);
 		unsigned long frame_cnt;
-		unsigned long byte_cnt;
 
-		ieee80211_txq_get_depth(txq, &frame_cnt, &byte_cnt);
+		ieee80211_txq_get_depth(txq, &frame_cnt, NULL);
 		rtw_txq_push(rtwdev, rtwtxq, frame_cnt);
 
 		list_del_init(&rtwtxq->list);

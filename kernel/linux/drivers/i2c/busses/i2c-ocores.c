@@ -24,6 +24,7 @@
 #include <linux/io.h>
 #include <linux/log2.h>
 #include <linux/spinlock.h>
+#include <linux/iopoll.h>
 #include <linux/jiffies.h>
 
 /*
@@ -32,7 +33,6 @@
  */
 struct ocores_i2c {
 	void __iomem *base;
-	int iobase;
 	u32 reg_shift;
 	u32 reg_io_width;
 	unsigned long flags;
@@ -134,16 +134,6 @@ static inline u8 oc_getreg_16be(struct ocores_i2c *i2c, int reg)
 static inline u8 oc_getreg_32be(struct ocores_i2c *i2c, int reg)
 {
 	return ioread32be(i2c->base + (reg << i2c->reg_shift));
-}
-
-static void oc_setreg_io_8(struct ocores_i2c *i2c, int reg, u8 value)
-{
-	outb(value, i2c->iobase + reg);
-}
-
-static inline u8 oc_getreg_io_8(struct ocores_i2c *i2c, int reg)
-{
-	return inb(i2c->iobase + reg);
 }
 
 static inline void oc_setreg(struct ocores_i2c *i2c, int reg, u8 value)
@@ -269,7 +259,7 @@ static void ocores_process_timeout(struct ocores_i2c *i2c)
  * @reg: register to query
  * @mask: bitmask to apply on register value
  * @val: expected result
- * @timeout: timeout in jiffies
+ * @timeout_us: timeout in microseconds
  *
  * Timeout is necessary to avoid to stay here forever when the chip
  * does not answer correctly.
@@ -278,21 +268,14 @@ static void ocores_process_timeout(struct ocores_i2c *i2c)
  */
 static int ocores_wait(struct ocores_i2c *i2c,
 		       int reg, u8 mask, u8 val,
-		       const unsigned long timeout)
+		       unsigned long timeout_us)
 {
-	unsigned long j;
+	u8 status;
 
-	j = jiffies + timeout;
-	while (1) {
-		u8 status = oc_getreg(i2c, reg);
-
-		if ((status & mask) == val)
-			break;
-
-		if (time_after(jiffies, j))
-			return -ETIMEDOUT;
-	}
-	return 0;
+	return read_poll_timeout_atomic(oc_getreg, status,
+					(status & mask) == val,
+					0, timeout_us, false,
+					i2c, reg);
 }
 
 /**
@@ -325,7 +308,7 @@ static int ocores_poll_wait(struct ocores_i2c *i2c)
 	 * once we are here we expect to get the expected result immediately
 	 * so if after 1ms we timeout then something is broken.
 	 */
-	err = ocores_wait(i2c, OCI2C_STATUS, mask, 0, msecs_to_jiffies(1));
+	err = ocores_wait(i2c, OCI2C_STATUS, mask, 0, 1000);
 	if (err)
 		dev_warn(i2c->adap.dev.parent,
 			 "%s: STATUS timeout, bit 0x%x did not clear in 1ms\n",
@@ -442,8 +425,8 @@ static int ocores_init(struct device *dev, struct ocores_i2c *i2c)
 	oc_setreg(i2c, OCI2C_PREHIGH, prescale >> 8);
 
 	/* Init the device */
-	oc_setreg(i2c, OCI2C_CMD, OCI2C_CMD_IACK);
 	oc_setreg(i2c, OCI2C_CONTROL, ctrl | OCI2C_CTRL_EN);
+	oc_setreg(i2c, OCI2C_CMD, OCI2C_CMD_IACK);
 
 	return 0;
 }
@@ -455,8 +438,8 @@ static u32 ocores_func(struct i2c_adapter *adap)
 }
 
 static struct i2c_algorithm ocores_algorithm = {
-	.master_xfer = ocores_xfer,
-	.master_xfer_atomic = ocores_xfer_polling,
+	.xfer = ocores_xfer,
+	.xfer_atomic = ocores_xfer_polling,
 	.functionality = ocores_func,
 };
 
@@ -618,15 +601,19 @@ static int ocores_i2c_probe(struct platform_device *pdev)
 		res = platform_get_resource(pdev, IORESOURCE_IO, 0);
 		if (!res)
 			return -EINVAL;
-		i2c->iobase = res->start;
 		if (!devm_request_region(&pdev->dev, res->start,
 					 resource_size(res),
 					 pdev->name)) {
 			dev_err(&pdev->dev, "Can't get I/O resource.\n");
 			return -EBUSY;
 		}
-		i2c->setreg = oc_setreg_io_8;
-		i2c->getreg = oc_getreg_io_8;
+		i2c->base = devm_ioport_map(&pdev->dev, res->start,
+					    resource_size(res));
+		if (!i2c->base) {
+			dev_err(&pdev->dev, "Can't map I/O resource.\n");
+			return -EBUSY;
+		}
+		i2c->reg_io_width = 1;
 	}
 
 	pdata = dev_get_platdata(&pdev->dev);
@@ -689,13 +676,13 @@ static int ocores_i2c_probe(struct platform_device *pdev)
 	}
 
 	if (irq == -ENXIO) {
-		ocores_algorithm.master_xfer = ocores_xfer_polling;
+		ocores_algorithm.xfer = ocores_xfer_polling;
 	} else {
 		if (irq < 0)
 			return irq;
 	}
 
-	if (ocores_algorithm.master_xfer != ocores_xfer_polling) {
+	if (ocores_algorithm.xfer != ocores_xfer_polling) {
 		ret = devm_request_any_context_irq(&pdev->dev, irq,
 						   ocores_isr, 0,
 						   pdev->name, i2c);
@@ -768,15 +755,19 @@ static int ocores_i2c_resume(struct device *dev)
 	rate = clk_get_rate(i2c->clk) / 1000;
 	if (rate)
 		i2c->ip_clock_khz = rate;
-	return ocores_init(dev, i2c);
+	ret = ocores_init(dev, i2c);
+	if (ret)
+		clk_disable_unprepare(i2c->clk);
+
+	return ret;
 }
 
-static DEFINE_SIMPLE_DEV_PM_OPS(ocores_i2c_pm,
-				ocores_i2c_suspend, ocores_i2c_resume);
+static DEFINE_NOIRQ_DEV_PM_OPS(ocores_i2c_pm,
+			       ocores_i2c_suspend, ocores_i2c_resume);
 
 static struct platform_driver ocores_i2c_driver = {
 	.probe   = ocores_i2c_probe,
-	.remove_new = ocores_i2c_remove,
+	.remove = ocores_i2c_remove,
 	.driver  = {
 		.name = "ocores-i2c",
 		.of_match_table = ocores_i2c_match,

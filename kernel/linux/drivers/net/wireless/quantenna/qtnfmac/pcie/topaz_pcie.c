@@ -667,12 +667,12 @@ static int qtnf_topaz_rx_poll(struct napi_struct *napi, int budget)
 				netif_receive_skb(skb);
 			} else {
 				pr_debug("drop untagged skb\n");
-				bus->mux_dev.stats.rx_dropped++;
+				bus->mux_dev->stats.rx_dropped++;
 				dev_kfree_skb_any(skb);
 			}
 		} else {
 			if (skb) {
-				bus->mux_dev.stats.rx_dropped++;
+				bus->mux_dev->stats.rx_dropped++;
 				dev_kfree_skb_any(skb);
 			}
 		}
@@ -1132,9 +1132,9 @@ static int qtnf_pcie_topaz_probe(struct qtnf_bus *bus,
 
 	/* assign host msi irq before card init */
 	if (ts->base.msi_enabled)
-		irqflags = IRQF_NOBALANCING;
+		irqflags = IRQF_NOBALANCING | IRQF_NO_AUTOEN;
 	else
-		irqflags = IRQF_NOBALANCING | IRQF_SHARED;
+		irqflags = IRQF_NOBALANCING | IRQF_SHARED | IRQF_NO_AUTOEN;
 
 	ret = devm_request_irq(&pdev->dev, pdev->irq,
 			       &qtnf_pcie_topaz_interrupt,
@@ -1143,8 +1143,6 @@ static int qtnf_pcie_topaz_probe(struct qtnf_bus *bus,
 		pr_err("failed to request pcie irq %d\n", pdev->irq);
 		return ret;
 	}
-
-	disable_irq(pdev->irq);
 
 	ret = qtnf_pre_init_ep(bus);
 	if (ret) {
@@ -1159,7 +1157,7 @@ static int qtnf_pcie_topaz_probe(struct qtnf_bus *bus,
 	}
 
 	tasklet_setup(&ts->base.reclaim_tq, qtnf_reclaim_tasklet_fn);
-	netif_napi_add_weight(&bus->mux_dev, &bus->mux_napi,
+	netif_napi_add_weight(bus->mux_dev, &bus->mux_napi,
 			      qtnf_topaz_rx_poll, 10);
 
 	ipc_int.fn = qtnf_topaz_ipc_gen_ep_int;

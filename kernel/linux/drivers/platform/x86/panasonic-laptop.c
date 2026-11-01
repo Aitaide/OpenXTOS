@@ -121,6 +121,7 @@
 
 #include <linux/acpi.h>
 #include <linux/backlight.h>
+#include <linux/bits.h>
 #include <linux/ctype.h>
 #include <linux/i8042.h>
 #include <linux/init.h>
@@ -158,8 +159,6 @@ MODULE_LICENSE("GPL");
 #define ECO_MODE_ON		0x80
 
 #define ACPI_PCC_DRIVER_NAME	"Panasonic Laptop Support"
-#define ACPI_PCC_DEVICE_NAME	"Hotkey"
-#define ACPI_PCC_CLASS		"pcc"
 
 #define ACPI_PCC_INPUT_PHYS	"panasonic/hkey0"
 
@@ -182,9 +181,9 @@ enum SINF_BITS { SINF_NUM_BATTERIES = 0,
 	};
 /* R1 handles SINF_AC_CUR_BRIGHT as SINF_CUR_BRIGHT, doesn't know AC state */
 
-static int acpi_pcc_hotkey_add(struct acpi_device *device);
-static void acpi_pcc_hotkey_remove(struct acpi_device *device);
-static void acpi_pcc_hotkey_notify(struct acpi_device *device, u32 event);
+static int acpi_pcc_hotkey_probe(struct platform_device *pdev);
+static void acpi_pcc_hotkey_remove(struct platform_device *pdev);
+static void acpi_pcc_hotkey_notify(acpi_handle handle, u32 event, void *data);
 
 static const struct acpi_device_id pcc_device_ids[] = {
 	{ "MAT0012", 0},
@@ -200,16 +199,14 @@ static int acpi_pcc_hotkey_resume(struct device *dev);
 #endif
 static SIMPLE_DEV_PM_OPS(acpi_pcc_hotkey_pm, NULL, acpi_pcc_hotkey_resume);
 
-static struct acpi_driver acpi_pcc_driver = {
-	.name =		ACPI_PCC_DRIVER_NAME,
-	.class =	ACPI_PCC_CLASS,
-	.ids =		pcc_device_ids,
-	.ops =		{
-				.add =		acpi_pcc_hotkey_add,
-				.remove =	acpi_pcc_hotkey_remove,
-				.notify =	acpi_pcc_hotkey_notify,
-			},
-	.drv.pm =	&acpi_pcc_hotkey_pm,
+static struct platform_driver acpi_pcc_driver = {
+	.probe = acpi_pcc_hotkey_probe,
+	.remove = acpi_pcc_hotkey_remove,
+	.driver = {
+		.name = ACPI_PCC_DRIVER_NAME,
+		.acpi_match_table = pcc_device_ids,
+		.pm = &acpi_pcc_hotkey_pm,
+	},
 };
 
 static const struct key_entry panasonic_keymap[] = {
@@ -224,6 +221,17 @@ static const struct key_entry panasonic_keymap[] = {
 	{ KE_KEY, 8, { KEY_PROG1 } }, /* Change CPU boost */
 	{ KE_KEY, 9, { KEY_BATTERY } },
 	{ KE_KEY, 10, { KEY_SUSPEND } },
+	{ KE_KEY, 21, { KEY_MACRO1 } },
+	{ KE_KEY, 22, { KEY_MACRO2 } },
+	{ KE_KEY, 24, { KEY_MACRO3 } },
+	{ KE_KEY, 25, { KEY_MACRO4 } },
+	{ KE_KEY, 34, { KEY_MACRO5 } },
+	{ KE_KEY, 35, { KEY_MACRO6 } },
+	{ KE_KEY, 36, { KEY_MACRO7 } },
+	{ KE_KEY, 37, { KEY_MACRO8 } },
+	{ KE_KEY, 41, { KEY_MACRO9 } },
+	{ KE_KEY, 42, { KEY_MACRO10 } },
+	{ KE_KEY, 43, { KEY_MACRO11 } },
 	{ KE_END, 0 }
 };
 
@@ -236,11 +244,11 @@ struct pcc_acpi {
 	int			ac_brightness;
 	int			dc_brightness;
 	int			current_brightness;
-	u32			*sinf;
 	struct acpi_device	*device;
 	struct input_dev	*input_dev;
 	struct backlight_device	*backlight;
 	struct platform_device	*platform;
+	u32			sinf[] __counted_by(num_sifr);
 };
 
 /*
@@ -248,7 +256,7 @@ struct pcc_acpi {
  * keypress events over the PS/2 kbd interface, filter these out.
  */
 static bool panasonic_i8042_filter(unsigned char data, unsigned char str,
-				   struct serio *port)
+				   struct serio *port, void *context)
 {
 	static bool extended;
 
@@ -337,7 +345,8 @@ static int acpi_pcc_retrieve_biosdata(struct pcc_acpi *pcc)
 	}
 
 	if (pcc->num_sifr < hkey->package.count) {
-		pr_err("SQTY reports bad SINF length\n");
+		pr_err("SQTY reports bad SINF length SQTY: %lu SINF-pkg-count: %u\n",
+		       pcc->num_sifr, hkey->package.count);
 		status = AE_ERROR;
 		goto end;
 	}
@@ -349,7 +358,16 @@ static int acpi_pcc_retrieve_biosdata(struct pcc_acpi *pcc)
 		} else
 			pr_err("Invalid HKEY.SINF data\n");
 	}
-	pcc->sinf[hkey->package.count] = -1;
+	/*
+	 * pcc->sinf[] has pcc->num_sifr elements (valid indices
+	 * 0..num_sifr-1). On DSDTs where SINF's package count equals
+	 * num_sifr exactly -- the off-by-one case probe()'s num_sifr++
+	 * already allocates a spare element for -- there is no room left
+	 * for this trailing sentinel; nothing reads it back, so just skip
+	 * the write rather than running one element past the flex array.
+	 */
+	if (hkey->package.count < pcc->num_sifr)
+		pcc->sinf[hkey->package.count] = -1;
 
 end:
 	kfree(buffer.pointer);
@@ -601,8 +619,7 @@ static ssize_t eco_mode_show(struct device *dev, struct device_attribute *attr,
 		result = 1;
 		break;
 	default:
-		result = -EIO;
-		break;
+		return -EIO;
 	}
 	return sysfs_emit(buf, "%u\n", result);
 }
@@ -748,7 +765,12 @@ static ssize_t current_brightness_store(struct device *dev, struct device_attrib
 static ssize_t cdpower_show(struct device *dev, struct device_attribute *attr,
 			    char *buf)
 {
-	return sysfs_emit(buf, "%d\n", get_optd_power_state());
+	int state = get_optd_power_state();
+
+	if (state < 0)
+		return state;
+
+	return sysfs_emit(buf, "%d\n", state);
 }
 
 static ssize_t cdpower_store(struct device *dev, struct device_attribute *attr,
@@ -773,6 +795,24 @@ static DEVICE_ATTR_RW(dc_brightness);
 static DEVICE_ATTR_RW(current_brightness);
 static DEVICE_ATTR_RW(cdpower);
 
+static umode_t pcc_sysfs_is_visible(struct kobject *kobj, struct attribute *attr, int idx)
+{
+	struct device *dev = kobj_to_dev(kobj);
+	struct acpi_device *acpi = to_acpi_device(dev);
+	struct pcc_acpi *pcc = acpi_driver_data(acpi);
+
+	if (attr == &dev_attr_mute.attr)
+		return (pcc->num_sifr > SINF_MUTE) ? attr->mode : 0;
+
+	if (attr == &dev_attr_eco_mode.attr)
+		return (pcc->num_sifr > SINF_ECO_MODE) ? attr->mode : 0;
+
+	if (attr == &dev_attr_current_brightness.attr)
+		return (pcc->num_sifr > SINF_CUR_BRIGHT) ? attr->mode : 0;
+
+	return attr->mode;
+}
+
 static struct attribute *pcc_sysfs_entries[] = {
 	&dev_attr_numbatt.attr,
 	&dev_attr_lcdtype.attr,
@@ -787,8 +827,9 @@ static struct attribute *pcc_sysfs_entries[] = {
 };
 
 static const struct attribute_group pcc_attr_group = {
-	.name	= NULL,		/* put in device directory */
-	.attrs	= pcc_sysfs_entries,
+	.name		= NULL,		/* put in device directory */
+	.attrs		= pcc_sysfs_entries,
+	.is_visible	= pcc_sysfs_is_visible,
 };
 
 
@@ -810,8 +851,8 @@ static void acpi_pcc_generate_keyinput(struct pcc_acpi *pcc)
 		return;
 	}
 
-	key = result & 0xf;
-	updown = result & 0x80; /* 0x80 == key down; 0x00 = key up */
+	key = result & GENMASK(6, 0);
+	updown = result & BIT(7); /* 0x80 == key down; 0x00 = key up */
 
 	/* hack: some firmware sends no key down for sleep / hibernate */
 	if (key == 7 || key == 10) {
@@ -833,9 +874,9 @@ static void acpi_pcc_generate_keyinput(struct pcc_acpi *pcc)
 		pr_err("Unknown hotkey event: 0x%04llx\n", result);
 }
 
-static void acpi_pcc_hotkey_notify(struct acpi_device *device, u32 event)
+static void acpi_pcc_hotkey_notify(acpi_handle handle, u32 event, void *data)
 {
-	struct pcc_acpi *pcc = acpi_driver_data(device);
+	struct pcc_acpi *pcc = data;
 
 	switch (event) {
 	case HKEY_NOTIFY:
@@ -855,7 +896,7 @@ static void pcc_optd_notify(acpi_handle handle, u32 event, void *data)
 	set_optd_power_state(0);
 }
 
-static int pcc_register_optd_notifier(struct pcc_acpi *pcc, char *node)
+static void pcc_register_optd_notifier(struct pcc_acpi *pcc, char *node)
 {
 	acpi_status status;
 	acpi_handle handle;
@@ -868,10 +909,7 @@ static int pcc_register_optd_notifier(struct pcc_acpi *pcc, char *node)
 				pcc_optd_notify, pcc);
 		if (ACPI_FAILURE(status))
 			pr_err("Failed to register notify on %s\n", node);
-	} else
-		return -ENODEV;
-
-	return 0;
+	}
 }
 
 static void pcc_unregister_optd_notifier(struct pcc_acpi *pcc, char *node)
@@ -932,65 +970,65 @@ static int acpi_pcc_init_input(struct pcc_acpi *pcc)
 #ifdef CONFIG_PM_SLEEP
 static int acpi_pcc_hotkey_resume(struct device *dev)
 {
-	struct pcc_acpi *pcc;
+	struct pcc_acpi *pcc = acpi_driver_data(ACPI_COMPANION(dev));
 
-	if (!dev)
-		return -EINVAL;
-
-	pcc = acpi_driver_data(to_acpi_device(dev));
-	if (!pcc)
-		return -EINVAL;
-
-	acpi_pcc_write_sset(pcc, SINF_MUTE, pcc->mute);
-	acpi_pcc_write_sset(pcc, SINF_ECO_MODE, pcc->eco_mode);
+	if (pcc->num_sifr > SINF_MUTE)
+		acpi_pcc_write_sset(pcc, SINF_MUTE, pcc->mute);
+	if (pcc->num_sifr > SINF_ECO_MODE)
+		acpi_pcc_write_sset(pcc, SINF_ECO_MODE, pcc->eco_mode);
 	acpi_pcc_write_sset(pcc, SINF_STICKY_KEY, pcc->sticky_key);
 	acpi_pcc_write_sset(pcc, SINF_AC_CUR_BRIGHT, pcc->ac_brightness);
 	acpi_pcc_write_sset(pcc, SINF_DC_CUR_BRIGHT, pcc->dc_brightness);
-	acpi_pcc_write_sset(pcc, SINF_CUR_BRIGHT, pcc->current_brightness);
+	if (pcc->num_sifr > SINF_CUR_BRIGHT)
+		acpi_pcc_write_sset(pcc, SINF_CUR_BRIGHT, pcc->current_brightness);
 
 	return 0;
 }
 #endif
 
-static int acpi_pcc_hotkey_add(struct acpi_device *device)
+static int acpi_pcc_hotkey_probe(struct platform_device *pdev)
 {
 	struct backlight_properties props;
+	struct acpi_device *device;
 	struct pcc_acpi *pcc;
 	int num_sifr, result;
 
+	device = ACPI_COMPANION(&pdev->dev);
 	if (!device)
-		return -EINVAL;
+		return -ENODEV;
 
 	num_sifr = acpi_pcc_get_sqty(device);
 
-	if (num_sifr < 0 || num_sifr > 255) {
-		pr_err("num_sifr out of range");
+	/*
+	 * pcc->sinf is expected to at least have the AC+DC brightness entries.
+	 * Accesses to higher SINF entries are checked against num_sifr.
+	 */
+	if (num_sifr <= SINF_DC_CUR_BRIGHT || num_sifr > 255) {
+		pr_err("num_sifr %d out of range %d - 255\n", num_sifr, SINF_DC_CUR_BRIGHT + 1);
 		return -ENODEV;
 	}
 
-	pcc = kzalloc(sizeof(struct pcc_acpi), GFP_KERNEL);
+	/*
+	 * Some DSDT-s have an off-by-one bug where the SINF package count is
+	 * one higher than the SQTY reported value, allocate 1 entry extra.
+	 */
+	num_sifr++;
+
+	pcc = kzalloc_flex(*pcc, sinf, num_sifr);
 	if (!pcc) {
 		pr_err("Couldn't allocate mem for pcc");
 		return -ENOMEM;
 	}
 
-	pcc->sinf = kcalloc(num_sifr + 1, sizeof(u32), GFP_KERNEL);
-	if (!pcc->sinf) {
-		result = -ENOMEM;
-		goto out_hotkey;
-	}
-
+	pcc->num_sifr = num_sifr;
 	pcc->device = device;
 	pcc->handle = device->handle;
-	pcc->num_sifr = num_sifr;
 	device->driver_data = pcc;
-	strcpy(acpi_device_name(device), ACPI_PCC_DEVICE_NAME);
-	strcpy(acpi_device_class(device), ACPI_PCC_CLASS);
 
 	result = acpi_pcc_init_input(pcc);
 	if (result) {
 		pr_err("Error installing keyinput handler\n");
-		goto out_sinf;
+		goto out_hotkey;
 	}
 
 	if (!acpi_pcc_retrieve_biosdata(pcc)) {
@@ -1020,16 +1058,24 @@ static int acpi_pcc_hotkey_add(struct acpi_device *device)
 	acpi_pcc_write_sset(pcc, SINF_STICKY_KEY, 0);
 	pcc->sticky_key = 0;
 
-	pcc->eco_mode = pcc->sinf[SINF_ECO_MODE];
-	pcc->mute = pcc->sinf[SINF_MUTE];
 	pcc->ac_brightness = pcc->sinf[SINF_AC_CUR_BRIGHT];
 	pcc->dc_brightness = pcc->sinf[SINF_DC_CUR_BRIGHT];
-	pcc->current_brightness = pcc->sinf[SINF_CUR_BRIGHT];
+	if (pcc->num_sifr > SINF_MUTE)
+		pcc->mute = pcc->sinf[SINF_MUTE];
+	if (pcc->num_sifr > SINF_ECO_MODE)
+		pcc->eco_mode = pcc->sinf[SINF_ECO_MODE];
+	if (pcc->num_sifr > SINF_CUR_BRIGHT)
+		pcc->current_brightness = pcc->sinf[SINF_CUR_BRIGHT];
 
 	/* add sysfs attributes */
 	result = sysfs_create_group(&device->dev.kobj, &pcc_attr_group);
 	if (result)
 		goto out_backlight;
+
+	result = acpi_dev_install_notify_handler(device, ACPI_DEVICE_NOTIFY,
+						 acpi_pcc_hotkey_notify, pcc);
+	if (result)
+		goto out_sysfs;
 
 	/* optical drive initialization */
 	if (ACPI_SUCCESS(check_optd_present())) {
@@ -1037,48 +1083,54 @@ static int acpi_pcc_hotkey_add(struct acpi_device *device)
 			PLATFORM_DEVID_NONE, NULL, 0);
 		if (IS_ERR(pcc->platform)) {
 			result = PTR_ERR(pcc->platform);
-			goto out_backlight;
+			goto out_notify_handler;
 		}
 		result = device_create_file(&pcc->platform->dev,
 			&dev_attr_cdpower);
-		pcc_register_optd_notifier(pcc, "\\_SB.PCI0.EHCI.ERHB.OPTD");
 		if (result)
 			goto out_platform;
+
+		pcc_register_optd_notifier(pcc, "\\_SB.PCI0.EHCI.ERHB.OPTD");
 	} else {
 		pcc->platform = NULL;
 	}
 
-	i8042_install_filter(panasonic_i8042_filter);
+	i8042_install_filter(panasonic_i8042_filter, NULL);
 	return 0;
 
 out_platform:
 	platform_device_unregister(pcc->platform);
+out_notify_handler:
+	acpi_dev_remove_notify_handler(device, ACPI_DEVICE_NOTIFY,
+				       acpi_pcc_hotkey_notify);
+out_sysfs:
+	sysfs_remove_group(&device->dev.kobj, &pcc_attr_group);
 out_backlight:
 	backlight_device_unregister(pcc->backlight);
 out_input:
 	input_unregister_device(pcc->input_dev);
-out_sinf:
-	kfree(pcc->sinf);
 out_hotkey:
+	device->driver_data = NULL;
 	kfree(pcc);
 
 	return result;
 }
 
-static void acpi_pcc_hotkey_remove(struct acpi_device *device)
+static void acpi_pcc_hotkey_remove(struct platform_device *pdev)
 {
+	struct acpi_device *device = ACPI_COMPANION(&pdev->dev);
 	struct pcc_acpi *pcc = acpi_driver_data(device);
-
-	if (!device || !pcc)
-		return;
 
 	i8042_remove_filter(panasonic_i8042_filter);
 
 	if (pcc->platform) {
+		pcc_unregister_optd_notifier(pcc, "\\_SB.PCI0.EHCI.ERHB.OPTD");
 		device_remove_file(&pcc->platform->dev, &dev_attr_cdpower);
 		platform_device_unregister(pcc->platform);
 	}
-	pcc_unregister_optd_notifier(pcc, "\\_SB.PCI0.EHCI.ERHB.OPTD");
+
+	acpi_dev_remove_notify_handler(device, ACPI_DEVICE_NOTIFY,
+				       acpi_pcc_hotkey_notify);
 
 	sysfs_remove_group(&device->dev.kobj, &pcc_attr_group);
 
@@ -1086,8 +1138,9 @@ static void acpi_pcc_hotkey_remove(struct acpi_device *device)
 
 	input_unregister_device(pcc->input_dev);
 
-	kfree(pcc->sinf);
+	device->driver_data = NULL;
+
 	kfree(pcc);
 }
 
-module_acpi_driver(acpi_pcc_driver);
+module_platform_driver(acpi_pcc_driver);

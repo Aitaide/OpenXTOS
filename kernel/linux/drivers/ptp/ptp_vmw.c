@@ -10,29 +10,23 @@
 #include <linux/acpi.h>
 #include <linux/kernel.h>
 #include <linux/module.h>
+#include <linux/platform_device.h>
 #include <linux/ptp_clock_kernel.h>
 #include <asm/hypervisor.h>
 #include <asm/vmware.h>
 
-#define VMWARE_MAGIC 0x564D5868
 #define VMWARE_CMD_PCLK(nr) ((nr << 16) | 97)
 #define VMWARE_CMD_PCLK_GETTIME VMWARE_CMD_PCLK(0)
 
-static struct acpi_device *ptp_vmw_acpi_device;
 static struct ptp_clock *ptp_vmw_clock;
 
 
 static int ptp_vmw_pclk_read(u64 *ns)
 {
-	u32 ret, nsec_hi, nsec_lo, unused1, unused2, unused3;
+	u32 ret, nsec_hi, nsec_lo;
 
-	asm volatile (VMWARE_HYPERCALL :
-		"=a"(ret), "=b"(nsec_hi), "=c"(nsec_lo), "=d"(unused1),
-		"=S"(unused2), "=D"(unused3) :
-		"a"(VMWARE_MAGIC), "b"(0),
-		"c"(VMWARE_CMD_PCLK_GETTIME), "d"(0) :
-		"memory");
-
+	ret = vmware_hypercall3(VMWARE_CMD_PCLK_GETTIME, 0,
+				&nsec_hi, &nsec_lo);
 	if (ret == 0)
 		*ns = ((u64)nsec_hi << 32) | nsec_lo;
 	return ret;
@@ -89,19 +83,17 @@ static struct ptp_clock_info ptp_vmw_clock_info = {
  * ACPI driver ops for VMware "precision clock" virtual device.
  */
 
-static int ptp_vmw_acpi_add(struct acpi_device *device)
+static int ptp_vmw_acpi_probe(struct platform_device *pdev)
 {
 	ptp_vmw_clock = ptp_clock_register(&ptp_vmw_clock_info, NULL);
 	if (IS_ERR(ptp_vmw_clock)) {
 		pr_err("failed to register ptp clock\n");
 		return PTR_ERR(ptp_vmw_clock);
 	}
-
-	ptp_vmw_acpi_device = device;
 	return 0;
 }
 
-static void ptp_vmw_acpi_remove(struct acpi_device *device)
+static void ptp_vmw_acpi_remove(struct platform_device *pdev)
 {
 	ptp_clock_unregister(ptp_vmw_clock);
 }
@@ -113,26 +105,25 @@ static const struct acpi_device_id ptp_vmw_acpi_device_ids[] = {
 
 MODULE_DEVICE_TABLE(acpi, ptp_vmw_acpi_device_ids);
 
-static struct acpi_driver ptp_vmw_acpi_driver = {
-	.name = "ptp_vmw",
-	.ids = ptp_vmw_acpi_device_ids,
-	.ops = {
-		.add = ptp_vmw_acpi_add,
-		.remove	= ptp_vmw_acpi_remove
+static struct platform_driver ptp_vmw_acpi_driver = {
+	.probe = ptp_vmw_acpi_probe,
+	.remove = ptp_vmw_acpi_remove,
+	.driver = {
+		.name = "ptp_vmw_acpi",
+		.acpi_match_table = ptp_vmw_acpi_device_ids,
 	},
-	.owner	= THIS_MODULE
 };
 
 static int __init ptp_vmw_init(void)
 {
 	if (x86_hyper_type != X86_HYPER_VMWARE)
 		return -1;
-	return acpi_bus_register_driver(&ptp_vmw_acpi_driver);
+	return platform_driver_register(&ptp_vmw_acpi_driver);
 }
 
 static void __exit ptp_vmw_exit(void)
 {
-	acpi_bus_unregister_driver(&ptp_vmw_acpi_driver);
+	platform_driver_unregister(&ptp_vmw_acpi_driver);
 }
 
 module_init(ptp_vmw_init);

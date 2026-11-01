@@ -97,7 +97,7 @@ mmhub_v3_0_2_print_l2_protection_fault_status(struct amdgpu_device *adev,
 					     uint32_t status)
 {
 	uint32_t cid, rw;
-	const char *mmhub_cid = NULL;
+	const char *mmhub_cid;
 
 	cid = REG_GET_FIELD(status,
 			    MMVM_L2_PROTECTION_FAULT_STATUS, CID);
@@ -107,8 +107,7 @@ mmhub_v3_0_2_print_l2_protection_fault_status(struct amdgpu_device *adev,
 	dev_err(adev->dev,
 		"MMVM_L2_PROTECTION_FAULT_STATUS:0x%08X\n",
 		status);
-
-	mmhub_cid = mmhub_client_ids_v3_0_2[cid][rw];
+	mmhub_cid = amdgpu_mmhub_client_name(&adev->mmhub, cid, rw);
 	dev_err(adev->dev, "\t Faulty UTCL2 client ID: %s (0x%x)\n",
 		mmhub_cid ? mmhub_cid : "unknown", cid);
 	dev_err(adev->dev, "\t MORE_FAULTS: 0x%lx\n",
@@ -181,8 +180,7 @@ static void mmhub_v3_0_2_init_system_aperture_regs(struct amdgpu_device *adev)
 	}
 
 	/* Set default page address. */
-	value = adev->mem_scratch.gpu_addr - adev->gmc.vram_start +
-		adev->vm_manager.vram_base_offset;
+	value = amdgpu_gmc_vram_mc2pa(adev, adev->mem_scratch.gpu_addr);
 	WREG32_SOC15(MMHUB, 0, regMMMC_VM_SYSTEM_APERTURE_DEFAULT_ADDR_LSB,
 		     (u32)(value >> 12));
 	WREG32_SOC15(MMHUB, 0, regMMMC_VM_SYSTEM_APERTURE_DEFAULT_ADDR_MSB,
@@ -316,7 +314,7 @@ static void mmhub_v3_0_2_setup_vmid_config(struct amdgpu_device *adev)
 	uint32_t tmp;
 
 	for (i = 0; i <= 14; i++) {
-		tmp = RREG32_SOC15_OFFSET(MMHUB, 0, regMMVM_CONTEXT1_CNTL, i);
+		tmp = RREG32_SOC15_OFFSET(MMHUB, 0, regMMVM_CONTEXT1_CNTL, i * hub->ctx_distance);
 		tmp = REG_SET_FIELD(tmp, MMVM_CONTEXT1_CNTL, ENABLE_CONTEXT, 1);
 		tmp = REG_SET_FIELD(tmp, MMVM_CONTEXT1_CNTL, PAGE_TABLE_DEPTH,
 				    adev->vm_manager.num_level);
@@ -341,7 +339,7 @@ static void mmhub_v3_0_2_setup_vmid_config(struct amdgpu_device *adev)
 		/* Send no-retry XNACK on fault to suppress VM fault storm. */
 		tmp = REG_SET_FIELD(tmp, MMVM_CONTEXT1_CNTL,
 				    RETRY_PERMISSION_OR_INVALID_PAGE_FAULT,
-				    !amdgpu_noretry);
+				    !adev->gmc.noretry);
 		WREG32_SOC15_OFFSET(MMHUB, 0, regMMVM_CONTEXT1_CNTL,
 				    i * hub->ctx_distance, tmp);
 		WREG32_SOC15_OFFSET(MMHUB, 0, regMMVM_CONTEXT1_PAGE_TABLE_START_ADDR_LO32,
@@ -510,6 +508,10 @@ static void mmhub_v3_0_2_init(struct amdgpu_device *adev)
 		SOC15_REG_OFFSET(MMHUB, 0, regMMVM_L2_BANK_SELECT_RESERVED_CID2);
 
 	hub->vmhub_funcs = &mmhub_v3_0_2_vmhub_funcs;
+
+	amdgpu_mmhub_init_client_info(&adev->mmhub,
+				     mmhub_client_ids_v3_0_2,
+				     ARRAY_SIZE(mmhub_client_ids_v3_0_2));
 }
 
 static u64 mmhub_v3_0_2_get_fb_location(struct amdgpu_device *adev)

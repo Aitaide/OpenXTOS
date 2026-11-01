@@ -2,7 +2,7 @@
 """Generate the XTOS SBOM in CycloneDX 1.5 JSON format.
 
 Covers everything shipped in the repository and produced by the system
-build: the vendored Linux kernel (with PREEMPT_RT patch and XTOS integration
+build: the vendored Linux kernel (mainline PREEMPT_RT and XTOS integration
 patch), BusyBox, the three XTOS SDK libraries, the user-space tools, and the
 XTOS kernel components. Machine-readable output is written to
 docs/sbom.json; a human summary is printed to stdout.
@@ -44,6 +44,17 @@ LICENSE_APACHE = "Apache-2.0"
 # (name, version, purl-ish download, license, description, scope)
 COMPONENTS = [
     {
+        "name": "xtos-rt-diagnostics",
+        "version": "1.0.1",
+        "license": LICENSE_APACHE,
+        "description": "Read-only mainline/legacy PREEMPT_RT identity and explicit native tuning tools; no physical latency guarantee",
+        "scope": "required",
+        "path": ".",
+        "hash_globs": ["tools/xtos-native/info/info.c", "tools/xtos-native/rt/rt.c",
+                       "tools/xtos-native/common/xtos_rt_state.h", "tools/xtos-native/common/xtos_ui.h",
+                       "tools/xtos-native/rt/rt_irq.h", "system/rootfs/usr/bin/xtos-rt-status"],
+    },
+    {
         "name": "xtos-xr",
         "version": "0.1.0",
         "license": LICENSE_APACHE,
@@ -69,12 +80,11 @@ COMPONENTS = [
     },
     {
         "name": "linux",
-        "version": "6.6.0",
-        "extra_version": "-rt15",
+        "version": "7.3.1",
         "license": LICENSE_KERNEL,
-        "description": "Linux kernel source vendored in kernel/linux (upstream 6.6.0)",
+        "description": "Linux kernel with mainline PREEMPT_RT support; configuration/source inventory, not runtime acceptance",
         "scope": "required",
-        "upstream": "https://kernel.org/pub/linux/kernel/v6.x/linux-6.6.0.tar.xz",
+        "upstream": "https://cdn.kernel.org/pub/linux/kernel/v7.x/linux-7.3.1.tar.xz",
         "path": "kernel/linux",
         "hash_globs": ["Makefile", "COPYING"],
     },
@@ -82,8 +92,8 @@ COMPONENTS = [
         "name": "preempt-rt",
         "version": "6.6-rt15",
         "license": LICENSE_GPL2,
-        "description": "PREEMPT_RT realtime patch set applied to the vendored kernel",
-        "scope": "required",
+        "description": "Historical 6.6-rt15 external PREEMPT_RT patch; not applied to Linux 7.3.1",
+        "scope": "excluded",
         "upstream": "https://cdn.kernel.org/pub/linux/kernel/projects/rt/6.6/older/patch-6.6-rt15.patch.xz",
         "path": "kernel/patches/preempt-rt-6.6-rt15.patch",
         "hash_globs": ["kernel/patches/preempt-rt-6.6-rt15.patch"],
@@ -95,8 +105,8 @@ COMPONENTS = [
         "description": ("XTOS kernel integration patch: scheduler helper, BCI core, "
                         "BCI buffer, OpenBCI Cyton serdev driver and shared packet parser, UAPI headers"),
         "scope": "required",
-        "path": "kernel/patches/xtos-linux-6.6.patch",
-        "hash_globs": ["kernel/patches/xtos-linux-6.6.patch"],
+        "path": "kernel/patches/xtos-linux-7.3.1.patch",
+        "hash_globs": ["kernel/patches/xtos-linux-7.3.1.patch"],
     },
     {
         "name": "busybox",
@@ -294,6 +304,16 @@ def component_ref(name: str) -> str:
 
 
 def build_component(entry: dict) -> dict:
+    pin_path = ROOT / "kernel/source-pin.json"
+    pin = {}
+    if entry["name"] in ("linux", "xtos-linux-integration"):
+        pin = json.loads(pin_path.read_text())
+        entry = dict(entry)
+        if entry["name"] == "linux":
+            entry.update(version=pin["version"], upstream=pin["upstream"],
+                         upstream_sha256=pin["archive_sha256"])
+        else:
+            entry["path"] = pin["xtos_patch"]
     comp = {
         "type": "library",
         "bom-ref": component_ref(entry["name"]),
@@ -325,7 +345,18 @@ def build_component(entry: dict) -> dict:
         parser_path = ROOT / "kernel/linux/drivers/xtos/bci/xtos_cyton_packet.h"
         comp.setdefault("properties", []).append({
             "name": "openbci-cyton-packet.h", "value": sha256_file(parser_path)})
-        for name in ("drivers/xtos/bci/xtos_bci_frame.c",
+        for name in ("drivers/Kconfig", "drivers/Makefile", "init/Kconfig", "kernel/sched/Makefile",
+                     "drivers/xtos/Kconfig", "drivers/xtos/Makefile",
+                     "drivers/xtos/bci/Kconfig", "drivers/xtos/bci/Makefile",
+                     "drivers/xtos/bci/xtos_bci_core.c", "drivers/xtos/bci/xtos_bci_buffer.c",
+                     "drivers/xtos/bci/xtos_bci_snapshot.c", "drivers/xtos/bci/xtos_bci_snapshot.h",
+                     "drivers/xtos/bci/xtos_cyton_config.h", "drivers/xtos/bci/xtos_cyton_packet.h",
+                     "drivers/xtos/bci/devices/openbci_cyton.c",
+                     "kernel/sched/xtos/Kconfig", "kernel/sched/xtos_sched.c", "kernel/sched/xtos_prio.h",
+                     "include/linux/xtos.h", "include/linux/xtos_bci.h", "include/linux/xtos_queue.h",
+                     "include/uapi/linux/xtos_bci.h", "include/uapi/linux/xtos_bci_config.h",
+                     "include/uapi/linux/xtos_bci_snapshot.h",
+                     "drivers/xtos/bci/xtos_bci_frame.c",
                      "drivers/xtos/bci/xtos_bci_frame.h",
                      "drivers/xtos/bci/xtos_bci_frame_snapshot.c",
                      "drivers/xtos/bci/xtos_bci_frame_snapshot.h",
@@ -335,6 +366,14 @@ def build_component(entry: dict) -> dict:
                 "value": sha256_file(ROOT / "kernel/linux" / name)})
     if hashes:
         comp["hashes"] = hashes
+    if entry["name"] == "linux":
+        comp.setdefault("properties", []).extend([
+            {"name": "xtos:source-pin-sha256", "value": sha256_file(pin_path)},
+            {"name": "xtos:upstream-archive-bytes", "value": str(pin["archive_bytes"])},
+            {"name": "xtos:rt-mode", "value": pin["rt_mode"]},
+            {"name": "xtos:rt-config", "value": pin["rt_config"]},
+            {"name": "xtos:rt-runtime-evidence", "value": "not-validated"},
+        ])
     if "upstream_sha256" in entry:
         comp.setdefault("properties", []).append(
             {"name": "xtos:upstream-archive-sha256", "value": entry["upstream_sha256"]})
@@ -374,7 +413,7 @@ def main() -> int:
         "version": project_version(),
         "licenses": [{"license": {"id": LICENSE_APACHE}}],
         "description": ("XTOS real-time operating system research build: "
-                        "Linux 6.6.0-rt15 kernel + XTOS BCI components + "
+                        "Linux mainline-RT kernel + XTOS BCI components + "
                         "BusyBox userland + XTOS SDK"),
         "scope": "required",
     }
@@ -388,6 +427,8 @@ def main() -> int:
         requires = [component_ref(name) for name in ('libxtos-bci', 'libxtos-signal')] if comp['name'] == 'xtos-eeg-stream' else []
         if comp['name'] == 'xtos-device-plugins':
             requires = [component_ref('xtos-eeg-pipeline')]
+        if comp['name'] == 'xtos-linux-integration':
+            requires = [component_ref('linux')]
         if comp['name'] == 'xtos-xr':
             requires = [component_ref(name) for name in ('openxr-headers', 'xtos-action-gate')]
         dependencies.append({"ref": comp["bom-ref"], "dependsOn": requires})
@@ -405,7 +446,7 @@ def main() -> int:
             "tools": [{"vendor": "XTOS", "name": "gen_sbom.py", "version": "1"}],
             "properties": [
                 {"name": "xtos:git-commit", "value": git_commit()},
-                {"name": "xtos:kernel-release", "value": "6.6.0-rt15"},
+                {"name": "xtos:kernel-release", "value": json.loads((ROOT / "kernel/source-pin.json").read_text())["version"]},
                 {"name": "xtos:generated-by-host", "value": platform.platform()},
             ],
         },

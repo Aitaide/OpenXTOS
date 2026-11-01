@@ -14,6 +14,29 @@
 # satisfy certain initialization assumptions in the SCSI layer.
 # *!*!*!*!*!*!*!*!*!*!*!*!*!*!*!*!*!*!*!*!*!*!*!*!*!*!*!*!*!*!*!*!
 
+CONTEXT_ANALYSIS_constants.o := y
+CONTEXT_ANALYSIS_hosts.o := y
+CONTEXT_ANALYSIS_scsi.o := y
+CONTEXT_ANALYSIS_scsi_common.o := y
+CONTEXT_ANALYSIS_scsi_devinfo.o := y
+CONTEXT_ANALYSIS_scsi_dh.o := y
+CONTEXT_ANALYSIS_scsi_error.o := y
+CONTEXT_ANALYSIS_scsi_ioctl.o := y
+CONTEXT_ANALYSIS_scsi_lib.o := y
+CONTEXT_ANALYSIS_scsi_lib_dma.o := y
+CONTEXT_ANALYSIS_scsi_logging.o := y
+CONTEXT_ANALYSIS_scsi_netlink.o := y
+CONTEXT_ANALYSIS_scsi_pm.o := y
+CONTEXT_ANALYSIS_scsi_proc.o := y
+CONTEXT_ANALYSIS_scsi_scan.o := y
+CONTEXT_ANALYSIS_scsi_sysfs.o := y
+CONTEXT_ANALYSIS_scsi_trace.o := y
+CONTEXT_ANALYSIS_scsicam.o := y
+CONTEXT_ANALYSIS_sd.o := y
+CONTEXT_ANALYSIS_sd_dif.o := y
+CONTEXT_ANALYSIS_sd_zbc.o := y
+CONTEXT_ANALYSIS_sr.o := y
+CONTEXT_ANALYSIS_sr_ioctl.o := y
 
 CFLAGS_aha152x.o =   -DAHA152X_STAT -DAUTOCONF
 
@@ -23,6 +46,8 @@ obj-$(CONFIG_SCSI)		+= scsi_mod.o
 obj-$(CONFIG_SCSI_COMMON)	+= scsi_common.o
 
 obj-$(CONFIG_RAID_ATTRS)	+= raid_class.o
+
+obj-$(CONFIG_SCSI_PROTO_TEST)	+= scsi_proto_test.o
 
 # --- NOTE ORDERING HERE ---
 # For kernel non-modular link, transport attributes need to
@@ -89,12 +114,12 @@ obj-$(CONFIG_SCSI_BFA_FC)	+= bfa/
 obj-$(CONFIG_SCSI_CHELSIO_FCOE)	+= csiostor/
 obj-$(CONFIG_SCSI_DMX3191D)	+= dmx3191d.o
 obj-$(CONFIG_SCSI_HPSA)		+= hpsa.o
+obj-$(CONFIG_SCSI_LEAPRAID) += leapraid/
 obj-$(CONFIG_SCSI_SMARTPQI)	+= smartpqi/
 obj-$(CONFIG_SCSI_SYM53C8XX_2)	+= sym53c8xx_2/
 obj-$(CONFIG_SCSI_ZALON)	+= zalon7xx.o
 obj-$(CONFIG_SCSI_DC395x)	+= dc395x.o
 obj-$(CONFIG_SCSI_AM53C974)	+= esp_scsi.o	am53c974.o
-obj-$(CONFIG_CXLFLASH)		+= cxlflash/
 obj-$(CONFIG_MEGARAID_LEGACY)	+= megaraid.o
 obj-$(CONFIG_MEGARAID_NEWGEN)	+= megaraid/
 obj-$(CONFIG_MEGARAID_SAS)	+= megaraid/
@@ -176,8 +201,8 @@ sd_mod-$(CONFIG_BLK_DEV_ZONED) += sd_zbc.o
 
 sr_mod-objs	:= sr.o sr_ioctl.o sr_vendor.o
 ncr53c8xx-flags-$(CONFIG_SCSI_ZALON) \
-		:= -DCONFIG_NCR53C8XX_PREFETCH -DSCSI_NCR_BIG_ENDIAN \
-			-DCONFIG_SCSI_NCR53C8XX_NO_WORD_TRANSFERS
+		:= -DNCR53C8XX_PREFETCH -DSCSI_NCR_BIG_ENDIAN \
+			-DSCSI_NCR53C8XX_NO_WORD_TRANSFERS
 CFLAGS_ncr53c8xx.o	:= $(ncr53c8xx-flags-y) $(ncr53c8xx-flags-m)
 zalon7xx-objs	:= zalon.o ncr53c8xx.o
 

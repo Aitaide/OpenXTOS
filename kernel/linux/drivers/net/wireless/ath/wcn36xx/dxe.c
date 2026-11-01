@@ -16,8 +16,8 @@
 
 /* DXE - DMA transfer engine
  * we have 2 channels(High prio and Low prio) for TX and 2 channels for RX.
- * through low channels data packets are transfered
- * through high channels managment packets are transfered
+ * through low channels data packets are transferred
+ * through high channels management packets are transferred
  */
 
 #define pr_fmt(fmt) KBUILD_MODNAME ": " fmt
@@ -74,7 +74,7 @@ static int wcn36xx_dxe_allocate_ctl_block(struct wcn36xx_dxe_ch *ch)
 
 	spin_lock_init(&ch->lock);
 	for (i = 0; i < ch->desc_num; i++) {
-		cur_ctl = kzalloc(sizeof(*cur_ctl), GFP_KERNEL);
+		cur_ctl = kzalloc_obj(*cur_ctl);
 		if (!cur_ctl)
 			goto out_fail;
 
@@ -180,7 +180,7 @@ static int wcn36xx_dxe_init_descs(struct wcn36xx *wcn, struct wcn36xx_dxe_ch *wc
 	if (!wcn_ch->cpu_addr)
 		return -ENOMEM;
 
-	cur_dxe = (struct wcn36xx_dxe_desc *)wcn_ch->cpu_addr;
+	cur_dxe = wcn_ch->cpu_addr;
 	cur_ctl = wcn_ch->head_blk_ctl;
 
 	for (i = 0; i < wcn_ch->desc_num; i++) {
@@ -350,7 +350,7 @@ void wcn36xx_dxe_tx_ack_ind(struct wcn36xx *wcn, u32 status)
 	spin_lock_irqsave(&wcn->dxe_lock, flags);
 	skb = wcn->tx_ack_skb;
 	wcn->tx_ack_skb = NULL;
-	del_timer(&wcn->tx_ack_timer);
+	timer_delete(&wcn->tx_ack_timer);
 	spin_unlock_irqrestore(&wcn->dxe_lock, flags);
 
 	if (!skb) {
@@ -373,7 +373,7 @@ void wcn36xx_dxe_tx_ack_ind(struct wcn36xx *wcn, u32 status)
 
 static void wcn36xx_dxe_tx_timer(struct timer_list *t)
 {
-	struct wcn36xx *wcn = from_timer(wcn, t, tx_ack_timer);
+	struct wcn36xx *wcn = timer_container_of(wcn, t, tx_ack_timer);
 	struct ieee80211_tx_info *info;
 	unsigned long flags;
 	struct sk_buff *skb;
@@ -453,7 +453,7 @@ static void reap_tx_dxes(struct wcn36xx *wcn, struct wcn36xx_dxe_ch *ch)
 
 static irqreturn_t wcn36xx_irq_tx_complete(int irq, void *dev)
 {
-	struct wcn36xx *wcn = (struct wcn36xx *)dev;
+	struct wcn36xx *wcn = dev;
 	int int_src, int_reason;
 
 	wcn36xx_dxe_read_register(wcn, WCN36XX_DXE_INT_SRC_RAW_REG, &int_src);
@@ -541,7 +541,7 @@ static irqreturn_t wcn36xx_irq_tx_complete(int irq, void *dev)
 
 static irqreturn_t wcn36xx_irq_rx_ready(int irq, void *dev)
 {
-	struct wcn36xx *wcn = (struct wcn36xx *)dev;
+	struct wcn36xx *wcn = dev;
 
 	wcn36xx_dxe_rx_frame(wcn);
 
@@ -1055,7 +1055,7 @@ void wcn36xx_dxe_deinit(struct wcn36xx *wcn)
 
 	free_irq(wcn->tx_irq, wcn);
 	free_irq(wcn->rx_irq, wcn);
-	del_timer(&wcn->tx_ack_timer);
+	timer_shutdown_sync(&wcn->tx_ack_timer);
 
 	if (wcn->tx_ack_skb) {
 		ieee80211_tx_status_irqsafe(wcn->hw, wcn->tx_ack_skb);

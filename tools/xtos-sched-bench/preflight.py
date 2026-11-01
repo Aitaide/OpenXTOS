@@ -287,13 +287,42 @@ class Collector:
     def _collect_realtime(self) -> dict:
         path = "/sys/kernel/realtime"
         value, error = self._read_text(path, 128)
+        if error == "not_found":
+            # Mainline need not expose the legacy node. Only corroborated
+            # evidence from this collector's selected root can replace it.
+            config_path = "/proc/config.gz"
+            data, config_error = self._read_bytes(config_path, MAX_BINARY_BYTES)
+            if config_error is not None or data is None:
+                return _unknown(config_path, config_error or "not_found")
+            try:
+                with gzip.GzipFile(fileobj=io.BytesIO(data), mode="rb") as stream:
+                    config = stream.read(MAX_BINARY_BYTES + 1)
+                if len(config) > MAX_BINARY_BYTES:
+                    return _unknown(config_path, "read_limit_exceeded")
+                lines = config.decode("utf-8").splitlines()
+            except (OSError, EOFError, UnicodeError, zlib.error):
+                return _unknown(config_path, "invalid_gzip")
+            settings = [line.strip() for line in lines
+                        if line.strip().startswith("CONFIG_PREEMPT_RT=") or
+                        line.strip() == "# CONFIG_PREEMPT_RT is not set"]
+            if settings in (["CONFIG_PREEMPT_RT=n"],
+                            ["# CONFIG_PREEMPT_RT is not set"]):
+                return _fact("available", "0", config_path, None)
+            if settings != ["CONFIG_PREEMPT_RT=y"]:
+                return _unknown(config_path, "preempt_rt_config_unconfirmed")
+            version_path = "/proc/version"
+            version, version_error = self._read_text(version_path)
+            if version_error is not None:
+                return _unknown(version_path, version_error)
+            if version is None or "PREEMPT_RT" not in version.split():
+                return _unknown(version_path, "preempt_rt_version_unconfirmed")
+            return _fact("available", "1", config_path + "+" + version_path, None)
         if error is not None:
             return _unknown(path, error)
         assert value is not None
-        normalized = value.strip()
-        if normalized not in {"0", "1"}:
+        if value not in {"0", "1", "0\n", "1\n"}:
             return _error(path, "malformed_realtime_value")
-        return _fact("available", normalized, path, None)
+        return _fact("available", value[0], path, None)
 
     def _collect_allowed(self) -> dict:
         if self._allowed_override is not None:

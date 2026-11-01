@@ -43,6 +43,7 @@ struct ksmbd_dir_info {
 	char		*rptr;
 	int		name_len;
 	int		out_buf_len;
+	int		num_scan;
 	int		num_entry;
 	int		data_count;
 	int		last_entry_offset;
@@ -69,6 +70,7 @@ struct ksmbd_kstat {
 	struct kstat		*kstat;
 	unsigned long long	create_time;
 	__le32			file_attributes;
+	bool			has_ads_stream; /* AAPL READDIR_ATTR V2 xattr-presence flag */
 };
 
 int ksmbd_vfs_lock_parent(struct dentry *parent, struct dentry *child);
@@ -86,8 +88,10 @@ int ksmbd_vfs_remove_file(struct ksmbd_work *work, const struct path *path);
 int ksmbd_vfs_link(struct ksmbd_work *work,
 		   const char *oldname, const char *newname);
 int ksmbd_vfs_getattr(const struct path *path, struct kstat *stat);
-int ksmbd_vfs_rename(struct ksmbd_work *work, const struct path *old_path,
-		     char *newname, int flags);
+int ksmbd_vfs_rename(struct ksmbd_work *work, struct ksmbd_file *old_fp,
+			 char *newname, int flags);
+int ksmbd_vfs_check_rename_share(struct ksmbd_work *work,
+				 const struct path *old_path);
 int ksmbd_vfs_truncate(struct ksmbd_work *work,
 		       struct ksmbd_file *fp, loff_t size);
 struct srv_copychunk;
@@ -109,14 +113,20 @@ ssize_t ksmbd_vfs_casexattr_len(struct mnt_idmap *idmap,
 				int attr_name_len);
 int ksmbd_vfs_setxattr(struct mnt_idmap *idmap,
 		       const struct path *path, const char *attr_name,
-		       void *attr_value, size_t attr_size, int flags);
+		       void *attr_value, size_t attr_size, int flags,
+		       bool get_write);
 int ksmbd_vfs_xattr_stream_name(char *stream_name, char **xattr_stream_name,
 				size_t *xattr_stream_name_size, int s_type);
 int ksmbd_vfs_remove_xattr(struct mnt_idmap *idmap,
-			   const struct path *path, char *attr_name);
-int ksmbd_vfs_kern_path_locked(struct ksmbd_work *work, char *name,
-			       unsigned int flags, struct path *parent_path,
-			       struct path *path, bool caseless);
+			   const struct path *path, char *attr_name,
+			   bool get_write);
+int ksmbd_vfs_kern_path(struct ksmbd_work *work, char *name,
+			unsigned int flags,
+			struct path *path, bool caseless);
+int ksmbd_vfs_kern_path_start_removing(struct ksmbd_work *work, char *name,
+				       unsigned int flags,
+				       struct path *path, bool caseless);
+void ksmbd_vfs_kern_path_end_removing(const struct path *path);
 struct dentry *ksmbd_vfs_kern_path_create(struct ksmbd_work *work,
 					  const char *name,
 					  unsigned int flags,
@@ -125,10 +135,15 @@ int ksmbd_vfs_empty_dir(struct ksmbd_file *fp);
 void ksmbd_vfs_set_fadvise(struct file *filp, __le32 option);
 int ksmbd_vfs_zero_data(struct ksmbd_work *work, struct ksmbd_file *fp,
 			loff_t off, loff_t len);
+int ksmbd_vfs_zero_holes(struct ksmbd_file *fp);
+int ksmbd_vfs_trim_data(struct ksmbd_work *work, struct ksmbd_file *fp,
+			loff_t off, loff_t len);
 struct file_allocated_range_buffer;
-int ksmbd_vfs_fqar_lseek(struct ksmbd_file *fp, loff_t start, loff_t length,
-			 struct file_allocated_range_buffer *ranges,
-			 unsigned int in_count, unsigned int *out_count);
+int ksmbd_vfs_query_allocated_ranges(struct ksmbd_file *fp, loff_t start,
+				     loff_t length,
+				     struct file_allocated_range_buffer *ranges,
+				     unsigned int in_count,
+				     unsigned int *out_count);
 int ksmbd_vfs_unlink(struct file *filp);
 void *ksmbd_vfs_init_kstat(char **p, struct ksmbd_kstat *ksmbd_kstat);
 int ksmbd_vfs_fill_dentry_attrs(struct ksmbd_work *work,
@@ -136,7 +151,6 @@ int ksmbd_vfs_fill_dentry_attrs(struct ksmbd_work *work,
 				struct dentry *dentry,
 				struct ksmbd_kstat *ksmbd_kstat);
 void ksmbd_vfs_posix_lock_wait(struct file_lock *flock);
-int ksmbd_vfs_posix_lock_wait_timeout(struct file_lock *flock, long timeout);
 void ksmbd_vfs_posix_lock_unblock(struct file_lock *flock);
 int ksmbd_vfs_remove_acl_xattrs(struct mnt_idmap *idmap,
 				const struct path *path);
@@ -144,20 +158,27 @@ int ksmbd_vfs_remove_sd_xattrs(struct mnt_idmap *idmap, const struct path *path)
 int ksmbd_vfs_set_sd_xattr(struct ksmbd_conn *conn,
 			   struct mnt_idmap *idmap,
 			   const struct path *path,
-			   struct smb_ntsd *pntsd, int len);
+			   struct smb_ntsd *pntsd, int len,
+			   bool get_write);
 int ksmbd_vfs_get_sd_xattr(struct ksmbd_conn *conn,
 			   struct mnt_idmap *idmap,
 			   struct dentry *dentry,
 			   struct smb_ntsd **pntsd);
 int ksmbd_vfs_set_dos_attrib_xattr(struct mnt_idmap *idmap,
 				   const struct path *path,
-				   struct xattr_dos_attrib *da);
+				   struct xattr_dos_attrib *da,
+				   bool get_write);
 int ksmbd_vfs_get_dos_attrib_xattr(struct mnt_idmap *idmap,
 				   struct dentry *dentry,
 				   struct xattr_dos_attrib *da);
 int ksmbd_vfs_set_init_posix_acl(struct mnt_idmap *idmap,
-				 struct path *path);
+				 const struct path *path);
 int ksmbd_vfs_inherit_posix_acl(struct mnt_idmap *idmap,
-				struct path *path,
+				const struct path *path,
 				struct inode *parent_inode);
+void ksmbd_vfs_update_compressed_fattr(struct dentry *dentry, __le32 *fattr);
+int ksmbd_vfs_get_compression(struct ksmbd_file *fp, u16 *fmt);
+int ksmbd_vfs_set_compression(struct ksmbd_work *work, struct ksmbd_file *fp, u16 fmt);
+int ksmbd_vfs_set_compression_create(struct ksmbd_work *work,
+				     struct ksmbd_file *fp, u16 fmt);
 #endif /* __KSMBD_VFS_H__ */

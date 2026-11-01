@@ -42,8 +42,7 @@ static int gp_aux_bus_probe(struct pci_dev *pdev, const struct pci_device_id *id
 	if (!aux_bus)
 		return -ENOMEM;
 
-	aux_bus->aux_device_wrapper[0] = kzalloc(sizeof(*aux_bus->aux_device_wrapper[0]),
-						 GFP_KERNEL);
+	aux_bus->aux_device_wrapper[0] = kzalloc_obj(*aux_bus->aux_device_wrapper[0]);
 	if (!aux_bus->aux_device_wrapper[0])
 		return -ENOMEM;
 
@@ -67,10 +66,11 @@ static int gp_aux_bus_probe(struct pci_dev *pdev, const struct pci_device_id *id
 	if (retval)
 		goto err_aux_dev_add_0;
 
-	aux_bus->aux_device_wrapper[1] = kzalloc(sizeof(*aux_bus->aux_device_wrapper[1]),
-						 GFP_KERNEL);
-	if (!aux_bus->aux_device_wrapper[1])
-		return -ENOMEM;
+	aux_bus->aux_device_wrapper[1] = kzalloc_obj(*aux_bus->aux_device_wrapper[1]);
+	if (!aux_bus->aux_device_wrapper[1]) {
+		retval =  -ENOMEM;
+		goto err_aux_dev_add_0;
+	}
 
 	retval = ida_alloc(&gp_client_ida, GFP_KERNEL);
 	if (retval < 0)
@@ -111,6 +111,7 @@ static int gp_aux_bus_probe(struct pci_dev *pdev, const struct pci_device_id *id
 
 err_aux_dev_add_1:
 	auxiliary_device_uninit(&aux_bus->aux_device_wrapper[1]->aux_dev);
+	goto err_aux_dev_add_0;
 
 err_aux_dev_init_1:
 	ida_free(&gp_client_ida, aux_bus->aux_device_wrapper[1]->aux_dev.id);
@@ -120,6 +121,7 @@ err_ida_alloc_1:
 
 err_aux_dev_add_0:
 	auxiliary_device_uninit(&aux_bus->aux_device_wrapper[0]->aux_dev);
+	goto err_ret;
 
 err_aux_dev_init_0:
 	ida_free(&gp_client_ida, aux_bus->aux_device_wrapper[0]->aux_dev.id);
@@ -127,6 +129,7 @@ err_aux_dev_init_0:
 err_ida_alloc_0:
 	kfree(aux_bus->aux_device_wrapper[0]);
 
+err_ret:
 	return retval;
 }
 
@@ -147,7 +150,7 @@ static const struct pci_device_id pci1xxxx_tbl[] = {
 	{ PCI_DEVICE(0x1055, 0xA035) },
 	{ PCI_DEVICE(0x1055, 0xA045) },
 	{ PCI_DEVICE(0x1055, 0xA055) },
-	{0,}
+	{ }
 };
 MODULE_DEVICE_TABLE(pci, pci1xxxx_tbl);
 

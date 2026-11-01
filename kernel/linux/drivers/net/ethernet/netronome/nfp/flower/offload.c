@@ -321,6 +321,10 @@ nfp_flower_calculate_key_layers(struct nfp_app *app,
 
 		flow_rule_match_enc_control(rule, &enc_ctl);
 
+		if (flow_rule_has_enc_control_flags(enc_ctl.mask->flags,
+						    extack))
+			return -EOPNOTSUPP;
+
 		if (enc_ctl.mask->addr_type != 0xffff) {
 			NL_SET_ERR_MSG_MOD(extack, "unsupported offload: wildcarded protocols on tunnels are not supported");
 			return -EOPNOTSUPP;
@@ -527,10 +531,10 @@ nfp_flower_calculate_key_layers(struct nfp_app *app,
 		struct flow_match_control ctl;
 
 		flow_rule_match_control(rule, &ctl);
-		if (ctl.key->flags & ~NFP_FLOWER_SUPPORTED_CTLFLAGS) {
-			NL_SET_ERR_MSG_MOD(extack, "unsupported offload: match on unknown control flag");
+
+		if (!flow_rule_is_supp_control_flags(NFP_FLOWER_SUPPORTED_CTLFLAGS,
+						     ctl.mask->flags, extack))
 			return -EOPNOTSUPP;
-		}
 	}
 
 	ret_key_ls->key_layer = key_layer;
@@ -545,7 +549,7 @@ nfp_flower_allocate_new(struct nfp_fl_key_ls *key_layer)
 {
 	struct nfp_fl_payload *flow_pay;
 
-	flow_pay = kmalloc(sizeof(*flow_pay), GFP_KERNEL);
+	flow_pay = kmalloc_obj(*flow_pay);
 	if (!flow_pay)
 		return NULL;
 
@@ -975,7 +979,7 @@ static int nfp_flower_link_flows(struct nfp_fl_payload *merge_flow,
 {
 	struct nfp_fl_payload_link *link;
 
-	link = kmalloc(sizeof(*link), GFP_KERNEL);
+	link = kmalloc_obj(*link);
 	if (!link)
 		return -ENOMEM;
 
@@ -1063,7 +1067,7 @@ int nfp_flower_merge_offloaded_flows(struct nfp_app *app,
 	if (err)
 		goto err_release_metadata;
 
-	merge_info = kmalloc(sizeof(*merge_info), GFP_KERNEL);
+	merge_info = kmalloc_obj(*merge_info);
 	if (!merge_info) {
 		err = -ENOMEM;
 		goto err_remove_rhash;
@@ -1350,7 +1354,7 @@ nfp_flower_add_offload(struct nfp_app *app, struct net_device *netdev,
 	if (!offload_pre_check(flow))
 		return -EOPNOTSUPP;
 
-	key_layer = kmalloc(sizeof(*key_layer), GFP_KERNEL);
+	key_layer = kmalloc_obj(*key_layer);
 	if (!key_layer)
 		return -ENOMEM;
 
@@ -1396,7 +1400,7 @@ nfp_flower_add_offload(struct nfp_app *app, struct net_device *netdev,
 		if (priv->flower_ext_feats & NFP_FL_FEATS_DECAP_V2) {
 			struct nfp_predt_entry *predt;
 
-			predt = kzalloc(sizeof(*predt), GFP_KERNEL);
+			predt = kzalloc_obj(*predt);
 			if (!predt) {
 				err = -ENOMEM;
 				goto err_remove_rhash;
@@ -1897,7 +1901,7 @@ nfp_flower_setup_indr_tc_block(struct net_device *netdev, struct Qdisc *sch, str
 					  &nfp_block_cb_list))
 			return -EBUSY;
 
-		cb_priv = kmalloc(sizeof(*cb_priv), GFP_KERNEL);
+		cb_priv = kmalloc_obj(*cb_priv);
 		if (!cb_priv)
 			return -ENOMEM;
 

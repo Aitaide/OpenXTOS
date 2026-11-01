@@ -68,7 +68,7 @@ static ssize_t instance_npe_count_show(struct edac_pci_ctl_info *pci,
 }
 
 #define to_instance(k) container_of(k, struct edac_pci_ctl_info, kobj)
-#define to_instance_attr(a) container_of(a, struct instance_attribute, attr)
+#define to_instance_attr(a) container_of_const(a, struct instance_attribute, attr)
 
 /* DEVICE instance kobject release() function */
 static void edac_pci_instance_release(struct kobject *kobj)
@@ -98,7 +98,7 @@ static ssize_t edac_pci_instance_show(struct kobject *kobj,
 				struct attribute *attr, char *buffer)
 {
 	struct edac_pci_ctl_info *pci = to_instance(kobj);
-	struct instance_attribute *instance_attr = to_instance_attr(attr);
+	const struct instance_attribute *instance_attr = to_instance_attr(attr);
 
 	if (instance_attr->show)
 		return instance_attr->show(pci, buffer);
@@ -111,7 +111,7 @@ static ssize_t edac_pci_instance_store(struct kobject *kobj,
 				const char *buffer, size_t count)
 {
 	struct edac_pci_ctl_info *pci = to_instance(kobj);
-	struct instance_attribute *instance_attr = to_instance_attr(attr);
+	const struct instance_attribute *instance_attr = to_instance_attr(attr);
 
 	if (instance_attr->store)
 		return instance_attr->store(pci, buffer, count);
@@ -125,7 +125,7 @@ static const struct sysfs_ops pci_instance_ops = {
 };
 
 #define INSTANCE_ATTR(_name, _mode, _show, _store)	\
-static struct instance_attribute attr_instance_##_name = {	\
+static const struct instance_attribute attr_instance_##_name = {	\
 	.attr	= {.name = __stringify(_name), .mode = _mode },	\
 	.show	= _show,					\
 	.store	= _store,					\
@@ -135,7 +135,7 @@ INSTANCE_ATTR(pe_count, S_IRUGO, instance_pe_count_show, NULL);
 INSTANCE_ATTR(npe_count, S_IRUGO, instance_npe_count_show, NULL);
 
 /* pci instance attributes */
-static struct attribute *pci_instance_attrs[] = {
+static const struct attribute *const pci_instance_attrs[] = {
 	&attr_instance_pe_count.attr,
 	&attr_instance_npe_count.attr,
 	NULL
@@ -338,7 +338,7 @@ static struct kobj_type ktype_edac_pci_main_kobj = {
 static int edac_pci_main_kobj_setup(void)
 {
 	int err = -ENODEV;
-	struct bus_type *edac_subsys;
+	const struct bus_type *edac_subsys;
 	struct device *dev_root;
 
 	edac_dbg(0, "\n");
@@ -361,7 +361,7 @@ static int edac_pci_main_kobj_setup(void)
 		goto decrement_count_fail;
 	}
 
-	edac_pci_top_main_kobj = kzalloc(sizeof(struct kobject), GFP_KERNEL);
+	edac_pci_top_main_kobj = kzalloc_obj(struct kobject);
 	if (!edac_pci_top_main_kobj) {
 		edac_dbg(1, "Failed to allocate\n");
 		err = -ENOMEM;
@@ -521,7 +521,7 @@ static void edac_pci_dev_parity_clear(struct pci_dev *dev)
 	/* read the device TYPE, looking for bridges */
 	pci_read_config_byte(dev, PCI_HEADER_TYPE, &header_type);
 
-	if ((header_type & 0x7F) == PCI_HEADER_TYPE_BRIDGE)
+	if ((header_type & PCI_HEADER_TYPE_MASK) == PCI_HEADER_TYPE_BRIDGE)
 		get_pci_parity_status(dev, 1);
 }
 
@@ -583,7 +583,7 @@ static void edac_pci_dev_parity_test(struct pci_dev *dev)
 	edac_dbg(4, "PCI HEADER TYPE= 0x%02x %s\n",
 		 header_type, dev_name(&dev->dev));
 
-	if ((header_type & 0x7F) == PCI_HEADER_TYPE_BRIDGE) {
+	if ((header_type & PCI_HEADER_TYPE_MASK) == PCI_HEADER_TYPE_BRIDGE) {
 		/* On bridges, need to examine secondary status register  */
 		status = get_pci_parity_status(dev, 1);
 

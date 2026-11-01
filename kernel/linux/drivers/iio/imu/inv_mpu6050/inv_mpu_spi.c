@@ -2,7 +2,6 @@
 /*
 * Copyright (C) 2015 Intel Corporation Inc.
 */
-#include <linux/mod_devicetable.h>
 #include <linux/module.h>
 #include <linux/property.h>
 #include <linux/spi/spi.h>
@@ -66,21 +65,24 @@ static int inv_mpu_probe(struct spi_device *spi)
  * supported by this driver
  */
 static const struct spi_device_id inv_mpu_id[] = {
-	{"mpu6000", INV_MPU6000},
-	{"mpu6500", INV_MPU6500},
-	{"mpu6515", INV_MPU6515},
-	{"mpu6880", INV_MPU6880},
-	{"mpu9250", INV_MPU9250},
-	{"mpu9255", INV_MPU9255},
-	{"icm20608", INV_ICM20608},
-	{"icm20608d", INV_ICM20608D},
-	{"icm20609", INV_ICM20609},
-	{"icm20689", INV_ICM20689},
-	{"icm20600", INV_ICM20600},
-	{"icm20602", INV_ICM20602},
-	{"icm20690", INV_ICM20690},
-	{"iam20680", INV_IAM20680},
-	{}
+	{ .name = "mpu6000", .driver_data = INV_MPU6000 },
+	{ .name = "mpu6500", .driver_data = INV_MPU6500 },
+	{ .name = "mpu6515", .driver_data = INV_MPU6515 },
+	{ .name = "mpu6880", .driver_data = INV_MPU6880 },
+	{ .name = "mpu9250", .driver_data = INV_MPU9250 },
+	{ .name = "mpu9255", .driver_data = INV_MPU9255 },
+	{ .name = "icm20608", .driver_data = INV_ICM20608 },
+	{ .name = "icm20608d", .driver_data = INV_ICM20608D },
+	{ .name = "icm20609", .driver_data = INV_ICM20609 },
+	{ .name = "icm20689", .driver_data = INV_ICM20689 },
+	{ .name = "icm20600", .driver_data = INV_ICM20600 },
+	{ .name = "icm20602", .driver_data = INV_ICM20602 },
+	{ .name = "icm20690", .driver_data = INV_ICM20690 },
+	{ .name = "iam20380", .driver_data = INV_IAM20380 },
+	{ .name = "iam20680", .driver_data = INV_IAM20680 },
+	{ .name = "iam20680hp", .driver_data = INV_IAM20680HP },
+	{ .name = "iam20680ht", .driver_data = INV_IAM20680HT },
+	{ }
 };
 
 MODULE_DEVICE_TABLE(spi, inv_mpu_id);
@@ -139,8 +141,20 @@ static const struct of_device_id inv_of_match[] = {
 		.data = (void *)INV_ICM20690
 	},
 	{
+		.compatible = "invensense,iam20380",
+		.data = (void *)INV_IAM20380
+	},
+	{
 		.compatible = "invensense,iam20680",
 		.data = (void *)INV_IAM20680
+	},
+	{
+		.compatible = "invensense,iam20680hp",
+		.data = (void *)INV_IAM20680HP
+	},
+	{
+		.compatible = "invensense,iam20680ht",
+		.data = (void *)INV_IAM20680HT
 	},
 	{ }
 };
@@ -148,7 +162,7 @@ MODULE_DEVICE_TABLE(of, inv_of_match);
 
 static const struct acpi_device_id inv_acpi_match[] = {
 	{"INVN6000", INV_MPU6000},
-	{ },
+	{ }
 };
 MODULE_DEVICE_TABLE(acpi, inv_acpi_match);
 
@@ -168,4 +182,4 @@ module_spi_driver(inv_mpu_driver);
 MODULE_AUTHOR("Adriana Reus <adriana.reus@intel.com>");
 MODULE_DESCRIPTION("Invensense device MPU6000 driver");
 MODULE_LICENSE("GPL");
-MODULE_IMPORT_NS(IIO_MPU6050);
+MODULE_IMPORT_NS("IIO_MPU6050");

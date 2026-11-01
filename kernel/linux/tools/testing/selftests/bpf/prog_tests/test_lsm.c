@@ -5,34 +5,13 @@
  */
 
 #include <test_progs.h>
-#include <sys/mman.h>
 #include <sys/wait.h>
 #include <unistd.h>
-#include <malloc.h>
-#include <stdlib.h>
 
 #include "lsm.skel.h"
+#include "lsm_tailcall.skel.h"
 
 char *CMD_ARGS[] = {"true", NULL};
-
-#define GET_PAGE_ADDR(ADDR, PAGE_SIZE)					\
-	(char *)(((unsigned long) (ADDR + PAGE_SIZE)) & ~(PAGE_SIZE-1))
-
-int stack_mprotect(void)
-{
-	void *buf;
-	long sz;
-	int ret;
-
-	sz = sysconf(_SC_PAGESIZE);
-	if (sz < 0)
-		return sz;
-
-	buf = alloca(sz * 3);
-	ret = mprotect(GET_PAGE_ADDR(buf, sz), sz,
-		       PROT_READ | PROT_WRITE | PROT_EXEC);
-	return ret;
-}
 
 int exec_cmd(int *monitored_pid)
 {
@@ -95,7 +74,7 @@ static int test_lsm(struct lsm *skel)
 	return 0;
 }
 
-void test_test_lsm(void)
+static void test_lsm_basic(void)
 {
 	struct lsm *skel = NULL;
 	int err;
@@ -113,4 +92,47 @@ void test_test_lsm(void)
 
 close_prog:
 	lsm__destroy(skel);
+}
+
+static void test_lsm_tailcall(void)
+{
+	struct lsm_tailcall *skel = NULL;
+	int map_fd, prog_fd;
+	int err, key;
+
+	skel = lsm_tailcall__open_and_load();
+	if (!ASSERT_OK_PTR(skel, "lsm_tailcall__skel_load"))
+		goto close_prog;
+
+	map_fd = bpf_map__fd(skel->maps.jmp_table);
+	if (CHECK_FAIL(map_fd < 0))
+		goto close_prog;
+
+	prog_fd = bpf_program__fd(skel->progs.lsm_file_permission_prog);
+	if (CHECK_FAIL(prog_fd < 0))
+		goto close_prog;
+
+	key = 0;
+	err = bpf_map_update_elem(map_fd, &key, &prog_fd, BPF_ANY);
+	if (CHECK_FAIL(!err))
+		goto close_prog;
+
+	prog_fd = bpf_program__fd(skel->progs.lsm_kernfs_init_security_prog);
+	if (CHECK_FAIL(prog_fd < 0))
+		goto close_prog;
+
+	err = bpf_map_update_elem(map_fd, &key, &prog_fd, BPF_ANY);
+	if (CHECK_FAIL(err))
+		goto close_prog;
+
+close_prog:
+	lsm_tailcall__destroy(skel);
+}
+
+void test_test_lsm(void)
+{
+	if (test__start_subtest("lsm_basic"))
+		test_lsm_basic();
+	if (test__start_subtest("lsm_tailcall"))
+		test_lsm_tailcall();
 }

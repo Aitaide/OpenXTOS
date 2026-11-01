@@ -47,7 +47,7 @@ int configfs_setattr(struct mnt_idmap *idmap, struct dentry *dentry,
 	sd_iattr = sd->s_iattr;
 	if (!sd_iattr) {
 		/* setting attributes for the first time, allocate now */
-		sd_iattr = kzalloc(sizeof(struct iattr), GFP_KERNEL);
+		sd_iattr = kzalloc_obj(struct iattr);
 		if (!sd_iattr)
 			return -ENOMEM;
 		/* assign default attributes */
@@ -88,7 +88,7 @@ int configfs_setattr(struct mnt_idmap *idmap, struct dentry *dentry,
 static inline void set_default_inode_attr(struct inode * inode, umode_t mode)
 {
 	inode->i_mode = mode;
-	inode->i_atime = inode->i_mtime = inode_set_ctime_current(inode);
+	simple_inode_init_ts(inode);
 }
 
 static inline void set_inode_attr(struct inode * inode, struct iattr * iattr)
@@ -96,8 +96,8 @@ static inline void set_inode_attr(struct inode * inode, struct iattr * iattr)
 	inode->i_mode = iattr->ia_mode;
 	inode->i_uid = iattr->ia_uid;
 	inode->i_gid = iattr->ia_gid;
-	inode->i_atime = iattr->ia_atime;
-	inode->i_mtime = iattr->ia_mtime;
+	inode_set_atime_to_ts(inode, iattr->ia_atime);
+	inode_set_mtime_to_ts(inode, iattr->ia_mtime);
 	inode_set_ctime_to_ts(inode, iattr->ia_ctime);
 }
 
@@ -157,7 +157,6 @@ struct inode *configfs_create(struct dentry *dentry, umode_t mode)
 {
 	struct inode *inode = NULL;
 	struct configfs_dirent *sd;
-	struct inode *p_inode;
 
 	if (!dentry)
 		return ERR_PTR(-ENOENT);
@@ -170,8 +169,6 @@ struct inode *configfs_create(struct dentry *dentry, umode_t mode)
 	if (!inode)
 		return ERR_PTR(-ENOMEM);
 
-	p_inode = d_inode(dentry->d_parent);
-	p_inode->i_mtime = inode_set_ctime_current(p_inode);
 	configfs_set_inode_lock_class(sd, inode);
 	return inode;
 }
@@ -194,50 +191,4 @@ const unsigned char * configfs_get_name(struct configfs_dirent *sd)
 		return attr->ca_name;
 	}
 	return NULL;
-}
-
-
-/*
- * Unhashes the dentry corresponding to given configfs_dirent
- * Called with parent inode's i_mutex held.
- */
-void configfs_drop_dentry(struct configfs_dirent * sd, struct dentry * parent)
-{
-	struct dentry * dentry = sd->s_dentry;
-
-	if (dentry) {
-		spin_lock(&dentry->d_lock);
-		if (simple_positive(dentry)) {
-			dget_dlock(dentry);
-			__d_drop(dentry);
-			spin_unlock(&dentry->d_lock);
-			simple_unlink(d_inode(parent), dentry);
-		} else
-			spin_unlock(&dentry->d_lock);
-	}
-}
-
-void configfs_hash_and_remove(struct dentry * dir, const char * name)
-{
-	struct configfs_dirent * sd;
-	struct configfs_dirent * parent_sd = dir->d_fsdata;
-
-	if (d_really_is_negative(dir))
-		/* no inode means this hasn't been made visible yet */
-		return;
-
-	inode_lock(d_inode(dir));
-	list_for_each_entry(sd, &parent_sd->s_children, s_sibling) {
-		if (!sd->s_element)
-			continue;
-		if (!strcmp(configfs_get_name(sd), name)) {
-			spin_lock(&configfs_dirent_lock);
-			list_del_init(&sd->s_sibling);
-			spin_unlock(&configfs_dirent_lock);
-			configfs_drop_dentry(sd, dir);
-			configfs_put(sd);
-			break;
-		}
-	}
-	inode_unlock(d_inode(dir));
 }

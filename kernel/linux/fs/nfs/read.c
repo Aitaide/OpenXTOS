@@ -28,6 +28,7 @@
 #include "fscache.h"
 #include "pnfs.h"
 #include "nfstrace.h"
+#include "delegation.h"
 
 #define NFSDBG_FACILITY		NFSDBG_PAGECACHE
 
@@ -47,8 +48,7 @@ static struct nfs_pgio_header *nfs_readhdr_alloc(void)
 
 static void nfs_readhdr_free(struct nfs_pgio_header *rhdr)
 {
-	if (rhdr->res.scratch != NULL)
-		kfree(rhdr->res.scratch);
+	kfree(rhdr->res.scratch);
 	kmem_cache_free(nfs_rdata_cachep, rhdr);
 }
 
@@ -56,7 +56,8 @@ static int nfs_return_empty_folio(struct folio *folio)
 {
 	folio_zero_segment(folio, 0, folio_size(folio));
 	folio_mark_uptodate(folio);
-	folio_unlock(folio);
+	if (nfs_netfs_folio_unlock(folio))
+		folio_unlock(folio);
 	return 0;
 }
 
@@ -67,10 +68,10 @@ void nfs_pageio_init_read(struct nfs_pageio_descriptor *pgio,
 	struct nfs_server *server = NFS_SERVER(inode);
 	const struct nfs_pageio_ops *pg_ops = &nfs_pgio_rw_ops;
 
-#ifdef CONFIG_NFS_V4_1
+#if IS_ENABLED(CONFIG_NFS_V4)
 	if (server->pnfs_curr_ld && !force_mds)
 		pg_ops = server->pnfs_curr_ld->pg_read_ops;
-#endif
+#endif /* CONFIG_NFS_V4 */
 	nfs_pageio_init(pgio, inode, pg_ops, compl_ops, &nfs_rw_read_ops,
 			server->rsize, 0);
 }
@@ -122,8 +123,6 @@ static void nfs_readpage_release(struct nfs_page *req, int error)
 {
 	struct folio *folio = nfs_page_to_folio(req);
 
-	if (nfs_error_is_fatal_on_server(error) && error != -ETIMEDOUT)
-		folio_set_error(folio);
 	if (nfs_page_group_sync_on_bit(req, PG_UNLOCKPAGE))
 		if (nfs_netfs_folio_unlock(folio))
 			folio_unlock(folio);
@@ -133,8 +132,30 @@ static void nfs_readpage_release(struct nfs_page *req, int error)
 
 static void nfs_page_group_set_uptodate(struct nfs_page *req)
 {
-	if (nfs_page_group_sync_on_bit(req, PG_UPTODATE))
+	bool uptodate = false;
+
+	nfs_page_group_lock(req);
+	if (!test_bit(PG_READ_FAILED, &req->wb_head->wb_flags) &&
+	    nfs_page_group_sync_on_bit_locked(req, PG_UPTODATE))
+		uptodate = true;
+	nfs_page_group_unlock(req);
+
+	if (uptodate)
 		folio_mark_uptodate(nfs_page_to_folio(req));
+}
+
+static void nfs_page_group_mark_read_failed(struct nfs_page *req)
+{
+	struct nfs_page *tmp;
+
+	nfs_page_group_lock(req);
+	set_bit(PG_READ_FAILED, &req->wb_head->wb_flags);
+	tmp = req;
+	do {
+		clear_bit(PG_UPTODATE, &tmp->wb_flags);
+		tmp = tmp->wb_this_page;
+	} while (tmp != req);
+	nfs_page_group_unlock(req);
 }
 
 static void nfs_read_completion(struct nfs_pgio_header *hdr)
@@ -173,6 +194,7 @@ static void nfs_read_completion(struct nfs_pgio_header *hdr)
 			if (bytes <= hdr->good_bytes)
 				nfs_page_group_set_uptodate(req);
 			else {
+				nfs_page_group_mark_read_failed(req);
 				error = hdr->error;
 				xchg(&nfs_req_openctx(req)->error, error);
 			}
@@ -288,7 +310,7 @@ int nfs_read_add_folio(struct nfs_pageio_descriptor *pgio,
 		       struct nfs_open_context *ctx,
 		       struct folio *folio)
 {
-	struct inode *inode = folio_file_mapping(folio)->host;
+	struct inode *inode = folio->mapping->host;
 	struct nfs_server *server = NFS_SERVER(inode);
 	size_t fsize = folio_size(folio);
 	unsigned int rsize = server->rsize;
@@ -305,6 +327,8 @@ int nfs_read_add_folio(struct nfs_pageio_descriptor *pgio,
 	new = nfs_page_create_from_folio(ctx, folio, 0, aligned_len);
 	if (IS_ERR(new)) {
 		error = PTR_ERR(new);
+		if (nfs_netfs_folio_unlock(folio))
+			folio_unlock(folio);
 		goto out;
 	}
 
@@ -322,21 +346,57 @@ out:
 }
 
 /*
- * Read a page over NFS.
- * We read the page synchronously in the following case:
- *  -	The error flag is set for this page. This happens only when a
- *	previous async read operation failed.
+ * Actually read a folio over the wire.
  */
-int nfs_read_folio(struct file *file, struct folio *folio)
+static int nfs_do_read_folio(struct file *file, struct folio *folio)
 {
 	struct inode *inode = file_inode(file);
 	struct nfs_pageio_descriptor pgio;
 	struct nfs_open_context *ctx;
 	int ret;
 
-	trace_nfs_aop_readpage(inode, folio);
+	ctx = get_nfs_open_context(nfs_file_open_context(file));
+
+	xchg(&ctx->error, 0);
+	nfs_pageio_init_read(&pgio, inode, false,
+			     &nfs_async_read_completion_ops);
+
+	ret = nfs_read_add_folio(&pgio, ctx, folio);
+	if (ret)
+		goto out_put;
+
+	nfs_pageio_complete_read(&pgio);
+	nfs_update_delegated_atime(inode);
+	if (pgio.pg_error < 0) {
+		ret = pgio.pg_error;
+		goto out_put;
+	}
+
+	ret = folio_wait_locked_killable(folio);
+	if (!folio_test_uptodate(folio) && !ret)
+		ret = xchg(&ctx->error, 0);
+
+out_put:
+	put_nfs_open_context(ctx);
+	return ret;
+}
+
+/*
+ * Synchronously read a folio.
+ *
+ * This is not heavily used as most users to try an asynchronous
+ * large read through ->readahead first.
+ */
+int nfs_read_folio(struct file *file, struct folio *folio)
+{
+	struct inode *inode = file_inode(file);
+	loff_t pos = folio_pos(folio);
+	size_t len = folio_size(folio);
+	int ret;
+
+	trace_nfs_aop_readpage(inode, pos, len);
 	nfs_inc_stats(inode, NFSIOS_VFSREADPAGE);
-	task_io_account_read(folio_size(folio));
+	task_io_account_read(len);
 
 	/*
 	 * Try to flush any pending writes to the file..
@@ -356,30 +416,10 @@ int nfs_read_folio(struct file *file, struct folio *folio)
 		goto out_unlock;
 
 	ret = nfs_netfs_read_folio(file, folio);
-	if (!ret)
-		goto out;
-
-	ctx = get_nfs_open_context(nfs_file_open_context(file));
-
-	xchg(&ctx->error, 0);
-	nfs_pageio_init_read(&pgio, inode, false,
-			     &nfs_async_read_completion_ops);
-
-	ret = nfs_read_add_folio(&pgio, ctx, folio);
 	if (ret)
-		goto out_put;
-
-	nfs_pageio_complete_read(&pgio);
-	ret = pgio.pg_error < 0 ? pgio.pg_error : 0;
-	if (!ret) {
-		ret = folio_wait_locked_killable(folio);
-		if (!folio_test_uptodate(folio) && !ret)
-			ret = xchg(&ctx->error, 0);
-	}
-out_put:
-	put_nfs_open_context(ctx);
+		ret = nfs_do_read_folio(file, folio);
 out:
-	trace_nfs_aop_readpage_done(inode, folio, ret);
+	trace_nfs_aop_readpage_done(inode, pos, len, ret);
 	return ret;
 out_unlock:
 	folio_unlock(folio);
@@ -426,6 +466,7 @@ void nfs_readahead(struct readahead_control *ractl)
 	}
 
 	nfs_pageio_complete_read(&pgio);
+	nfs_update_delegated_atime(inode);
 
 	put_nfs_open_context(ctx);
 out:

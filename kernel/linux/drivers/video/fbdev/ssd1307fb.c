@@ -14,6 +14,7 @@
 #include <linux/module.h>
 #include <linux/property.h>
 #include <linux/pwm.h>
+#include <linux/spinlock.h>
 #include <linux/uaccess.h>
 #include <linux/regulator/consumer.h>
 
@@ -72,6 +73,13 @@ struct ssd1307fb_par {
 	struct i2c_client *client;
 	u32 height;
 	struct fb_info *info;
+	/* Pending damage, with exclusive x2/y2, protected by damage_lock. */
+	spinlock_t damage_lock;
+	bool damage_pending;
+	u32 damage_x1;
+	u32 damage_x2;
+	u32 damage_y1;
+	u32 damage_y2;
 	u8 lookup_table[4];
 	u32 page_offset;
 	u32 col_offset;
@@ -302,19 +310,49 @@ static int ssd1307fb_blank(int blank_mode, struct fb_info *info)
 		return ssd1307fb_write_cmd(par->client, SSD1307FB_DISPLAY_ON);
 }
 
+static void ssd1307fb_schedule_damage(struct fb_info *info, u32 x, u32 y,
+				      u32 width, u32 height)
+{
+	struct ssd1307fb_par *par = info->par;
+	unsigned long flags;
+	u32 x2, y2;
+
+	if (!width || !height || x >= par->width || y >= par->height)
+		return;
+
+	x2 = x + min(width, par->width - x);
+	y2 = y + min(height, par->height - y);
+
+	spin_lock_irqsave(&par->damage_lock, flags);
+	if (par->damage_pending) {
+		par->damage_x1 = min(par->damage_x1, x);
+		par->damage_y1 = min(par->damage_y1, y);
+		par->damage_x2 = max(par->damage_x2, x2);
+		par->damage_y2 = max(par->damage_y2, y2);
+	} else {
+		par->damage_x1 = x;
+		par->damage_y1 = y;
+		par->damage_x2 = x2;
+		par->damage_y2 = y2;
+		par->damage_pending = true;
+	}
+	spin_unlock_irqrestore(&par->damage_lock, flags);
+
+	/* Advance an already-pending mmap update as well. */
+	mod_delayed_work(system_wq, &info->deferred_work, 0);
+}
+
 static void ssd1307fb_defio_damage_range(struct fb_info *info, off_t off, size_t len)
 {
 	struct ssd1307fb_par *par = info->par;
 
-	ssd1307fb_update_display(par);
+	ssd1307fb_schedule_damage(info, 0, 0, par->width, par->height);
 }
 
 static void ssd1307fb_defio_damage_area(struct fb_info *info, u32 x, u32 y,
 					u32 width, u32 height)
 {
-	struct ssd1307fb_par *par = info->par;
-
-	ssd1307fb_update_rect(par, x, y, width, height);
+	ssd1307fb_schedule_damage(info, x, y, width, height);
 }
 
 FB_GEN_DEFAULT_DEFERRED_SYSMEM_OPS(ssd1307fb,
@@ -329,7 +367,30 @@ static const struct fb_ops ssd1307fb_ops = {
 
 static void ssd1307fb_deferred_io(struct fb_info *info, struct list_head *pagereflist)
 {
-	ssd1307fb_update_display(info->par);
+	struct ssd1307fb_par *par = info->par;
+	unsigned long flags;
+	u32 x, y, width, height;
+
+	spin_lock_irqsave(&par->damage_lock, flags);
+	if (!list_empty(pagereflist)) {
+		x = 0;
+		y = 0;
+		width = par->width;
+		height = par->height;
+		par->damage_pending = false;
+	} else if (par->damage_pending) {
+		x = par->damage_x1;
+		y = par->damage_y1;
+		width = par->damage_x2 - par->damage_x1;
+		height = par->damage_y2 - par->damage_y1;
+		par->damage_pending = false;
+	} else {
+		spin_unlock_irqrestore(&par->damage_lock, flags);
+		return;
+	}
+	spin_unlock_irqrestore(&par->damage_lock, flags);
+
+	ssd1307fb_update_rect(par, x, y, width, height);
 }
 
 static int ssd1307fb_init(struct ssd1307fb_par *par)
@@ -347,7 +408,7 @@ static int ssd1307fb_init(struct ssd1307fb_par *par)
 
 		pwm_init_state(par->pwm, &pwmstate);
 		pwm_set_relative_duty_cycle(&pwmstate, 50, 100);
-		pwm_apply_state(par->pwm, &pwmstate);
+		pwm_apply_might_sleep(par->pwm, &pwmstate);
 
 		/* Enable the PWM */
 		pwm_enable(par->pwm);
@@ -530,17 +591,10 @@ static int ssd1307fb_get_brightness(struct backlight_device *bdev)
 	return par->contrast;
 }
 
-static int ssd1307fb_check_fb(struct backlight_device *bdev,
-				   struct fb_info *info)
-{
-	return (info->bl_dev == bdev);
-}
-
 static const struct backlight_ops ssd1307fb_bl_ops = {
 	.options	= BL_CORE_SUSPENDRESUME,
 	.update_status	= ssd1307fb_update_bl,
 	.get_brightness	= ssd1307fb_get_brightness,
-	.check_fb	= ssd1307fb_check_fb,
 };
 
 static struct ssd1307fb_deviceinfo ssd1307fb_ssd1305_deviceinfo = {
@@ -594,7 +648,6 @@ static int ssd1307fb_probe(struct i2c_client *client)
 {
 	struct device *dev = &client->dev;
 	struct backlight_device *bl;
-	char bl_name[12];
 	struct fb_info *info;
 	struct fb_deferred_io *ssd1307fb_defio;
 	u32 vmem_size;
@@ -609,8 +662,13 @@ static int ssd1307fb_probe(struct i2c_client *client)
 	par = info->par;
 	par->info = info;
 	par->client = client;
+	spin_lock_init(&par->damage_lock);
 
 	par->device_info = device_get_match_data(dev);
+	if (!par->device_info) {
+		ret = -ENODEV;
+		goto fb_alloc_error;
+	}
 
 	par->reset = devm_gpiod_get_optional(dev, "reset", GPIOD_OUT_LOW);
 	if (IS_ERR(par->reset)) {
@@ -688,7 +746,7 @@ static int ssd1307fb_probe(struct i2c_client *client)
 	if (!ssd1307fb_defio) {
 		dev_err(dev, "Couldn't allocate deferred io.\n");
 		ret = -ENOMEM;
-		goto fb_alloc_error;
+		goto fb_defio_error;
 	}
 
 	ssd1307fb_defio->delay = HZ / refreshrate;
@@ -733,31 +791,30 @@ static int ssd1307fb_probe(struct i2c_client *client)
 	if (ret)
 		goto regulator_enable_error;
 
-	ret = register_framebuffer(info);
-	if (ret) {
-		dev_err(dev, "Couldn't register the framebuffer\n");
-		goto panel_init_error;
-	}
-
-	snprintf(bl_name, sizeof(bl_name), "ssd1307fb%d", info->node);
-	bl = backlight_device_register(bl_name, dev, par, &ssd1307fb_bl_ops,
+	bl = backlight_device_register("ssd1307fb-bl", dev, par, &ssd1307fb_bl_ops,
 				       NULL);
 	if (IS_ERR(bl)) {
 		ret = PTR_ERR(bl);
 		dev_err(dev, "unable to register backlight device: %d\n", ret);
-		goto bl_init_error;
+		goto panel_init_error;
+	}
+	info->bl_dev = bl;
+
+	ret = register_framebuffer(info);
+	if (ret) {
+		dev_err(dev, "Couldn't register the framebuffer\n");
+		goto fb_init_error;
 	}
 
 	bl->props.brightness = par->contrast;
 	bl->props.max_brightness = MAX_CONTRAST;
-	info->bl_dev = bl;
 
 	dev_info(dev, "fb%d: %s framebuffer device registered, using %d bytes of video memory\n", info->node, info->fix.id, vmem_size);
 
 	return 0;
 
-bl_init_error:
-	unregister_framebuffer(info);
+fb_init_error:
+	backlight_device_unregister(bl);
 panel_init_error:
 	pwm_disable(par->pwm);
 	pwm_put(par->pwm);
@@ -766,6 +823,8 @@ regulator_enable_error:
 		regulator_disable(par->vbat_reg);
 reset_oled_error:
 	fb_deferred_io_cleanup(info);
+fb_defio_error:
+	__free_pages(vmem, get_order(vmem_size));
 fb_alloc_error:
 	framebuffer_release(info);
 	return ret;
@@ -791,10 +850,10 @@ static void ssd1307fb_remove(struct i2c_client *client)
 }
 
 static const struct i2c_device_id ssd1307fb_i2c_id[] = {
-	{ "ssd1305fb", 0 },
-	{ "ssd1306fb", 0 },
-	{ "ssd1307fb", 0 },
-	{ "ssd1309fb", 0 },
+	{ .name = "ssd1305fb" },
+	{ .name = "ssd1306fb" },
+	{ .name = "ssd1307fb" },
+	{ .name = "ssd1309fb" },
 	{ }
 };
 MODULE_DEVICE_TABLE(i2c, ssd1307fb_i2c_id);

@@ -26,16 +26,15 @@ static struct workqueue_struct *ata_sff_wq;
 const struct ata_port_operations ata_sff_port_ops = {
 	.inherits		= &ata_base_port_ops,
 
-	.qc_prep		= ata_noop_qc_prep,
 	.qc_issue		= ata_sff_qc_issue,
 	.qc_fill_rtf		= ata_sff_qc_fill_rtf,
 
 	.freeze			= ata_sff_freeze,
 	.thaw			= ata_sff_thaw,
-	.prereset		= ata_sff_prereset,
-	.softreset		= ata_sff_softreset,
-	.hardreset		= sata_sff_hardreset,
-	.postreset		= ata_sff_postreset,
+	.reset.prereset		= ata_sff_prereset,
+	.reset.softreset	= ata_sff_softreset,
+	.reset.hardreset	= sata_sff_hardreset,
+	.reset.postreset	= ata_sff_postreset,
 	.error_handler		= ata_sff_error_handler,
 
 	.sff_dev_select		= ata_sff_dev_select,
@@ -602,7 +601,7 @@ static void ata_pio_sector(struct ata_queued_cmd *qc)
 {
 	struct ata_port *ap = qc->ap;
 	struct page *page;
-	unsigned int offset;
+	unsigned int offset, count;
 
 	if (!qc->cursg) {
 		qc->curbytes = qc->nbytes;
@@ -615,28 +614,30 @@ static void ata_pio_sector(struct ata_queued_cmd *qc)
 	offset = qc->cursg->offset + qc->cursg_ofs;
 
 	/* get the current page and offset */
-	page = nth_page(page, (offset >> PAGE_SHIFT));
+	page += offset >> PAGE_SHIFT;
 	offset %= PAGE_SIZE;
 
-	trace_ata_sff_pio_transfer_data(qc, offset, qc->sect_size);
+	/* don't overrun current sg */
+	count = min(qc->cursg->length - qc->cursg_ofs, qc->sect_size);
+
+	trace_ata_sff_pio_transfer_data(qc, offset, count);
 
 	/*
 	 * Split the transfer when it splits a page boundary.  Note that the
 	 * split still has to be dword aligned like all ATA data transfers.
 	 */
 	WARN_ON_ONCE(offset % 4);
-	if (offset + qc->sect_size > PAGE_SIZE) {
+	if (offset + count > PAGE_SIZE) {
 		unsigned int split_len = PAGE_SIZE - offset;
 
 		ata_pio_xfer(qc, page, offset, split_len);
-		ata_pio_xfer(qc, nth_page(page, 1), 0,
-			     qc->sect_size - split_len);
+		ata_pio_xfer(qc, page + 1, 0, count - split_len);
 	} else {
-		ata_pio_xfer(qc, page, offset, qc->sect_size);
+		ata_pio_xfer(qc, page, offset, count);
 	}
 
-	qc->curbytes += qc->sect_size;
-	qc->cursg_ofs += qc->sect_size;
+	qc->curbytes += count;
+	qc->cursg_ofs += count;
 
 	if (qc->cursg_ofs == qc->cursg->length) {
 		qc->cursg = sg_next(qc->cursg);
@@ -750,7 +751,7 @@ next_sg:
 	offset = sg->offset + qc->cursg_ofs;
 
 	/* get the current page and offset */
-	page = nth_page(page, (offset >> PAGE_SHIFT));
+	page += offset >> PAGE_SHIFT;
 	offset %= PAGE_SIZE;
 
 	/* don't overrun current sg */
@@ -970,7 +971,7 @@ fsm_start:
 			 * We ignore ERR here to workaround and proceed sending
 			 * the CDB.
 			 */
-			if (!(qc->dev->horkage & ATA_HORKAGE_STUCK_ERR)) {
+			if (!(qc->dev->quirks & ATA_QUIRK_STUCK_ERR)) {
 				ata_ehi_push_desc(ehi, "ST_FIRST: "
 					"DRQ=1 with device error, "
 					"dev_stat 0x%X", status);
@@ -1045,8 +1046,8 @@ fsm_start:
 					 * IDENTIFY, it's likely a phantom
 					 * device.  Mark hint.
 					 */
-					if (qc->dev->horkage &
-					    ATA_HORKAGE_DIAGNOSTIC)
+					if (qc->dev->quirks &
+					    ATA_QUIRK_DIAGNOSTIC)
 						qc->err_mask |=
 							AC_ERR_NODEV_HINT;
 				} else {
@@ -1113,8 +1114,14 @@ fsm_start:
 
 			if (ap->hsm_task_state == HSM_ST_LAST &&
 			    (!(qc->tf.flags & ATA_TFLAG_WRITE))) {
-				/* all data read */
-				status = ata_wait_idle(ap);
+				status = ata_sff_busy_wait(ap,
+						ATA_BUSY | ATA_DRQ, 10);
+				if (status != 0xff &&
+				    (status & (ATA_BUSY | ATA_DRQ))) {
+					qc->tf.flags |= ATA_TFLAG_POLLING;
+					ata_sff_queue_pio_task(link, 0);
+					return 0;
+				}
 				goto fsm_start;
 			}
 		}
@@ -1212,7 +1219,7 @@ static void ata_sff_pio_task(struct work_struct *work)
 		container_of(work, struct ata_port, sff_pio_task.work);
 	struct ata_link *link = ap->sff_pio_task_link;
 	struct ata_queued_cmd *qc;
-	u8 status;
+	u8 status, wait_mask;
 	int poll_next;
 
 	spin_lock_irq(ap->lock);
@@ -1228,6 +1235,10 @@ static void ata_sff_pio_task(struct work_struct *work)
 fsm_start:
 	WARN_ON_ONCE(ap->hsm_task_state == HSM_ST_IDLE);
 
+	wait_mask = ATA_BUSY;
+	if (ap->hsm_task_state == HSM_ST_LAST)
+		wait_mask |= ATA_DRQ;
+
 	/*
 	 * This is purely heuristic.  This is a fast path.
 	 * Sometimes when we enter, BSY will be cleared in
@@ -1235,14 +1246,14 @@ fsm_start:
 	 * or something.  Snooze for a couple msecs, then
 	 * chk-status again.  If still busy, queue delayed work.
 	 */
-	status = ata_sff_busy_wait(ap, ATA_BUSY, 5);
-	if (status & ATA_BUSY) {
+	status = ata_sff_busy_wait(ap, wait_mask, 5);
+	if (status & wait_mask) {
 		spin_unlock_irq(ap->lock);
 		ata_msleep(ap, 2);
 		spin_lock_irq(ap->lock);
 
-		status = ata_sff_busy_wait(ap, ATA_BUSY, 10);
-		if (status & ATA_BUSY) {
+		status = ata_sff_busy_wait(ap, wait_mask, 10);
+		if (status & wait_mask) {
 			ata_sff_queue_pio_task(link, ATA_SHORT_PAUSE);
 			goto out_unlock;
 		}
@@ -1762,7 +1773,7 @@ unsigned int ata_sff_dev_classify(struct ata_device *dev, int present,
 	/* see if device passed diags: continue and warn later */
 	if (err == 0)
 		/* diagnostic fail : do nothing _YET_ */
-		dev->horkage |= ATA_HORKAGE_DIAGNOSTIC;
+		dev->quirks |= ATA_QUIRK_DIAGNOSTIC;
 	else if (err == 1)
 		/* do nothing */ ;
 	else if ((dev->devno == 0) && (err == 0x81))
@@ -1781,7 +1792,7 @@ unsigned int ata_sff_dev_classify(struct ata_device *dev, int present,
 		 * device signature is invalid with diagnostic
 		 * failure.
 		 */
-		if (present && (dev->horkage & ATA_HORKAGE_DIAGNOSTIC))
+		if (present && (dev->quirks & ATA_QUIRK_DIAGNOSTIC))
 			class = ATA_DEV_ATA;
 		else
 			class = ATA_DEV_NONE;
@@ -2052,9 +2063,8 @@ EXPORT_SYMBOL_GPL(ata_sff_drain_fifo);
  *	Kernel thread context (may sleep)
  */
 void ata_sff_error_handler(struct ata_port *ap)
+	__must_hold(&ap->host->eh_mutex)
 {
-	ata_reset_fn_t softreset = ap->ops->softreset;
-	ata_reset_fn_t hardreset = ap->ops->hardreset;
 	struct ata_queued_cmd *qc;
 	unsigned long flags;
 
@@ -2076,13 +2086,7 @@ void ata_sff_error_handler(struct ata_port *ap)
 
 	spin_unlock_irqrestore(ap->lock, flags);
 
-	/* ignore built-in hardresets if SCR access is not available */
-	if ((hardreset == sata_std_hardreset ||
-	     hardreset == sata_sff_hardreset) && !sata_scr_valid(&ap->link))
-		hardreset = NULL;
-
-	ata_do_eh(ap, ap->ops->prereset, softreset, hardreset,
-		  ap->ops->postreset);
+	ata_std_error_handler(ap);
 }
 EXPORT_SYMBOL_GPL(ata_sff_error_handler);
 
@@ -2316,7 +2320,7 @@ int ata_pci_sff_activate_host(struct ata_host *host,
 		for (i = 0; i < 2; i++) {
 			if (ata_port_is_dummy(host->ports[i]))
 				continue;
-			ata_port_desc(host->ports[i], "irq %d", pdev->irq);
+			ata_port_desc_misc(host->ports[i], pdev->irq);
 		}
 	} else if (legacy_mode) {
 		if (!ata_port_is_dummy(host->ports[0])) {
@@ -2326,8 +2330,8 @@ int ata_pci_sff_activate_host(struct ata_host *host,
 			if (rc)
 				goto out;
 
-			ata_port_desc(host->ports[0], "irq %d",
-				      ATA_PRIMARY_IRQ(pdev));
+			ata_port_desc_misc(host->ports[0],
+					   ATA_PRIMARY_IRQ(pdev));
 		}
 
 		if (!ata_port_is_dummy(host->ports[1])) {
@@ -2337,8 +2341,8 @@ int ata_pci_sff_activate_host(struct ata_host *host,
 			if (rc)
 				goto out;
 
-			ata_port_desc(host->ports[1], "irq %d",
-				      ATA_SECONDARY_IRQ(pdev));
+			ata_port_desc_misc(host->ports[1],
+					   ATA_SECONDARY_IRQ(pdev));
 		}
 	}
 
@@ -2776,6 +2780,7 @@ EXPORT_SYMBOL_GPL(ata_bmdma_interrupt);
  *	Kernel thread context (may sleep)
  */
 void ata_bmdma_error_handler(struct ata_port *ap)
+	__must_hold(&ap->host->eh_mutex)
 {
 	struct ata_queued_cmd *qc;
 	unsigned long flags;
@@ -3032,6 +3037,7 @@ EXPORT_SYMBOL_GPL(ata_bmdma_port_start32);
  */
 int ata_pci_bmdma_clear_simplex(struct pci_dev *pdev)
 {
+#ifdef CONFIG_HAS_IOPORT
 	unsigned long bmdma = pci_resource_start(pdev, 4);
 	u8 simplex;
 
@@ -3044,6 +3050,9 @@ int ata_pci_bmdma_clear_simplex(struct pci_dev *pdev)
 	if (simplex & 0x80)
 		return -EOPNOTSUPP;
 	return 0;
+#else
+	return -ENOENT;
+#endif /* CONFIG_HAS_IOPORT */
 }
 EXPORT_SYMBOL_GPL(ata_pci_bmdma_clear_simplex);
 
@@ -3194,7 +3203,8 @@ void ata_sff_port_init(struct ata_port *ap)
 
 int __init ata_sff_init(void)
 {
-	ata_sff_wq = alloc_workqueue("ata_sff", WQ_MEM_RECLAIM, WQ_MAX_ACTIVE);
+	ata_sff_wq = alloc_workqueue("ata_sff", WQ_MEM_RECLAIM | WQ_PERCPU,
+				     WQ_MAX_ACTIVE);
 	if (!ata_sff_wq)
 		return -ENOMEM;
 

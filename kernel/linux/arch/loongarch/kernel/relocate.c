@@ -13,6 +13,7 @@
 #include <asm/bootinfo.h>
 #include <asm/early_ioremap.h>
 #include <asm/inst.h>
+#include <asm/io.h>
 #include <asm/sections.h>
 #include <asm/setup.h>
 
@@ -34,11 +35,27 @@ static inline void __init relocate_relative(void)
 		if (rela->r_info != R_LARCH_RELATIVE)
 			continue;
 
-		if (relocated_addr >= VMLINUX_LOAD_ADDRESS)
-			relocated_addr = (Elf64_Addr)RELOCATED(relocated_addr);
-
+		relocated_addr = (Elf64_Addr)RELOCATED(relocated_addr);
 		*(Elf64_Addr *)RELOCATED(addr) = relocated_addr;
 	}
+
+#ifdef CONFIG_RELR
+	u64 *addr = NULL;
+	u64 *relr = (u64 *)&__relr_dyn_begin;
+	u64 *relr_end = (u64 *)&__relr_dyn_end;
+
+	for ( ; relr < relr_end; relr++) {
+		if ((*relr & 1) == 0) {
+			addr = (u64 *)(*relr + reloc_offset);
+			*addr++ += reloc_offset;
+		} else {
+			for (u64 *p = addr, r = *relr >> 1; r; p++, r >>= 1)
+				if (r & 1)
+					*p += reloc_offset;
+			addr += 63;
+		}
+	}
+#endif
 }
 
 static inline void __init relocate_absolute(long random_offset)
@@ -51,18 +68,25 @@ static inline void __init relocate_absolute(long random_offset)
 
 	for (p = begin; (void *)p < end; p++) {
 		long v = p->symvalue;
-		uint32_t lu12iw, ori, lu32id, lu52id;
-		union loongarch_instruction *insn = (void *)p - p->offset;
+		uint32_t lu12iw, ori;
+#ifdef CONFIG_64BIT
+		uint32_t lu32id, lu52id;
+#endif
+		union loongarch_instruction *insn = (void *)p->pc;
 
 		lu12iw = (v >> 12) & 0xfffff;
 		ori    = v & 0xfff;
+#ifdef CONFIG_64BIT
 		lu32id = (v >> 32) & 0xfffff;
 		lu52id = v >> 52;
+#endif
 
 		insn[0].reg1i20_format.immediate = lu12iw;
 		insn[1].reg2i12_format.immediate = ori;
+#ifdef CONFIG_64BIT
 		insn[2].reg1i20_format.immediate = lu32id;
 		insn[3].reg2i12_format.immediate = lu52id;
+#endif
 	}
 }
 
@@ -102,18 +126,78 @@ static inline __init unsigned long get_random_boot(void)
 	return hash;
 }
 
+static int __init nokaslr(char *p)
+{
+	return 0; /* Just silence the boot warning */
+}
+early_param("nokaslr", nokaslr);
+
+#define KASLR_DISABLED_MESSAGE "KASLR is disabled by %s in %s cmdline.\n"
+
+/*
+ * Note: strictly-defined KASLR means the kernel's final runtime address
+ * has a random offset from the kernel's load address, which is implemented
+ * in relocate.c; broadly-defined KALSR means the kernel's final runtime
+ * address has a random offset from the kernel's link address (a.k.a.
+ * VMLINUX_LOAD_ADDRESS), which also include the efistlub implementation,
+ * kexec_file implementation and QEMU direct kernel boot. kaslr_disabled()
+ * return true only means strictly-defined KASLR is disabled.
+ */
 static inline __init bool kaslr_disabled(void)
 {
 	char *str;
 	const char *builtin_cmdline = CONFIG_CMDLINE;
 
+	if (kaslr_offset())
+		return true; /* KASLR is performed during early boot. */
+
 	str = strstr(builtin_cmdline, "nokaslr");
-	if (str == builtin_cmdline || (str > builtin_cmdline && *(str - 1) == ' '))
+	if (str == builtin_cmdline || (str > builtin_cmdline && *(str - 1) == ' ')) {
+		pr_info(KASLR_DISABLED_MESSAGE, "\'nokaslr\'", "built-in");
 		return true;
+	}
 
 	str = strstr(boot_command_line, "nokaslr");
-	if (str == boot_command_line || (str > boot_command_line && *(str - 1) == ' '))
+	if (str == boot_command_line || (str > boot_command_line && *(str - 1) == ' ')) {
+		pr_info(KASLR_DISABLED_MESSAGE, "\'nokaslr\'", "bootloader");
 		return true;
+	}
+
+#ifdef CONFIG_HIBERNATION
+	str = strstr(builtin_cmdline, "nohibernate");
+	if (str == builtin_cmdline || (str > builtin_cmdline && *(str - 1) == ' '))
+		return false;
+
+	str = strstr(boot_command_line, "nohibernate");
+	if (str == boot_command_line || (str > boot_command_line && *(str - 1) == ' '))
+		return false;
+
+	str = strstr(builtin_cmdline, "noresume");
+	if (str == builtin_cmdline || (str > builtin_cmdline && *(str - 1) == ' '))
+		return false;
+
+	str = strstr(boot_command_line, "noresume");
+	if (str == boot_command_line || (str > boot_command_line && *(str - 1) == ' '))
+		return false;
+
+	str = strstr(builtin_cmdline, "resume=");
+	if (str == builtin_cmdline || (str > builtin_cmdline && *(str - 1) == ' ')) {
+		pr_info(KASLR_DISABLED_MESSAGE, "\'resume=\'", "built-in");
+		return true;
+	}
+
+	str = strstr(boot_command_line, "resume=");
+	if (str == boot_command_line || (str > boot_command_line && *(str - 1) == ' ')) {
+		pr_info(KASLR_DISABLED_MESSAGE, "\'resume=\'", "bootloader");
+		return true;
+	}
+#endif
+
+	str = strstr(boot_command_line, "kexec_file");
+	if (str == boot_command_line || (str > boot_command_line && *(str - 1) == ' ')) {
+		pr_info(KASLR_DISABLED_MESSAGE, "\'kexec_file\'", "bootloader");
+		return true;
+	}
 
 	return false;
 }
@@ -128,7 +212,7 @@ static inline void __init *determine_relocation_address(void)
 	if (kaslr_disabled())
 		return destination;
 
-	kernel_length = (long)_end - (long)_text;
+	kernel_length = (unsigned long)_end - (unsigned long)_text;
 
 	random_offset = get_random_boot() << 16;
 	random_offset &= (CONFIG_RANDOMIZE_BASE_MAX_OFFSET - 1);
@@ -138,13 +222,51 @@ static inline void __init *determine_relocation_address(void)
 	return RELOCATED_KASLR(destination);
 }
 
+static unsigned long __init determine_initrd_address(unsigned long *size)
+{
+	unsigned long start = 0;
+	unsigned long key_length;
+	char *p, *endp, *key = "initrd=";
+
+	key_length = strlen(key);
+	p = strstr(boot_command_line, key);
+
+	if (!p) {
+		key = "initrdmem=";
+		key_length = strlen(key);
+		p = strstr(boot_command_line, key);
+	}
+
+	if (p == boot_command_line || (p > boot_command_line && *(p - 1) == ' ')) {
+		p += key_length;
+		start = memparse(p, &endp);
+		if (*endp == ',')
+			*size = memparse(endp + 1, NULL);
+	}
+
+	return start;
+}
+
 static inline int __init relocation_addr_valid(void *location_new)
 {
+	unsigned long kernel_start, kernel_size;
+	unsigned long initrd_start, initrd_size = 0;
+
 	if ((unsigned long)location_new & 0x00000ffff)
 		return 0; /* Inappropriately aligned new location */
 
 	if ((unsigned long)location_new < (unsigned long)_end)
 		return 0; /* New location overlaps original kernel */
+
+	initrd_start = determine_initrd_address(&initrd_size);
+	if (initrd_start && initrd_size) {
+		kernel_start = PHYSADDR(location_new);
+		kernel_size = (unsigned long)_end - (unsigned long)_text;
+
+		if (kernel_start < (initrd_start + initrd_size) &&
+			initrd_start < (kernel_start + kernel_size))
+			return 0; /* initrd/initramfs overlaps kernel */
+	}
 
 	return 1;
 }
@@ -162,7 +284,7 @@ unsigned long __init relocate_kernel(void)
 	unsigned long kernel_length;
 	unsigned long random_offset = 0;
 	void *location_new = _text; /* Default to original kernel start */
-	char *cmdline = early_ioremap(fw_arg1, COMMAND_LINE_SIZE); /* Boot command line is passed in fw_arg1 */
+	char *cmdline = early_memremap_ro(fw_arg1, COMMAND_LINE_SIZE); /* Boot command line is passed in fw_arg1 */
 
 	strscpy(boot_command_line, cmdline, COMMAND_LINE_SIZE);
 
@@ -174,9 +296,10 @@ unsigned long __init relocate_kernel(void)
 		random_offset = (unsigned long)location_new - (unsigned long)(_text);
 #endif
 	reloc_offset = (unsigned long)_text - VMLINUX_LOAD_ADDRESS;
+	early_memunmap(cmdline, COMMAND_LINE_SIZE);
 
 	if (random_offset) {
-		kernel_length = (long)(_end) - (long)(_text);
+		kernel_length = (unsigned long)(_end) - (unsigned long)(_text);
 
 		/* Copy the kernel to it's new location */
 		memcpy(location_new, _text, kernel_length);
@@ -190,7 +313,7 @@ unsigned long __init relocate_kernel(void)
 		reloc_offset += random_offset;
 
 		/* The current thread is now within the relocated kernel */
-		__current_thread_info = RELOCATED_KASLR(__current_thread_info);
+		current_thread_pointer = RELOCATED_KASLR(current_thread_pointer);
 
 		update_reloc_offset(&reloc_offset, random_offset);
 	}

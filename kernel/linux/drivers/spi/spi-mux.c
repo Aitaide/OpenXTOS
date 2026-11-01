@@ -68,7 +68,7 @@ static int spi_mux_select(struct spi_device *spi)
 
 	priv->current_cs = spi_get_chipselect(spi, 0);
 
-	return 0;
+	return spi_setup(priv->spi);
 }
 
 static int spi_mux_setup(struct spi_device *spi)
@@ -127,9 +127,8 @@ static int spi_mux_probe(struct spi_device *spi)
 {
 	struct spi_controller *ctlr;
 	struct spi_mux_priv *priv;
-	int ret;
 
-	ctlr = spi_alloc_master(&spi->dev, sizeof(*priv));
+	ctlr = devm_spi_alloc_host(&spi->dev, sizeof(*priv));
 	if (!ctlr)
 		return -ENOMEM;
 
@@ -146,9 +145,8 @@ static int spi_mux_probe(struct spi_device *spi)
 
 	priv->mux = devm_mux_control_get(&spi->dev, NULL);
 	if (IS_ERR(priv->mux)) {
-		ret = dev_err_probe(&spi->dev, PTR_ERR(priv->mux),
-				    "failed to get control-mux\n");
-		goto err_put_ctlr;
+		return dev_err_probe(&spi->dev, PTR_ERR(priv->mux),
+				     "failed to get control-mux\n");
 	}
 
 	priv->current_cs = SPI_MUX_NO_CS;
@@ -156,23 +154,15 @@ static int spi_mux_probe(struct spi_device *spi)
 	/* supported modes are the same as our parent's */
 	ctlr->mode_bits = spi->controller->mode_bits;
 	ctlr->flags = spi->controller->flags;
+	ctlr->bits_per_word_mask = spi->controller->bits_per_word_mask;
 	ctlr->transfer_one_message = spi_mux_transfer_one_message;
 	ctlr->setup = spi_mux_setup;
 	ctlr->num_chipselect = mux_control_states(priv->mux);
 	ctlr->bus_num = -1;
-	ctlr->dev.of_node = spi->dev.of_node;
 	ctlr->must_async = true;
+	ctlr->defer_optimize_message = true;
 
-	ret = devm_spi_register_controller(&spi->dev, ctlr);
-	if (ret)
-		goto err_put_ctlr;
-
-	return 0;
-
-err_put_ctlr:
-	spi_controller_put(ctlr);
-
-	return ret;
+	return devm_spi_register_controller(&spi->dev, ctlr);
 }
 
 static const struct spi_device_id spi_mux_id[] = {

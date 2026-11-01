@@ -2,7 +2,7 @@
 #ifndef _LINUX_OBJTOOL_TYPES_H
 #define _LINUX_OBJTOOL_TYPES_H
 
-#ifndef __ASSEMBLY__
+#ifndef __ASSEMBLER__
 
 #include <linux/types.h>
 
@@ -18,7 +18,7 @@ struct unwind_hint {
 	u8		signal;
 };
 
-#endif /* __ASSEMBLY__ */
+#endif /* __ASSEMBLER__ */
 
 /*
  * UNWIND_HINT_TYPE_UNDEFINED: A blind spot in ORC coverage which can result in
@@ -53,5 +53,20 @@ struct unwind_hint {
 #define UNWIND_HINT_TYPE_FUNC		5
 #define UNWIND_HINT_TYPE_SAVE		6
 #define UNWIND_HINT_TYPE_RESTORE	7
+
+/*
+ * Annotate types
+ */
+#define ANNOTYPE_NOENDBR		1
+#define ANNOTYPE_RETPOLINE_SAFE		2
+#define ANNOTYPE_INSTR_BEGIN		3
+#define ANNOTYPE_INSTR_END		4
+#define ANNOTYPE_UNRET_BEGIN		5
+#define ANNOTYPE_IGNORE_ALTS		6
+#define ANNOTYPE_INTRA_FUNCTION_CALL	7
+#define ANNOTYPE_REACHABLE		8
+#define ANNOTYPE_NOCFI			9
+
+#define ANNOTYPE_DATA_SPECIAL		1
 
 #endif /* _LINUX_OBJTOOL_TYPES_H */

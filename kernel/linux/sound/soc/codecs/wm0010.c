@@ -9,6 +9,7 @@
  *          Scott Ling <sl@opensource.wolfsonmicro.com>
  */
 
+#include <linux/cleanup.h>
 #include <linux/module.h>
 #include <linux/moduleparam.h>
 #include <linux/interrupt.h>
@@ -18,7 +19,7 @@
 #include <linux/firmware.h>
 #include <linux/delay.h>
 #include <linux/fs.h>
-#include <linux/gpio.h>
+#include <linux/gpio/consumer.h>
 #include <linux/regulator/consumer.h>
 #include <linux/mutex.h>
 #include <linux/workqueue.h>
@@ -94,8 +95,7 @@ struct wm0010_priv {
 
 	struct wm0010_pdata pdata;
 
-	int gpio_reset;
-	int gpio_reset_value;
+	struct gpio_desc *reset;
 
 	struct regulator_bulk_data core_supplies[2];
 	struct regulator *dbvdd;
@@ -114,14 +114,6 @@ struct wm0010_priv {
 	int irq;
 
 	struct completion boot_completion;
-};
-
-struct wm0010_spi_msg {
-	struct spi_message m;
-	struct spi_transfer t;
-	u8 *tx_buf;
-	u8 *rx_buf;
-	size_t len;
 };
 
 static const struct snd_soc_dapm_widget wm0010_dapm_widgets[] = {
@@ -157,13 +149,11 @@ static const char *wm0010_state_to_str(enum wm0010_state state)
 static void wm0010_halt(struct snd_soc_component *component)
 {
 	struct wm0010_priv *wm0010 = snd_soc_component_get_drvdata(component);
-	unsigned long flags;
 	enum wm0010_state state;
 
 	/* Fetch the wm0010 state */
-	spin_lock_irqsave(&wm0010->irq_lock, flags);
-	state = wm0010->state;
-	spin_unlock_irqrestore(&wm0010->irq_lock, flags);
+	scoped_guard(spinlock_irqsave, &wm0010->irq_lock)
+		state = wm0010->state;
 
 	switch (state) {
 	case WM0010_POWER_OFF:
@@ -174,8 +164,7 @@ static void wm0010_halt(struct snd_soc_component *component)
 	case WM0010_STAGE2:
 	case WM0010_FIRMWARE:
 		/* Remember to put chip back into reset */
-		gpio_set_value_cansleep(wm0010->gpio_reset,
-					wm0010->gpio_reset_value);
+		gpiod_set_value_cansleep(wm0010->reset, 1);
 		/* Disable the regulators */
 		regulator_disable(wm0010->dbvdd);
 		regulator_bulk_disable(ARRAY_SIZE(wm0010->core_supplies),
@@ -183,9 +172,8 @@ static void wm0010_halt(struct snd_soc_component *component)
 		break;
 	}
 
-	spin_lock_irqsave(&wm0010->irq_lock, flags);
-	wm0010->state = WM0010_POWER_OFF;
-	spin_unlock_irqrestore(&wm0010->irq_lock, flags);
+	scoped_guard(spinlock_irqsave, &wm0010->irq_lock)
+		wm0010->state = WM0010_POWER_OFF;
 }
 
 struct wm0010_boot_xfer {
@@ -200,11 +188,9 @@ struct wm0010_boot_xfer {
 static void wm0010_mark_boot_failure(struct wm0010_priv *wm0010)
 {
 	enum wm0010_state state;
-	unsigned long flags;
 
-	spin_lock_irqsave(&wm0010->irq_lock, flags);
-	state = wm0010->state;
-	spin_unlock_irqrestore(&wm0010->irq_lock, flags);
+	scoped_guard(spinlock_irqsave, &wm0010->irq_lock)
+		state = wm0010->state;
 
 	dev_err(wm0010->dev, "Failed to transition from `%s' state to `%s' state\n",
 		wm0010_state_to_str(state), wm0010_state_to_str(state + 1));
@@ -336,7 +322,7 @@ static void byte_swap_64(u64 *data_in, u64 *data_out, u32 len)
 	int i;
 
 	for (i = 0; i < len / 8; i++)
-		data_out[i] = cpu_to_be64(le64_to_cpu(data_in[i]));
+		data_out[i] = swab64(data_in[i]);
 }
 
 static int wm0010_firmware_load(const char *name, struct snd_soc_component *component)
@@ -347,7 +333,6 @@ static int wm0010_firmware_load(const char *name, struct snd_soc_component *comp
 	struct wm0010_boot_xfer *xfer;
 	int ret;
 	DECLARE_COMPLETION_ONSTACK(done);
-	const struct firmware *fw;
 	const struct dfw_binrec *rec;
 	const struct dfw_inforec *inforec;
 	u64 *img;
@@ -356,6 +341,7 @@ static int wm0010_firmware_load(const char *name, struct snd_soc_component *comp
 
 	INIT_LIST_HEAD(&xfer_list);
 
+	const struct firmware *fw __free(firmware) = NULL;
 	ret = request_firmware(&fw, name, component->dev);
 	if (ret != 0) {
 		dev_err(component->dev, "Failed to request application(%s): %d\n",
@@ -374,16 +360,14 @@ static int wm0010_firmware_load(const char *name, struct snd_soc_component *comp
 	/* First record should be INFO */
 	if (rec->command != DFW_CMD_INFO) {
 		dev_err(component->dev, "First record not INFO\r\n");
-		ret = -EINVAL;
-		goto abort;
+		return -EINVAL;
 	}
 
 	if (inforec->info_version != INFO_VERSION) {
 		dev_err(component->dev,
 			"Unsupported version (%02d) of INFO record\r\n",
 			inforec->info_version);
-		ret = -EINVAL;
-		goto abort;
+		return -EINVAL;
 	}
 
 	dev_dbg(component->dev, "Version v%02d INFO record found\r\n",
@@ -392,8 +376,7 @@ static int wm0010_firmware_load(const char *name, struct snd_soc_component *comp
 	/* Check it's a DSP file */
 	if (dsp != DEVICE_ID_WM0010) {
 		dev_err(component->dev, "Not a WM0010 firmware file.\r\n");
-		ret = -EINVAL;
-		goto abort;
+		return -EINVAL;
 	}
 
 	/* Skip the info record as we don't need to send it */
@@ -406,7 +389,7 @@ static int wm0010_firmware_load(const char *name, struct snd_soc_component *comp
 			rec->command, rec->length);
 		len = rec->length + 8;
 
-		xfer = kzalloc(sizeof(*xfer), GFP_KERNEL);
+		xfer = kzalloc_obj(*xfer);
 		if (!xfer) {
 			ret = -ENOMEM;
 			goto abort;
@@ -418,14 +401,14 @@ static int wm0010_firmware_load(const char *name, struct snd_soc_component *comp
 		out = kzalloc(len, GFP_KERNEL | GFP_DMA);
 		if (!out) {
 			ret = -ENOMEM;
-			goto abort1;
+			goto abort;
 		}
 		xfer->t.rx_buf = out;
 
 		img = kzalloc(len, GFP_KERNEL | GFP_DMA);
 		if (!img) {
 			ret = -ENOMEM;
-			goto abort1;
+			goto abort;
 		}
 		xfer->t.tx_buf = img;
 
@@ -463,13 +446,13 @@ static int wm0010_firmware_load(const char *name, struct snd_soc_component *comp
 		ret = spi_async(spi, &xfer->m);
 		if (ret != 0) {
 			dev_err(component->dev, "Write failed: %d\n", ret);
-			goto abort1;
+			goto abort;
 		}
 
 		if (wm0010->boot_failed) {
 			dev_dbg(component->dev, "Boot fail!\n");
 			ret = -EINVAL;
-			goto abort1;
+			goto abort;
 		}
 	}
 
@@ -477,7 +460,7 @@ static int wm0010_firmware_load(const char *name, struct snd_soc_component *comp
 
 	ret = 0;
 
-abort1:
+abort:
 	while (!list_empty(&xfer_list)) {
 		xfer = list_first_entry(&xfer_list, struct wm0010_boot_xfer,
 					list);
@@ -487,8 +470,6 @@ abort1:
 		kfree(xfer);
 	}
 
-abort:
-	release_firmware(fw);
 	return ret;
 }
 
@@ -496,14 +477,12 @@ static int wm0010_stage2_load(struct snd_soc_component *component)
 {
 	struct spi_device *spi = to_spi_device(component->dev);
 	struct wm0010_priv *wm0010 = snd_soc_component_get_drvdata(component);
-	const struct firmware *fw;
 	struct spi_message m;
 	struct spi_transfer t;
-	u32 *img;
-	u8 *out;
 	int i;
 	int ret = 0;
 
+	const struct firmware *fw __free(firmware) = NULL;
 	ret = request_firmware(&fw, "wm0010_stage2.bin", component->dev);
 	if (ret != 0) {
 		dev_err(component->dev, "Failed to request stage2 loader: %d\n",
@@ -514,17 +493,15 @@ static int wm0010_stage2_load(struct snd_soc_component *component)
 	dev_dbg(component->dev, "Downloading %zu byte stage 2 loader\n", fw->size);
 
 	/* Copy to local buffer first as vmalloc causes problems for dma */
-	img = kmemdup(&fw->data[0], fw->size, GFP_KERNEL | GFP_DMA);
-	if (!img) {
-		ret = -ENOMEM;
-		goto abort2;
-	}
+	u32 *img __free(kfree) =
+		kmemdup(&fw->data[0], fw->size, GFP_KERNEL | GFP_DMA);
+	if (!img)
+		return -ENOMEM;
 
-	out = kzalloc(fw->size, GFP_KERNEL | GFP_DMA);
-	if (!out) {
-		ret = -ENOMEM;
-		goto abort1;
-	}
+	u8 *out __free(kfree) =
+		kzalloc(fw->size, GFP_KERNEL | GFP_DMA);
+	if (!out)
+		return -ENOMEM;
 
 	spi_message_init(&m);
 	memset(&t, 0, sizeof(t));
@@ -541,7 +518,7 @@ static int wm0010_stage2_load(struct snd_soc_component *component)
 	ret = spi_sync(spi, &m);
 	if (ret != 0) {
 		dev_err(component->dev, "Initial download failed: %d\n", ret);
-		goto abort;
+		return ret;
 	}
 
 	/* Look for errors from the boot ROM */
@@ -550,18 +527,11 @@ static int wm0010_stage2_load(struct snd_soc_component *component)
 			dev_err(component->dev, "Boot ROM error: %x in %d\n",
 				out[i], i);
 			wm0010_mark_boot_failure(wm0010);
-			ret = -EBUSY;
-			goto abort;
+			return -EBUSY;
 		}
 	}
-abort:
-	kfree(out);
-abort1:
-	kfree(img);
-abort2:
-	release_firmware(fw);
 
-	return ret;
+	return 0;
 }
 
 static int wm0010_boot(struct snd_soc_component *component)
@@ -610,7 +580,7 @@ static int wm0010_boot(struct snd_soc_component *component)
 	}
 
 	/* Release reset */
-	gpio_set_value_cansleep(wm0010->gpio_reset, !wm0010->gpio_reset_value);
+	gpiod_set_value_cansleep(wm0010->reset, 0);
 	spin_lock_irqsave(&wm0010->irq_lock, flags);
 	wm0010->state = WM0010_OUT_OF_RESET;
 	spin_unlock_irqrestore(&wm0010->irq_lock, flags);
@@ -733,19 +703,19 @@ static int wm0010_set_bias_level(struct snd_soc_component *component,
 				 enum snd_soc_bias_level level)
 {
 	struct wm0010_priv *wm0010 = snd_soc_component_get_drvdata(component);
+	struct snd_soc_dapm_context *dapm = snd_soc_component_to_dapm(component);
 
 	switch (level) {
 	case SND_SOC_BIAS_ON:
-		if (snd_soc_component_get_bias_level(component) == SND_SOC_BIAS_PREPARE)
+		if (snd_soc_dapm_get_bias_level(dapm) == SND_SOC_BIAS_PREPARE)
 			wm0010_boot(component);
 		break;
 	case SND_SOC_BIAS_PREPARE:
 		break;
 	case SND_SOC_BIAS_STANDBY:
-		if (snd_soc_component_get_bias_level(component) == SND_SOC_BIAS_PREPARE) {
-			mutex_lock(&wm0010->lock);
-			wm0010_halt(component);
-			mutex_unlock(&wm0010->lock);
+		if (snd_soc_dapm_get_bias_level(dapm) == SND_SOC_BIAS_PREPARE) {
+			scoped_guard(mutex, &wm0010->lock)
+				wm0010_halt(component);
 		}
 		break;
 	case SND_SOC_BIAS_OFF:
@@ -841,9 +811,8 @@ static irqreturn_t wm0010_irq(int irq, void *data)
 	case WM0010_OUT_OF_RESET:
 	case WM0010_BOOTROM:
 	case WM0010_STAGE2:
-		spin_lock(&wm0010->irq_lock);
-		complete(&wm0010->boot_completion);
-		spin_unlock(&wm0010->irq_lock);
+		scoped_guard(spinlock, &wm0010->irq_lock)
+			complete(&wm0010->boot_completion);
 		return IRQ_HANDLED;
 	default:
 		return IRQ_NONE;
@@ -863,7 +832,6 @@ static int wm0010_probe(struct snd_soc_component *component)
 
 static int wm0010_spi_probe(struct spi_device *spi)
 {
-	unsigned long gpio_flags;
 	int ret;
 	int trigger;
 	int irq;
@@ -903,31 +871,11 @@ static int wm0010_spi_probe(struct spi_device *spi)
 		return ret;
 	}
 
-	if (wm0010->pdata.gpio_reset) {
-		wm0010->gpio_reset = wm0010->pdata.gpio_reset;
-
-		if (wm0010->pdata.reset_active_high)
-			wm0010->gpio_reset_value = 1;
-		else
-			wm0010->gpio_reset_value = 0;
-
-		if (wm0010->gpio_reset_value)
-			gpio_flags = GPIOF_OUT_INIT_HIGH;
-		else
-			gpio_flags = GPIOF_OUT_INIT_LOW;
-
-		ret = devm_gpio_request_one(wm0010->dev, wm0010->gpio_reset,
-					    gpio_flags, "wm0010 reset");
-		if (ret < 0) {
-			dev_err(wm0010->dev,
-				"Failed to request GPIO for DSP reset: %d\n",
-				ret);
-			return ret;
-		}
-	} else {
-		dev_err(wm0010->dev, "No reset GPIO configured\n");
-		return -EINVAL;
-	}
+	wm0010->reset = devm_gpiod_get(wm0010->dev, "reset", GPIOD_OUT_HIGH);
+	if (IS_ERR(wm0010->reset))
+		return dev_err_probe(wm0010->dev, PTR_ERR(wm0010->reset),
+				     "could not get RESET GPIO\n");
+	gpiod_set_consumer_name(wm0010->reset, "wm0010 reset");
 
 	wm0010->state = WM0010_POWER_OFF;
 
@@ -951,7 +899,7 @@ static int wm0010_spi_probe(struct spi_device *spi)
 	if (ret) {
 		dev_err(wm0010->dev, "Failed to set IRQ %d as wake source: %d\n",
 			irq, ret);
-		return ret;
+		goto free_irq;
 	}
 
 	if (spi->max_speed_hz)
@@ -963,17 +911,25 @@ static int wm0010_spi_probe(struct spi_device *spi)
 				     &soc_component_dev_wm0010, wm0010_dai,
 				     ARRAY_SIZE(wm0010_dai));
 	if (ret < 0)
-		return ret;
+		goto disable_irq_wake;
 
 	return 0;
+
+disable_irq_wake:
+	irq_set_irq_wake(wm0010->irq, 0);
+
+free_irq:
+	if (wm0010->irq)
+		free_irq(wm0010->irq, wm0010);
+
+	return ret;
 }
 
 static void wm0010_spi_remove(struct spi_device *spi)
 {
 	struct wm0010_priv *wm0010 = spi_get_drvdata(spi);
 
-	gpio_set_value_cansleep(wm0010->gpio_reset,
-				wm0010->gpio_reset_value);
+	gpiod_set_value_cansleep(wm0010->reset, 1);
 
 	irq_set_irq_wake(wm0010->irq, 0);
 

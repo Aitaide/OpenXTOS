@@ -17,9 +17,8 @@ properties:
   compatible:
     const: lgphilips,lb035q02
 
-  label: true
-  enable-gpios: true
-  port: true
+  reg:
+    maxItems: 1
 
   spi-cpha: true
   spi-cpol: true

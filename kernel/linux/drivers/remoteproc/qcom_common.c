@@ -13,6 +13,7 @@
 #include <linux/notifier.h>
 #include <linux/remoteproc.h>
 #include <linux/remoteproc/qcom_rproc.h>
+#include <linux/auxiliary_bus.h>
 #include <linux/rpmsg/qcom_glink.h>
 #include <linux/rpmsg/qcom_smd.h>
 #include <linux/slab.h>
@@ -25,8 +26,8 @@
 #define to_glink_subdev(d) container_of(d, struct qcom_rproc_glink, subdev)
 #define to_smd_subdev(d) container_of(d, struct qcom_rproc_subdev, subdev)
 #define to_ssr_subdev(d) container_of(d, struct qcom_rproc_ssr, subdev)
+#define to_pdm_subdev(d) container_of(d, struct qcom_rproc_pdm, subdev)
 
-#define MAX_NUM_OF_SS           10
 #define MAX_REGION_NAME_LENGTH  16
 #define SBL_MINIDUMP_SMEM_ID	602
 #define MINIDUMP_REGION_VALID		('V' << 24 | 'A' << 16 | 'L' << 8 | 'I' << 0)
@@ -78,7 +79,7 @@ struct minidump_global_toc {
 	__le32				status;
 	__le32				md_revision;
 	__le32				enabled;
-	struct minidump_subsystem	subsystems[MAX_NUM_OF_SS];
+	struct minidump_subsystem	subsystems[];
 };
 
 struct qcom_ssr_subsystem {
@@ -108,6 +109,7 @@ static int qcom_add_minidump_segments(struct rproc *rproc, struct minidump_subsy
 	struct minidump_region __iomem *ptr;
 	struct minidump_region region;
 	int seg_cnt, i;
+	int ret = 0;
 	dma_addr_t da;
 	size_t size;
 	char *name;
@@ -128,17 +130,22 @@ static int qcom_add_minidump_segments(struct rproc *rproc, struct minidump_subsy
 		if (le32_to_cpu(region.valid) == MINIDUMP_REGION_VALID) {
 			name = kstrndup(region.name, MAX_REGION_NAME_LENGTH - 1, GFP_KERNEL);
 			if (!name) {
-				iounmap(ptr);
-				return -ENOMEM;
+				ret = -ENOMEM;
+				break;
 			}
 			da = le64_to_cpu(region.address);
 			size = le64_to_cpu(region.size);
-			rproc_coredump_add_custom_segment(rproc, da, size, rproc_dumpfn_t, name);
+			ret = rproc_coredump_add_custom_segment(rproc, da, size, rproc_dumpfn_t,
+								name);
+			if (ret) {
+				kfree(name);
+				break;
+			}
 		}
 	}
 
 	iounmap(ptr);
-	return 0;
+	return ret;
 }
 
 void qcom_minidump(struct rproc *rproc, unsigned int minidump_id,
@@ -149,13 +156,25 @@ void qcom_minidump(struct rproc *rproc, unsigned int minidump_id,
 	int ret;
 	struct minidump_subsystem *subsystem;
 	struct minidump_global_toc *toc;
+	unsigned int num_ss;
+	size_t toc_size;
 
 	/* Get Global minidump ToC*/
-	toc = qcom_smem_get(QCOM_SMEM_HOST_ANY, SBL_MINIDUMP_SMEM_ID, NULL);
+	toc = qcom_smem_get(QCOM_SMEM_HOST_ANY, SBL_MINIDUMP_SMEM_ID, &toc_size);
 
 	/* check if global table pointer exists and init is set */
 	if (IS_ERR(toc) || !toc->status) {
 		dev_err(&rproc->dev, "Minidump TOC not found in SMEM\n");
+		return;
+	}
+
+	/* Derive the number of subsystems from the actual SMEM item size */
+	num_ss = (toc_size - offsetof(struct minidump_global_toc, subsystems)) /
+		 sizeof(struct minidump_subsystem);
+
+	if (minidump_id >= num_ss) {
+		dev_err(&rproc->dev, "Minidump id %d is out of range: %d\n",
+			minidump_id, num_ss);
 		return;
 	}
 
@@ -234,8 +253,10 @@ void qcom_add_glink_subdev(struct rproc *rproc, struct qcom_rproc_glink *glink,
 		return;
 
 	glink->ssr_name = kstrdup_const(ssr_name, GFP_KERNEL);
-	if (!glink->ssr_name)
+	if (!glink->ssr_name) {
+		of_node_put(glink->node);
 		return;
+	}
 
 	glink->dev = dev;
 	glink->subdev.start = glink_subdev_start;
@@ -368,7 +389,7 @@ static struct qcom_ssr_subsystem *qcom_ssr_get_subsys(const char *name)
 		if (!strcmp(info->name, name))
 			goto out;
 
-	info = kzalloc(sizeof(*info), GFP_KERNEL);
+	info = kzalloc_obj(*info);
 	if (!info) {
 		info = ERR_PTR(-ENOMEM);
 		goto out;
@@ -518,6 +539,91 @@ void qcom_remove_ssr_subdev(struct rproc *rproc, struct qcom_rproc_ssr *ssr)
 	ssr->info = NULL;
 }
 EXPORT_SYMBOL_GPL(qcom_remove_ssr_subdev);
+
+static void pdm_dev_release(struct device *dev)
+{
+	struct auxiliary_device *adev = to_auxiliary_dev(dev);
+
+	kfree(adev);
+}
+
+static int pdm_notify_prepare(struct rproc_subdev *subdev)
+{
+	struct qcom_rproc_pdm *pdm = to_pdm_subdev(subdev);
+	struct auxiliary_device *adev;
+	int ret;
+
+	adev = kzalloc_obj(*adev);
+	if (!adev)
+		return -ENOMEM;
+
+	adev->dev.parent = pdm->dev;
+	adev->dev.release = pdm_dev_release;
+	adev->name = "pd-mapper";
+	adev->id = pdm->index;
+
+	ret = auxiliary_device_init(adev);
+	if (ret) {
+		kfree(adev);
+		return ret;
+	}
+
+	ret = auxiliary_device_add(adev);
+	if (ret) {
+		auxiliary_device_uninit(adev);
+		return ret;
+	}
+
+	pdm->adev = adev;
+
+	return 0;
+}
+
+
+static void pdm_notify_unprepare(struct rproc_subdev *subdev)
+{
+	struct qcom_rproc_pdm *pdm = to_pdm_subdev(subdev);
+
+	if (!pdm->adev)
+		return;
+
+	auxiliary_device_delete(pdm->adev);
+	auxiliary_device_uninit(pdm->adev);
+	pdm->adev = NULL;
+}
+
+/**
+ * qcom_add_pdm_subdev() - register PD Mapper subdevice
+ * @rproc:	rproc handle
+ * @pdm:	PDM subdevice handle
+ *
+ * Register @pdm so that Protection Device mapper service is started when the
+ * DSP is started too.
+ */
+void qcom_add_pdm_subdev(struct rproc *rproc, struct qcom_rproc_pdm *pdm)
+{
+	pdm->dev = &rproc->dev;
+	pdm->index = rproc->index;
+
+	pdm->subdev.prepare = pdm_notify_prepare;
+	pdm->subdev.unprepare = pdm_notify_unprepare;
+
+	rproc_add_subdev(rproc, &pdm->subdev);
+}
+EXPORT_SYMBOL_GPL(qcom_add_pdm_subdev);
+
+/**
+ * qcom_remove_pdm_subdev() - remove PD Mapper subdevice
+ * @rproc:	rproc handle
+ * @pdm:	PDM subdevice handle
+ *
+ * Remove the PD Mapper subdevice.
+ */
+void qcom_remove_pdm_subdev(struct rproc *rproc, struct qcom_rproc_pdm *pdm)
+{
+	rproc_remove_subdev(rproc, &pdm->subdev);
+}
+EXPORT_SYMBOL_GPL(qcom_remove_pdm_subdev);
 
 MODULE_DESCRIPTION("Qualcomm Remoteproc helper driver");
 MODULE_LICENSE("GPL v2");

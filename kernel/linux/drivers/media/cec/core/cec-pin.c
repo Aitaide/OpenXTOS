@@ -4,8 +4,9 @@
  */
 
 #include <linux/delay.h>
-#include <linux/slab.h>
 #include <linux/sched/types.h>
+#include <linux/seq_file.h>
+#include <linux/slab.h>
 
 #include <media/cec-pin.h>
 #include "cec-pin-priv.h"
@@ -114,7 +115,7 @@ static void cec_pin_update(struct cec_pin *pin, bool v, bool force)
 		return;
 
 	pin->adap->cec_pin_is_high = v;
-	if (atomic_read(&pin->work_pin_num_events) < CEC_NUM_PIN_EVENTS) {
+	if (atomic_read_acquire(&pin->work_pin_num_events) < CEC_NUM_PIN_EVENTS) {
 		u8 ev = v;
 
 		if (pin->work_pin_events_dropped) {
@@ -125,7 +126,7 @@ static void cec_pin_update(struct cec_pin *pin, bool v, bool force)
 		pin->work_pin_ts[pin->work_pin_events_wr] = ktime_get();
 		pin->work_pin_events_wr =
 			(pin->work_pin_events_wr + 1) % CEC_NUM_PIN_EVENTS;
-		atomic_inc(&pin->work_pin_num_events);
+		atomic_inc_return_release(&pin->work_pin_num_events);
 	} else {
 		pin->work_pin_events_dropped = true;
 		pin->work_pin_events_dropped_cnt++;
@@ -141,15 +142,42 @@ static bool cec_pin_read(struct cec_pin *pin)
 	return v;
 }
 
+static void cec_pin_insert_glitch(struct cec_pin *pin, bool rising_edge)
+{
+	/*
+	 * Insert a short glitch after the falling or rising edge to
+	 * simulate reflections on the CEC line. This can be used to
+	 * test deglitch filters, which should be present in CEC devices
+	 * to deal with noise on the line.
+	 */
+	if (!pin->tx_glitch_high_usecs || !pin->tx_glitch_low_usecs)
+		return;
+	if (rising_edge) {
+		udelay(pin->tx_glitch_high_usecs);
+		call_void_pin_op(pin, low);
+		udelay(pin->tx_glitch_low_usecs);
+		call_void_pin_op(pin, high);
+	} else {
+		udelay(pin->tx_glitch_low_usecs);
+		call_void_pin_op(pin, high);
+		udelay(pin->tx_glitch_high_usecs);
+		call_void_pin_op(pin, low);
+	}
+}
+
 static void cec_pin_low(struct cec_pin *pin)
 {
 	call_void_pin_op(pin, low);
+	if (pin->tx_glitch_falling_edge && pin->adap->cec_pin_is_high)
+		cec_pin_insert_glitch(pin, false);
 	cec_pin_update(pin, false, false);
 }
 
 static bool cec_pin_high(struct cec_pin *pin)
 {
 	call_void_pin_op(pin, high);
+	if (pin->tx_glitch_rising_edge && !pin->adap->cec_pin_is_high)
+		cec_pin_insert_glitch(pin, true);
 	return cec_pin_read(pin);
 }
 
@@ -664,7 +692,6 @@ static void cec_pin_rx_states(struct cec_pin *pin, ktime_t ts)
 		v = cec_pin_read(pin);
 		if (!v)
 			break;
-		pin->state = CEC_ST_RX_START_BIT_HIGH;
 		delta = ktime_us_delta(ts, pin->ts);
 		/* Start bit low is too short, go back to idle */
 		if (delta < CEC_TIM_START_BIT_LOW_MIN - CEC_TIM_IDLE_SAMPLE) {
@@ -675,7 +702,16 @@ static void cec_pin_rx_states(struct cec_pin *pin, ktime_t ts)
 			cec_pin_to_idle(pin);
 			break;
 		}
+		pin->state = CEC_ST_RX_START_BIT_HIGH;
 		if (rx_arb_lost(pin, &poll)) {
+			/*
+			 * Normally rx_toggle is toggled in cec_pin_to_idle()
+			 * when we're in an RX state, but here we switch to TX
+			 * mode, so cec_pin_to_idle() sees a TX mode and never
+			 * toggles rx_toggle. So toggle it here as a special
+			 * corner case.
+			 */
+			pin->rx_toggle ^= 1;
 			cec_msg_init(&pin->tx_msg, poll >> 4, poll & 0xf);
 			pin->tx_generated_poll = true;
 			pin->tx_extra_bytes = 0;
@@ -769,7 +805,7 @@ static void cec_pin_rx_states(struct cec_pin *pin, ktime_t ts)
 		 * Go to low drive state when the total bit time is
 		 * too short.
 		 */
-		if (delta < CEC_TIM_DATA_BIT_TOTAL_MIN) {
+		if (delta < CEC_TIM_DATA_BIT_TOTAL_MIN && !pin->rx_no_low_drive) {
 			if (!pin->rx_data_bit_too_short_cnt++) {
 				pin->rx_data_bit_too_short_ts = ktime_to_ns(pin->ts);
 				pin->rx_data_bit_too_short_delta = delta;
@@ -872,19 +908,19 @@ static enum hrtimer_restart cec_pin_timer(struct hrtimer *timer)
 		if (pin->wait_usecs > 150) {
 			pin->wait_usecs -= 100;
 			pin->timer_ts = ktime_add_us(ts, 100);
-			hrtimer_forward_now(timer, ns_to_ktime(100000));
+			hrtimer_forward_now(timer, us_to_ktime(100));
 			return HRTIMER_RESTART;
 		}
 		if (pin->wait_usecs > 100) {
 			pin->wait_usecs /= 2;
 			pin->timer_ts = ktime_add_us(ts, pin->wait_usecs);
 			hrtimer_forward_now(timer,
-					ns_to_ktime(pin->wait_usecs * 1000));
+					us_to_ktime(pin->wait_usecs));
 			return HRTIMER_RESTART;
 		}
 		pin->timer_ts = ktime_add_us(ts, pin->wait_usecs);
 		hrtimer_forward_now(timer,
-				    ns_to_ktime(pin->wait_usecs * 1000));
+				    us_to_ktime(pin->wait_usecs));
 		pin->wait_usecs = 0;
 		return HRTIMER_RESTART;
 	}
@@ -1019,13 +1055,12 @@ static enum hrtimer_restart cec_pin_timer(struct hrtimer *timer)
 	if (!adap->monitor_pin_cnt || usecs <= 150) {
 		pin->wait_usecs = 0;
 		pin->timer_ts = ktime_add_us(ts, usecs);
-		hrtimer_forward_now(timer,
-				ns_to_ktime(usecs * 1000));
+		hrtimer_forward_now(timer, us_to_ktime(usecs));
 		return HRTIMER_RESTART;
 	}
 	pin->wait_usecs = usecs - 100;
 	pin->timer_ts = ktime_add_us(ts, 100);
-	hrtimer_forward_now(timer, ns_to_ktime(100000));
+	hrtimer_forward_now(timer, us_to_ktime(100));
 	return HRTIMER_RESTART;
 }
 
@@ -1074,7 +1109,7 @@ static int cec_pin_thread_func(void *_adap)
 						     pin->work_tx_ts);
 		}
 
-		while (atomic_read(&pin->work_pin_num_events)) {
+		while (atomic_read_acquire(&pin->work_pin_num_events)) {
 			unsigned int idx = pin->work_pin_events_rd;
 			u8 v = pin->work_pin_events[idx];
 
@@ -1083,7 +1118,7 @@ static int cec_pin_thread_func(void *_adap)
 						v & CEC_PIN_EVENT_FL_DROPPED,
 						pin->work_pin_ts[idx]);
 			pin->work_pin_events_rd = (idx + 1) % CEC_NUM_PIN_EVENTS;
-			atomic_dec(&pin->work_pin_num_events);
+			atomic_dec_return_release(&pin->work_pin_num_events);
 		}
 
 		switch (atomic_xchg(&pin->work_irq_change,
@@ -1340,17 +1375,18 @@ struct cec_adapter *cec_pin_allocate_adapter(const struct cec_pin_ops *pin_ops,
 					void *priv, const char *name, u32 caps)
 {
 	struct cec_adapter *adap;
-	struct cec_pin *pin = kzalloc(sizeof(*pin), GFP_KERNEL);
+	struct cec_pin *pin = kzalloc_obj(*pin);
 
 	if (pin == NULL)
 		return ERR_PTR(-ENOMEM);
 	pin->ops = pin_ops;
-	hrtimer_init(&pin->timer, CLOCK_MONOTONIC, HRTIMER_MODE_REL);
 	atomic_set(&pin->work_pin_num_events, 0);
-	pin->timer.function = cec_pin_timer;
+	hrtimer_setup(&pin->timer, cec_pin_timer, CLOCK_MONOTONIC, HRTIMER_MODE_REL);
 	init_waitqueue_head(&pin->kthread_waitq);
 	pin->tx_custom_low_usecs = CEC_TIM_CUSTOM_DEFAULT;
 	pin->tx_custom_high_usecs = CEC_TIM_CUSTOM_DEFAULT;
+	pin->tx_glitch_low_usecs = CEC_TIM_GLITCH_DEFAULT;
+	pin->tx_glitch_high_usecs = CEC_TIM_GLITCH_DEFAULT;
 
 	adap = cec_allocate_adapter(&cec_pin_adap_ops, priv, name,
 			    caps | CEC_CAP_MONITOR_ALL | CEC_CAP_MONITOR_PIN,

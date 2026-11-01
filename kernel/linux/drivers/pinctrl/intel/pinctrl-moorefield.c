@@ -2,13 +2,12 @@
 /*
  * Intel Moorefield SoC pinctrl driver
  *
- * Copyright (C) 2022, Intel Corporation
+ * Copyright (C) 2022 Intel Corporation
  * Author: Andy Shevchenko <andriy.shevchenko@linux.intel.com>
  */
 
+#include <linux/array_size.h>
 #include <linux/init.h>
-#include <linux/kernel.h>
-#include <linux/mod_devicetable.h>
 #include <linux/module.h>
 #include <linux/platform_device.h>
 #include <linux/types.h>
@@ -341,4 +340,4 @@ MODULE_AUTHOR("Andy Shevchenko <andriy.shevchenko@linux.intel.com>");
 MODULE_DESCRIPTION("Intel Moorefield SoC pinctrl driver");
 MODULE_LICENSE("GPL v2");
 MODULE_ALIAS("platform:pinctrl-moorefield");
-MODULE_IMPORT_NS(PINCTRL_TANGIER);
+MODULE_IMPORT_NS("PINCTRL_TANGIER");

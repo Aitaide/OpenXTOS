@@ -33,6 +33,7 @@
  */
 
 #include <linux/delay.h>
+#include <linux/string_choices.h>
 #include "cxgb4.h"
 #include "t4_regs.h"
 #include "t4_values.h"
@@ -4867,7 +4868,7 @@ static void mem_intr_handler(struct adapter *adapter, int idx)
 		if (printk_ratelimit())
 			dev_warn(adapter->pdev_dev,
 				 "%u %s correctable ECC data error%s\n",
-				 cnt, name[idx], cnt > 1 ? "s" : "");
+				 cnt, name[idx], str_plural(cnt));
 	}
 	if (v & ECC_UE_INT_CAUSE_F)
 		dev_alert(adapter->pdev_dev,
@@ -6735,14 +6736,6 @@ void t4_sge_decode_idma_state(struct adapter *adapter, int state)
 		dev_err(adapter->pdev_dev,
 			"Unsupported chip version %d\n", chip_version);
 		return;
-	}
-
-	if (is_t4(adapter->params.chip)) {
-		sge_idma_decode = (const char **)t4_decode;
-		sge_idma_decode_nstates = ARRAY_SIZE(t4_decode);
-	} else {
-		sge_idma_decode = (const char **)t5_decode;
-		sge_idma_decode_nstates = ARRAY_SIZE(t5_decode);
 	}
 
 	if (state < sge_idma_decode_nstates)
@@ -9348,7 +9341,7 @@ int t4_init_devlog_params(struct adapter *adap)
 		return 0;
 	}
 
-	/* Otherwise, ask the firmware for it's Device Log Parameters.
+	/* Otherwise, ask the firmware for its Device Log Parameters.
 	 */
 	memset(&devlog_cmd, 0, sizeof(devlog_cmd));
 	devlog_cmd.op_to_write = cpu_to_be32(FW_CMD_OP_V(FW_DEVLOG_CMD) |
@@ -10215,11 +10208,12 @@ out:
  *	t4_set_vf_mac_acl - Set MAC address for the specified VF
  *	@adapter: The adapter
  *	@vf: one of the VFs instantiated by the specified PF
+ *	@start: The start port id associated with specified VF
  *	@naddr: the number of MAC addresses
  *	@addr: the MAC address(es) to be set to the specified VF
  */
 int t4_set_vf_mac_acl(struct adapter *adapter, unsigned int vf,
-		      unsigned int naddr, u8 *addr)
+		      u8 start, unsigned int naddr, u8 *addr)
 {
 	struct fw_acl_mac_cmd cmd;
 
@@ -10234,7 +10228,7 @@ int t4_set_vf_mac_acl(struct adapter *adapter, unsigned int vf,
 	cmd.en_to_len16 = cpu_to_be32((unsigned int)FW_LEN16(cmd));
 	cmd.nmac = naddr;
 
-	switch (adapter->pf) {
+	switch (start) {
 	case 3:
 		memcpy(cmd.macaddr3, addr, sizeof(cmd.macaddr3));
 		break;

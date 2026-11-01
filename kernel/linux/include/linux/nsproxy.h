@@ -2,6 +2,7 @@
 #ifndef _LINUX_NSPROXY_H
 #define _LINUX_NSPROXY_H
 
+#include <linux/refcount.h>
 #include <linux/spinlock.h>
 #include <linux/sched.h>
 
@@ -91,11 +92,15 @@ static inline struct cred *nsset_cred(struct nsset *set)
  *
  */
 
-int copy_namespaces(unsigned long flags, struct task_struct *tsk);
-void exit_task_namespaces(struct task_struct *tsk);
+int copy_namespaces(u64 flags, struct task_struct *tsk);
+void switch_cred_namespaces(const struct cred *old, const struct cred *new);
+void exit_nsproxy_namespaces(struct task_struct *tsk);
+void get_cred_namespaces(struct task_struct *tsk);
+void exit_cred_namespaces(struct task_struct *tsk);
 void switch_task_namespaces(struct task_struct *tsk, struct nsproxy *new);
 int exec_task_namespaces(void);
-void free_nsproxy(struct nsproxy *ns);
+void deactivate_nsproxy(struct nsproxy *ns);
+void nsproxy_free(struct nsproxy *ns);
 int unshare_nsproxy_namespaces(unsigned long, struct nsproxy **,
 	struct cred *, struct fs_struct *);
 int __init nsproxy_cache_init(void);
@@ -103,12 +108,14 @@ int __init nsproxy_cache_init(void);
 static inline void put_nsproxy(struct nsproxy *ns)
 {
 	if (refcount_dec_and_test(&ns->count))
-		free_nsproxy(ns);
+		deactivate_nsproxy(ns);
 }
 
 static inline void get_nsproxy(struct nsproxy *ns)
 {
 	refcount_inc(&ns->count);
 }
+
+DEFINE_FREE(put_nsproxy, struct nsproxy *, if (_T) put_nsproxy(_T))
 
 #endif

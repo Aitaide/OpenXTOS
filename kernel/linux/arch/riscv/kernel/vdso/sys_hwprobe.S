@@ -3,13 +3,17 @@
 
 #include <linux/linkage.h>
 #include <asm/unistd.h>
+#include <asm/assembler.h>
 
 .text
-ENTRY(riscv_hwprobe)
+SYM_FUNC_START(riscv_hwprobe)
 	.cfi_startproc
+	vdso_lpad
 	li a7, __NR_riscv_hwprobe
 	ecall
 	ret
 
 	.cfi_endproc
-ENDPROC(riscv_hwprobe)
+SYM_FUNC_END(riscv_hwprobe)
+
+emit_riscv_feature_1_and

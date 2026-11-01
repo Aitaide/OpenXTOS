@@ -7,6 +7,7 @@
 #define __SND_SEQ_PORTS_H
 
 #include <sound/seq_kernel.h>
+#include <sound/ump_convert.h>
 #include "seq_lock.h"
 
 /* list of 'exported' ports */
@@ -27,30 +28,19 @@
 
 struct snd_seq_subscribers {
 	struct snd_seq_port_subscribe info;	/* additional info */
-	struct list_head src_list;	/* link of sources */
-	struct list_head dest_list;	/* link of destinations */
+	struct hlist_node src_list;	/* link of sources */
+	struct hlist_node dest_list;	/* link of destinations */
 	atomic_t ref_count;
+	struct rcu_head rcu;		/* for deferred free */
 };
 
 struct snd_seq_port_subs_info {
-	struct list_head list_head;	/* list of subscribed ports */
+	struct hlist_head list_head;	/* list of subscribed ports */
 	unsigned int count;		/* count of subscribers */
 	unsigned int exclusive: 1;	/* exclusive mode */
 	struct rw_semaphore list_mutex;
-	rwlock_t list_lock;
 	int (*open)(void *private_data, struct snd_seq_port_subscribe *info);
 	int (*close)(void *private_data, struct snd_seq_port_subscribe *info);
-};
-
-/* context for converting from legacy control event to UMP packet */
-struct snd_seq_ump_midi2_bank {
-	bool rpn_set;
-	bool nrpn_set;
-	bool bank_set;
-	unsigned char cc_rpn_msb, cc_rpn_lsb;
-	unsigned char cc_nrpn_msb, cc_nrpn_lsb;
-	unsigned char cc_data_msb, cc_data_lsb;
-	unsigned char cc_bank_msb, cc_bank_lsb;
 };
 
 struct snd_seq_client_port {
@@ -87,8 +77,10 @@ struct snd_seq_client_port {
 	unsigned char direction;
 	unsigned char ump_group;
 
+	bool is_midi1;	/* keep MIDI 1.0 protocol */
+
 #if IS_ENABLED(CONFIG_SND_SEQ_UMP)
-	struct snd_seq_ump_midi2_bank midi2_bank[16]; /* per channel */
+	struct ump_cvt_to_ump_bank midi2_bank[16]; /* per channel */
 #endif
 };
 
@@ -104,9 +96,15 @@ struct snd_seq_client_port *snd_seq_port_query_nearest(struct snd_seq_client *cl
 /* unlock the port */
 #define snd_seq_port_unlock(port) snd_use_lock_free(&(port)->use_lock)
 
-/* create a port, port number or a negative error code is returned */
-int snd_seq_create_port(struct snd_seq_client *client, int port_index,
+DEFINE_FREE(snd_seq_port, struct snd_seq_client_port *, if (!IS_ERR_OR_NULL(_T)) snd_seq_port_unlock(_T))
+
+/* create a port, 0 on success or a negative error code is returned */
+int snd_seq_create_port(struct snd_seq_client *client,
 			struct snd_seq_client_port **port_ret);
+
+/* insert the port; return the port address or a negative error code */
+int snd_seq_insert_port(struct snd_seq_client *client, int port,
+			struct snd_seq_client_port *new_port);
 
 /* delete a port */
 int snd_seq_delete_port(struct snd_seq_client *client, int port);

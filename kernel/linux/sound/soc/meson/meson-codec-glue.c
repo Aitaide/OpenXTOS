@@ -74,7 +74,7 @@ int meson_codec_glue_input_hw_params(struct snd_pcm_substream *substream,
 	data->params.rates = snd_pcm_rate_to_rate_bit(params_rate(params));
 	data->params.rate_min = params_rate(params);
 	data->params.rate_max = params_rate(params);
-	data->params.formats = 1ULL << (__force int) params_format(params);
+	data->params.formats = 1ULL << params_format(params);
 	data->params.channels_min = params_channels(params);
 	data->params.channels_max = params_channels(params);
 	data->params.sig_bits = dai->driver->playback.sig_bits;
@@ -98,7 +98,7 @@ EXPORT_SYMBOL_GPL(meson_codec_glue_input_set_fmt);
 int meson_codec_glue_output_startup(struct snd_pcm_substream *substream,
 				    struct snd_soc_dai *dai)
 {
-	struct snd_soc_pcm_runtime *rtd = asoc_substream_to_rtd(substream);
+	struct snd_soc_pcm_runtime *rtd = snd_soc_substream_to_rtd(substream);
 	struct snd_soc_dapm_widget *w = snd_soc_dai_get_widget_capture(dai);
 	struct meson_codec_glue_input *in_data = meson_codec_glue_output_get_input_data(w);
 
@@ -122,7 +122,7 @@ int meson_codec_glue_input_dai_probe(struct snd_soc_dai *dai)
 {
 	struct meson_codec_glue_input *data;
 
-	data = kzalloc(sizeof(*data), GFP_KERNEL);
+	data = kzalloc_obj(*data);
 	if (!data)
 		return -ENOMEM;
 

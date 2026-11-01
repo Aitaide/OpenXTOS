@@ -344,7 +344,6 @@ static const unsigned int hsic_data_pins[] = { 153 };
 		.io_reg = 0x1004 + 0x10 * id,		\
 		.intr_cfg_reg = 0x1008 + 0x10 * id,	\
 		.intr_status_reg = 0x100c + 0x10 * id,	\
-		.intr_target_reg = 0x1008 + 0x10 * id,	\
 		.mux_bit = 2,				\
 		.pull_bit = 0,				\
 		.drv_bit = 6,				\
@@ -370,7 +369,6 @@ static const unsigned int hsic_data_pins[] = { 153 };
 		.io_reg = 0,				\
 		.intr_cfg_reg = 0,			\
 		.intr_status_reg = 0,			\
-		.intr_target_reg = 0,			\
 		.mux_bit = -1,				\
 		.pull_bit = pull,			\
 		.drv_bit = drv,				\
@@ -401,7 +399,6 @@ static const unsigned int hsic_data_pins[] = { 153 };
 		.io_reg = 0,				\
 		.intr_cfg_reg = 0,			\
 		.intr_status_reg = 0,			\
-		.intr_target_reg = 0,			\
 		.mux_bit = 25,				\
 		.pull_bit = -1,				\
 		.drv_bit = -1,				\
@@ -778,7 +775,7 @@ static const char * const slimbus_groups[] = { "gpio70", "gpio71" };
 static const char * const hsic_ctl_groups[] = { "hsic_strobe", "hsic_data" };
 
 static const struct pinfunction msm8x74_functions[] = {
-	MSM_PIN_FUNCTION(gpio),
+	MSM_GPIO_PIN_FUNCTION(gpio),
 	MSM_PIN_FUNCTION(cci_i2c0),
 	MSM_PIN_FUNCTION(cci_i2c1),
 	MSM_PIN_FUNCTION(uim1),
@@ -1045,6 +1042,16 @@ static const struct msm_pingroup msm8x74_groups[] = {
 
 #define NUM_GPIO_PINGROUPS 146
 
+static const struct msm_gpio_wakeirq_map msm8x74_mpm_map[] = {
+	{ 1, 4 }, { 5, 5 }, { 9, 6 }, { 18, 7 }, { 20, 8 }, { 24, 9 },
+	{ 27, 10 }, { 28, 11 }, { 34, 12 }, { 35, 13 }, { 37, 14 }, { 42, 15 },
+	{ 44, 16 }, { 46, 17 }, { 50, 18 }, { 54, 19 }, { 59, 20 }, { 61, 21 },
+	{ 62, 22 }, { 64, 23 }, { 65, 24 }, { 66, 25 }, { 67, 26 }, { 68, 27 },
+	{ 71, 28 }, { 72, 29 }, { 73, 30 }, { 74, 31 }, { 75, 32 }, { 77, 33 },
+	{ 79, 34 }, { 80, 35 }, { 82, 36 }, { 86, 37 }, { 92, 38 }, { 93, 39 },
+	{ 95, 40 }, { 102, 3 }, { 144, 41 },
+};
+
 static const struct msm_pinctrl_soc_data msm8x74_pinctrl = {
 	.pins = msm8x74_pins,
 	.npins = ARRAY_SIZE(msm8x74_pins),
@@ -1053,6 +1060,8 @@ static const struct msm_pinctrl_soc_data msm8x74_pinctrl = {
 	.groups = msm8x74_groups,
 	.ngroups = ARRAY_SIZE(msm8x74_groups),
 	.ngpios = NUM_GPIO_PINGROUPS,
+	.wakeirq_map = msm8x74_mpm_map,
+	.nwakeirq_map = ARRAY_SIZE(msm8x74_mpm_map),
 };
 
 static int msm8x74_pinctrl_probe(struct platform_device *pdev)
@@ -1064,6 +1073,7 @@ static const struct of_device_id msm8x74_pinctrl_of_match[] = {
 	{ .compatible = "qcom,msm8974-pinctrl", },
 	{ },
 };
+MODULE_DEVICE_TABLE(of, msm8x74_pinctrl_of_match);
 
 static struct platform_driver msm8x74_pinctrl_driver = {
 	.driver = {
@@ -1071,7 +1081,6 @@ static struct platform_driver msm8x74_pinctrl_driver = {
 		.of_match_table = msm8x74_pinctrl_of_match,
 	},
 	.probe = msm8x74_pinctrl_probe,
-	.remove = msm_pinctrl_remove,
 };
 
 static int __init msm8x74_pinctrl_init(void)
@@ -1089,5 +1098,4 @@ module_exit(msm8x74_pinctrl_exit);
 MODULE_AUTHOR("Bjorn Andersson <bjorn.andersson@sonymobile.com>");
 MODULE_DESCRIPTION("Qualcomm MSM8x74 pinctrl driver");
 MODULE_LICENSE("GPL v2");
-MODULE_DEVICE_TABLE(of, msm8x74_pinctrl_of_match);
 

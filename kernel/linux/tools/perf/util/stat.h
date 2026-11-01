@@ -7,7 +7,6 @@
 #include <sys/types.h>
 #include <sys/resource.h>
 #include "cpumap.h"
-#include "rblist.h"
 #include "counts.h"
 
 struct perf_cpu_map;
@@ -48,17 +47,13 @@ enum aggr_mode {
 	AGGR_GLOBAL,
 	AGGR_SOCKET,
 	AGGR_DIE,
+	AGGR_CLUSTER,
 	AGGR_CACHE,
 	AGGR_CORE,
 	AGGR_THREAD,
 	AGGR_UNSET,
 	AGGR_NODE,
 	AGGR_MAX
-};
-
-struct rusage_stats {
-	struct stats ru_utime_usec_stat;
-	struct stats ru_stime_usec_stat;
 };
 
 typedef struct aggr_cpu_id (*aggr_get_id_t)(struct perf_stat_config *config, struct perf_cpu cpu);
@@ -74,9 +69,9 @@ struct perf_stat_config {
 	bool			 interval_clear;
 	bool			 metric_only;
 	bool			 null_run;
+	bool			 hide_zero;
 	bool			 ru_display;
 	bool			 big_num;
-	bool			 no_merge;
 	bool			 hybrid_merge;
 	bool			 walltime_run_table;
 	bool			 all_kernel;
@@ -87,6 +82,7 @@ struct perf_stat_config {
 	bool			 metric_no_group;
 	bool			 metric_no_merge;
 	bool			 metric_no_threshold;
+	bool			 hardware_aware_grouping;
 	bool			 stop_read_counter;
 	bool			 iostat_run;
 	char			 *user_requested_cpu_list;
@@ -99,16 +95,13 @@ struct perf_stat_config {
 	int			 times;
 	int			 run_count;
 	int			 print_free_counters_hint;
-	int			 print_mixed_hw_group_error;
 	const char		*csv_sep;
 	struct stats		*walltime_nsecs_stats;
 	struct rusage		 ru_data;
-	struct rusage_stats		 *ru_stats;
 	struct cpu_aggr_map	*aggr_map;
 	aggr_get_id_t		 aggr_get_id;
 	struct cpu_aggr_map	*cpus_aggr_map;
 	u64			*walltime_run;
-	struct rblist		 metric_events;
 	int			 ctl_fd;
 	int			 ctl_fd_ack;
 	bool			 ctl_fd_close;
@@ -116,8 +109,9 @@ struct perf_stat_config {
 	unsigned int		topdown_level;
 };
 
+extern struct perf_stat_config stat_config;
+
 void perf_stat__set_big_num(int set);
-void perf_stat__set_no_csv_summary(int set);
 
 void update_stats(struct stats *stats, u64 val);
 double avg_stats(struct stats *stats);
@@ -133,29 +127,24 @@ static inline void init_stats(struct stats *stats)
 	stats->max  = 0;
 }
 
-static inline void init_rusage_stats(struct rusage_stats *ru_stats) {
-	init_stats(&ru_stats->ru_utime_usec_stat);
-	init_stats(&ru_stats->ru_stime_usec_stat);
-}
-
-static inline void update_rusage_stats(struct rusage_stats *ru_stats, struct rusage* rusage) {
-	const u64 us_to_ns = 1000;
-	const u64 s_to_ns = 1000000000;
-	update_stats(&ru_stats->ru_utime_usec_stat,
-	             (rusage->ru_utime.tv_usec * us_to_ns + rusage->ru_utime.tv_sec * s_to_ns));
-	update_stats(&ru_stats->ru_stime_usec_stat,
-	             (rusage->ru_stime.tv_usec * us_to_ns + rusage->ru_stime.tv_sec * s_to_ns));
-}
-
 struct evsel;
 struct evlist;
 
-extern struct stats walltime_nsecs_stats;
-extern struct rusage_stats ru_stats;
+enum metric_threshold_classify {
+	METRIC_THRESHOLD_UNKNOWN,
+	METRIC_THRESHOLD_BAD,
+	METRIC_THRESHOLD_NEARLY_BAD,
+	METRIC_THRESHOLD_LESS_GOOD,
+	METRIC_THRESHOLD_GOOD,
+};
+const char *metric_threshold_classify__color(enum metric_threshold_classify thresh);
 
 typedef void (*print_metric_t)(struct perf_stat_config *config,
-			       void *ctx, const char *color, const char *unit,
-			       const char *fmt, double val);
+			       void *ctx,
+			       enum metric_threshold_classify thresh,
+			       const char *fmt,
+			       const char *unit,
+			       double val);
 typedef void (*new_line_t)(struct perf_stat_config *config, void *ctx);
 
 /* Used to print the display name of the Default metricgroup for now. */
@@ -173,19 +162,15 @@ struct perf_stat_output_ctx {
 
 void perf_stat__print_shadow_stats(struct perf_stat_config *config,
 				   struct evsel *evsel,
-				   double avg, int aggr_idx,
-				   struct perf_stat_output_ctx *out,
-				   struct rblist *metric_events);
-bool perf_stat__skip_metric_event(struct evsel *evsel,
-				  struct rblist *metric_events,
-				  u64 ena, u64 run);
+				   int aggr_idx,
+				   struct perf_stat_output_ctx *out);
+bool perf_stat__skip_metric_event(struct evsel *evsel);
 void *perf_stat__print_shadow_stats_metricgroup(struct perf_stat_config *config,
 						struct evsel *evsel,
 						int aggr_idx,
 						int *num,
 						void *from,
-						struct perf_stat_output_ctx *out,
-						struct rblist *metric_events);
+						struct perf_stat_output_ctx *out);
 
 int evlist__alloc_stats(struct perf_stat_config *config,
 			struct evlist *evlist, bool alloc_raw);
@@ -209,17 +194,14 @@ union perf_event;
 struct perf_session;
 struct target;
 
-int perf_event__process_stat_event(struct perf_session *session,
+int perf_event__process_stat_event(const struct perf_tool *tool,
+				   struct perf_session *session,
 				   union perf_event *event);
 
 size_t perf_event__fprintf_stat(union perf_event *event, FILE *fp);
 size_t perf_event__fprintf_stat_round(union perf_event *event, FILE *fp);
 size_t perf_event__fprintf_stat_config(union perf_event *event, FILE *fp);
 
-int create_perf_stat_counter(struct evsel *evsel,
-			     struct perf_stat_config *config,
-			     struct target *target,
-			     int cpu_map_idx);
 void evlist__print_counters(struct evlist *evlist, struct perf_stat_config *config,
 			    struct target *_target, struct timespec *ts, int argc, const char **argv);
 

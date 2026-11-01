@@ -2,15 +2,10 @@
 #ifndef _ASM_X86_EXTABLE_FIXUP_TYPES_H
 #define _ASM_X86_EXTABLE_FIXUP_TYPES_H
 
-/*
- * Our IMM is signed, as such it must live at the top end of the word. Also,
- * since C99 hex constants are of ambigious type, force cast the mask to 'int'
- * so that FIELD_GET() will DTRT and sign extend the value when it extracts it.
- */
-#define EX_DATA_TYPE_MASK		((int)0x000000FF)
-#define EX_DATA_REG_MASK		((int)0x00000F00)
-#define EX_DATA_FLAG_MASK		((int)0x0000F000)
-#define EX_DATA_IMM_MASK		((int)0xFFFF0000)
+#define EX_DATA_TYPE_MASK		(0x000000FF)
+#define EX_DATA_REG_MASK		(0x00000F00)
+#define EX_DATA_FLAG_MASK		(0x0000F000)
+#define EX_DATA_IMM_MASK		(0xFFFF0000)
 
 #define EX_DATA_REG_SHIFT		8
 #define EX_DATA_FLAG_SHIFT		12
@@ -36,7 +31,7 @@
 #define	EX_TYPE_DEFAULT			 1
 #define	EX_TYPE_FAULT			 2
 #define	EX_TYPE_UACCESS			 3
-#define	EX_TYPE_COPY			 4
+/* unused, was: #define EX_TYPE_COPY	 4 */
 #define	EX_TYPE_CLEAR_FS		 5
 #define	EX_TYPE_FPU_RESTORE		 6
 #define	EX_TYPE_BPF			 7
@@ -64,6 +59,8 @@
 #define	EX_TYPE_UCOPY_LEN4		(EX_TYPE_UCOPY_LEN | EX_DATA_IMM(4))
 #define	EX_TYPE_UCOPY_LEN8		(EX_TYPE_UCOPY_LEN | EX_DATA_IMM(8))
 
-#define EX_TYPE_ZEROPAD			20 /* longword load with zeropad on fault */
+#define	EX_TYPE_ZEROPAD			20 /* longword load with zeropad on fault */
+
+#define	EX_TYPE_ERETU			21
 
 #endif

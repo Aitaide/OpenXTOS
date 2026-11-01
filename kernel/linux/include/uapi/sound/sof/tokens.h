@@ -3,7 +3,7 @@
  * This file is provided under a dual BSD/GPLv2 license.  When using or
  * redistributing this file, you may do so under either license.
  *
- * Copyright(c) 2018 Intel Corporation. All rights reserved.
+ * Copyright(c) 2018 Intel Corporation
  * Author: Liam Girdwood <liam.r.girdwood@linux.intel.com>
  *         Keyon Jie <yang.jie@linux.intel.com>
  */
@@ -35,6 +35,7 @@
 /* buffers */
 #define SOF_TKN_BUF_SIZE			100
 #define SOF_TKN_BUF_CAPS			101
+#define SOF_TKN_BUF_FLAGS			102
 
 /* DAI */
 /* Token retired with ABI 3.2, do not use for new capabilities
@@ -55,6 +56,9 @@
 #define SOF_TKN_SCHED_LP_MODE			207
 #define SOF_TKN_SCHED_MEM_USAGE			208
 #define SOF_TKN_SCHED_USE_CHAIN_DMA		209
+#define SOF_TKN_SCHED_KCPS			210
+#define SOF_TKN_SCHED_DIRECTION			211
+#define SOF_TKN_SCHED_DIRECTION_VALID		212
 
 /* volume */
 #define SOF_TKN_VOLUME_RAMP_STEP_TYPE		250
@@ -105,6 +109,11 @@
  */
 #define SOF_TKN_COMP_NO_WNAME_IN_KCONTROL_NAME	417
 
+#define SOF_TKN_COMP_SCHED_DOMAIN		418
+#define SOF_TKN_COMP_DOMAIN_ID			419
+#define SOF_TKN_COMP_STACK_BYTES_REQUIREMENT	420
+#define SOF_TKN_COMP_HEAP_BYTES_REQUIREMENT	421
+
 /* SSP */
 #define SOF_TKN_INTEL_SSP_CLKS_CONTROL		500
 #define SOF_TKN_INTEL_SSP_MCLK_ID		501
@@ -152,6 +161,8 @@
 /* Stream */
 #define SOF_TKN_STREAM_PLAYBACK_COMPATIBLE_D0I3	1200
 #define SOF_TKN_STREAM_CAPTURE_COMPATIBLE_D0I3	1201
+#define SOF_TKN_STREAM_PLAYBACK_PAUSE_SUPPORTED	1202
+#define SOF_TKN_STREAM_CAPTURE_PAUSE_SUPPORTED	1203
 
 /* Led control for mute switches */
 #define SOF_TKN_MUTE_LED_USE			1300
@@ -212,5 +223,14 @@
 #define SOF_TKN_AMD_ACPI2S_RATE			1700
 #define SOF_TKN_AMD_ACPI2S_CH			1701
 #define SOF_TKN_AMD_ACPI2S_TDM_MODE		1702
+#define SOF_TKN_AMD_ACPI2S_FORMAT		1703
+
+/* MICFIL PDM */
+#define SOF_TKN_IMX_MICFIL_RATE			2000
+#define SOF_TKN_IMX_MICFIL_CH			2001
+
+/* ACP SDW */
+#define SOF_TKN_AMD_ACP_SDW_RATE		2100
+#define SOF_TKN_AMD_ACP_SDW_CH			2101
 
 #endif

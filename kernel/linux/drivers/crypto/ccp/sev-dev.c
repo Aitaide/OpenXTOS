@@ -21,14 +21,20 @@
 #include <linux/hw_random.h>
 #include <linux/ccp.h>
 #include <linux/firmware.h>
+#include <linux/panic_notifier.h>
 #include <linux/gfp.h>
 #include <linux/cpufeature.h>
 #include <linux/fs.h>
 #include <linux/fs_struct.h>
 #include <linux/psp.h>
+#include <linux/amd-iommu.h>
+#include <linux/crash_dump.h>
 
 #include <asm/smp.h>
 #include <asm/cacheflush.h>
+#include <asm/e820/types.h>
+#include <asm/sev.h>
+#include <asm/msr.h>
 
 #include "psp-dev.h"
 #include "sev-dev.h"
@@ -36,6 +42,19 @@
 #define DEVICE_NAME		"sev"
 #define SEV_FW_FILE		"amd/sev.fw"
 #define SEV_FW_NAME_SIZE	64
+
+/* Minimum firmware version required for the SEV-SNP support */
+#define SNP_MIN_API_MAJOR	1
+#define SNP_MIN_API_MINOR	51
+
+/*
+ * Maximum number of firmware-writable buffers that might be specified
+ * in the parameters of a legacy SEV command buffer.
+ */
+#define CMD_BUF_FW_WRITABLE_MAX 2
+
+/* Leave room in the descriptor array for an end-of-list indicator. */
+#define CMD_BUF_DESC_MAX (CMD_BUF_FW_WRITABLE_MAX + 1)
 
 static DEFINE_MUTEX(sev_cmd_mutex);
 static struct sev_misc_dev *misc_dev;
@@ -56,6 +75,14 @@ static bool psp_init_on_probe = true;
 module_param(psp_init_on_probe, bool, 0444);
 MODULE_PARM_DESC(psp_init_on_probe, "  if true, the PSP will be initialized on module init. Else the PSP will be initialized on the first command requiring it");
 
+#if IS_ENABLED(CONFIG_PCI_TSM)
+static bool sev_tio_enabled = true;
+module_param_named(tio, sev_tio_enabled, bool, 0444);
+MODULE_PARM_DESC(tio, "Enables TIO in SNP_INIT_EX");
+#else
+static const bool sev_tio_enabled = false;
+#endif
+
 MODULE_FIRMWARE("amd/amd_sev_fam17h_model0xh.sbin"); /* 1st gen EPYC */
 MODULE_FIRMWARE("amd/amd_sev_fam17h_model3xh.sbin"); /* 2nd gen EPYC */
 MODULE_FIRMWARE("amd/amd_sev_fam19h_model0xh.sbin"); /* 3rd gen EPYC */
@@ -64,13 +91,33 @@ MODULE_FIRMWARE("amd/amd_sev_fam19h_model1xh.sbin"); /* 4th gen EPYC */
 static bool psp_dead;
 static int psp_timeout;
 
+enum snp_hv_fixed_pages_state {
+	ALLOCATED,
+	HV_FIXED,
+};
+
+struct snp_hv_fixed_pages_entry {
+	struct list_head list;
+	struct page *page;
+	unsigned int order;
+	bool free;
+	enum snp_hv_fixed_pages_state page_state;
+};
+
+static LIST_HEAD(snp_hv_fixed_pages);
+
 /* Trusted Memory Region (TMR):
  *   The TMR is a 1MB area that must be 1MB aligned.  Use the page allocator
  *   to allocate the memory, which will return aligned memory for the specified
  *   allocation order.
+ *
+ * When SEV-SNP is enabled the TMR needs to be 2MB aligned and 2MB sized.
  */
-#define SEV_ES_TMR_SIZE		(1024 * 1024)
+#define SEV_TMR_SIZE		(1024 * 1024)
+#define SNP_TMR_SIZE		(2 * 1024 * 1024)
+
 static void *sev_es_tmr;
+static size_t sev_es_tmr_size = SEV_TMR_SIZE;
 
 /* INIT_EX NV Storage:
  *   The NV Storage is a 32Kb area and must be 4Kb page aligned.  Use the page
@@ -79,6 +126,15 @@ static void *sev_es_tmr;
  */
 #define NV_LENGTH (32 * 1024)
 static void *sev_init_ex_buffer;
+
+static void __sev_firmware_shutdown(struct sev_device *sev, bool panic);
+
+static int snp_shutdown_on_panic(struct notifier_block *nb,
+				 unsigned long reason, void *arg);
+
+static struct notifier_block snp_panic_notifier = {
+	.notifier_call = snp_shutdown_on_panic,
+};
 
 static inline bool sev_version_greater_or_equal(u8 maj, u8 min)
 {
@@ -115,6 +171,25 @@ static int sev_wait_cmd_ioc(struct sev_device *sev,
 {
 	int ret;
 
+	/*
+	 * If invoked during panic handling, local interrupts are disabled,
+	 * so the PSP command completion interrupt can't be used. Poll for
+	 * PSP command completion instead.
+	 */
+	if (irqs_disabled()) {
+		unsigned long timeout_usecs = (timeout * USEC_PER_SEC) / 10;
+
+		/* Poll for SEV command completion: */
+		while (timeout_usecs--) {
+			*reg = ioread32(sev->io_regs + sev->vdata->cmdresp_reg);
+			if (*reg & PSP_CMDRESP_RESP)
+				return 0;
+
+			udelay(10);
+		}
+		return -ETIMEDOUT;
+	}
+
 	ret = wait_event_timeout(sev->int_queue,
 			sev->int_rcvd, timeout * HZ);
 	if (!ret)
@@ -130,6 +205,8 @@ static int sev_cmd_buffer_len(int cmd)
 	switch (cmd) {
 	case SEV_CMD_INIT:			return sizeof(struct sev_data_init);
 	case SEV_CMD_INIT_EX:                   return sizeof(struct sev_data_init_ex);
+	case SEV_CMD_SNP_SHUTDOWN_EX:		return sizeof(struct sev_data_snp_shutdown_ex);
+	case SEV_CMD_SNP_INIT_EX:		return sizeof(struct sev_data_snp_init_ex);
 	case SEV_CMD_PLATFORM_STATUS:		return sizeof(struct sev_user_data_status);
 	case SEV_CMD_PEK_CSR:			return sizeof(struct sev_data_pek_csr);
 	case SEV_CMD_PEK_CERT_IMPORT:		return sizeof(struct sev_data_pek_cert_import);
@@ -158,46 +235,42 @@ static int sev_cmd_buffer_len(int cmd)
 	case SEV_CMD_GET_ID:			return sizeof(struct sev_data_get_id);
 	case SEV_CMD_ATTESTATION_REPORT:	return sizeof(struct sev_data_attestation_report);
 	case SEV_CMD_SEND_CANCEL:		return sizeof(struct sev_data_send_cancel);
-	default:				return 0;
+	case SEV_CMD_SNP_GCTX_CREATE:		return sizeof(struct sev_data_snp_addr);
+	case SEV_CMD_SNP_LAUNCH_START:		return sizeof(struct sev_data_snp_launch_start);
+	case SEV_CMD_SNP_LAUNCH_UPDATE:		return sizeof(struct sev_data_snp_launch_update);
+	case SEV_CMD_SNP_ACTIVATE:		return sizeof(struct sev_data_snp_activate);
+	case SEV_CMD_SNP_DECOMMISSION:		return sizeof(struct sev_data_snp_addr);
+	case SEV_CMD_SNP_PAGE_RECLAIM:		return sizeof(struct sev_data_snp_page_reclaim);
+	case SEV_CMD_SNP_GUEST_STATUS:		return sizeof(struct sev_data_snp_guest_status);
+	case SEV_CMD_SNP_LAUNCH_FINISH:		return sizeof(struct sev_data_snp_launch_finish);
+	case SEV_CMD_SNP_DBG_DECRYPT:		return sizeof(struct sev_data_snp_dbg);
+	case SEV_CMD_SNP_DBG_ENCRYPT:		return sizeof(struct sev_data_snp_dbg);
+	case SEV_CMD_SNP_VERIFY_MITIGATION:	return sizeof(struct sev_data_snp_verify_mitigation);
+	case SEV_CMD_SNP_PAGE_UNSMASH:		return sizeof(struct sev_data_snp_page_unsmash);
+	case SEV_CMD_SNP_PLATFORM_STATUS:	return sizeof(struct sev_data_snp_addr);
+	case SEV_CMD_SNP_GUEST_REQUEST:		return sizeof(struct sev_data_snp_guest_request);
+	case SEV_CMD_SNP_CONFIG:		return sizeof(struct sev_user_data_snp_config);
+	case SEV_CMD_SNP_COMMIT:		return sizeof(struct sev_data_snp_commit);
+	case SEV_CMD_SNP_FEATURE_INFO:		return sizeof(struct sev_data_snp_feature_info);
+	case SEV_CMD_SNP_VLEK_LOAD:		return sizeof(struct sev_user_data_snp_vlek_load);
+	default:				return sev_tio_cmd_buffer_len(cmd);
 	}
 
 	return 0;
 }
 
-static void *sev_fw_alloc(unsigned long len)
-{
-	struct page *page;
-
-	page = alloc_pages(GFP_KERNEL, get_order(len));
-	if (!page)
-		return NULL;
-
-	return page_address(page);
-}
-
 static struct file *open_file_as_root(const char *filename, int flags, umode_t mode)
 {
-	struct file *fp;
-	struct path root;
-	struct cred *cred;
-	const struct cred *old_cred;
-
-	task_lock(&init_task);
-	get_fs_root(init_task.fs, &root);
-	task_unlock(&init_task);
-
-	cred = prepare_creds();
+	CLASS(prepare_creds, cred)();
 	if (!cred)
 		return ERR_PTR(-ENOMEM);
+
 	cred->fsuid = GLOBAL_ROOT_UID;
-	old_cred = override_creds(cred);
 
-	fp = file_open_root(&root, filename, flags, mode);
-	path_put(&root);
-
-	revert_creds(old_cred);
-
-	return fp;
+	scoped_with_init_fs() {
+		scoped_with_creds(cred)
+			return filp_open(filename, flags, mode);
+	}
 }
 
 static int sev_read_init_ex_file(void)
@@ -305,13 +378,482 @@ static int sev_write_init_ex_file_if_required(int cmd_id)
 	return sev_write_init_ex_file();
 }
 
-static int __sev_do_cmd_locked(int cmd, void *data, int *psp_ret)
+int snp_reclaim_pages(unsigned long paddr, unsigned int npages, bool locked)
 {
+	int ret, err, i;
+
+	paddr = __sme_clr(ALIGN_DOWN(paddr, PAGE_SIZE));
+
+	for (i = 0; i < npages; i++, paddr += PAGE_SIZE) {
+		struct sev_data_snp_page_reclaim data = {0};
+
+		data.paddr = paddr;
+
+		if (locked)
+			ret = __sev_do_cmd_locked(SEV_CMD_SNP_PAGE_RECLAIM, &data, &err);
+		else
+			ret = sev_do_cmd(SEV_CMD_SNP_PAGE_RECLAIM, &data, &err);
+
+		if (ret)
+			goto cleanup;
+
+		ret = rmp_make_shared(__phys_to_pfn(paddr), PG_LEVEL_4K);
+		if (ret)
+			goto cleanup;
+	}
+
+	return 0;
+
+cleanup:
+	/*
+	 * If there was a failure reclaiming the page then it is no longer safe
+	 * to release it back to the system; leak it instead.
+	 */
+	snp_leak_pages(__phys_to_pfn(paddr), npages - i);
+	return ret;
+}
+EXPORT_SYMBOL_GPL(snp_reclaim_pages);
+
+static int rmp_mark_pages_firmware(unsigned long paddr, unsigned int npages, bool locked)
+{
+	unsigned long pfn = __sme_clr(paddr) >> PAGE_SHIFT;
+	int rc, i;
+
+	for (i = 0; i < npages; i++, pfn++) {
+		rc = rmp_make_private(pfn, 0, PG_LEVEL_4K, 0, true);
+		if (rc)
+			goto cleanup;
+	}
+
+	return 0;
+
+cleanup:
+	/*
+	 * Try unrolling the firmware state changes by
+	 * reclaiming the pages which were already changed to the
+	 * firmware state.
+	 */
+	snp_reclaim_pages(paddr, i, locked);
+
+	return rc;
+}
+
+static struct page *__snp_alloc_firmware_pages(gfp_t gfp_mask, int order, bool locked)
+{
+	unsigned long npages = 1ul << order, paddr;
+	struct sev_device *sev;
+	struct page *page;
+
+	if (!psp_master || !psp_master->sev_data)
+		return NULL;
+
+	page = alloc_pages(gfp_mask, order);
+	if (!page)
+		return NULL;
+
+	/* If SEV-SNP is initialized then add the page in RMP table. */
+	sev = psp_master->sev_data;
+	if (!sev->snp_initialized)
+		return page;
+
+	paddr = __pa((unsigned long)page_address(page));
+	if (rmp_mark_pages_firmware(paddr, npages, locked))
+		return NULL;
+
+	return page;
+}
+
+void *snp_alloc_firmware_page(gfp_t gfp_mask)
+{
+	struct page *page;
+
+	page = __snp_alloc_firmware_pages(gfp_mask, 0, false);
+
+	return page ? page_address(page) : NULL;
+}
+EXPORT_SYMBOL_GPL(snp_alloc_firmware_page);
+
+static void __snp_free_firmware_pages(struct page *page, int order, bool locked)
+{
+	struct sev_device *sev = psp_master->sev_data;
+	unsigned long paddr, npages = 1ul << order;
+
+	if (!page)
+		return;
+
+	paddr = __pa((unsigned long)page_address(page));
+	if (sev->snp_initialized &&
+	    snp_reclaim_pages(paddr, npages, locked))
+		return;
+
+	__free_pages(page, order);
+}
+
+void snp_free_firmware_page(void *addr)
+{
+	if (!addr)
+		return;
+
+	__snp_free_firmware_pages(virt_to_page(addr), 0, false);
+}
+EXPORT_SYMBOL_GPL(snp_free_firmware_page);
+
+static void *sev_fw_alloc(unsigned long len)
+{
+	struct page *page;
+
+	page = __snp_alloc_firmware_pages(GFP_KERNEL, get_order(len), true);
+	if (!page)
+		return NULL;
+
+	return page_address(page);
+}
+
+/**
+ * struct cmd_buf_desc - descriptors for managing legacy SEV command address
+ * parameters corresponding to buffers that may be written to by firmware.
+ *
+ * @paddr_ptr:  pointer to the address parameter in the command buffer which may
+ *              need to be saved/restored depending on whether a bounce buffer
+ *              is used. In the case of a bounce buffer, the command buffer
+ *              needs to be updated with the address of the new bounce buffer
+ *              snp_map_cmd_buf_desc() has allocated specifically for it. Must
+ *              be NULL if this descriptor is only an end-of-list indicator.
+ *
+ * @paddr_orig: storage for the original address parameter, which can be used to
+ *              restore the original value in @paddr_ptr in cases where it is
+ *              replaced with the address of a bounce buffer.
+ *
+ * @len: length of buffer located at the address originally stored at @paddr_ptr
+ *
+ * @guest_owned: true if the address corresponds to guest-owned pages, in which
+ *               case bounce buffers are not needed.
+ */
+struct cmd_buf_desc {
+	u64 *paddr_ptr;
+	u64 paddr_orig;
+	u32 len;
+	bool guest_owned;
+};
+
+/*
+ * If a legacy SEV command parameter is a memory address, those pages in
+ * turn need to be transitioned to/from firmware-owned before/after
+ * executing the firmware command.
+ *
+ * Additionally, in cases where those pages are not guest-owned, a bounce
+ * buffer is needed in place of the original memory address parameter.
+ *
+ * A set of descriptors are used to keep track of this handling, and
+ * initialized here based on the specific commands being executed.
+ */
+static void snp_populate_cmd_buf_desc_list(int cmd, void *cmd_buf,
+					   struct cmd_buf_desc *desc_list)
+{
+	switch (cmd) {
+	case SEV_CMD_PDH_CERT_EXPORT: {
+		struct sev_data_pdh_cert_export *data = cmd_buf;
+
+		desc_list[0].paddr_ptr = &data->pdh_cert_address;
+		desc_list[0].len = data->pdh_cert_len;
+		desc_list[1].paddr_ptr = &data->cert_chain_address;
+		desc_list[1].len = data->cert_chain_len;
+		break;
+	}
+	case SEV_CMD_GET_ID: {
+		struct sev_data_get_id *data = cmd_buf;
+
+		desc_list[0].paddr_ptr = &data->address;
+		desc_list[0].len = data->len;
+		break;
+	}
+	case SEV_CMD_PEK_CSR: {
+		struct sev_data_pek_csr *data = cmd_buf;
+
+		desc_list[0].paddr_ptr = &data->address;
+		desc_list[0].len = data->len;
+		break;
+	}
+	case SEV_CMD_LAUNCH_UPDATE_DATA: {
+		struct sev_data_launch_update_data *data = cmd_buf;
+
+		desc_list[0].paddr_ptr = &data->address;
+		desc_list[0].len = data->len;
+		desc_list[0].guest_owned = true;
+		break;
+	}
+	case SEV_CMD_LAUNCH_UPDATE_VMSA: {
+		struct sev_data_launch_update_vmsa *data = cmd_buf;
+
+		desc_list[0].paddr_ptr = &data->address;
+		desc_list[0].len = data->len;
+		desc_list[0].guest_owned = true;
+		break;
+	}
+	case SEV_CMD_LAUNCH_MEASURE: {
+		struct sev_data_launch_measure *data = cmd_buf;
+
+		desc_list[0].paddr_ptr = &data->address;
+		desc_list[0].len = data->len;
+		break;
+	}
+	case SEV_CMD_LAUNCH_UPDATE_SECRET: {
+		struct sev_data_launch_secret *data = cmd_buf;
+
+		desc_list[0].paddr_ptr = &data->guest_address;
+		desc_list[0].len = data->guest_len;
+		desc_list[0].guest_owned = true;
+		break;
+	}
+	case SEV_CMD_DBG_DECRYPT: {
+		struct sev_data_dbg *data = cmd_buf;
+
+		desc_list[0].paddr_ptr = &data->dst_addr;
+		desc_list[0].len = data->len;
+		desc_list[0].guest_owned = true;
+		break;
+	}
+	case SEV_CMD_DBG_ENCRYPT: {
+		struct sev_data_dbg *data = cmd_buf;
+
+		desc_list[0].paddr_ptr = &data->dst_addr;
+		desc_list[0].len = data->len;
+		desc_list[0].guest_owned = true;
+		break;
+	}
+	case SEV_CMD_ATTESTATION_REPORT: {
+		struct sev_data_attestation_report *data = cmd_buf;
+
+		desc_list[0].paddr_ptr = &data->address;
+		desc_list[0].len = data->len;
+		break;
+	}
+	case SEV_CMD_SEND_START: {
+		struct sev_data_send_start *data = cmd_buf;
+
+		desc_list[0].paddr_ptr = &data->session_address;
+		desc_list[0].len = data->session_len;
+		break;
+	}
+	case SEV_CMD_SEND_UPDATE_DATA: {
+		struct sev_data_send_update_data *data = cmd_buf;
+
+		desc_list[0].paddr_ptr = &data->hdr_address;
+		desc_list[0].len = data->hdr_len;
+		desc_list[1].paddr_ptr = &data->trans_address;
+		desc_list[1].len = data->trans_len;
+		break;
+	}
+	case SEV_CMD_SEND_UPDATE_VMSA: {
+		struct sev_data_send_update_vmsa *data = cmd_buf;
+
+		desc_list[0].paddr_ptr = &data->hdr_address;
+		desc_list[0].len = data->hdr_len;
+		desc_list[1].paddr_ptr = &data->trans_address;
+		desc_list[1].len = data->trans_len;
+		break;
+	}
+	case SEV_CMD_RECEIVE_UPDATE_DATA: {
+		struct sev_data_receive_update_data *data = cmd_buf;
+
+		desc_list[0].paddr_ptr = &data->guest_address;
+		desc_list[0].len = data->guest_len;
+		desc_list[0].guest_owned = true;
+		break;
+	}
+	case SEV_CMD_RECEIVE_UPDATE_VMSA: {
+		struct sev_data_receive_update_vmsa *data = cmd_buf;
+
+		desc_list[0].paddr_ptr = &data->guest_address;
+		desc_list[0].len = data->guest_len;
+		desc_list[0].guest_owned = true;
+		break;
+	}
+	default:
+		break;
+	}
+}
+
+static int snp_map_cmd_buf_desc(struct cmd_buf_desc *desc)
+{
+	unsigned int npages;
+
+	if (!desc->len)
+		return 0;
+
+	/* Allocate a bounce buffer if this isn't a guest owned page. */
+	if (!desc->guest_owned) {
+		struct page *page;
+
+		page = alloc_pages(GFP_KERNEL_ACCOUNT, get_order(desc->len));
+		if (!page) {
+			pr_warn("Failed to allocate bounce buffer for SEV legacy command.\n");
+			return -ENOMEM;
+		}
+
+		desc->paddr_orig = *desc->paddr_ptr;
+		*desc->paddr_ptr = __psp_pa(page_to_virt(page));
+	}
+
+	npages = PAGE_ALIGN(desc->len) >> PAGE_SHIFT;
+
+	/* Transition the buffer to firmware-owned. */
+	if (rmp_mark_pages_firmware(*desc->paddr_ptr, npages, true)) {
+		pr_warn("Error moving pages to firmware-owned state for SEV legacy command.\n");
+		return -EFAULT;
+	}
+
+	return 0;
+}
+
+static int snp_unmap_cmd_buf_desc(struct cmd_buf_desc *desc)
+{
+	unsigned int npages;
+
+	if (!desc->len)
+		return 0;
+
+	npages = PAGE_ALIGN(desc->len) >> PAGE_SHIFT;
+
+	/* Transition the buffers back to hypervisor-owned. */
+	if (snp_reclaim_pages(*desc->paddr_ptr, npages, true)) {
+		pr_warn("Failed to reclaim firmware-owned pages while issuing SEV legacy command.\n");
+		return -EFAULT;
+	}
+
+	/* Copy data from bounce buffer and then free it. */
+	if (!desc->guest_owned) {
+		void *bounce_buf = __va(__sme_clr(*desc->paddr_ptr));
+		void *dst_buf = __va(__sme_clr(desc->paddr_orig));
+
+		memcpy(dst_buf, bounce_buf, desc->len);
+		__free_pages(virt_to_page(bounce_buf), get_order(desc->len));
+
+		/* Restore the original address in the command buffer. */
+		*desc->paddr_ptr = desc->paddr_orig;
+	}
+
+	return 0;
+}
+
+static int snp_map_cmd_buf_desc_list(int cmd, void *cmd_buf, struct cmd_buf_desc *desc_list)
+{
+	int i;
+
+	snp_populate_cmd_buf_desc_list(cmd, cmd_buf, desc_list);
+
+	for (i = 0; i < CMD_BUF_DESC_MAX; i++) {
+		struct cmd_buf_desc *desc = &desc_list[i];
+
+		if (!desc->paddr_ptr)
+			break;
+
+		if (snp_map_cmd_buf_desc(desc))
+			goto err_unmap;
+	}
+
+	return 0;
+
+err_unmap:
+	for (i--; i >= 0; i--)
+		snp_unmap_cmd_buf_desc(&desc_list[i]);
+
+	return -EFAULT;
+}
+
+static int snp_unmap_cmd_buf_desc_list(struct cmd_buf_desc *desc_list)
+{
+	int i, ret = 0;
+
+	for (i = 0; i < CMD_BUF_DESC_MAX; i++) {
+		struct cmd_buf_desc *desc = &desc_list[i];
+
+		if (!desc->paddr_ptr)
+			break;
+
+		if (snp_unmap_cmd_buf_desc(&desc_list[i]))
+			ret = -EFAULT;
+	}
+
+	return ret;
+}
+
+static bool sev_cmd_buf_writable(int cmd)
+{
+	switch (cmd) {
+	case SEV_CMD_PLATFORM_STATUS:
+	case SEV_CMD_GUEST_STATUS:
+	case SEV_CMD_LAUNCH_START:
+	case SEV_CMD_RECEIVE_START:
+	case SEV_CMD_LAUNCH_MEASURE:
+	case SEV_CMD_SEND_START:
+	case SEV_CMD_SEND_UPDATE_DATA:
+	case SEV_CMD_SEND_UPDATE_VMSA:
+	case SEV_CMD_PEK_CSR:
+	case SEV_CMD_PDH_CERT_EXPORT:
+	case SEV_CMD_GET_ID:
+	case SEV_CMD_ATTESTATION_REPORT:
+		return true;
+	default:
+		return false;
+	}
+}
+
+/* After SNP is INIT'ed, the behavior of legacy SEV commands is changed. */
+static bool snp_legacy_handling_needed(int cmd)
+{
+	struct sev_device *sev = psp_master->sev_data;
+
+	return cmd < SEV_CMD_SNP_INIT && sev->snp_initialized;
+}
+
+static int snp_prep_cmd_buf(int cmd, void *cmd_buf, struct cmd_buf_desc *desc_list)
+{
+	if (!snp_legacy_handling_needed(cmd))
+		return 0;
+
+	if (snp_map_cmd_buf_desc_list(cmd, cmd_buf, desc_list))
+		return -EFAULT;
+
+	/*
+	 * Before command execution, the command buffer needs to be put into
+	 * the firmware-owned state.
+	 */
+	if (sev_cmd_buf_writable(cmd)) {
+		if (rmp_mark_pages_firmware(__pa(cmd_buf), 1, true))
+			return -EFAULT;
+	}
+
+	return 0;
+}
+
+static int snp_reclaim_cmd_buf(int cmd, void *cmd_buf)
+{
+	if (!snp_legacy_handling_needed(cmd))
+		return 0;
+
+	/*
+	 * After command completion, the command buffer needs to be put back
+	 * into the hypervisor-owned state.
+	 */
+	if (sev_cmd_buf_writable(cmd))
+		if (snp_reclaim_pages(__pa(cmd_buf), 1, true))
+			return -EFAULT;
+
+	return 0;
+}
+
+int __sev_do_cmd_locked(int cmd, void *data, int *psp_ret)
+{
+	struct cmd_buf_desc desc_list[CMD_BUF_DESC_MAX] = {0};
 	struct psp_device *psp = psp_master;
 	struct sev_device *sev;
+	unsigned int cmdbuff_hi, cmdbuff_lo;
 	unsigned int phys_lsb, phys_msb;
-	unsigned int reg, ret = 0;
+	unsigned int reg;
+	void *cmd_buf;
 	int buf_len;
+	int ret = 0;
 
 	if (!psp || !psp->sev_data)
 		return -ENODEV;
@@ -330,12 +872,47 @@ static int __sev_do_cmd_locked(int cmd, void *data, int *psp_ret)
 	 * work for some memory, e.g. vmalloc'd addresses, and @data may not be
 	 * physically contiguous.
 	 */
-	if (data)
-		memcpy(sev->cmd_buf, data, buf_len);
+	if (data) {
+		/*
+		 * Commands are generally issued one at a time and require the
+		 * sev_cmd_mutex, but there could be recursive firmware requests
+		 * due to SEV_CMD_SNP_PAGE_RECLAIM needing to be issued while
+		 * preparing buffers for another command. This is the only known
+		 * case of nesting in the current code, so exactly one
+		 * additional command buffer is available for that purpose.
+		 */
+		if (!sev->cmd_buf_active) {
+			cmd_buf = sev->cmd_buf;
+			sev->cmd_buf_active = true;
+		} else if (!sev->cmd_buf_backup_active) {
+			cmd_buf = sev->cmd_buf_backup;
+			sev->cmd_buf_backup_active = true;
+		} else {
+			dev_err(sev->dev,
+				"SEV: too many firmware commands in progress, no command buffers available.\n");
+			return -EBUSY;
+		}
+
+		memcpy(cmd_buf, data, buf_len);
+
+		/*
+		 * The behavior of the SEV-legacy commands is altered when the
+		 * SNP firmware is in the INIT state.
+		 */
+		ret = snp_prep_cmd_buf(cmd, cmd_buf, desc_list);
+		if (ret) {
+			dev_err(sev->dev,
+				"SEV: failed to prepare buffer for legacy command 0x%x. Error: %d\n",
+				cmd, ret);
+			return ret;
+		}
+	} else {
+		cmd_buf = sev->cmd_buf;
+	}
 
 	/* Get the physical address of the command buffer */
-	phys_lsb = data ? lower_32_bits(__psp_pa(sev->cmd_buf)) : 0;
-	phys_msb = data ? upper_32_bits(__psp_pa(sev->cmd_buf)) : 0;
+	phys_lsb = data ? lower_32_bits(__psp_pa(cmd_buf)) : 0;
+	phys_msb = data ? upper_32_bits(__psp_pa(cmd_buf)) : 0;
 
 	dev_dbg(sev->dev, "sev command id %#x buffer 0x%08x%08x timeout %us\n",
 		cmd, phys_msb, phys_lsb, psp_timeout);
@@ -348,7 +925,18 @@ static int __sev_do_cmd_locked(int cmd, void *data, int *psp_ret)
 
 	sev->int_rcvd = 0;
 
-	reg = FIELD_PREP(SEV_CMDRESP_CMD, cmd) | SEV_CMDRESP_IOC;
+	reg = FIELD_PREP(SEV_CMDRESP_CMD, cmd);
+
+	/*
+	 * If invoked during panic handling, local interrupts are disabled so
+	 * the PSP command completion interrupt can't be used.
+	 * sev_wait_cmd_ioc() already checks for interrupts disabled and
+	 * polls for PSP command completion.  Ensure we do not request an
+	 * interrupt from the PSP if irqs disabled.
+	 */
+	if (!irqs_disabled())
+		reg |= SEV_CMDRESP_IOC;
+
 	iowrite32(reg, sev->io_regs + sev->vdata->cmdresp_reg);
 
 	/* wait for command completion */
@@ -371,25 +959,59 @@ static int __sev_do_cmd_locked(int cmd, void *data, int *psp_ret)
 	if (FIELD_GET(PSP_CMDRESP_STS, reg)) {
 		dev_dbg(sev->dev, "sev command %#x failed (%#010lx)\n",
 			cmd, FIELD_GET(PSP_CMDRESP_STS, reg));
+
+		/*
+		 * PSP firmware may report additional error information in the
+		 * command buffer registers on error. Print contents of command
+		 * buffer registers if they changed.
+		 */
+		cmdbuff_hi = ioread32(sev->io_regs + sev->vdata->cmdbuff_addr_hi_reg);
+		cmdbuff_lo = ioread32(sev->io_regs + sev->vdata->cmdbuff_addr_lo_reg);
+		if (cmdbuff_hi != phys_msb || cmdbuff_lo != phys_lsb) {
+			dev_dbg(sev->dev, "Additional error information reported in cmdbuff:");
+			dev_dbg(sev->dev, "  cmdbuff hi: %#010x\n", cmdbuff_hi);
+			dev_dbg(sev->dev, "  cmdbuff lo: %#010x\n", cmdbuff_lo);
+		}
 		ret = -EIO;
 	} else {
 		ret = sev_write_init_ex_file_if_required(cmd);
 	}
 
-	print_hex_dump_debug("(out): ", DUMP_PREFIX_OFFSET, 16, 2, data,
-			     buf_len, false);
-
 	/*
 	 * Copy potential output from the PSP back to data.  Do this even on
 	 * failure in case the caller wants to glean something from the error.
 	 */
-	if (data)
-		memcpy(data, sev->cmd_buf, buf_len);
+	if (data) {
+		int ret_reclaim;
+		/*
+		 * Restore the page state after the command completes.
+		 */
+		ret_reclaim = snp_reclaim_cmd_buf(cmd, cmd_buf);
+		if (ret_reclaim) {
+			dev_err(sev->dev,
+				"SEV: failed to reclaim buffer for legacy command %#x. Error: %d\n",
+				cmd, ret_reclaim);
+			return ret_reclaim;
+		}
+
+		memcpy(data, cmd_buf, buf_len);
+
+		if (sev->cmd_buf_backup_active)
+			sev->cmd_buf_backup_active = false;
+		else
+			sev->cmd_buf_active = false;
+
+		if (snp_unmap_cmd_buf_desc_list(desc_list))
+			return -EFAULT;
+	}
+
+	print_hex_dump_debug("(out): ", DUMP_PREFIX_OFFSET, 16, 2, data,
+			     buf_len, false);
 
 	return ret;
 }
 
-static int sev_do_cmd(int cmd, void *data, int *psp_ret)
+int sev_do_cmd(int cmd, void *data, int *psp_ret)
 {
 	int rc;
 
@@ -399,6 +1021,7 @@ static int sev_do_cmd(int cmd, void *data, int *psp_ret)
 
 	return rc;
 }
+EXPORT_SYMBOL_GPL(sev_do_cmd);
 
 static int __sev_init_locked(int *error)
 {
@@ -413,7 +1036,7 @@ static int __sev_init_locked(int *error)
 		data.tmr_address = __pa(sev_es_tmr);
 
 		data.flags |= SEV_INIT_FLAGS_SEV_ES;
-		data.tmr_len = SEV_ES_TMR_SIZE;
+		data.tmr_len = sev_es_tmr_size;
 	}
 
 	return __sev_do_cmd_locked(SEV_CMD_INIT, &data, error);
@@ -436,7 +1059,7 @@ static int __sev_init_ex_locked(int *error)
 		data.tmr_address = __pa(sev_es_tmr);
 
 		data.flags |= SEV_INIT_FLAGS_SEV_ES;
-		data.tmr_len = SEV_ES_TMR_SIZE;
+		data.tmr_len = sev_es_tmr_size;
 	}
 
 	return __sev_do_cmd_locked(SEV_CMD_INIT_EX, &data, error);
@@ -450,25 +1073,688 @@ static inline int __sev_do_init_locked(int *psp_ret)
 		return __sev_init_locked(psp_ret);
 }
 
-static int __sev_platform_init_locked(int *error)
+/* Hypervisor Fixed pages API interface */
+static void snp_hv_fixed_pages_state_update(struct sev_device *sev,
+					    enum snp_hv_fixed_pages_state page_state)
 {
-	int rc = 0, psp_ret = SEV_RET_NO_FW_CALL;
+	struct snp_hv_fixed_pages_entry *entry;
+
+	/* List is protected by sev_cmd_mutex */
+	lockdep_assert_held(&sev_cmd_mutex);
+
+	if (list_empty(&snp_hv_fixed_pages))
+		return;
+
+	list_for_each_entry(entry, &snp_hv_fixed_pages, list)
+		entry->page_state = page_state;
+}
+
+/*
+ * Allocate HV_FIXED pages in 2MB aligned sizes to ensure the whole
+ * 2MB pages are marked as HV_FIXED.
+ */
+struct page *snp_alloc_hv_fixed_pages(unsigned int num_2mb_pages)
+{
+	struct psp_device *psp_master = psp_get_master_device();
+	struct snp_hv_fixed_pages_entry *entry;
+	unsigned int order;
+	struct page *page;
+
+	if (!psp_master)
+		return NULL;
+
+	order = get_order(PMD_SIZE * num_2mb_pages);
+
+	/*
+	 * SNP_INIT_EX is protected by sev_cmd_mutex, therefore this list
+	 * also needs to be protected using the same mutex.
+	 */
+	guard(mutex)(&sev_cmd_mutex);
+
+	/*
+	 * This API uses SNP_INIT_EX to transition allocated pages to HV_Fixed
+	 * page state, fail if SNP is already initialized.
+	 */
+	if (psp_master->sev_data &&
+	    ((struct sev_device *)psp_master->sev_data)->snp_initialized)
+		return NULL;
+
+	/* Re-use freed pages that match the request */
+	list_for_each_entry(entry, &snp_hv_fixed_pages, list) {
+		/* Hypervisor fixed page allocator implements exact fit policy */
+		if (entry->order == order && entry->free) {
+			entry->free = false;
+			memset(page_address(entry->page), 0,
+			       (1 << entry->order) * PAGE_SIZE);
+			return entry->page;
+		}
+	}
+
+	page = alloc_pages(GFP_KERNEL | __GFP_ZERO, order);
+	if (!page)
+		return NULL;
+
+	entry = kzalloc_obj(*entry);
+	if (!entry) {
+		__free_pages(page, order);
+		return NULL;
+	}
+
+	entry->page = page;
+	entry->order = order;
+	list_add_tail(&entry->list, &snp_hv_fixed_pages);
+
+	return page;
+}
+
+void snp_free_hv_fixed_pages(struct page *page)
+{
+	struct psp_device *psp_master = psp_get_master_device();
+	struct snp_hv_fixed_pages_entry *entry, *nentry;
+
+	if (!psp_master)
+		return;
+
+	/*
+	 * SNP_INIT_EX is protected by sev_cmd_mutex, therefore this list
+	 * also needs to be protected using the same mutex.
+	 */
+	guard(mutex)(&sev_cmd_mutex);
+
+	list_for_each_entry_safe(entry, nentry, &snp_hv_fixed_pages, list) {
+		if (entry->page != page)
+			continue;
+
+		/*
+		 * HV_FIXED page state cannot be changed until reboot
+		 * and they cannot be used by an SNP guest, so they cannot
+		 * be returned back to the page allocator.
+		 * Mark the pages as free internally to allow possible re-use.
+		 */
+		if (entry->page_state == HV_FIXED) {
+			entry->free = true;
+		} else {
+			__free_pages(page, entry->order);
+			list_del(&entry->list);
+			kfree(entry);
+		}
+		return;
+	}
+}
+
+static void snp_add_hv_fixed_pages(struct sev_device *sev, struct sev_data_range_list *range_list)
+{
+	struct snp_hv_fixed_pages_entry *entry;
+	struct sev_data_range *range;
+	int num_elements;
+
+	lockdep_assert_held(&sev_cmd_mutex);
+
+	if (list_empty(&snp_hv_fixed_pages))
+		return;
+
+	num_elements = list_count_nodes(&snp_hv_fixed_pages) +
+		       range_list->num_elements;
+
+	/*
+	 * Ensure the list of HV_FIXED pages that will be passed to firmware
+	 * do not exceed the page-sized argument buffer.
+	 */
+	if (num_elements * sizeof(*range) + sizeof(*range_list) > PAGE_SIZE) {
+		dev_warn(sev->dev, "Additional HV_Fixed pages cannot be accommodated, omitting\n");
+		return;
+	}
+
+	range = &range_list->ranges[range_list->num_elements];
+	list_for_each_entry(entry, &snp_hv_fixed_pages, list) {
+		range->base = page_to_pfn(entry->page) << PAGE_SHIFT;
+		range->page_count = 1 << entry->order;
+		range++;
+	}
+	range_list->num_elements = num_elements;
+}
+
+static void snp_leak_hv_fixed_pages(void)
+{
+	struct snp_hv_fixed_pages_entry *entry, *nentry;
+
+	/* List is protected by sev_cmd_mutex */
+	lockdep_assert_held(&sev_cmd_mutex);
+
+	if (list_empty(&snp_hv_fixed_pages))
+		return;
+
+	list_for_each_entry_safe(entry, nentry, &snp_hv_fixed_pages, list) {
+		if (entry->free && entry->page_state != HV_FIXED)
+			__free_pages(entry->page, entry->order);
+		else
+			__snp_leak_pages(page_to_pfn(entry->page),
+					 1 << entry->order, false);
+
+		list_del(&entry->list);
+		kfree(entry);
+	}
+}
+
+bool sev_is_snp_ciphertext_hiding_supported(void)
+{
 	struct psp_device *psp = psp_master;
 	struct sev_device *sev;
 
 	if (!psp || !psp->sev_data)
+		return false;
+
+	sev = psp->sev_data;
+
+	/*
+	 * Feature information indicates if CipherTextHiding feature is
+	 * supported by the SEV firmware and additionally platform status
+	 * indicates if CipherTextHiding feature is enabled in the
+	 * Platform BIOS.
+	 */
+	return ((sev->snp_feat_info_0.ecx & SNP_CIPHER_TEXT_HIDING_SUPPORTED) &&
+		 sev->snp_plat_status.ciphertext_hiding_cap);
+}
+EXPORT_SYMBOL_GPL(sev_is_snp_ciphertext_hiding_supported);
+
+static int snp_get_platform_data(struct sev_device *sev, int *error)
+{
+	struct sev_data_snp_feature_info snp_feat_info;
+	struct snp_feature_info *feat_info;
+	struct sev_data_snp_addr buf;
+	struct page *page;
+	int rc;
+
+	/*
+	 * This function is expected to be called before SNP is
+	 * initialized.
+	 */
+	if (sev->snp_initialized)
+		return -EINVAL;
+
+	buf.address = __psp_pa(&sev->snp_plat_status);
+	rc = sev_do_cmd(SEV_CMD_SNP_PLATFORM_STATUS, &buf, error);
+	if (rc) {
+		dev_err(sev->dev, "SNP PLATFORM_STATUS command failed, ret = %d, error = %#x\n",
+			rc, *error);
+		return rc;
+	}
+
+	sev->api_major = sev->snp_plat_status.api_major;
+	sev->api_minor = sev->snp_plat_status.api_minor;
+	sev->build = sev->snp_plat_status.build_id;
+
+	/*
+	 * Do feature discovery of the currently loaded firmware,
+	 * and cache feature information from CPUID 0x8000_0024,
+	 * sub-function 0.
+	 */
+	if (!sev->snp_plat_status.feature_info)
+		return 0;
+
+	/*
+	 * Use dynamically allocated structure for the SNP_FEATURE_INFO
+	 * command to ensure structure is 8-byte aligned, and does not
+	 * cross a page boundary.
+	 */
+	page = alloc_page(GFP_KERNEL);
+	if (!page)
+		return -ENOMEM;
+
+	feat_info = page_address(page);
+	snp_feat_info.length = sizeof(snp_feat_info);
+	snp_feat_info.ecx_in = 0;
+	snp_feat_info.feature_info_paddr = __psp_pa(feat_info);
+
+	rc = sev_do_cmd(SEV_CMD_SNP_FEATURE_INFO, &snp_feat_info, error);
+	if (!rc)
+		sev->snp_feat_info_0 = *feat_info;
+	else
+		dev_err(sev->dev, "SNP FEATURE_INFO command failed, ret = %d, error = %#x\n",
+			rc, *error);
+
+	__free_page(page);
+
+	return rc;
+}
+
+static int snp_filter_reserved_mem_regions(struct resource *rs, void *arg)
+{
+	struct sev_data_range_list *range_list = arg;
+	struct sev_data_range *range = &range_list->ranges[range_list->num_elements];
+	size_t size;
+
+	/*
+	 * Ensure the list of HV_FIXED pages passed to the firmware including
+	 * the one about to be written to do not exceed the page-sized argument
+	 * buffer.
+	 */
+	if (((range_list->num_elements + 1) * sizeof(struct sev_data_range) +
+	     sizeof(struct sev_data_range_list)) > PAGE_SIZE)
+		return -E2BIG;
+
+	switch (rs->desc) {
+	case E820_TYPE_RESERVED:
+	case E820_TYPE_PMEM:
+	case E820_TYPE_ACPI:
+		range->base = rs->start & PAGE_MASK;
+		size = PAGE_ALIGN((rs->end + 1) - rs->start);
+		range->page_count = size >> PAGE_SHIFT;
+		range_list->num_elements++;
+		break;
+	default:
+		break;
+	}
+
+	return 0;
+}
+
+#ifdef CONFIG_SYSFS
+static int snp_verify_mitigation(u16 command, u64 vector,
+				 struct sev_data_snp_verify_mitigation_dst *dst)
+{
+	struct sev_data_snp_verify_mitigation_dst *mit_dst = NULL;
+	struct sev_data_snp_verify_mitigation data = {0};
+	struct sev_device *sev = psp_master->sev_data;
+	int ret, error = 0;
+
+	mit_dst = snp_alloc_firmware_page(GFP_KERNEL | __GFP_ZERO);
+	if (!mit_dst)
+		return -ENOMEM;
+
+	data.length = sizeof(data);
+	data.subcommand = command;
+	data.vector = vector;
+	data.dst_paddr = __psp_pa(mit_dst);
+	data.dst_paddr_en = true;
+
+	ret = sev_do_cmd(SEV_CMD_SNP_VERIFY_MITIGATION, &data, &error);
+	if (!ret)
+		memcpy(dst, mit_dst, sizeof(*mit_dst));
+	else
+		dev_err(sev->dev, "SNP_VERIFY_MITIGATION command failed, ret = %d, error = %#x\n",
+			ret, error);
+
+	snp_free_firmware_page(mit_dst);
+
+	return ret;
+}
+
+static ssize_t supported_mitigations_show(struct kobject *kobj,
+					  struct kobj_attribute *attr, char *buf)
+{
+	struct sev_data_snp_verify_mitigation_dst dst;
+	int ret;
+
+	ret = snp_verify_mitigation(SNP_MIT_SUBCMD_REQ_STATUS, 0, &dst);
+	if (ret)
+		return ret;
+
+	return sysfs_emit(buf, "0x%llx\n", dst.mit_supported_vector);
+}
+
+static struct kobj_attribute supported_attr =
+		__ATTR_RO_MODE(supported_mitigations, 0400);
+
+static ssize_t verified_mitigations_show(struct kobject *kobj,
+					 struct kobj_attribute *attr, char *buf)
+{
+	struct sev_data_snp_verify_mitigation_dst dst;
+	int ret;
+
+	ret = snp_verify_mitigation(SNP_MIT_SUBCMD_REQ_STATUS, 0, &dst);
+	if (ret)
+		return ret;
+
+	return sysfs_emit(buf, "0x%llx\n", dst.mit_verified_vector);
+}
+
+static ssize_t verified_mitigations_store(struct kobject *kobj,
+					  struct kobj_attribute *attr,
+					  const char *buf, size_t count)
+{
+	struct sev_data_snp_verify_mitigation_dst dst;
+	struct sev_device *sev = psp_master->sev_data;
+	u64 vector;
+	int ret;
+
+	ret = kstrtoull(buf, 0, &vector);
+	if (ret)
+		return ret;
+
+	/*
+	 * The firmware verifies a single mitigation per call. Reject vectors
+	 * with more than one bit set early to avoid a guaranteed-to-fail call
+	 */
+	if (hweight64(vector) != 1)
+		return -EINVAL;
+
+	ret = snp_verify_mitigation(SNP_MIT_SUBCMD_REQ_VERIFY, vector, &dst);
+	if (ret)
+		return ret;
+
+	if (dst.mit_failure_status) {
+		dev_err(sev->dev, "Verify Mitigation - failure status: 0x%x\n",
+			dst.mit_failure_status);
+		return -EINVAL;
+	}
+
+	return count;
+}
+
+static struct kobj_attribute verified_attr =
+		__ATTR_RW_MODE(verified_mitigations, 0600);
+
+static struct attribute *mitigation_attrs[] = {
+	&supported_attr.attr,
+	&verified_attr.attr,
+	NULL
+};
+
+static const struct attribute_group mit_attr_group = {
+	.attrs = mitigation_attrs,
+};
+
+static void sev_snp_register_verify_mitigation(struct sev_device *sev)
+{
+	int rc;
+
+	if (!(sev->snp_feat_info_0.ecx & SNP_VERIFY_MITIGATION_SUPPORTED) ||
+	    sev->verify_mit)
+		return;
+
+	if (!sev->sev_kobj) {
+		sev->sev_kobj = kobject_create_and_add("sev", firmware_kobj);
+		if (!sev->sev_kobj)
+			return;
+	}
+
+	sev->verify_mit = kobject_create_and_add("vulnerabilities", sev->sev_kobj);
+	if (!sev->verify_mit)
+		goto err_sev_kobj;
+
+	rc = sysfs_create_group(sev->verify_mit, &mit_attr_group);
+	if (rc)
+		goto err_verify_mit;
+
+	return;
+
+err_verify_mit:
+	kobject_put(sev->verify_mit);
+	sev->verify_mit = NULL;
+err_sev_kobj:
+	kobject_put(sev->sev_kobj);
+	sev->sev_kobj = NULL;
+}
+
+static void sev_snp_unregister_verify_mitigation(struct sev_device *sev)
+{
+	if (sev->verify_mit) {
+		sysfs_remove_group(sev->verify_mit, &mit_attr_group);
+		kobject_put(sev->verify_mit);
+		sev->verify_mit = NULL;
+	}
+
+	if (sev->sev_kobj) {
+		kobject_put(sev->sev_kobj);
+		sev->sev_kobj = NULL;
+	}
+}
+#else	// CONFIG_SYSFS
+static void sev_snp_register_verify_mitigation(struct sev_device *sev) { }
+static void sev_snp_unregister_verify_mitigation(struct sev_device *sev) { }
+#endif	// CONFIG_SYSFS
+
+static int __sev_snp_init_locked(int *error, unsigned int max_snp_asid)
+{
+	struct sev_data_range_list *snp_range_list __free(kfree) = NULL;
+	struct psp_device *psp = psp_master;
+	struct sev_data_snp_init_ex data = {};
+	struct sev_device *sev;
+	void *arg = &data;
+	int cmd, rc = 0;
+
+	if (!cc_platform_has(CC_ATTR_HOST_SEV_SNP))
 		return -ENODEV;
 
 	sev = psp->sev_data;
 
-	if (sev->state == SEV_STATE_INIT)
+	if (sev->snp_initialized)
 		return 0;
 
-	if (sev_init_ex_buffer) {
-		rc = sev_read_init_ex_file();
-		if (rc)
-			return rc;
+	if (!sev_version_greater_or_equal(SNP_MIN_API_MAJOR, SNP_MIN_API_MINOR)) {
+		dev_dbg(sev->dev, "SEV-SNP support requires firmware version >= %d:%d\n",
+			SNP_MIN_API_MAJOR, SNP_MIN_API_MINOR);
+		return -EOPNOTSUPP;
 	}
+
+	rc = snp_prepare();
+	if (rc)
+		return rc;
+
+	/*
+	 * Starting in SNP firmware v1.52, the SNP_INIT_EX command takes a list
+	 * of system physical address ranges to convert into HV-fixed page
+	 * states during the RMP initialization.  For instance, the memory that
+	 * UEFI reserves should be included in the that list. This allows system
+	 * components that occasionally write to memory (e.g. logging to UEFI
+	 * reserved regions) to not fail due to RMP initialization and SNP
+	 * enablement.
+	 *
+	 */
+	if (sev_version_greater_or_equal(SNP_MIN_API_MAJOR, 52)) {
+		bool tio_supp = !!(sev->snp_feat_info_0.ebx & SNP_SEV_TIO_SUPPORTED);
+
+		/*
+		 * Firmware checks that the pages containing the ranges enumerated
+		 * in the RANGES structure are either in the default page state or in the
+		 * firmware page state.
+		 */
+		snp_range_list = kzalloc(PAGE_SIZE, GFP_KERNEL);
+		if (!snp_range_list) {
+			dev_err(sev->dev,
+				"SEV: SNP_INIT_EX range list memory allocation failed\n");
+			return -ENOMEM;
+		}
+
+		/*
+		 * Retrieve all reserved memory regions from the e820 memory map
+		 * to be setup as HV-fixed pages.
+		 */
+		rc = walk_iomem_res_desc(IORES_DESC_NONE, IORESOURCE_MEM, 0, ~0,
+					 snp_range_list, snp_filter_reserved_mem_regions);
+		if (rc) {
+			dev_err(sev->dev,
+				"SEV: SNP_INIT_EX walk_iomem_res_desc failed rc = %d\n", rc);
+			return rc;
+		}
+
+		/*
+		 * Add HV_Fixed pages from other PSP sub-devices, such as SFS to the
+		 * HV_Fixed page list.
+		 */
+		snp_add_hv_fixed_pages(sev, snp_range_list);
+
+		if (max_snp_asid) {
+			data.ciphertext_hiding_en = 1;
+			data.max_snp_asid = max_snp_asid;
+		}
+
+		data.init_rmp = 1;
+		data.list_paddr_en = 1;
+		data.list_paddr = __psp_pa(snp_range_list);
+
+		data.tio_en = tio_supp && sev_tio_enabled && amd_iommu_sev_tio_supported();
+
+		/*
+		 * When psp_init_on_probe is disabled, the userspace calling
+		 * SEV ioctl can inadvertently shut down SNP and SEV-TIO causing
+		 * unexpected state loss.
+		 */
+		if (data.tio_en && !psp_init_on_probe)
+			dev_warn(sev->dev, "SEV-TIO as incompatible with psp_init_on_probe=0\n");
+
+		cmd = SEV_CMD_SNP_INIT_EX;
+	} else {
+		cmd = SEV_CMD_SNP_INIT;
+		arg = NULL;
+	}
+
+	/*
+	 * The following sequence must be issued before launching the first SNP
+	 * guest to ensure all dirty cache lines are flushed, including from
+	 * updates to the RMP table itself via the RMPUPDATE instruction:
+	 *
+	 * - WBINVD on all running CPUs
+	 * - SEV_CMD_SNP_INIT[_EX] firmware command
+	 * - WBINVD on all running CPUs
+	 * - SEV_CMD_SNP_DF_FLUSH firmware command
+	 */
+	wbinvd_on_all_cpus();
+
+	rc = __sev_do_cmd_locked(cmd, arg, error);
+	if (rc) {
+		dev_err(sev->dev, "SEV-SNP: %s failed rc %d, error %#x\n",
+			cmd == SEV_CMD_SNP_INIT_EX ? "SNP_INIT_EX" : "SNP_INIT",
+			rc, *error);
+		return rc;
+	}
+
+	/* Prepare for first SNP guest launch after INIT. */
+	wbinvd_on_all_cpus();
+	rc = __sev_do_cmd_locked(SEV_CMD_SNP_DF_FLUSH, NULL, error);
+	if (rc) {
+		dev_err(sev->dev, "SEV-SNP: SNP_DF_FLUSH failed rc %d, error %#x\n",
+			rc, *error);
+		return rc;
+	}
+
+	snp_hv_fixed_pages_state_update(sev, HV_FIXED);
+	sev->snp_initialized = true;
+	dev_dbg(sev->dev, "SEV-SNP firmware initialized, SEV-TIO is %s\n",
+		data.tio_en ? "enabled" : "disabled");
+
+	dev_info(sev->dev, "SEV-SNP API:%d.%d build:%d\n", sev->api_major,
+		 sev->api_minor, sev->build);
+
+	atomic_notifier_chain_register(&panic_notifier_list,
+				       &snp_panic_notifier);
+
+	if (data.tio_en) {
+		struct page *page;
+
+		/*
+		 * This executes with the sev_cmd_mutex held so down the stack
+		 * snp_reclaim_pages(locked=false) might be needed (which is extremely
+		 * unlikely) but will cause a deadlock.
+		 * Instead of exporting __snp_alloc_firmware_pages(), allocate a page
+		 * for this one call here.
+		 */
+		page = __snp_alloc_firmware_pages(GFP_KERNEL_ACCOUNT | __GFP_ZERO,
+						  0, true);
+		if (page) {
+			void *tio_status = page_address(page);
+
+			sev_tsm_init_locked(sev, tio_status);
+
+			__snp_free_firmware_pages(page, 0, true);
+		}
+	}
+
+	sev_es_tmr_size = SNP_TMR_SIZE;
+
+	return 0;
+}
+
+static void __sev_platform_init_handle_tmr(struct sev_device *sev)
+{
+	if (sev_es_tmr)
+		return;
+
+	/* Obtain the TMR memory area for SEV-ES use */
+	sev_es_tmr = sev_fw_alloc(sev_es_tmr_size);
+	if (sev_es_tmr) {
+		/* Must flush the cache before giving it to the firmware */
+		if (!sev->snp_initialized)
+			clflush_cache_range(sev_es_tmr, sev_es_tmr_size);
+	} else {
+			dev_warn(sev->dev, "SEV: TMR allocation failed, SEV-ES support unavailable\n");
+	}
+}
+
+/*
+ * If an init_ex_path is provided allocate a buffer for the file and
+ * read in the contents. Additionally, if SNP is initialized, convert
+ * the buffer pages to firmware pages.
+ */
+static int __sev_platform_init_handle_init_ex_path(struct sev_device *sev)
+{
+	struct page *page;
+	int rc;
+
+	if (!init_ex_path)
+		return 0;
+
+	if (sev_init_ex_buffer)
+		return 0;
+
+	page = alloc_pages(GFP_KERNEL | __GFP_ZERO, get_order(NV_LENGTH));
+	if (!page) {
+		dev_err(sev->dev, "SEV: INIT_EX NV memory allocation failed\n");
+		return -ENOMEM;
+	}
+
+	sev_init_ex_buffer = page_address(page);
+
+	rc = sev_read_init_ex_file();
+	if (rc)
+		goto err_free;
+
+	/* If SEV-SNP is initialized, transition to firmware page. */
+	if (sev->snp_initialized) {
+		unsigned long npages;
+
+		npages = 1UL << get_order(NV_LENGTH);
+		if (rmp_mark_pages_firmware(__pa(sev_init_ex_buffer), npages, true)) {
+			dev_err(sev->dev, "SEV: INIT_EX NV memory page state change failed.\n");
+			rc = -ENOMEM;
+			/*
+			 * Pages can be in an inconsistent state, don't release them back to the
+			 * system.
+			 */
+			goto err_reset;
+		}
+	}
+
+	return 0;
+
+err_free:
+	__free_pages(page, get_order(NV_LENGTH));
+err_reset:
+	sev_init_ex_buffer = NULL;
+	return rc;
+}
+
+static int __sev_platform_init_locked(int *error)
+{
+	int rc, psp_ret, dfflush_error;
+	struct sev_device *sev;
+
+	psp_ret = dfflush_error = SEV_RET_NO_FW_CALL;
+
+	if (!psp_master || !psp_master->sev_data)
+		return -ENODEV;
+
+	sev = psp_master->sev_data;
+
+	if (sev->sev_plat_status.state == SEV_STATE_INIT)
+		return 0;
+
+	__sev_platform_init_handle_tmr(sev);
+
+	rc = __sev_platform_init_handle_init_ex_path(sev);
+	if (rc)
+		return rc;
 
 	rc = __sev_do_init_locked(&psp_ret);
 	if (rc && psp_ret == SEV_RET_SECURE_DATA_INVALID) {
@@ -487,16 +1773,22 @@ static int __sev_platform_init_locked(int *error)
 	if (error)
 		*error = psp_ret;
 
-	if (rc)
+	if (rc) {
+		dev_err(sev->dev, "SEV: %s failed %#x, rc %d\n",
+			sev_init_ex_buffer ? "INIT_EX" : "INIT", psp_ret, rc);
 		return rc;
+	}
 
-	sev->state = SEV_STATE_INIT;
+	sev->sev_plat_status.state = SEV_STATE_INIT;
 
 	/* Prepare for first SEV guest launch after INIT */
 	wbinvd_on_all_cpus();
-	rc = __sev_do_cmd_locked(SEV_CMD_DF_FLUSH, NULL, error);
-	if (rc)
+	rc = __sev_do_cmd_locked(SEV_CMD_DF_FLUSH, NULL, &dfflush_error);
+	if (rc) {
+		dev_err(sev->dev, "SEV: DF_FLUSH failed %#x, rc %d\n",
+			dfflush_error, rc);
 		return rc;
+	}
 
 	dev_dbg(sev->dev, "SEV firmware initialized\n");
 
@@ -506,13 +1798,57 @@ static int __sev_platform_init_locked(int *error)
 	return 0;
 }
 
-int sev_platform_init(int *error)
+static int _sev_platform_init_locked(struct sev_platform_init_args *args)
+{
+	struct sev_device *sev;
+	int rc;
+
+	if (!psp_master || !psp_master->sev_data)
+		return -ENODEV;
+
+	/*
+	 * Skip SNP/SEV initialization under a kdump kernel as SEV/SNP
+	 * may already be initialized in the previous kernel. Since no
+	 * SNP/SEV guests are run under a kdump kernel, there is no
+	 * need to initialize SNP or SEV during kdump boot.
+	 */
+	if (is_kdump_kernel())
+		return 0;
+
+	sev = psp_master->sev_data;
+
+	if (sev->sev_plat_status.state == SEV_STATE_INIT)
+		return 0;
+
+	rc = __sev_snp_init_locked(&args->error, args->max_snp_asid);
+	if (rc && rc != -ENODEV)
+		return rc;
+
+	/* Defer legacy SEV/SEV-ES support if allowed by caller/module. */
+	if (args->probe && !psp_init_on_probe)
+		return 0;
+
+	return __sev_platform_init_locked(&args->error);
+}
+
+int sev_platform_init(struct sev_platform_init_args *args)
 {
 	int rc;
 
 	mutex_lock(&sev_cmd_mutex);
-	rc = __sev_platform_init_locked(error);
+	rc = _sev_platform_init_locked(args);
 	mutex_unlock(&sev_cmd_mutex);
+
+	/*
+	 * Register the sysfs interface outside the sev_cmd_mutex. The
+	 * _show()/_store() handlers issue SEV commands that acquire the
+	 * sev_cmd_mutex, so creating (and on the shutdown path, removing) the
+	 * sysfs group must stay outside that lock. sysfs provides its own
+	 * synchronization between group creation/removal and concurrent
+	 * attribute access.
+	 */
+	if (!rc)
+		sev_snp_register_verify_mitigation(psp_master->sev_data);
 
 	return rc;
 }
@@ -520,31 +1856,29 @@ EXPORT_SYMBOL_GPL(sev_platform_init);
 
 static int __sev_platform_shutdown_locked(int *error)
 {
-	struct sev_device *sev = psp_master->sev_data;
+	struct psp_device *psp = psp_master;
+	struct sev_device *sev;
 	int ret;
 
-	if (!sev || sev->state == SEV_STATE_UNINIT)
+	if (!psp || !psp->sev_data)
+		return 0;
+
+	sev = psp->sev_data;
+
+	if (sev->sev_plat_status.state == SEV_STATE_UNINIT)
 		return 0;
 
 	ret = __sev_do_cmd_locked(SEV_CMD_SHUTDOWN, NULL, error);
-	if (ret)
+	if (ret) {
+		dev_err(sev->dev, "SEV: failed to SHUTDOWN error %#x, rc %d\n",
+			*error, ret);
 		return ret;
+	}
 
-	sev->state = SEV_STATE_UNINIT;
+	sev->sev_plat_status.state = SEV_STATE_UNINIT;
 	dev_dbg(sev->dev, "SEV firmware shutdown\n");
 
 	return ret;
-}
-
-static int sev_platform_shutdown(int *error)
-{
-	int rc;
-
-	mutex_lock(&sev_cmd_mutex);
-	rc = __sev_platform_shutdown_locked(NULL);
-	mutex_unlock(&sev_cmd_mutex);
-
-	return rc;
 }
 
 static int sev_get_platform_state(int *state, int *error)
@@ -558,6 +1892,19 @@ static int sev_get_platform_state(int *state, int *error)
 
 	*state = data.state;
 	return rc;
+}
+
+static int sev_move_to_init_state(struct sev_issue_cmd *argp, bool *shutdown_required)
+{
+	int rc;
+
+	rc = __sev_platform_init_locked(&argp->error);
+	if (rc)
+		return rc;
+
+	*shutdown_required = true;
+
+	return 0;
 }
 
 static int sev_ioctl_do_reset(struct sev_issue_cmd *argp, bool writable)
@@ -612,24 +1959,31 @@ static int sev_ioctl_do_platform_status(struct sev_issue_cmd *argp)
 static int sev_ioctl_do_pek_pdh_gen(int cmd, struct sev_issue_cmd *argp, bool writable)
 {
 	struct sev_device *sev = psp_master->sev_data;
+	bool shutdown_required = false;
 	int rc;
 
 	if (!writable)
 		return -EPERM;
 
-	if (sev->state == SEV_STATE_UNINIT) {
-		rc = __sev_platform_init_locked(&argp->error);
+	if (sev->sev_plat_status.state == SEV_STATE_UNINIT) {
+		rc = sev_move_to_init_state(argp, &shutdown_required);
 		if (rc)
 			return rc;
 	}
 
-	return __sev_do_cmd_locked(cmd, NULL, &argp->error);
+	rc = __sev_do_cmd_locked(cmd, NULL, &argp->error);
+
+	if (shutdown_required)
+		__sev_firmware_shutdown(sev, false);
+
+	return rc;
 }
 
 static int sev_ioctl_do_pek_csr(struct sev_issue_cmd *argp, bool writable)
 {
 	struct sev_device *sev = psp_master->sev_data;
 	struct sev_user_data_pek_csr input;
+	bool shutdown_required = false;
 	struct sev_data_pek_csr data;
 	void __user *input_address;
 	void *blob = NULL;
@@ -660,15 +2014,18 @@ static int sev_ioctl_do_pek_csr(struct sev_issue_cmd *argp, bool writable)
 	data.len = input.length;
 
 cmd:
-	if (sev->state == SEV_STATE_UNINIT) {
-		ret = __sev_platform_init_locked(&argp->error);
+	if (sev->sev_plat_status.state == SEV_STATE_UNINIT) {
+		ret = sev_move_to_init_state(argp, &shutdown_required);
 		if (ret)
 			goto e_free_blob;
 	}
 
 	ret = __sev_do_cmd_locked(SEV_CMD_PEK_CSR, &data, &argp->error);
 
-	 /* If we query the CSR length, FW responded with expected data. */
+	/*
+	 * Firmware will returns the length of the CSR blob (either the minimum
+	 * required length or the actual length written), return it to the user.
+	 */
 	input.length = data.len;
 
 	if (copy_to_user((void __user *)argp->data, &input, sizeof(input))) {
@@ -676,12 +2033,18 @@ cmd:
 		goto e_free_blob;
 	}
 
+	if (ret || WARN_ON_ONCE(argp->error))
+		goto e_free_blob;
+
 	if (blob) {
 		if (copy_to_user(input_address, blob, input.length))
 			ret = -EFAULT;
 	}
 
 e_free_blob:
+	if (shutdown_required)
+		__sev_firmware_shutdown(sev, false);
+
 	kfree(blob);
 	return ret;
 }
@@ -705,6 +2068,16 @@ static int sev_get_api_version(void)
 	struct sev_user_data_status status;
 	int error = 0, ret;
 
+	/*
+	 * Cache SNP platform status and SNP feature information
+	 * if SNP is available.
+	 */
+	if (cc_platform_has(CC_ATTR_HOST_SEV_SNP)) {
+		ret = snp_get_platform_data(sev, &error);
+		if (ret)
+			return 1;
+	}
+
 	ret = sev_platform_status(&status, &error);
 	if (ret) {
 		dev_err(sev->dev,
@@ -712,10 +2085,12 @@ static int sev_get_api_version(void)
 		return 1;
 	}
 
+	/* Cache SEV platform status */
+	sev->sev_plat_status = status;
+
 	sev->api_major = status.api_major;
 	sev->api_minor = status.api_minor;
 	sev->build = status.build;
-	sev->state = status.state;
 
 	return 0;
 }
@@ -758,11 +2133,11 @@ static int sev_get_firmware(struct device *dev,
 /* Don't fail if SEV FW couldn't be updated. Continue with existing SEV FW */
 static int sev_update_firmware(struct device *dev)
 {
-	struct sev_data_download_firmware *data;
+	struct sev_data_download_firmware data;
 	const struct firmware *firmware;
 	int ret, error, order;
 	struct page *p;
-	u64 data_size;
+	void *fw_blob;
 
 	if (!sev_version_greater_or_equal(0, 15)) {
 		dev_dbg(dev, "DOWNLOAD_FIRMWARE not supported\n");
@@ -774,16 +2149,7 @@ static int sev_update_firmware(struct device *dev)
 		return -1;
 	}
 
-	/*
-	 * SEV FW expects the physical address given to it to be 32
-	 * byte aligned. Memory allocated has structure placed at the
-	 * beginning followed by the firmware being passed to the SEV
-	 * FW. Allocate enough memory for data structure + alignment
-	 * padding + SEV FW.
-	 */
-	data_size = ALIGN(sizeof(struct sev_data_download_firmware), 32);
-
-	order = get_order(firmware->size + data_size);
+	order = get_order(firmware->size);
 	p = alloc_pages(GFP_KERNEL, order);
 	if (!p) {
 		ret = -1;
@@ -794,25 +2160,23 @@ static int sev_update_firmware(struct device *dev)
 	 * Copy firmware data to a kernel allocated contiguous
 	 * memory region.
 	 */
-	data = page_address(p);
-	memcpy(page_address(p) + data_size, firmware->data, firmware->size);
+	fw_blob = page_address(p);
+	memcpy(fw_blob, firmware->data, firmware->size);
 
-	data->address = __psp_pa(page_address(p) + data_size);
-	data->len = firmware->size;
+	data.address = __psp_pa(fw_blob);
+	data.len = firmware->size;
 
-	ret = sev_do_cmd(SEV_CMD_DOWNLOAD_FIRMWARE, data, &error);
+	ret = sev_do_cmd(SEV_CMD_DOWNLOAD_FIRMWARE, &data, &error);
 
 	/*
 	 * A quirk for fixing the committed TCB version, when upgrading from
 	 * earlier firmware version than 1.50.
 	 */
 	if (!ret && !sev_version_greater_or_equal(1, 50))
-		ret = sev_do_cmd(SEV_CMD_DOWNLOAD_FIRMWARE, data, &error);
+		ret = sev_do_cmd(SEV_CMD_DOWNLOAD_FIRMWARE, &data, &error);
 
 	if (ret)
 		dev_dbg(dev, "Failed to update SEV firmware: %#x\n", error);
-	else
-		dev_info(dev, "SEV firmware update successful\n");
 
 	__free_pages(p, order);
 
@@ -822,11 +2186,109 @@ fw_err:
 	return ret;
 }
 
+static int __sev_snp_shutdown_locked(int *error, bool panic)
+{
+	struct psp_device *psp = psp_master;
+	struct sev_device *sev;
+	struct sev_data_snp_shutdown_ex data;
+	int ret;
+
+	if (!psp || !psp->sev_data)
+		return 0;
+
+	sev = psp->sev_data;
+
+	if (!sev->snp_initialized)
+		return 0;
+
+	memset(&data, 0, sizeof(data));
+	data.len = sizeof(data);
+	data.iommu_snp_shutdown = 1;
+	if (sev->snp_feat_info_0.ecx & SNP_X86_SHUTDOWN_SUPPORTED)
+		data.x86_snp_shutdown = 1;
+
+	/*
+	 * If invoked during panic handling, local interrupts are disabled
+	 * and all CPUs are stopped, so wbinvd_on_all_cpus() can't be called.
+	 * In that case, a wbinvd() is done on remote CPUs via the NMI
+	 * callback, so only a local wbinvd() is needed here.
+	 */
+	if (!panic)
+		wbinvd_on_all_cpus();
+	else
+		wbinvd();
+
+	ret = __sev_do_cmd_locked(SEV_CMD_SNP_SHUTDOWN_EX, &data, error);
+	/* SHUTDOWN may require DF_FLUSH */
+	if (*error == SEV_RET_DFFLUSH_REQUIRED) {
+		int dfflush_error = SEV_RET_NO_FW_CALL;
+
+		ret = __sev_do_cmd_locked(SEV_CMD_SNP_DF_FLUSH, NULL, &dfflush_error);
+		if (ret) {
+			dev_err(sev->dev, "SEV-SNP DF_FLUSH failed, ret = %d, error = %#x\n",
+				ret, dfflush_error);
+			return ret;
+		}
+		/* reissue the shutdown command */
+		ret = __sev_do_cmd_locked(SEV_CMD_SNP_SHUTDOWN_EX, &data,
+					  error);
+	}
+	if (ret) {
+		dev_err(sev->dev, "SEV-SNP firmware shutdown failed, rc %d, error %#x\n",
+			ret, *error);
+		return ret;
+	}
+
+	if (data.x86_snp_shutdown) {
+		if (!panic)
+			snp_shutdown();
+		snp_hv_fixed_pages_state_update(sev, ALLOCATED);
+	} else {
+		/*
+		 * SNP_SHUTDOWN_EX with IOMMU_SNP_SHUTDOWN set to 1 disables SNP
+		 * enforcement by the IOMMU and also transitions all pages
+		 * associated with the IOMMU to the Reclaim state.
+		 * Firmware was transitioning the IOMMU pages to Hypervisor state
+		 * before version 1.53. But, accounting for the number of assigned
+		 * 4kB pages in a 2M page was done incorrectly by not transitioning
+		 * to the Reclaim state. This resulted in RMP #PF when later accessing
+		 * the 2M page containing those pages during kexec boot. Hence, the
+		 * firmware now transitions these pages to Reclaim state and hypervisor
+		 * needs to transition these pages to shared state. SNP Firmware
+		 * version 1.53 and above are needed for kexec boot.
+		 */
+		ret = amd_iommu_snp_disable();
+		if (ret) {
+			dev_err(sev->dev, "SNP IOMMU shutdown failed\n");
+			return ret;
+		}
+	}
+
+	snp_leak_hv_fixed_pages();
+	sev->snp_initialized = false;
+	dev_dbg(sev->dev, "SEV-SNP firmware shutdown\n");
+
+	/*
+	 * __sev_snp_shutdown_locked() deadlocks when it tries to unregister
+	 * itself during panic as the panic notifier is called with RCU read
+	 * lock held and notifier unregistration does RCU synchronization.
+	 */
+	if (!panic)
+		atomic_notifier_chain_unregister(&panic_notifier_list,
+						 &snp_panic_notifier);
+
+	/* Reset TMR size back to default */
+	sev_es_tmr_size = SEV_TMR_SIZE;
+
+	return ret;
+}
+
 static int sev_ioctl_do_pek_import(struct sev_issue_cmd *argp, bool writable)
 {
 	struct sev_device *sev = psp_master->sev_data;
 	struct sev_user_data_pek_cert_import input;
 	struct sev_data_pek_cert_import data;
+	bool shutdown_required = false;
 	void *pek_blob, *oca_blob;
 	int ret;
 
@@ -856,8 +2318,8 @@ static int sev_ioctl_do_pek_import(struct sev_issue_cmd *argp, bool writable)
 	data.oca_cert_len = input.oca_cert_len;
 
 	/* If platform is not in INIT state then transition it to INIT */
-	if (sev->state != SEV_STATE_INIT) {
-		ret = __sev_platform_init_locked(&argp->error);
+	if (sev->sev_plat_status.state != SEV_STATE_INIT) {
+		ret = sev_move_to_init_state(argp, &shutdown_required);
 		if (ret)
 			goto e_free_oca;
 	}
@@ -865,6 +2327,9 @@ static int sev_ioctl_do_pek_import(struct sev_issue_cmd *argp, bool writable)
 	ret = __sev_do_cmd_locked(SEV_CMD_PEK_CERT_IMPORT, &data, &argp->error);
 
 e_free_oca:
+	if (shutdown_required)
+		__sev_firmware_shutdown(sev, false);
+
 	kfree(oca_blob);
 e_free_pek:
 	kfree(pek_blob);
@@ -892,7 +2357,7 @@ static int sev_ioctl_do_get_id2(struct sev_issue_cmd *argp)
 		/*
 		 * The length of the ID shouldn't be assumed by software since
 		 * it may change in the future.  The allocation size is limited
-		 * to 1 << (PAGE_SHIFT + MAX_ORDER) by the page allocator.
+		 * to 1 << (PAGE_SHIFT + MAX_PAGE_ORDER) by the page allocator.
 		 * If the allocation fails, simply return ENOMEM rather than
 		 * warning in the kernel log.
 		 */
@@ -919,6 +2384,9 @@ static int sev_ioctl_do_get_id2(struct sev_issue_cmd *argp)
 		ret = -EFAULT;
 		goto e_free;
 	}
+
+	if (ret || WARN_ON_ONCE(argp->error))
+		goto e_free;
 
 	if (id_blob) {
 		if (copy_to_user(input_address, id_blob, data.len)) {
@@ -981,31 +2449,23 @@ static int sev_ioctl_do_pdh_export(struct sev_issue_cmd *argp, bool writable)
 	struct sev_data_pdh_cert_export data;
 	void __user *input_cert_chain_address;
 	void __user *input_pdh_cert_address;
+	bool shutdown_required = false;
 	int ret;
-
-	/* If platform is not in INIT state then transition it to INIT. */
-	if (sev->state != SEV_STATE_INIT) {
-		if (!writable)
-			return -EPERM;
-
-		ret = __sev_platform_init_locked(&argp->error);
-		if (ret)
-			return ret;
-	}
 
 	if (copy_from_user(&input, (void __user *)argp->data, sizeof(input)))
 		return -EFAULT;
 
 	memset(&data, 0, sizeof(data));
 
+	input_pdh_cert_address = (void __user *)input.pdh_cert_address;
+	input_cert_chain_address = (void __user *)input.cert_chain_address;
+
 	/* Userspace wants to query the certificate length. */
 	if (!input.pdh_cert_address ||
 	    !input.pdh_cert_len ||
-	    !input.cert_chain_address)
+	    !input.cert_chain_address ||
+	    !input.cert_chain_len)
 		goto cmd;
-
-	input_pdh_cert_address = (void __user *)input.pdh_cert_address;
-	input_cert_chain_address = (void __user *)input.cert_chain_address;
 
 	/* Allocate a physically contiguous buffer to store the PDH blob. */
 	if (input.pdh_cert_len > SEV_FW_BLOB_MAX_SIZE)
@@ -1032,9 +2492,23 @@ static int sev_ioctl_do_pdh_export(struct sev_issue_cmd *argp, bool writable)
 	data.cert_chain_len = input.cert_chain_len;
 
 cmd:
+	/* If platform is not in INIT state then transition it to INIT. */
+	if (sev->sev_plat_status.state != SEV_STATE_INIT) {
+		if (!writable) {
+			ret = -EPERM;
+			goto e_free_cert;
+		}
+		ret = sev_move_to_init_state(argp, &shutdown_required);
+		if (ret)
+			goto e_free_cert;
+	}
+
 	ret = __sev_do_cmd_locked(SEV_CMD_PDH_CERT_EXPORT, &data, &argp->error);
 
-	/* If we query the length, FW responded with expected data. */
+	/*
+	 * Firmware will return the length of the blobs (either the minimum
+	 * required length or the actual length written), return 'em to the user.
+	 */
 	input.cert_chain_len = data.cert_chain_len;
 	input.pdh_cert_len = data.pdh_cert_len;
 
@@ -1042,6 +2516,9 @@ cmd:
 		ret = -EFAULT;
 		goto e_free_cert;
 	}
+
+	if (ret || WARN_ON_ONCE(argp->error))
+		goto e_free_cert;
 
 	if (pdh_blob) {
 		if (copy_to_user(input_pdh_cert_address,
@@ -1058,9 +2535,151 @@ cmd:
 	}
 
 e_free_cert:
+	if (shutdown_required)
+		__sev_firmware_shutdown(sev, false);
+
 	kfree(cert_blob);
 e_free_pdh:
 	kfree(pdh_blob);
+	return ret;
+}
+
+static int __sev_do_snp_platform_status(struct sev_user_data_snp_status *status,
+					int *error)
+{
+	struct sev_device *sev = psp_master->sev_data;
+	struct sev_data_snp_addr buf;
+	struct page *status_page;
+	void *data;
+	int ret;
+
+	status_page = alloc_page(GFP_KERNEL_ACCOUNT);
+	if (!status_page)
+		return -ENOMEM;
+
+	data = page_address(status_page);
+
+	/*
+	 * SNP_PLATFORM_STATUS can be executed in any SNP state. But if executed
+	 * when SNP has been initialized, the status page must be firmware-owned.
+	 */
+	if (sev->snp_initialized) {
+		/*
+		 * Firmware expects the status page to be in Firmware state,
+		 * otherwise it will report an error INVALID_PAGE_STATE.
+		 */
+		if (rmp_mark_pages_firmware(__pa(data), 1, true)) {
+			ret = -EFAULT;
+			goto cleanup;
+		}
+	}
+
+	buf.address = __psp_pa(data);
+	ret = __sev_do_cmd_locked(SEV_CMD_SNP_PLATFORM_STATUS, &buf, error);
+
+	if (sev->snp_initialized) {
+		/*
+		 * The status page will be in Reclaim state on success, or left
+		 * in Firmware state on failure. Use snp_reclaim_pages() to
+		 * transition either case back to Hypervisor-owned state.
+		 */
+		if (snp_reclaim_pages(__pa(data), 1, true))
+			return -EFAULT;
+	}
+
+	if (ret)
+		goto cleanup;
+
+	memcpy(status, data, sizeof(*status));
+
+cleanup:
+	__free_pages(status_page, 0);
+	return ret;
+}
+
+static int sev_ioctl_do_snp_platform_status(struct sev_issue_cmd *argp)
+{
+	struct sev_user_data_snp_status status;
+	int ret;
+
+	if (!argp->data)
+		return -EINVAL;
+
+	ret = __sev_do_snp_platform_status(&status, &argp->error);
+	if (ret < 0)
+		return ret;
+
+	if (copy_to_user((void __user *)argp->data, &status,
+			 sizeof(struct sev_user_data_snp_status)))
+		ret = -EFAULT;
+
+	return ret;
+}
+
+static int sev_ioctl_do_snp_commit(struct sev_issue_cmd *argp)
+{
+	struct sev_data_snp_commit buf;
+	int ret;
+
+	buf.len = sizeof(buf);
+
+	ret = __sev_do_cmd_locked(SEV_CMD_SNP_COMMIT, &buf, &argp->error);
+
+	return ret;
+}
+
+static int sev_ioctl_do_snp_set_config(struct sev_issue_cmd *argp, bool writable)
+{
+	struct sev_device *sev = psp_master->sev_data;
+	struct sev_user_data_snp_config config;
+
+	if (!argp->data)
+		return -EINVAL;
+
+	if (!writable)
+		return -EPERM;
+
+	if (!sev->snp_initialized)
+		return -ENODEV;
+
+	if (copy_from_user(&config, (void __user *)argp->data, sizeof(config)))
+		return -EFAULT;
+
+	return __sev_do_cmd_locked(SEV_CMD_SNP_CONFIG, &config, &argp->error);
+}
+
+static int sev_ioctl_do_snp_vlek_load(struct sev_issue_cmd *argp, bool writable)
+{
+	struct sev_device *sev = psp_master->sev_data;
+	struct sev_user_data_snp_vlek_load input;
+	void *blob;
+	int ret;
+
+	if (!argp->data)
+		return -EINVAL;
+
+	if (!writable)
+		return -EPERM;
+
+	if (!sev->snp_initialized)
+		return -ENODEV;
+
+	if (copy_from_user(&input, u64_to_user_ptr(argp->data), sizeof(input)))
+		return -EFAULT;
+
+	if (input.len != sizeof(input) || input.vlek_wrapped_version != 0)
+		return -EINVAL;
+
+	blob = psp_copy_user_blob(input.vlek_wrapped_address,
+				  sizeof(struct sev_user_data_snp_wrapped_vlek_hashstick));
+	if (IS_ERR(blob))
+		return PTR_ERR(blob);
+
+	input.vlek_wrapped_address = __psp_pa(blob);
+
+	ret = __sev_do_cmd_locked(SEV_CMD_SNP_VLEK_LOAD, &input, &argp->error);
+	kfree(blob);
+
 	return ret;
 }
 
@@ -1114,6 +2733,18 @@ static long sev_ioctl(struct file *file, unsigned int ioctl, unsigned long arg)
 		break;
 	case SEV_GET_ID2:
 		ret = sev_ioctl_do_get_id2(&input);
+		break;
+	case SNP_PLATFORM_STATUS:
+		ret = sev_ioctl_do_snp_platform_status(&input);
+		break;
+	case SNP_COMMIT:
+		ret = sev_ioctl_do_snp_commit(&input);
+		break;
+	case SNP_SET_CONFIG:
+		ret = sev_ioctl_do_snp_set_config(&input, writable);
+		break;
+	case SNP_VLEK_LOAD:
+		ret = sev_ioctl_do_snp_vlek_load(&input, writable);
 		break;
 	default:
 		ret = -EINVAL;
@@ -1185,7 +2816,7 @@ static int sev_misc_init(struct sev_device *sev)
 	if (!misc_dev) {
 		struct miscdevice *misc;
 
-		misc_dev = kzalloc(sizeof(*misc_dev), GFP_KERNEL);
+		misc_dev = kzalloc_obj(*misc_dev);
 		if (!misc_dev)
 			return -ENOMEM;
 
@@ -1225,9 +2856,11 @@ int sev_dev_init(struct psp_device *psp)
 	if (!sev)
 		goto e_err;
 
-	sev->cmd_buf = (void *)devm_get_free_pages(dev, GFP_KERNEL, 0);
+	sev->cmd_buf = (void *)devm_get_free_pages(dev, GFP_KERNEL, 1);
 	if (!sev->cmd_buf)
 		goto e_sev;
+
+	sev->cmd_buf_backup = (uint8_t *)sev->cmd_buf + PAGE_SIZE;
 
 	psp->sev_data = sev;
 
@@ -1267,25 +2900,114 @@ e_err:
 	return ret;
 }
 
-static void sev_firmware_shutdown(struct sev_device *sev)
+static void __sev_firmware_shutdown(struct sev_device *sev, bool panic)
 {
-	sev_platform_shutdown(NULL);
+	int error;
+
+	__sev_platform_shutdown_locked(&error);
 
 	if (sev_es_tmr) {
-		/* The TMR area was encrypted, flush it from the cache */
-		wbinvd_on_all_cpus();
+		/*
+		 * The TMR area was encrypted, flush it from the cache.
+		 *
+		 * If invoked during panic handling, local interrupts are
+		 * disabled and all CPUs are stopped, so wbinvd_on_all_cpus()
+		 * can't be used. In that case, wbinvd() is done on remote CPUs
+		 * via the NMI callback, and done for this CPU later during
+		 * SNP shutdown, so wbinvd_on_all_cpus() can be skipped.
+		 */
+		if (!panic)
+			wbinvd_on_all_cpus();
 
-		free_pages((unsigned long)sev_es_tmr,
-			   get_order(SEV_ES_TMR_SIZE));
+		__snp_free_firmware_pages(virt_to_page(sev_es_tmr),
+					  get_order(sev_es_tmr_size),
+					  true);
 		sev_es_tmr = NULL;
 	}
 
 	if (sev_init_ex_buffer) {
-		free_pages((unsigned long)sev_init_ex_buffer,
-			   get_order(NV_LENGTH));
+		__snp_free_firmware_pages(virt_to_page(sev_init_ex_buffer),
+					  get_order(NV_LENGTH),
+					  true);
 		sev_init_ex_buffer = NULL;
 	}
+
+	__sev_snp_shutdown_locked(&error, panic);
 }
+
+static void sev_firmware_shutdown(struct sev_device *sev)
+{
+	/*
+	 * Calling without sev_cmd_mutex held as TSM will likely try disconnecting
+	 * IDE and this ends up calling sev_do_cmd() which locks sev_cmd_mutex.
+	 */
+	if (sev->tio_status)
+		sev_tsm_uninit(sev);
+
+	/*
+	 * Remove the sysfs interface before taking the sev_cmd_mutex.
+	 * sysfs_remove_group() waits for in-flight _show()/_store() handlers
+	 * to drain, and those handlers issue SNP_VERIFY_MITIGATION via
+	 * sev_do_cmd() which acquires the sev_cmd_mutex. Removing the group
+	 * while holding the mutex could therefore deadlock.
+	 */
+	sev_snp_unregister_verify_mitigation(sev);
+
+	mutex_lock(&sev_cmd_mutex);
+
+	__sev_firmware_shutdown(sev, false);
+
+	kfree(sev->tio_status);
+	sev->tio_status = NULL;
+
+	mutex_unlock(&sev_cmd_mutex);
+}
+
+void sev_platform_shutdown(void)
+{
+	if (!psp_master || !psp_master->sev_data)
+		return;
+
+	sev_firmware_shutdown(psp_master->sev_data);
+}
+EXPORT_SYMBOL_GPL(sev_platform_shutdown);
+
+u64 sev_get_snp_policy_bits(void)
+{
+	struct psp_device *psp = psp_master;
+	struct sev_device *sev;
+	u64 policy_bits;
+
+	if (!cc_platform_has(CC_ATTR_HOST_SEV_SNP))
+		return 0;
+
+	if (!psp || !psp->sev_data)
+		return 0;
+
+	sev = psp->sev_data;
+
+	policy_bits = SNP_POLICY_MASK_BASE;
+
+	if (sev->snp_plat_status.feature_info) {
+		if (sev->snp_feat_info_0.ecx & SNP_RAPL_DISABLE_SUPPORTED)
+			policy_bits |= SNP_POLICY_MASK_RAPL_DIS;
+
+		if (sev->snp_feat_info_0.ecx & SNP_CIPHER_TEXT_HIDING_SUPPORTED)
+			policy_bits |= SNP_POLICY_MASK_CIPHERTEXT_HIDING_DRAM;
+
+		if (sev->snp_feat_info_0.ecx & SNP_AES_256_XTS_POLICY_SUPPORTED)
+			policy_bits |= SNP_POLICY_MASK_MEM_AES_256_XTS;
+
+		if (sev->snp_feat_info_0.ecx & SNP_CXL_ALLOW_POLICY_SUPPORTED)
+			policy_bits |= SNP_POLICY_MASK_CXL_ALLOW;
+
+		if (sev_version_greater_or_equal(1, 58))
+			policy_bits |= SNP_POLICY_MASK_PAGE_SWAP_DISABLE;
+	}
+
+	return policy_bits;
+}
+EXPORT_SYMBOL_GPL(sev_get_snp_policy_bits);
 
 void sev_dev_destroy(struct psp_device *psp)
 {
@@ -1302,6 +3024,25 @@ void sev_dev_destroy(struct psp_device *psp)
 	psp_clear_sev_irq_handler(psp);
 }
 
+static int snp_shutdown_on_panic(struct notifier_block *nb,
+				 unsigned long reason, void *arg)
+{
+	struct sev_device *sev = psp_master->sev_data;
+
+	/*
+	 * If sev_cmd_mutex is already acquired, then it's likely
+	 * another PSP command is in flight and issuing a shutdown
+	 * would fail in unexpected ways. Rather than create even
+	 * more confusion during a panic, just bail out here.
+	 */
+	if (mutex_is_locked(&sev_cmd_mutex))
+		return NOTIFY_DONE;
+
+	__sev_firmware_shutdown(sev, true);
+
+	return NOTIFY_DONE;
+}
+
 int sev_issue_cmd_external_user(struct file *filep, unsigned int cmd,
 				void *data, int *error)
 {
@@ -1315,7 +3056,7 @@ EXPORT_SYMBOL_GPL(sev_issue_cmd_external_user);
 void sev_pci_init(void)
 {
 	struct sev_device *sev = psp_master->sev_data;
-	int error, rc;
+	u8 api_major, api_minor, build;
 
 	if (!sev)
 		return;
@@ -1325,42 +3066,24 @@ void sev_pci_init(void)
 	if (sev_get_api_version())
 		goto err;
 
+	api_major = sev->api_major;
+	api_minor = sev->api_minor;
+	build     = sev->build;
+
 	if (sev_update_firmware(sev->dev) == 0)
 		sev_get_api_version();
 
-	/* If an init_ex_path is provided rely on INIT_EX for PSP initialization
-	 * instead of INIT.
-	 */
-	if (init_ex_path) {
-		sev_init_ex_buffer = sev_fw_alloc(NV_LENGTH);
-		if (!sev_init_ex_buffer) {
-			dev_err(sev->dev,
-				"SEV: INIT_EX NV memory allocation failed\n");
-			goto err;
-		}
-	}
-
-	/* Obtain the TMR memory area for SEV-ES use */
-	sev_es_tmr = sev_fw_alloc(SEV_ES_TMR_SIZE);
-	if (sev_es_tmr)
-		/* Must flush the cache before giving it to the firmware */
-		clflush_cache_range(sev_es_tmr, SEV_ES_TMR_SIZE);
-	else
-		dev_warn(sev->dev,
-			 "SEV: TMR allocation failed, SEV-ES support unavailable\n");
-
-	if (!psp_init_on_probe)
-		return;
-
-	/* Initialize the platform */
-	rc = sev_platform_init(&error);
-	if (rc)
-		dev_err(sev->dev, "SEV: failed to INIT error %#x, rc %d\n",
-			error, rc);
+	if (api_major != sev->api_major || api_minor != sev->api_minor ||
+	    build != sev->build)
+		dev_info(sev->dev, "SEV firmware updated from %d.%d.%d to %d.%d.%d\n",
+			 api_major, api_minor, build,
+			 sev->api_major, sev->api_minor, sev->build);
 
 	return;
 
 err:
+	sev_dev_destroy(psp_master);
+
 	psp_master->sev_data = NULL;
 }
 
@@ -1373,3 +3096,73 @@ void sev_pci_exit(void)
 
 	sev_firmware_shutdown(sev);
 }
+
+static int get_v1_svn(struct sev_device *sev)
+{
+	struct sev_snp_tcb_version_genoa_milan *tcb;
+	struct sev_user_data_snp_status status;
+	int ret, error = 0;
+
+	mutex_lock(&sev_cmd_mutex);
+	ret = __sev_do_snp_platform_status(&status, &error);
+	mutex_unlock(&sev_cmd_mutex);
+	if (ret < 0)
+		return ret;
+
+	tcb = (struct sev_snp_tcb_version_genoa_milan *)&status
+		      .current_tcb_version;
+	return tcb->snp;
+}
+
+static int get_v2_svn(struct sev_device *sev)
+{
+	struct sev_user_data_snp_status status;
+	struct sev_snp_tcb_version_turin *tcb;
+	int ret, error = 0;
+
+	mutex_lock(&sev_cmd_mutex);
+	ret = __sev_do_snp_platform_status(&status, &error);
+	mutex_unlock(&sev_cmd_mutex);
+	if (ret < 0)
+		return ret;
+
+	tcb = (struct sev_snp_tcb_version_turin *)&status
+		      .current_tcb_version;
+	return tcb->snp;
+}
+
+static bool sev_firmware_allows_es(struct sev_device *sev)
+{
+	/* Documented in AMD-SB-3023 */
+	if (boot_cpu_has(X86_FEATURE_ZEN4) || boot_cpu_has(X86_FEATURE_ZEN3))
+		return get_v1_svn(sev) < 0x1b;
+	else if (boot_cpu_has(X86_FEATURE_ZEN5))
+		return get_v2_svn(sev) < 0x4;
+	else
+		return true;
+}
+
+int sev_firmware_supported_vm_types(void)
+{
+	int supported_vm_types = 0;
+	struct sev_device *sev;
+
+	if (!psp_master || !psp_master->sev_data)
+		return supported_vm_types;
+	sev = psp_master->sev_data;
+
+	supported_vm_types |= BIT(KVM_X86_SEV_VM);
+	supported_vm_types |= BIT(KVM_X86_SEV_ES_VM);
+
+	if (!sev->snp_initialized)
+		return supported_vm_types;
+
+	supported_vm_types |= BIT(KVM_X86_SNP_VM);
+
+	if (!sev_firmware_allows_es(sev))
+		supported_vm_types &= ~BIT(KVM_X86_SEV_ES_VM);
+
+	return supported_vm_types;
+
+}
+EXPORT_SYMBOL_FOR_MODULES(sev_firmware_supported_vm_types, "kvm-amd");

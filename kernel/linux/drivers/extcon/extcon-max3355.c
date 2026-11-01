@@ -10,7 +10,6 @@
 #include <linux/gpio/consumer.h>
 #include <linux/interrupt.h>
 #include <linux/module.h>
-#include <linux/mod_devicetable.h>
 #include <linux/platform_device.h>
 
 struct max3355_data {
@@ -112,13 +111,11 @@ static int max3355_probe(struct platform_device *pdev)
 	return 0;
 }
 
-static int max3355_remove(struct platform_device *pdev)
+static void max3355_remove(struct platform_device *pdev)
 {
 	struct max3355_data *data = platform_get_drvdata(pdev);
 
 	gpiod_set_value_cansleep(data->shdn_gpiod, 0);
-
-	return 0;
 }
 
 static const struct of_device_id max3355_match_table[] = {

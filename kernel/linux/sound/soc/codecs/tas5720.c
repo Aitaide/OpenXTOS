@@ -43,7 +43,6 @@ static const char * const tas5720_supply_names[] = {
 struct tas5720_data {
 	struct snd_soc_component *component;
 	struct regmap *regmap;
-	struct i2c_client *tas5720_client;
 	enum tas572x_type devtype;
 	struct regulator_bulk_data supplies[TAS5720_NUM_SUPPLIES];
 	struct delayed_work fault_check_work;
@@ -565,7 +564,7 @@ static DECLARE_TLV_DB_SCALE(tas5722_dac_tlv, -10350, 25, 0);
 static int tas5722_volume_get(struct snd_kcontrol *kcontrol,
 			      struct snd_ctl_elem_value *ucontrol)
 {
-	struct snd_soc_component *component = snd_soc_kcontrol_component(kcontrol);
+	struct snd_soc_component *component = snd_kcontrol_chip(kcontrol);
 	unsigned int val;
 
 	val = snd_soc_component_read(component, TAS5720_VOLUME_CTRL_REG);
@@ -580,7 +579,7 @@ static int tas5722_volume_get(struct snd_kcontrol *kcontrol,
 static int tas5722_volume_set(struct snd_kcontrol *kcontrol,
 			      struct snd_ctl_elem_value *ucontrol)
 {
-	struct snd_soc_component *component = snd_soc_kcontrol_component(kcontrol);
+	struct snd_soc_component *component = snd_kcontrol_chip(kcontrol);
 	unsigned int sel = ucontrol->value.integer.value[0];
 
 	snd_soc_component_write(component, TAS5720_VOLUME_CTRL_REG, sel >> 1);
@@ -717,9 +716,9 @@ static struct snd_soc_dai_driver tas5720_dai[] = {
 };
 
 static const struct i2c_device_id tas5720_id[] = {
-	{ "tas5720", TAS5720 },
-	{ "tas5720a-q1", TAS5720A_Q1 },
-	{ "tas5722", TAS5722 },
+	{ .name = "tas5720", .driver_data = TAS5720 },
+	{ .name = "tas5720a-q1", .driver_data = TAS5720A_Q1 },
+	{ .name = "tas5722", .driver_data = TAS5722 },
 	{ }
 };
 MODULE_DEVICE_TABLE(i2c, tas5720_id);
@@ -729,7 +728,6 @@ static int tas5720_probe(struct i2c_client *client)
 	struct device *dev = &client->dev;
 	struct tas5720_data *data;
 	const struct regmap_config *regmap_config;
-	const struct i2c_device_id *id;
 	int ret;
 	int i;
 
@@ -737,11 +735,9 @@ static int tas5720_probe(struct i2c_client *client)
 	if (!data)
 		return -ENOMEM;
 
-	id = i2c_match_id(tas5720_id, client);
-	data->tas5720_client = client;
-	data->devtype = id->driver_data;
+	data->devtype = (uintptr_t)i2c_get_match_data(client);
 
-	switch (id->driver_data) {
+	switch (data->devtype) {
 	case TAS5720:
 		regmap_config = &tas5720_regmap_config;
 		break;
@@ -774,7 +770,7 @@ static int tas5720_probe(struct i2c_client *client)
 
 	dev_set_drvdata(dev, data);
 
-	switch (id->driver_data) {
+	switch (data->devtype) {
 	case TAS5720:
 		ret = devm_snd_soc_register_component(&client->dev,
 					&soc_component_dev_tas5720,

@@ -16,9 +16,8 @@
 #include <linux/iio/sysfs.h>
 #include <linux/delay.h>
 #include <linux/util_macros.h>
-#include <linux/acpi.h>
 
-#include <asm/unaligned.h>
+#include <linux/unaligned.h>
 
 /* I2C commands: */
 #define HP206C_CMD_SOFT_RST	0x06
@@ -395,25 +394,23 @@ static int hp206c_probe(struct i2c_client *client)
 }
 
 static const struct i2c_device_id hp206c_id[] = {
-	{"hp206c"},
-	{}
+	{ .name = "hp206c" },
+	{ }
 };
 MODULE_DEVICE_TABLE(i2c, hp206c_id);
 
-#ifdef CONFIG_ACPI
 static const struct acpi_device_id hp206c_acpi_match[] = {
 	{"HOP206C", 0},
-	{ },
+	{ }
 };
 MODULE_DEVICE_TABLE(acpi, hp206c_acpi_match);
-#endif
 
 static struct i2c_driver hp206c_driver = {
 	.probe = hp206c_probe,
 	.id_table = hp206c_id,
 	.driver = {
 		.name = "hp206c",
-		.acpi_match_table = ACPI_PTR(hp206c_acpi_match),
+		.acpi_match_table = hp206c_acpi_match,
 	},
 };
 

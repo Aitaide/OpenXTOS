@@ -33,10 +33,11 @@
 #include <linux/moduleparam.h>
 
 #include <drm/drm_bridge.h>
-#include <drm/drm_client.h>
+#include <drm/drm_client_event.h>
 #include <drm/drm_crtc.h>
 #include <drm/drm_edid.h>
 #include <drm/drm_fourcc.h>
+#include <drm/drm_managed.h>
 #include <drm/drm_modeset_helper_vtables.h>
 #include <drm/drm_print.h>
 #include <drm/drm_probe_helper.h>
@@ -118,6 +119,7 @@ drm_mode_validate_pipeline(struct drm_display_mode *mode,
 		*status = drm_bridge_chain_mode_valid(bridge,
 						      &connector->display_info,
 						      mode);
+		drm_bridge_put(bridge);
 		if (*status != MODE_OK) {
 			/* There is also no point in continuing for crtc check
 			 * here. */
@@ -201,7 +203,7 @@ enum drm_mode_status drm_encoder_mode_valid(struct drm_encoder *encoder,
 
 int
 drm_connector_mode_valid(struct drm_connector *connector,
-			 struct drm_display_mode *mode,
+			 const struct drm_display_mode *mode,
 			 struct drm_modeset_acquire_ctx *ctx,
 			 enum drm_mode_status *status)
 {
@@ -293,14 +295,17 @@ static void reschedule_output_poll_work(struct drm_device *dev)
  * Drivers can call this helper from their device resume implementation. It is
  * not an error to call this even when output polling isn't enabled.
  *
+ * If device polling was never initialized before, this call will trigger a
+ * warning and return.
+ *
  * Note that calls to enable and disable polling must be strictly ordered, which
  * is automatically the case when they're only call from suspend/resume
  * callbacks.
  */
 void drm_kms_helper_poll_enable(struct drm_device *dev)
 {
-	if (!dev->mode_config.poll_enabled || !drm_kms_helper_poll ||
-	    dev->mode_config.poll_running)
+	if (drm_WARN_ON_ONCE(dev, !dev->mode_config.poll_enabled) ||
+	    !drm_kms_helper_poll || dev->mode_config.poll_running)
 		return;
 
 	if (drm_kms_helper_enable_hpd(dev) ||
@@ -334,10 +339,23 @@ void drm_kms_helper_poll_reschedule(struct drm_device *dev)
 }
 EXPORT_SYMBOL(drm_kms_helper_poll_reschedule);
 
+static int detect_connector_status(struct drm_connector *connector,
+				   struct drm_modeset_acquire_ctx *ctx,
+				   bool force)
+{
+	const struct drm_connector_helper_funcs *funcs = connector->helper_private;
+
+	if (funcs->detect_ctx)
+		return funcs->detect_ctx(connector, ctx, force);
+	else if (connector->funcs->detect)
+		return connector->funcs->detect(connector, force);
+
+	return connector_status_connected;
+}
+
 static enum drm_connector_status
 drm_helper_probe_detect_ctx(struct drm_connector *connector, bool force)
 {
-	const struct drm_connector_helper_funcs *funcs = connector->helper_private;
 	struct drm_modeset_acquire_ctx ctx;
 	int ret;
 
@@ -345,14 +363,8 @@ drm_helper_probe_detect_ctx(struct drm_connector *connector, bool force)
 
 retry:
 	ret = drm_modeset_lock(&connector->dev->mode_config.connection_mutex, &ctx);
-	if (!ret) {
-		if (funcs->detect_ctx)
-			ret = funcs->detect_ctx(connector, &ctx, force);
-		else if (connector->funcs->detect)
-			ret = connector->funcs->detect(connector, force);
-		else
-			ret = connector_status_connected;
-	}
+	if (!ret)
+		ret = detect_connector_status(connector, &ctx, force);
 
 	if (ret == -EDEADLK) {
 		drm_modeset_backoff(&ctx);
@@ -386,7 +398,6 @@ drm_helper_probe_detect(struct drm_connector *connector,
 			struct drm_modeset_acquire_ctx *ctx,
 			bool force)
 {
-	const struct drm_connector_helper_funcs *funcs = connector->helper_private;
 	struct drm_device *dev = connector->dev;
 	int ret;
 
@@ -397,12 +408,7 @@ drm_helper_probe_detect(struct drm_connector *connector,
 	if (ret)
 		return ret;
 
-	if (funcs->detect_ctx)
-		ret = funcs->detect_ctx(connector, ctx, force);
-	else if (connector->funcs->detect)
-		ret = connector->funcs->detect(connector, force);
-	else
-		ret = connector_status_connected;
+	ret = detect_connector_status(connector, ctx, force);
 
 	if (ret != connector->status)
 		connector->epoch_counter += 1;
@@ -418,6 +424,13 @@ static int drm_helper_probe_get_modes(struct drm_connector *connector)
 	int count;
 
 	count = connector_funcs->get_modes(connector);
+
+	/* The .get_modes() callback should not return negative values. */
+	if (count < 0) {
+		drm_err(connector->dev, ".get_modes() returned %pe\n",
+			ERR_PTR(count));
+		count = 0;
+	}
 
 	/*
 	 * Fallback for when DDC probe failed in drm_get_edid() and thus skipped
@@ -463,6 +476,10 @@ static int __drm_helper_update_and_validate(struct drm_connector *connector,
 		if (mode->status != MODE_OK)
 			continue;
 
+		mode->status = drm_mode_validate_ycbcr420(mode, connector);
+		if (mode->status != MODE_OK)
+			continue;
+
 		ret = drm_mode_validate_pipeline(mode, connector, ctx,
 						 &mode->status);
 		if (ret) {
@@ -475,10 +492,6 @@ static int __drm_helper_update_and_validate(struct drm_connector *connector,
 			else
 				return -EDEADLK;
 		}
-
-		if (mode->status != MODE_OK)
-			continue;
-		mode->status = drm_mode_validate_ycbcr420(mode, connector);
 	}
 
 	return 0;
@@ -556,8 +569,8 @@ int drm_helper_probe_single_connector_modes(struct drm_connector *connector,
 
 	drm_modeset_acquire_init(&ctx, 0);
 
-	DRM_DEBUG_KMS("[CONNECTOR:%d:%s]\n", connector->base.id,
-			connector->name);
+	drm_dbg_kms(dev, "[CONNECTOR:%d:%s]\n", connector->base.id,
+		    connector->name);
 
 retry:
 	ret = drm_modeset_lock(&dev->mode_config.connection_mutex, &ctx);
@@ -600,11 +613,10 @@ retry:
 	 * check here, and if anything changed start the hotplug code.
 	 */
 	if (old_status != connector->status) {
-		DRM_DEBUG_KMS("[CONNECTOR:%d:%s] status updated from %s to %s\n",
-			      connector->base.id,
-			      connector->name,
-			      drm_get_connector_status_name(old_status),
-			      drm_get_connector_status_name(connector->status));
+		drm_dbg_kms(dev, "[CONNECTOR:%d:%s] status updated from %s to %s\n",
+			    connector->base.id, connector->name,
+			    drm_get_connector_status_name(old_status),
+			    drm_get_connector_status_name(connector->status));
 
 		/*
 		 * The hotplug event code might call into the fb
@@ -614,17 +626,21 @@ retry:
 		 */
 		dev->mode_config.delayed_event = true;
 		if (dev->mode_config.poll_enabled)
-			mod_delayed_work(system_wq,
+			mod_delayed_work(system_percpu_wq,
 					 &dev->mode_config.output_poll_work,
 					 0);
 	}
 
-	/* Re-enable polling in case the global poll config changed. */
-	drm_kms_helper_poll_enable(dev);
+	/*
+	 * Re-enable polling in case the global poll config changed but polling
+	 * is still initialized.
+	 */
+	if (dev->mode_config.poll_enabled)
+		drm_kms_helper_poll_enable(dev);
 
 	if (connector->status == connector_status_disconnected) {
-		DRM_DEBUG_KMS("[CONNECTOR:%d:%s] disconnected\n",
-			connector->base.id, connector->name);
+		drm_dbg_kms(dev, "[CONNECTOR:%d:%s] disconnected\n",
+			    connector->base.id, connector->name);
 		drm_connector_update_edid_property(connector, NULL);
 		drm_mode_prune_invalid(dev, &connector->modes, false);
 		goto exit;
@@ -682,11 +698,13 @@ exit:
 
 	drm_mode_sort(&connector->modes);
 
-	DRM_DEBUG_KMS("[CONNECTOR:%d:%s] probed modes :\n", connector->base.id,
-			connector->name);
+	drm_dbg_kms(dev, "[CONNECTOR:%d:%s] probed modes:\n",
+		    connector->base.id, connector->name);
+
 	list_for_each_entry(mode, &connector->modes, head) {
 		drm_mode_set_crtcinfo(mode, CRTC_INTERLACE_HALVE_V);
-		drm_mode_debug_printmodeline(mode);
+		drm_dbg_kms(dev, "Probed mode: " DRM_MODE_FMT "\n",
+			    DRM_MODE_ARG(mode));
 	}
 
 	return count;
@@ -698,7 +716,7 @@ EXPORT_SYMBOL(drm_helper_probe_single_connector_modes);
  * @dev: drm_device whose connector state changed
  *
  * This function fires off the uevent for userspace and also calls the
- * output_poll_changed function, which is most commonly used to inform the fbdev
+ * client hotplug function, which is most commonly used to inform the fbdev
  * emulation code and allow it to update the fbcon output configuration.
  *
  * Drivers should call this from their hotplug handling code when a change is
@@ -714,11 +732,7 @@ EXPORT_SYMBOL(drm_helper_probe_single_connector_modes);
  */
 void drm_kms_helper_hotplug_event(struct drm_device *dev)
 {
-	/* send a uevent + call fbdev */
 	drm_sysfs_hotplug_event(dev);
-	if (dev->mode_config.funcs->output_poll_changed)
-		dev->mode_config.funcs->output_poll_changed(dev);
-
 	drm_client_dev_hotplug(dev);
 }
 EXPORT_SYMBOL(drm_kms_helper_hotplug_event);
@@ -734,11 +748,7 @@ void drm_kms_helper_connector_hotplug_event(struct drm_connector *connector)
 {
 	struct drm_device *dev = connector->dev;
 
-	/* send a uevent + call fbdev */
 	drm_sysfs_connector_hotplug_event(connector);
-	if (dev->mode_config.funcs->output_poll_changed)
-		dev->mode_config.funcs->output_poll_changed(dev);
-
 	drm_client_dev_hotplug(dev);
 }
 EXPORT_SYMBOL(drm_kms_helper_connector_hotplug_event);
@@ -750,25 +760,32 @@ static void output_poll_execute(struct work_struct *work)
 	struct drm_connector *connector;
 	struct drm_connector_list_iter conn_iter;
 	enum drm_connector_status old_status;
-	bool repoll = false, changed;
+	bool repoll = false, changed = false;
 	u64 old_epoch_counter;
 
 	if (!dev->mode_config.poll_enabled)
 		return;
 
-	/* Pick up any changes detected by the probe functions. */
-	changed = dev->mode_config.delayed_event;
-	dev->mode_config.delayed_event = false;
+	if (!drm_kms_helper_poll) {
+		if (dev->mode_config.poll_running) {
+			drm_kms_helper_disable_hpd(dev);
+			dev->mode_config.poll_running = false;
+		}
 
-	if (!drm_kms_helper_poll && dev->mode_config.poll_running) {
-		drm_kms_helper_disable_hpd(dev);
-		dev->mode_config.poll_running = false;
-		goto out;
+		scoped_guard(mutex, &dev->mode_config.mutex) {
+			changed = dev->mode_config.delayed_event;
+			dev->mode_config.delayed_event = false;
+		}
+
+		if (changed)
+			drm_kms_helper_hotplug_event(dev);
+
+		return;
 	}
 
 	if (!mutex_trylock(&dev->mode_config.mutex)) {
-		repoll = true;
-		goto out;
+		schedule_delayed_work(delayed_work, DRM_OUTPUT_POLL_PERIOD);
+		return;
 	}
 
 	drm_connector_list_iter_begin(dev, &conn_iter);
@@ -817,25 +834,30 @@ static void output_poll_execute(struct work_struct *work)
 			old = drm_get_connector_status_name(old_status);
 			new = drm_get_connector_status_name(connector->status);
 
-			DRM_DEBUG_KMS("[CONNECTOR:%d:%s] "
-				      "status updated from %s to %s\n",
-				      connector->base.id,
-				      connector->name,
-				      old, new);
-			DRM_DEBUG_KMS("[CONNECTOR:%d:%s] epoch counter %llu -> %llu\n",
-				      connector->base.id, connector->name,
-				      old_epoch_counter, connector->epoch_counter);
+			drm_dbg_kms(dev, "[CONNECTOR:%d:%s] status updated from %s to %s\n",
+				    connector->base.id, connector->name,
+				    old, new);
+			drm_dbg_kms(dev, "[CONNECTOR:%d:%s] epoch counter %llu -> %llu\n",
+				    connector->base.id, connector->name,
+				    old_epoch_counter, connector->epoch_counter);
 
+			drm_sysfs_connector_hotplug_event(connector);
 			changed = true;
 		}
 	}
 	drm_connector_list_iter_end(&conn_iter);
 
+	/* Pick up any changes detected by the probe functions. */
+	if (dev->mode_config.delayed_event) {
+		dev->mode_config.delayed_event = false;
+		changed = true;
+		drm_sysfs_hotplug_event(dev);
+	}
+
 	mutex_unlock(&dev->mode_config.mutex);
 
-out:
 	if (changed)
-		drm_kms_helper_hotplug_event(dev);
+		drm_client_dev_hotplug(dev);
 
 	if (repoll)
 		schedule_delayed_work(delayed_work, DRM_OUTPUT_POLL_PERIOD);
@@ -871,12 +893,18 @@ EXPORT_SYMBOL(drm_kms_helper_is_poll_worker);
  * not an error to call this even when output polling isn't enabled or already
  * disabled. Polling is re-enabled by calling drm_kms_helper_poll_enable().
  *
+ * If however, the polling was never initialized, this call will trigger a
+ * warning and return.
+ *
  * Note that calls to enable and disable polling must be strictly ordered, which
  * is automatically the case when they're only call from suspend/resume
  * callbacks.
  */
 void drm_kms_helper_poll_disable(struct drm_device *dev)
 {
+	if (drm_WARN_ON(dev, !dev->mode_config.poll_enabled))
+		return;
+
 	if (dev->mode_config.poll_running)
 		drm_kms_helper_disable_hpd(dev);
 
@@ -928,6 +956,33 @@ void drm_kms_helper_poll_fini(struct drm_device *dev)
 	dev->mode_config.poll_enabled = false;
 }
 EXPORT_SYMBOL(drm_kms_helper_poll_fini);
+
+static void drm_kms_helper_poll_init_release(struct drm_device *dev, void *res)
+{
+	drm_kms_helper_poll_fini(dev);
+}
+
+/**
+ * drmm_kms_helper_poll_init - initialize and enable output polling
+ * @dev: drm_device
+ *
+ * This function initializes and then also enables output polling support for
+ * @dev similar to drm_kms_helper_poll_init(). Polling will automatically be
+ * cleaned up when the DRM device goes away.
+ *
+ * See drm_kms_helper_poll_init() for more information.
+ */
+void drmm_kms_helper_poll_init(struct drm_device *dev)
+{
+	int ret;
+
+	drm_kms_helper_poll_init(dev);
+
+	ret = drmm_add_action_or_reset(dev, drm_kms_helper_poll_init_release, dev);
+	if (ret)
+		drm_warn(dev, "Connector status will not be updated, error %d\n", ret);
+}
+EXPORT_SYMBOL(drmm_kms_helper_poll_init);
 
 static bool check_connector_changed(struct drm_connector *connector)
 {
@@ -1038,9 +1093,9 @@ EXPORT_SYMBOL(drm_connector_helper_hpd_irq_event);
  */
 bool drm_helper_hpd_irq_event(struct drm_device *dev)
 {
-	struct drm_connector *connector, *first_changed_connector = NULL;
 	struct drm_connector_list_iter conn_iter;
-	int changed = 0;
+	struct drm_connector *connector;
+	bool changed = false;
 
 	if (!dev->mode_config.poll_enabled)
 		return false;
@@ -1053,24 +1108,15 @@ bool drm_helper_hpd_irq_event(struct drm_device *dev)
 			continue;
 
 		if (check_connector_changed(connector)) {
-			if (!first_changed_connector) {
-				drm_connector_get(connector);
-				first_changed_connector = connector;
-			}
-
-			changed++;
+			changed = true;
+			drm_sysfs_connector_hotplug_event(connector);
 		}
 	}
 	drm_connector_list_iter_end(&conn_iter);
 	mutex_unlock(&dev->mode_config.mutex);
 
-	if (changed == 1)
-		drm_kms_helper_connector_hotplug_event(first_changed_connector);
-	else if (changed > 0)
-		drm_kms_helper_hotplug_event(dev);
-
-	if (first_changed_connector)
-		drm_connector_put(first_changed_connector);
+	if (changed)
+		drm_client_dev_hotplug(dev);
 
 	return changed;
 }
@@ -1099,42 +1145,6 @@ enum drm_mode_status drm_crtc_helper_mode_valid_fixed(struct drm_crtc *crtc,
 	return MODE_OK;
 }
 EXPORT_SYMBOL(drm_crtc_helper_mode_valid_fixed);
-
-/**
- * drm_connector_helper_get_modes_from_ddc - Updates the connector's EDID
- *                                           property from the connector's
- *                                           DDC channel
- * @connector: The connector
- *
- * Returns:
- * The number of detected display modes.
- *
- * Uses a connector's DDC channel to retrieve EDID data and update the
- * connector's EDID property and display modes. Drivers can use this
- * function to implement struct &drm_connector_helper_funcs.get_modes
- * for connectors with a DDC channel.
- */
-int drm_connector_helper_get_modes_from_ddc(struct drm_connector *connector)
-{
-	struct edid *edid;
-	int count = 0;
-
-	if (!connector->ddc)
-		return 0;
-
-	edid = drm_get_edid(connector, connector->ddc);
-
-	// clears property if EDID is NULL
-	drm_connector_update_edid_property(connector, edid);
-
-	if (edid) {
-		count = drm_add_edid_modes(connector, edid);
-		kfree(edid);
-	}
-
-	return count;
-}
-EXPORT_SYMBOL(drm_connector_helper_get_modes_from_ddc);
 
 /**
  * drm_connector_helper_get_modes_fixed - Duplicates a display mode for a connector
@@ -1247,8 +1257,9 @@ int drm_connector_helper_tv_get_modes(struct drm_connector *connector)
 	for (i = 0; i < tv_mode_property->num_values; i++)
 		supported_tv_modes |= BIT(tv_mode_property->values[i]);
 
-	if ((supported_tv_modes & ntsc_modes) &&
-	    (supported_tv_modes & pal_modes)) {
+	if (((supported_tv_modes & ntsc_modes) &&
+	     (supported_tv_modes & pal_modes)) ||
+	    (supported_tv_modes & BIT(DRM_MODE_TV_MODE_MONOCHROME))) {
 		uint64_t default_mode;
 
 		if (drm_object_property_get_default_value(&connector->base,
@@ -1293,3 +1304,32 @@ int drm_connector_helper_tv_get_modes(struct drm_connector *connector)
 	return i;
 }
 EXPORT_SYMBOL(drm_connector_helper_tv_get_modes);
+
+/**
+ * drm_connector_helper_detect_from_ddc - Read EDID and detect connector status.
+ * @connector: The connector
+ * @ctx: Acquire context
+ * @force: Perform screen-destructive operations, if necessary
+ *
+ * Detects the connector status by reading the EDID using drm_probe_ddc(),
+ * which requires connector->ddc to be set. Returns connector_status_connected
+ * on success or connector_status_disconnected on failure.
+ *
+ * Returns:
+ * The connector status as defined by enum drm_connector_status.
+ */
+int drm_connector_helper_detect_from_ddc(struct drm_connector *connector,
+					 struct drm_modeset_acquire_ctx *ctx,
+					 bool force)
+{
+	struct i2c_adapter *ddc = connector->ddc;
+
+	if (!ddc)
+		return connector_status_unknown;
+
+	if (drm_probe_ddc(ddc))
+		return connector_status_connected;
+
+	return connector_status_disconnected;
+}
+EXPORT_SYMBOL(drm_connector_helper_detect_from_ddc);

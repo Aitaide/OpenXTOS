@@ -6,7 +6,9 @@
 
 唯一开发目录：`/root/xtos-development/xtos`。
 
-仓库直接包含 Linux 6.6.0 + PREEMPT_RT rt15、XTOS 内核组件、BusyBox 1.37.0、根文件系统、SDK、工具、测试、开发计划和架构设计。构建不下载基础源码，输出隔离在 `.build/`。
+当前源码已迁移为官方签名核验的 Linux 7.3.1 与主线 PREEMPT_RT；版本和补丁来源见 `kernel/source-pin.json`。x86_64、ARM64、RISC-V 64 完整内核与生产 BCI 三模块均已实际构建；三个架构的合成设备 QEMU 已验证运行中 RT 模型、配置查询、旧/逐帧 ioctl、只读 mmap、SDK、解绑与模块卸载。新整机、完整维护、集成独立审查及精确提交验收仍在进行，本次升级保持 `in_progress`，不继承旧镜像 PASS。证据与失败记录在 `.build/kernel-7.3.1/`，范围见 `docs/kernel-7.3.1-migration.md`。
+
+下列早期构建、跨架构和镜像记录均保留其原始内核与源码范围，不代表当前 7.3.1 候选通过。BusyBox、根文件系统、SDK、工具和测试继续在仓库维护，输出隔离在 `.build/`。
 
 当前已验证：
 
@@ -69,7 +71,7 @@ P4已支持的本地软件交付矩阵在 `.build/p4-image-5cb533e4b/p4-delivery
 
 P5生产签名provider的软件切片已在准确提交 `0ee8b87f367e1cd59e996d4d5bf0bf91ef0e2e21` 验收并私有推送，索引 `.build/p5-provider-next/acceptance-index.json`。保留v1 CPU-only，v2签名绑定显式CPU/CUDA/MIGraphX、runtime分发文件/ABI和子进程CPU放置；有限恢复每代次最多两次，缺GPU拒绝且不回退。组件和共享SPEC/QUALITY通过；完整维护118组1515次执行、零失败/错误/跳过（包含11项AI），另一次干净提交严格AI11项、安装副本实际签名CPU3项通过。source-only七模块归档已读回；本验收没有新整机ISO，candidate-61仍只绑定原提交。原worker/server/preflight失败与离线测试超时、后续真实回归和独立修复均保留；历史TDD限制未改写。CUDA/MIGraphX实际推理、性能、外部驱动供应链与RT共存未验证，CPU依赖锁不变。
 
-P6按 `docs/xr-multimodal-v1.md` 实现应用层OpenXR loader、逐点时钟转换、事件barrier和EEG/眼动/EMG有界多模态模拟确认流程。第三方头文件固定Khronos OpenXR-SDK release-1.1.57；不捆绑loader或vendor runtime。native清理/数值溢出及眼动样本时间域缺口已加入回归；安装副本demo、launcher解释器/argv、冲突保护和编译native事件到多模态撤销的聚焦执行通过。组件与共享独立审查、完整维护、准确提交及最终安装归档门完成前，P6保持in_progress，当前聚焦结果不是阶段验收。图形会话、眼动action/space的真实采集尚未实现；真实头显、设备时钟同步和物理时延未验证。所有模拟反馈保持no_action。自定义 `sched_class` 仍受物理前置决策门约束，尚未实现。
+P6 应用层 OpenXR loader、逐点转换、事件 barrier 与多模态模拟确认软件切片，已在精确提交 `155beef4e3eadb0824bf4dd7fd3ead73765b4bb2` 验收并私有推送，索引 `.build/p6-xr-next/acceptance-index.json`。SPEC/QUALITY、124 组 1563 次完整维护（含 AI11，零跳过）、干净提交 AI11/安装5/控制桥4，以及 35 文件安装归档解包执行均通过。所有模拟回执 no_action；历史 TDD PARTIAL 和原始失败保留。该验收不覆盖本次内核升级、新整机、图形会话或真实眼动 action/space；真实头显、校准、物理延迟仍未验证。自定义 `sched_class` 受实机前置决策门约束，尚未实现。
 
 ## 历史状态记录
 

@@ -231,7 +231,7 @@ nomem:
 void sctp_generate_t3_rtx_event(struct timer_list *t)
 {
 	struct sctp_transport *transport =
-		from_timer(transport, t, T3_rtx_timer);
+		timer_container_of(transport, t, T3_rtx_timer);
 	struct sctp_association *asoc = transport->asoc;
 	struct sock *sk = asoc->base.sk;
 	struct net *net = sock_net(sk);
@@ -244,8 +244,9 @@ void sctp_generate_t3_rtx_event(struct timer_list *t)
 		pr_debug("%s: sock is busy\n", __func__);
 
 		/* Try again later.  */
-		if (!mod_timer(&transport->T3_rtx_timer, jiffies + (HZ/20)))
-			sctp_transport_hold(transport);
+		sctp_transport_hold(transport);
+		if (mod_timer(&transport->T3_rtx_timer, jiffies + (HZ / 20)))
+			sctp_transport_put(transport);
 		goto out_unlock;
 	}
 
@@ -280,8 +281,9 @@ static void sctp_generate_timeout_event(struct sctp_association *asoc,
 			 timeout_type);
 
 		/* Try again later.  */
-		if (!mod_timer(&asoc->timers[timeout_type], jiffies + (HZ/20)))
-			sctp_association_hold(asoc);
+		sctp_association_hold(asoc);
+		if (mod_timer(&asoc->timers[timeout_type], jiffies + (HZ / 20)))
+			sctp_association_put(asoc);
 		goto out_unlock;
 	}
 
@@ -308,7 +310,8 @@ out_unlock:
 static void sctp_generate_t1_cookie_event(struct timer_list *t)
 {
 	struct sctp_association *asoc =
-		from_timer(asoc, t, timers[SCTP_EVENT_TIMEOUT_T1_COOKIE]);
+		timer_container_of(asoc, t,
+				   timers[SCTP_EVENT_TIMEOUT_T1_COOKIE]);
 
 	sctp_generate_timeout_event(asoc, SCTP_EVENT_TIMEOUT_T1_COOKIE);
 }
@@ -316,7 +319,8 @@ static void sctp_generate_t1_cookie_event(struct timer_list *t)
 static void sctp_generate_t1_init_event(struct timer_list *t)
 {
 	struct sctp_association *asoc =
-		from_timer(asoc, t, timers[SCTP_EVENT_TIMEOUT_T1_INIT]);
+		timer_container_of(asoc, t,
+				   timers[SCTP_EVENT_TIMEOUT_T1_INIT]);
 
 	sctp_generate_timeout_event(asoc, SCTP_EVENT_TIMEOUT_T1_INIT);
 }
@@ -324,7 +328,8 @@ static void sctp_generate_t1_init_event(struct timer_list *t)
 static void sctp_generate_t2_shutdown_event(struct timer_list *t)
 {
 	struct sctp_association *asoc =
-		from_timer(asoc, t, timers[SCTP_EVENT_TIMEOUT_T2_SHUTDOWN]);
+		timer_container_of(asoc, t,
+				   timers[SCTP_EVENT_TIMEOUT_T2_SHUTDOWN]);
 
 	sctp_generate_timeout_event(asoc, SCTP_EVENT_TIMEOUT_T2_SHUTDOWN);
 }
@@ -332,7 +337,7 @@ static void sctp_generate_t2_shutdown_event(struct timer_list *t)
 static void sctp_generate_t4_rto_event(struct timer_list *t)
 {
 	struct sctp_association *asoc =
-		from_timer(asoc, t, timers[SCTP_EVENT_TIMEOUT_T4_RTO]);
+		timer_container_of(asoc, t, timers[SCTP_EVENT_TIMEOUT_T4_RTO]);
 
 	sctp_generate_timeout_event(asoc, SCTP_EVENT_TIMEOUT_T4_RTO);
 }
@@ -340,8 +345,8 @@ static void sctp_generate_t4_rto_event(struct timer_list *t)
 static void sctp_generate_t5_shutdown_guard_event(struct timer_list *t)
 {
 	struct sctp_association *asoc =
-		from_timer(asoc, t,
-			   timers[SCTP_EVENT_TIMEOUT_T5_SHUTDOWN_GUARD]);
+		timer_container_of(asoc, t,
+				   timers[SCTP_EVENT_TIMEOUT_T5_SHUTDOWN_GUARD]);
 
 	sctp_generate_timeout_event(asoc,
 				    SCTP_EVENT_TIMEOUT_T5_SHUTDOWN_GUARD);
@@ -351,7 +356,8 @@ static void sctp_generate_t5_shutdown_guard_event(struct timer_list *t)
 static void sctp_generate_autoclose_event(struct timer_list *t)
 {
 	struct sctp_association *asoc =
-		from_timer(asoc, t, timers[SCTP_EVENT_TIMEOUT_AUTOCLOSE]);
+		timer_container_of(asoc, t,
+				   timers[SCTP_EVENT_TIMEOUT_AUTOCLOSE]);
 
 	sctp_generate_timeout_event(asoc, SCTP_EVENT_TIMEOUT_AUTOCLOSE);
 }
@@ -361,7 +367,8 @@ static void sctp_generate_autoclose_event(struct timer_list *t)
  */
 void sctp_generate_heartbeat_event(struct timer_list *t)
 {
-	struct sctp_transport *transport = from_timer(transport, t, hb_timer);
+	struct sctp_transport *transport = timer_container_of(transport, t,
+							      hb_timer);
 	struct sctp_association *asoc = transport->asoc;
 	struct sock *sk = asoc->base.sk;
 	struct net *net = sock_net(sk);
@@ -373,8 +380,9 @@ void sctp_generate_heartbeat_event(struct timer_list *t)
 		pr_debug("%s: sock is busy\n", __func__);
 
 		/* Try again later.  */
-		if (!mod_timer(&transport->hb_timer, jiffies + (HZ/20)))
-			sctp_transport_hold(transport);
+		sctp_transport_hold(transport);
+		if (mod_timer(&transport->hb_timer, jiffies + (HZ / 20)))
+			sctp_transport_put(transport);
 		goto out_unlock;
 	}
 
@@ -383,8 +391,9 @@ void sctp_generate_heartbeat_event(struct timer_list *t)
 	timeout = sctp_transport_timeout(transport);
 	if (elapsed < timeout) {
 		elapsed = timeout - elapsed;
-		if (!mod_timer(&transport->hb_timer, jiffies + elapsed))
-			sctp_transport_hold(transport);
+		sctp_transport_hold(transport);
+		if (mod_timer(&transport->hb_timer, jiffies + elapsed))
+			sctp_transport_put(transport);
 		goto out_unlock;
 	}
 
@@ -407,7 +416,7 @@ out_unlock:
 void sctp_generate_proto_unreach_event(struct timer_list *t)
 {
 	struct sctp_transport *transport =
-		from_timer(transport, t, proto_unreach_timer);
+		timer_container_of(transport, t, proto_unreach_timer);
 	struct sctp_association *asoc = transport->asoc;
 	struct sock *sk = asoc->base.sk;
 	struct net *net = sock_net(sk);
@@ -417,9 +426,10 @@ void sctp_generate_proto_unreach_event(struct timer_list *t)
 		pr_debug("%s: sock is busy\n", __func__);
 
 		/* Try again later.  */
-		if (!mod_timer(&transport->proto_unreach_timer,
-				jiffies + (HZ/20)))
-			sctp_transport_hold(transport);
+		sctp_transport_hold(transport);
+		if (mod_timer(&transport->proto_unreach_timer,
+			      jiffies + (HZ / 20)))
+			sctp_transport_put(transport);
 		goto out_unlock;
 	}
 
@@ -442,7 +452,7 @@ out_unlock:
 void sctp_generate_reconf_event(struct timer_list *t)
 {
 	struct sctp_transport *transport =
-		from_timer(transport, t, reconf_timer);
+		timer_container_of(transport, t, reconf_timer);
 	struct sctp_association *asoc = transport->asoc;
 	struct sock *sk = asoc->base.sk;
 	struct net *net = sock_net(sk);
@@ -453,8 +463,9 @@ void sctp_generate_reconf_event(struct timer_list *t)
 		pr_debug("%s: sock is busy\n", __func__);
 
 		/* Try again later.  */
-		if (!mod_timer(&transport->reconf_timer, jiffies + (HZ / 20)))
-			sctp_transport_hold(transport);
+		sctp_transport_hold(transport);
+		if (mod_timer(&transport->reconf_timer, jiffies + (HZ / 20)))
+			sctp_transport_put(transport);
 		goto out_unlock;
 	}
 
@@ -478,7 +489,8 @@ out_unlock:
 /* Handle the timeout of the probe timer. */
 void sctp_generate_probe_event(struct timer_list *t)
 {
-	struct sctp_transport *transport = from_timer(transport, t, probe_timer);
+	struct sctp_transport *transport = timer_container_of(transport, t,
+							      probe_timer);
 	struct sctp_association *asoc = transport->asoc;
 	struct sock *sk = asoc->base.sk;
 	struct net *net = sock_net(sk);
@@ -489,8 +501,9 @@ void sctp_generate_probe_event(struct timer_list *t)
 		pr_debug("%s: sock is busy\n", __func__);
 
 		/* Try again later.  */
-		if (!mod_timer(&transport->probe_timer, jiffies + (HZ / 20)))
-			sctp_transport_hold(transport);
+		sctp_transport_hold(transport);
+		if (mod_timer(&transport->probe_timer, jiffies + (HZ / 20)))
+			sctp_transport_put(transport);
 		goto out_unlock;
 	}
 
@@ -511,7 +524,7 @@ out_unlock:
 static void sctp_generate_sack_event(struct timer_list *t)
 {
 	struct sctp_association *asoc =
-		from_timer(asoc, t, timers[SCTP_EVENT_TIMEOUT_SACK]);
+		timer_container_of(asoc, t, timers[SCTP_EVENT_TIMEOUT_SACK]);
 
 	sctp_generate_timeout_event(asoc, SCTP_EVENT_TIMEOUT_SACK);
 }
@@ -734,7 +747,7 @@ static void sctp_cmd_hb_timers_stop(struct sctp_cmd_seq *cmds,
 
 	list_for_each_entry(t, &asoc->peer.transport_addr_list,
 			transports) {
-		if (del_timer(&t->hb_timer))
+		if (timer_delete(&t->hb_timer))
 			sctp_transport_put(t);
 	}
 }
@@ -747,7 +760,7 @@ static void sctp_cmd_t3_rtx_timers_stop(struct sctp_cmd_seq *cmds,
 
 	list_for_each_entry(t, &asoc->peer.transport_addr_list,
 			transports) {
-		if (del_timer(&t->T3_rtx_timer))
+		if (timer_delete(&t->T3_rtx_timer))
 			sctp_transport_put(t);
 	}
 }
@@ -1326,6 +1339,10 @@ static int sctp_cmd_interpreter(enum sctp_event_type event_type,
 				sctp_outq_uncork(&asoc->outqueue, gfp);
 				local_cork = 0;
 			}
+			/* No chunk left in this packet may use this asoc. */
+			if (event_type == SCTP_EVENT_T_CHUNK &&
+			    chunk->asoc == asoc)
+				chunk->pdiscard = 1;
 			/* Delete the current association.  */
 			sctp_cmd_delete_tcb(commands, asoc);
 			asoc = NULL;
@@ -1535,17 +1552,8 @@ static int sctp_cmd_interpreter(enum sctp_event_type event_type,
 			timeout = asoc->timeouts[cmd->obj.to];
 			BUG_ON(!timeout);
 
-			/*
-			 * SCTP has a hard time with timer starts.  Because we process
-			 * timer starts as side effects, it can be hard to tell if we
-			 * have already started a timer or not, which leads to BUG
-			 * halts when we call add_timer. So here, instead of just starting
-			 * a timer, if the timer is already started, and just mod
-			 * the timer with the shorter of the two expiration times
-			 */
-			if (!timer_pending(timer))
+			if (!timer_reduce(timer, jiffies + timeout))
 				sctp_association_hold(asoc);
-			timer_reduce(timer, jiffies + timeout);
 			break;
 
 		case SCTP_CMD_TIMER_RESTART:
@@ -1557,7 +1565,7 @@ static int sctp_cmd_interpreter(enum sctp_event_type event_type,
 
 		case SCTP_CMD_TIMER_STOP:
 			timer = &asoc->timers[cmd->obj.to];
-			if (del_timer(timer))
+			if (timer_delete(timer))
 				sctp_association_put(asoc);
 			break;
 

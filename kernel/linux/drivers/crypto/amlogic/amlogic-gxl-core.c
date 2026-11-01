@@ -240,11 +240,9 @@ static int meson_crypto_probe(struct platform_device *pdev)
 	platform_set_drvdata(pdev, mc);
 
 	mc->base = devm_platform_ioremap_resource(pdev, 0);
-	if (IS_ERR(mc->base)) {
-		err = PTR_ERR(mc->base);
-		dev_err(&pdev->dev, "Cannot request MMIO err=%d\n", err);
-		return err;
-	}
+	if (IS_ERR(mc->base))
+		return PTR_ERR(mc->base);
+
 	mc->busclk = devm_clk_get(&pdev->dev, "blkmv");
 	if (IS_ERR(mc->busclk)) {
 		err = PTR_ERR(mc->busclk);
@@ -259,10 +257,8 @@ static int meson_crypto_probe(struct platform_device *pdev)
 
 		err = devm_request_irq(&pdev->dev, mc->irqs[i], meson_irq_handler, 0,
 				       "gxl-crypto", mc);
-		if (err < 0) {
-			dev_err(mc->dev, "Cannot request IRQ for flow %d\n", i);
+		if (err < 0)
 			return err;
-		}
 	}
 
 	err = clk_prepare_enable(mc->busclk);
@@ -293,13 +289,13 @@ static int meson_crypto_probe(struct platform_device *pdev)
 	return 0;
 error_alg:
 	meson_unregister_algs(mc);
-error_flow:
 	meson_free_chanlist(mc, MAXFLOW - 1);
+error_flow:
 	clk_disable_unprepare(mc->busclk);
 	return err;
 }
 
-static int meson_crypto_remove(struct platform_device *pdev)
+static void meson_crypto_remove(struct platform_device *pdev)
 {
 	struct meson_dev *mc = platform_get_drvdata(pdev);
 
@@ -312,7 +308,6 @@ static int meson_crypto_remove(struct platform_device *pdev)
 	meson_free_chanlist(mc, MAXFLOW - 1);
 
 	clk_disable_unprepare(mc->busclk);
-	return 0;
 }
 
 static const struct of_device_id meson_crypto_of_match_table[] = {

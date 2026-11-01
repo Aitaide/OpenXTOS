@@ -7,7 +7,6 @@
 #include <linux/err.h>
 #include <linux/i2c.h>
 #include <linux/iio/iio.h>
-#include <linux/mod_devicetable.h>
 #include <linux/module.h>
 #include <linux/property.h>
 
@@ -34,6 +33,7 @@ static bool inv_mpu_i2c_aux_bus(struct device *dev)
 	case INV_ICM20689:
 	case INV_ICM20600:
 	case INV_ICM20602:
+	case INV_IAM20380:
 	case INV_IAM20680:
 		/* no i2c auxiliary bus on the chip */
 		return false;
@@ -142,7 +142,7 @@ static int inv_mpu_probe(struct i2c_client *client)
 		if (!st->muxc)
 			return -ENOMEM;
 		st->muxc->priv = dev_get_drvdata(&client->dev);
-		result = i2c_mux_add_adapter(st->muxc, 0, 0, 0);
+		result = i2c_mux_add_adapter(st->muxc, 0, 0);
 		if (result)
 			return result;
 		result = inv_mpu_acpi_create_mux_client(client);
@@ -173,22 +173,25 @@ static void inv_mpu_remove(struct i2c_client *client)
  * supported by this driver
  */
 static const struct i2c_device_id inv_mpu_id[] = {
-	{"mpu6050", INV_MPU6050},
-	{"mpu6500", INV_MPU6500},
-	{"mpu6515", INV_MPU6515},
-	{"mpu6880", INV_MPU6880},
-	{"mpu9150", INV_MPU9150},
-	{"mpu9250", INV_MPU9250},
-	{"mpu9255", INV_MPU9255},
-	{"icm20608", INV_ICM20608},
-	{"icm20608d", INV_ICM20608D},
-	{"icm20609", INV_ICM20609},
-	{"icm20689", INV_ICM20689},
-	{"icm20600", INV_ICM20600},
-	{"icm20602", INV_ICM20602},
-	{"icm20690", INV_ICM20690},
-	{"iam20680", INV_IAM20680},
-	{}
+	{ .name = "mpu6050", .driver_data = INV_MPU6050 },
+	{ .name = "mpu6500", .driver_data = INV_MPU6500 },
+	{ .name = "mpu6515", .driver_data = INV_MPU6515 },
+	{ .name = "mpu6880", .driver_data = INV_MPU6880 },
+	{ .name = "mpu9150", .driver_data = INV_MPU9150 },
+	{ .name = "mpu9250", .driver_data = INV_MPU9250 },
+	{ .name = "mpu9255", .driver_data = INV_MPU9255 },
+	{ .name = "icm20608", .driver_data = INV_ICM20608 },
+	{ .name = "icm20608d", .driver_data = INV_ICM20608D },
+	{ .name = "icm20609", .driver_data = INV_ICM20609 },
+	{ .name = "icm20689", .driver_data = INV_ICM20689 },
+	{ .name = "icm20600", .driver_data = INV_ICM20600 },
+	{ .name = "icm20602", .driver_data = INV_ICM20602 },
+	{ .name = "icm20690", .driver_data = INV_ICM20690 },
+	{ .name = "iam20380", .driver_data = INV_IAM20380 },
+	{ .name = "iam20680", .driver_data = INV_IAM20680 },
+	{ .name = "iam20680hp", .driver_data = INV_IAM20680HP },
+	{ .name = "iam20680ht", .driver_data = INV_IAM20680HT },
+	{ }
 };
 
 MODULE_DEVICE_TABLE(i2c, inv_mpu_id);
@@ -251,8 +254,20 @@ static const struct of_device_id inv_of_match[] = {
 		.data = (void *)INV_ICM20690
 	},
 	{
+		.compatible = "invensense,iam20380",
+		.data = (void *)INV_IAM20380
+	},
+	{
 		.compatible = "invensense,iam20680",
 		.data = (void *)INV_IAM20680
+	},
+	{
+		.compatible = "invensense,iam20680hp",
+		.data = (void *)INV_IAM20680HP
+	},
+	{
+		.compatible = "invensense,iam20680ht",
+		.data = (void *)INV_IAM20680HT
 	},
 	{ }
 };
@@ -260,7 +275,7 @@ MODULE_DEVICE_TABLE(of, inv_of_match);
 
 static const struct acpi_device_id inv_acpi_match[] = {
 	{"INVN6500", INV_MPU6500},
-	{ },
+	{ }
 };
 MODULE_DEVICE_TABLE(acpi, inv_acpi_match);
 
@@ -281,4 +296,4 @@ module_i2c_driver(inv_mpu_driver);
 MODULE_AUTHOR("Invensense Corporation");
 MODULE_DESCRIPTION("Invensense device MPU6050 driver");
 MODULE_LICENSE("GPL");
-MODULE_IMPORT_NS(IIO_MPU6050);
+MODULE_IMPORT_NS("IIO_MPU6050");

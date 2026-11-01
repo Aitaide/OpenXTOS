@@ -8,9 +8,7 @@
  * Copyright (c) 2016, Intel Corporation.
  */
 #include <linux/module.h>
-#include <linux/mod_devicetable.h>
 #include <linux/spi/spi.h>
-#include <linux/acpi.h>
 #include <linux/regmap.h>
 
 #include "bmc150_magn.h"
@@ -35,27 +33,18 @@ static void bmc150_magn_spi_remove(struct spi_device *spi)
 }
 
 static const struct spi_device_id bmc150_magn_spi_id[] = {
-	{"bmc150_magn", 0},
-	{"bmc156_magn", 0},
-	{"bmm150_magn", 0},
-	{}
+	{ .name = "bmc150_magn" },
+	{ .name = "bmc156_magn" },
+	{ .name = "bmm150_magn" },
+	{ }
 };
 MODULE_DEVICE_TABLE(spi, bmc150_magn_spi_id);
-
-static const struct acpi_device_id bmc150_magn_acpi_match[] = {
-	{"BMC150B", 0},
-	{"BMC156B", 0},
-	{"BMM150B", 0},
-	{},
-};
-MODULE_DEVICE_TABLE(acpi, bmc150_magn_acpi_match);
 
 static struct spi_driver bmc150_magn_spi_driver = {
 	.probe		= bmc150_magn_spi_probe,
 	.remove		= bmc150_magn_spi_remove,
 	.id_table	= bmc150_magn_spi_id,
 	.driver = {
-		.acpi_match_table = ACPI_PTR(bmc150_magn_acpi_match),
 		.name	= "bmc150_magn_spi",
 	},
 };
@@ -64,4 +53,4 @@ module_spi_driver(bmc150_magn_spi_driver);
 MODULE_AUTHOR("Daniel Baluta <daniel.baluta@intel.com");
 MODULE_DESCRIPTION("BMC150 magnetometer SPI driver");
 MODULE_LICENSE("GPL v2");
-MODULE_IMPORT_NS(IIO_BMC150_MAGN);
+MODULE_IMPORT_NS("IIO_BMC150_MAGN");

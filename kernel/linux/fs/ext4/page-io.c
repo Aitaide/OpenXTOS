@@ -7,6 +7,7 @@
  * Written by Theodore Ts'o, 2010.
  */
 
+#include <linux/blk-crypto.h>
 #include <linux/fs.h>
 #include <linux/time.h>
 #include <linux/highuid.h>
@@ -15,7 +16,6 @@
 #include <linux/string.h>
 #include <linux/buffer_head.h>
 #include <linux/writeback.h>
-#include <linux/pagevec.h>
 #include <linux/mpage.h>
 #include <linux/namei.h>
 #include <linux/uio.h>
@@ -103,21 +103,14 @@ static void ext4_finish_bio(struct bio *bio)
 
 	bio_for_each_folio_all(fi, bio) {
 		struct folio *folio = fi.folio;
-		struct folio *io_folio = NULL;
 		struct buffer_head *bh, *head;
 		size_t bio_start = fi.offset;
 		size_t bio_end = bio_start + fi.length;
 		unsigned under_io = 0;
 		unsigned long flags;
 
-		if (fscrypt_is_bounce_folio(folio)) {
-			io_folio = folio;
-			folio = fscrypt_pagecache_folio(folio);
-		}
-
 		if (bio->bi_status) {
 			int err = blk_status_to_errno(bio->bi_status);
-			folio_set_error(folio);
 			mapping_set_error(folio->mapping, err);
 		}
 		bh = head = folio_buffers(folio);
@@ -140,10 +133,8 @@ static void ext4_finish_bio(struct bio *bio)
 			}
 		} while ((bh = bh->b_this_page) != head);
 		spin_unlock_irqrestore(&head->b_uptodate_lock, flags);
-		if (!under_io) {
-			fscrypt_free_bounce_page(&io_folio->page);
+		if (!under_io)
 			folio_end_writeback(folio);
-		}
 	}
 }
 
@@ -165,10 +156,11 @@ static void ext4_release_io_end(ext4_io_end_t *io_end)
 }
 
 /*
- * Check a range of space and convert unwritten extents to written. Note that
+ * On successful IO, check a range of space and convert unwritten extents to
+ * written. On IO failure, check if journal abort is needed. Note that
  * we are protected from truncate touching same part of extent tree by the
  * fact that truncate code waits for all DIO to finish (thus exclusion from
- * direct IO is achieved) and also waits for PageWriteback bits. Thus we
+ * direct IO is achieved) and also waits for writeback to complete. Thus we
  * cannot get to ext4_ext_truncate() before all IOs overlapping that range are
  * completed (happens from ext4_free_ioend()).
  */
@@ -176,20 +168,36 @@ static int ext4_end_io_end(ext4_io_end_t *io_end)
 {
 	struct inode *inode = io_end->inode;
 	handle_t *handle = io_end->handle;
+	struct super_block *sb = inode->i_sb;
 	int ret = 0;
 
-	ext4_debug("ext4_end_io_nolock: io_end 0x%p from inode %lu,list->next 0x%p,"
+	ext4_debug("ext4_end_io_nolock: io_end 0x%p from inode %llu,list->next 0x%p,"
 		   "list->prev 0x%p\n",
 		   io_end, inode->i_ino, io_end->list.next, io_end->list.prev);
 
-	io_end->handle = NULL;	/* Following call will use up the handle */
-	ret = ext4_convert_unwritten_io_end_vec(handle, io_end);
-	if (ret < 0 && !ext4_forced_shutdown(inode->i_sb)) {
-		ext4_msg(inode->i_sb, KERN_EMERG,
+	/*
+	 * Do not convert the unwritten extents if data writeback fails,
+	 * or stale data may be exposed.
+	 */
+	io_end->handle = NULL;  /* Following call will use up the handle */
+	if (unlikely(io_end->flag & EXT4_IO_END_FAILED)) {
+		ret = -EIO;
+		if (handle)
+			jbd2_journal_free_reserved(handle);
+
+		if (test_opt(sb, DATA_ERR_ABORT))
+			jbd2_journal_abort(EXT4_SB(sb)->s_journal, ret);
+	} else {
+		ret = ext4_convert_unwritten_io_end_vec(handle, io_end);
+	}
+	if (ret < 0 && !ext4_emergency_state(sb) &&
+	    io_end->flag & EXT4_IO_END_UNWRITTEN) {
+		ext4_msg(sb, KERN_EMERG,
 			 "failed to convert unwritten extents to written "
 			 "extents -- potential data loss!  "
-			 "(inode %lu, error %d)", inode->i_ino, ret);
+			 "(inode %llu, error %d)", inode->i_ino, ret);
 	}
+
 	ext4_clear_io_unwritten_flag(io_end);
 	ext4_release_io_end(io_end);
 	return ret;
@@ -204,7 +212,7 @@ static void dump_completed_IO(struct inode *inode, struct list_head *head)
 	if (list_empty(head))
 		return;
 
-	ext4_debug("Dump inode %lu completed io list\n", inode->i_ino);
+	ext4_debug("Dump inode %llu completed io list\n", inode->i_ino);
 	list_for_each_entry(io_end, head, list) {
 		cur = &io_end->list;
 		before = cur->prev;
@@ -212,10 +220,22 @@ static void dump_completed_IO(struct inode *inode, struct list_head *head)
 		after = cur->next;
 		io_end1 = container_of(after, ext4_io_end_t, list);
 
-		ext4_debug("io 0x%p from inode %lu,prev 0x%p,next 0x%p\n",
+		ext4_debug("io 0x%p from inode %llu,prev 0x%p,next 0x%p\n",
 			    io_end, inode->i_ino, io_end0, io_end1);
 	}
 #endif
+}
+
+static bool ext4_io_end_defer_completion(ext4_io_end_t *io_end)
+{
+	if (io_end->flag & EXT4_IO_END_UNWRITTEN &&
+	    !list_empty(&io_end->list_vec))
+		return true;
+	if (test_opt(io_end->inode->i_sb, DATA_ERR_ABORT) &&
+	    io_end->flag & EXT4_IO_END_FAILED &&
+	    !ext4_emergency_state(io_end->inode->i_sb))
+		return true;
+	return false;
 }
 
 /* Add the io_end to per-inode completed end_io list. */
@@ -226,9 +246,12 @@ static void ext4_add_complete_io(ext4_io_end_t *io_end)
 	struct workqueue_struct *wq;
 	unsigned long flags;
 
-	/* Only reserved conversions from writeback should enter here */
-	WARN_ON(!(io_end->flag & EXT4_IO_END_UNWRITTEN));
-	WARN_ON(!io_end->handle && sbi->s_journal);
+	/* Only reserved conversions or pending IO errors will enter here. */
+	WARN_ON(!(io_end->flag & EXT4_IO_END_DEFER_COMPLETION));
+	WARN_ON(io_end->flag & EXT4_IO_END_UNWRITTEN &&
+		!io_end->handle && sbi->s_journal);
+	WARN_ON(!io_end->bio);
+
 	spin_lock_irqsave(&ei->i_completed_io_lock, flags);
 	wq = sbi->rsv_conversion_wq;
 	if (list_empty(&ei->i_rsv_conversion_list))
@@ -253,7 +276,7 @@ static int ext4_do_flush_completed_IO(struct inode *inode,
 
 	while (!list_empty(&unwritten)) {
 		io_end = list_entry(unwritten.next, ext4_io_end_t, list);
-		BUG_ON(!(io_end->flag & EXT4_IO_END_UNWRITTEN));
+		BUG_ON(!(io_end->flag & EXT4_IO_END_DEFER_COMPLETION));
 		list_del_init(&io_end->list);
 
 		err = ext4_end_io_end(io_end);
@@ -264,7 +287,8 @@ static int ext4_do_flush_completed_IO(struct inode *inode,
 }
 
 /*
- * work on completed IO, to convert unwritten extents to extents
+ * Used to convert unwritten extents to written extents upon IO completion,
+ * or used to abort the journal upon IO errors.
  */
 void ext4_end_io_rsv_work(struct work_struct *work)
 {
@@ -289,29 +313,22 @@ ext4_io_end_t *ext4_init_io_end(struct inode *inode, gfp_t flags)
 void ext4_put_io_end_defer(ext4_io_end_t *io_end)
 {
 	if (refcount_dec_and_test(&io_end->count)) {
-		if (!(io_end->flag & EXT4_IO_END_UNWRITTEN) ||
-				list_empty(&io_end->list_vec)) {
-			ext4_release_io_end(io_end);
-			return;
-		}
-		ext4_add_complete_io(io_end);
+		if (ext4_io_end_defer_completion(io_end))
+			return ext4_add_complete_io(io_end);
+
+		ext4_release_io_end(io_end);
 	}
 }
 
 int ext4_put_io_end(ext4_io_end_t *io_end)
 {
-	int err = 0;
-
 	if (refcount_dec_and_test(&io_end->count)) {
-		if (io_end->flag & EXT4_IO_END_UNWRITTEN) {
-			err = ext4_convert_unwritten_io_end_vec(io_end->handle,
-								io_end);
-			io_end->handle = NULL;
-			ext4_clear_io_unwritten_flag(io_end);
-		}
+		if (ext4_io_end_defer_completion(io_end))
+			return ext4_end_io_end(io_end);
+
 		ext4_release_io_end(io_end);
 	}
-	return err;
+	return 0;
 }
 
 ext4_io_end_t *ext4_get_io_end(ext4_io_end_t *io_end)
@@ -340,16 +357,17 @@ static void ext4_end_bio(struct bio *bio)
 	if (bio->bi_status) {
 		struct inode *inode = io_end->inode;
 
-		ext4_warning(inode->i_sb, "I/O error %d writing to inode %lu "
+		ext4_warning(inode->i_sb, "I/O error %d writing to inode %llu "
 			     "starting block %llu)",
 			     bio->bi_status, inode->i_ino,
 			     (unsigned long long)
 			     bi_sector >> (inode->i_blkbits - 9));
+		io_end->flag |= EXT4_IO_END_FAILED;
 		mapping_set_error(inode->i_mapping,
 				blk_status_to_errno(bio->bi_status));
 	}
 
-	if (io_end->flag & EXT4_IO_END_UNWRITTEN) {
+	if (ext4_io_end_defer_completion(io_end)) {
 		/*
 		 * Link bio into list hanging from io_end. We have to do it
 		 * atomically as bio completions can be racing against each
@@ -375,7 +393,7 @@ void ext4_io_submit(struct ext4_io_submit *io)
 	if (bio) {
 		if (io->io_wbc->sync_mode == WB_SYNC_ALL)
 			io->io_bio->bi_opf |= REQ_SYNC;
-		submit_bio(io->io_bio);
+		blk_crypto_submit_bio(io->io_bio);
 	}
 	io->io_bio = NULL;
 }
@@ -389,6 +407,8 @@ void ext4_io_submit_init(struct ext4_io_submit *io,
 }
 
 static void io_submit_init_bio(struct ext4_io_submit *io,
+			       struct inode *inode,
+			       struct folio *folio,
 			       struct buffer_head *bh)
 {
 	struct bio *bio;
@@ -398,42 +418,53 @@ static void io_submit_init_bio(struct ext4_io_submit *io,
 	 * __GFP_DIRECT_RECLAIM is set, see comments for bio_alloc_bioset().
 	 */
 	bio = bio_alloc(bh->b_bdev, BIO_MAX_VECS, REQ_OP_WRITE, GFP_NOIO);
-	fscrypt_set_bio_crypt_ctx_bh(bio, bh, GFP_NOIO);
+	fscrypt_set_bio_crypt_ctx(bio, inode, folio_pos(folio) + bh_offset(bh),
+				  GFP_NOIO);
 	bio->bi_iter.bi_sector = bh->b_blocknr * (bh->b_size >> 9);
 	bio->bi_end_io = ext4_end_bio;
 	bio->bi_private = ext4_get_io_end(io->io_end);
+	bio->bi_write_hint = inode->i_write_hint;
 	io->io_bio = bio;
 	io->io_next_block = bh->b_blocknr;
 	wbc_init_bio(io->io_wbc, bio);
 }
 
+static bool io_submit_need_new_bio(struct ext4_io_submit *io,
+				   struct inode *inode,
+				   struct folio *folio,
+				   struct buffer_head *bh)
+{
+	if (bh->b_blocknr != io->io_next_block)
+		return true;
+	if (!fscrypt_mergeable_bio(io->io_bio, inode,
+			folio_pos(folio) + bh_offset(bh)))
+		return true;
+	return false;
+}
+
 static void io_submit_add_bh(struct ext4_io_submit *io,
 			     struct inode *inode,
 			     struct folio *folio,
-			     struct folio *io_folio,
 			     struct buffer_head *bh)
 {
-	if (io->io_bio && (bh->b_blocknr != io->io_next_block ||
-			   !fscrypt_mergeable_bio_bh(io->io_bio, bh))) {
+	if (io->io_bio && io_submit_need_new_bio(io, inode, folio, bh)) {
 submit_and_retry:
 		ext4_io_submit(io);
 	}
 	if (io->io_bio == NULL)
-		io_submit_init_bio(io, bh);
-	if (!bio_add_folio(io->io_bio, io_folio, bh->b_size, bh_offset(bh)))
+		io_submit_init_bio(io, inode, folio, bh);
+	if (!bio_add_folio(io->io_bio, folio, bh->b_size, bh_offset(bh)))
 		goto submit_and_retry;
-	wbc_account_cgroup_owner(io->io_wbc, &folio->page, bh->b_size);
+	wbc_account_cgroup_owner(io->io_wbc, folio, bh->b_size);
 	io->io_next_block++;
 }
 
-int ext4_bio_write_folio(struct ext4_io_submit *io, struct folio *folio,
+void ext4_bio_write_folio(struct ext4_io_submit *io, struct folio *folio,
 		size_t len)
 {
-	struct folio *io_folio = folio;
 	struct inode *inode = folio->mapping->host;
 	unsigned block_start;
 	struct buffer_head *bh, *head;
-	int ret = 0;
 	int nr_to_submit = 0;
 	struct writeback_control *wbc = io->io_wbc;
 	bool keep_towrite = false;
@@ -441,10 +472,8 @@ int ext4_bio_write_folio(struct ext4_io_submit *io, struct folio *folio,
 	BUG_ON(!folio_test_locked(folio));
 	BUG_ON(folio_test_writeback(folio));
 
-	folio_clear_error(folio);
-
 	/*
-	 * Comments copied from block_write_full_page:
+	 * Comments copied from block_write_full_folio:
 	 *
 	 * The folio straddles i_size.  It must be zeroed out on each and every
 	 * writepage invocation because it may be mmapped.  "A file is mapped
@@ -497,62 +526,17 @@ int ext4_bio_write_folio(struct ext4_io_submit *io, struct folio *folio,
 		nr_to_submit++;
 	} while ((bh = bh->b_this_page) != head);
 
-	/* Nothing to submit? Just unlock the folio... */
-	if (!nr_to_submit)
-		return 0;
+	if (!nr_to_submit) {
+		/*
+		 * We have nothing to submit. Just cycle the folio through
+		 * writeback state to properly update xarray tags.
+		 */
+		__folio_start_writeback(folio, keep_towrite);
+		folio_end_writeback(folio);
+		return;
+	}
 
 	bh = head = folio_buffers(folio);
-
-	/*
-	 * If any blocks are being written to an encrypted file, encrypt them
-	 * into a bounce page.  For simplicity, just encrypt until the last
-	 * block which might be needed.  This may cause some unneeded blocks
-	 * (e.g. holes) to be unnecessarily encrypted, but this is rare and
-	 * can't happen in the common case of blocksize == PAGE_SIZE.
-	 */
-	if (fscrypt_inode_uses_fs_layer_crypto(inode)) {
-		gfp_t gfp_flags = GFP_NOFS;
-		unsigned int enc_bytes = round_up(len, i_blocksize(inode));
-		struct page *bounce_page;
-
-		/*
-		 * Since bounce page allocation uses a mempool, we can only use
-		 * a waiting mask (i.e. request guaranteed allocation) on the
-		 * first page of the bio.  Otherwise it can deadlock.
-		 */
-		if (io->io_bio)
-			gfp_flags = GFP_NOWAIT | __GFP_NOWARN;
-	retry_encrypt:
-		bounce_page = fscrypt_encrypt_pagecache_blocks(&folio->page,
-					enc_bytes, 0, gfp_flags);
-		if (IS_ERR(bounce_page)) {
-			ret = PTR_ERR(bounce_page);
-			if (ret == -ENOMEM &&
-			    (io->io_bio || wbc->sync_mode == WB_SYNC_ALL)) {
-				gfp_t new_gfp_flags = GFP_NOFS;
-				if (io->io_bio)
-					ext4_io_submit(io);
-				else
-					new_gfp_flags |= __GFP_NOFAIL;
-				memalloc_retry_wait(gfp_flags);
-				gfp_flags = new_gfp_flags;
-				goto retry_encrypt;
-			}
-
-			printk_ratelimited(KERN_ERR "%s: ret = %d\n", __func__, ret);
-			folio_redirty_for_writepage(wbc, folio);
-			do {
-				if (buffer_async_write(bh)) {
-					clear_buffer_async_write(bh);
-					set_buffer_dirty(bh);
-				}
-				bh = bh->b_this_page;
-			} while (bh != head);
-
-			return ret;
-		}
-		io_folio = page_folio(bounce_page);
-	}
 
 	__folio_start_writeback(folio, keep_towrite);
 
@@ -560,8 +544,6 @@ int ext4_bio_write_folio(struct ext4_io_submit *io, struct folio *folio,
 	do {
 		if (!buffer_async_write(bh))
 			continue;
-		io_submit_add_bh(io, inode, folio, io_folio, bh);
+		io_submit_add_bh(io, inode, folio, bh);
 	} while ((bh = bh->b_this_page) != head);
-
-	return 0;
 }

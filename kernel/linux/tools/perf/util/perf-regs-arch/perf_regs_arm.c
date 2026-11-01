@@ -1,9 +1,12 @@
 // SPDX-License-Identifier: GPL-2.0
 
-#ifdef HAVE_PERF_REGS_SUPPORT
-
 #include "../perf_regs.h"
-#include "../../../arch/arm/include/uapi/asm/perf_regs.h"
+#include "../../arch/arm/include/perf_regs.h"
+
+uint64_t __perf_reg_mask_arm(bool intr __maybe_unused)
+{
+	return PERF_REGS_MASK;
+}
 
 const char *__perf_reg_name_arm(int id)
 {
@@ -56,5 +59,3 @@ uint64_t __perf_reg_sp_arm(void)
 {
 	return PERF_REG_ARM_SP;
 }
-
-#endif

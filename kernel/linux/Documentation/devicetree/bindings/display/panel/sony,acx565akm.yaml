@@ -17,9 +17,8 @@ properties:
   compatible:
     const: sony,acx565akm
 
-  label: true
-  reset-gpios: true
-  port: true
+  reg:
+    maxItems: 1
 
 required:
   - compatible

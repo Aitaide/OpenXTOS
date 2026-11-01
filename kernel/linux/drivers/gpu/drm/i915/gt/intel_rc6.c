@@ -6,6 +6,11 @@
 #include <linux/pm_runtime.h>
 #include <linux/string_helpers.h>
 
+#include <drm/drm_print.h>
+#include <drm/intel/intel_pcode_regs.h>
+#include <drm/intel/intel_gmd_interrupt_regs.h>
+
+#include "display/vlv_clock.h"
 #include "gem/i915_gem_region.h"
 #include "i915_drv.h"
 #include "i915_reg.h"
@@ -109,7 +114,7 @@ static void gen11_rc6_enable(struct intel_rc6 *rc6)
 	 * thus allowing GuC to control RC6 entry/exit fully instead.
 	 * We will not set the HW ENABLE and EI bits
 	 */
-	if (!intel_guc_rc_enable(&gt->uc.guc))
+	if (!intel_guc_rc_enable(gt_to_guc(gt)))
 		rc6->ctl_enable = GEN6_RC_CTL_RC6_ENABLE;
 	else
 		rc6->ctl_enable =
@@ -117,25 +122,12 @@ static void gen11_rc6_enable(struct intel_rc6 *rc6)
 			GEN6_RC_CTL_RC6_ENABLE |
 			GEN6_RC_CTL_EI_MODE(1);
 
-	/*
-	 * Wa_16011777198 and BSpec 52698 - Render powergating must be off.
-	 * FIXME BSpec is outdated, disabling powergating for MTL is just
-	 * temporary wa and should be removed after fixing real cause
-	 * of forcewake timeouts.
-	 */
-	if (IS_METEORLAKE(gt->i915) ||
-	    IS_DG2_GRAPHICS_STEP(gt->i915, G10, STEP_A0, STEP_C0) ||
-	    IS_DG2_GRAPHICS_STEP(gt->i915, G11, STEP_A0, STEP_B0))
-		pg_enable =
-			GEN9_MEDIA_PG_ENABLE |
-			GEN11_MEDIA_SAMPLER_PG_ENABLE;
-	else
-		pg_enable =
-			GEN9_RENDER_PG_ENABLE |
-			GEN9_MEDIA_PG_ENABLE |
-			GEN11_MEDIA_SAMPLER_PG_ENABLE;
+	pg_enable =
+		GEN9_RENDER_PG_ENABLE |
+		GEN9_MEDIA_PG_ENABLE |
+		GEN11_MEDIA_SAMPLER_PG_ENABLE;
 
-	if (GRAPHICS_VER(gt->i915) >= 12) {
+	if (GRAPHICS_VER(gt->i915) >= 12 && !IS_DG1(gt->i915)) {
 		for (i = 0; i < I915_MAX_VCS; i++)
 			if (HAS_ENGINE(gt, _VCS(i)))
 				pg_enable |= (VDN_HCP_POWERGATE_ENABLE(i) |
@@ -354,7 +346,7 @@ static int vlv_rc6_init(struct intel_rc6 *rc6)
 		return PTR_ERR(pctx);
 	}
 
-	GEM_BUG_ON(range_overflows_end_t(u64,
+	GEM_BUG_ON(range_end_overflows_t(u64,
 					 i915->dsm.stolen.start,
 					 pctx->stolen->start,
 					 U32_MAX));
@@ -386,9 +378,9 @@ static void chv_rc6_enable(struct intel_rc6 *rc6)
 
 	/* Allows RC6 residency counter to work */
 	intel_uncore_write_fw(uncore, VLV_COUNTER_CONTROL,
-			      _MASKED_BIT_ENABLE(VLV_COUNT_RANGE_HIGH |
-						 VLV_MEDIA_RC6_COUNT_EN |
-						 VLV_RENDER_RC6_COUNT_EN));
+			      REG_MASKED_FIELD_ENABLE(VLV_COUNT_RANGE_HIGH |
+						      VLV_MEDIA_RC6_COUNT_EN |
+						      VLV_RENDER_RC6_COUNT_EN));
 
 	/* 3: Enable RC6 */
 	rc6->ctl_enable = GEN7_RC_CTL_TO_MODE;
@@ -411,11 +403,11 @@ static void vlv_rc6_enable(struct intel_rc6 *rc6)
 
 	/* Allows RC6 residency counter to work */
 	intel_uncore_write_fw(uncore, VLV_COUNTER_CONTROL,
-			      _MASKED_BIT_ENABLE(VLV_COUNT_RANGE_HIGH |
-						 VLV_MEDIA_RC0_COUNT_EN |
-						 VLV_RENDER_RC0_COUNT_EN |
-						 VLV_MEDIA_RC6_COUNT_EN |
-						 VLV_RENDER_RC6_COUNT_EN));
+			      REG_MASKED_FIELD_ENABLE(VLV_COUNT_RANGE_HIGH |
+						      VLV_MEDIA_RC0_COUNT_EN |
+						      VLV_RENDER_RC0_COUNT_EN |
+						      VLV_MEDIA_RC6_COUNT_EN |
+						      VLV_RENDER_RC6_COUNT_EN));
 
 	rc6->ctl_enable =
 	    GEN7_RC_CTL_TO_MODE | VLV_RC_CTL_CTX_RST_PARALLEL;
@@ -526,8 +518,7 @@ static bool rc6_supported(struct intel_rc6 *rc6)
 		return false;
 	}
 
-	if (IS_MTL_MEDIA_STEP(gt->i915, STEP_A0, STEP_B0) &&
-	    gt->type == GT_MEDIA) {
+	if (IS_MEDIA_GT_IP_STEP(gt, IP_VER(13, 0), STEP_A0, STEP_B0)) {
 		drm_notice(&i915->drm,
 			   "Media RC6 disabled on A step\n");
 		return false;
@@ -572,7 +563,7 @@ static void __intel_rc6_disable(struct intel_rc6 *rc6)
 	struct intel_gt *gt = rc6_to_gt(rc6);
 
 	/* Take control of RC6 back from GuC */
-	intel_guc_rc_disable(&gt->uc.guc);
+	intel_guc_rc_disable(gt_to_guc(gt));
 
 	intel_uncore_forcewake_get(uncore, FORCEWAKE_ALL);
 	if (GRAPHICS_VER(i915) >= 9)
@@ -584,19 +575,23 @@ static void __intel_rc6_disable(struct intel_rc6 *rc6)
 
 static void rc6_res_reg_init(struct intel_rc6 *rc6)
 {
-	memset(rc6->res_reg, INVALID_MMIO_REG.reg, sizeof(rc6->res_reg));
+	i915_reg_t res_reg[INTEL_RC6_RES_MAX] = {
+		[0 ... INTEL_RC6_RES_MAX - 1] = INVALID_MMIO_REG,
+	};
 
 	switch (rc6_to_gt(rc6)->type) {
 	case GT_MEDIA:
-		rc6->res_reg[INTEL_RC6_RES_RC6] = MTL_MEDIA_MC6;
+		res_reg[INTEL_RC6_RES_RC6] = MTL_MEDIA_MC6;
 		break;
 	default:
-		rc6->res_reg[INTEL_RC6_RES_RC6_LOCKED] = GEN6_GT_GFX_RC6_LOCKED;
-		rc6->res_reg[INTEL_RC6_RES_RC6] = GEN6_GT_GFX_RC6;
-		rc6->res_reg[INTEL_RC6_RES_RC6p] = GEN6_GT_GFX_RC6p;
-		rc6->res_reg[INTEL_RC6_RES_RC6pp] = GEN6_GT_GFX_RC6pp;
+		res_reg[INTEL_RC6_RES_RC6_LOCKED] = GEN6_GT_GFX_RC6_LOCKED;
+		res_reg[INTEL_RC6_RES_RC6] = GEN6_GT_GFX_RC6;
+		res_reg[INTEL_RC6_RES_RC6p] = GEN6_GT_GFX_RC6p;
+		res_reg[INTEL_RC6_RES_RC6pp] = GEN6_GT_GFX_RC6pp;
 		break;
 	}
+
+	memcpy(rc6->res_reg, res_reg, sizeof(res_reg));
 }
 
 void intel_rc6_init(struct intel_rc6 *rc6)
@@ -768,17 +763,17 @@ static u64 vlv_residency_raw(struct intel_uncore *uncore, const i915_reg_t reg)
 	 * set the high bit to be safe.
 	 */
 	intel_uncore_write_fw(uncore, VLV_COUNTER_CONTROL,
-			      _MASKED_BIT_ENABLE(VLV_COUNT_RANGE_HIGH));
+			      REG_MASKED_FIELD_ENABLE(VLV_COUNT_RANGE_HIGH));
 	upper = intel_uncore_read_fw(uncore, reg);
 	do {
 		tmp = upper;
 
 		intel_uncore_write_fw(uncore, VLV_COUNTER_CONTROL,
-				      _MASKED_BIT_DISABLE(VLV_COUNT_RANGE_HIGH));
+				      REG_MASKED_FIELD_DISABLE(VLV_COUNT_RANGE_HIGH));
 		lower = intel_uncore_read_fw(uncore, reg);
 
 		intel_uncore_write_fw(uncore, VLV_COUNTER_CONTROL,
-				      _MASKED_BIT_ENABLE(VLV_COUNT_RANGE_HIGH));
+				      REG_MASKED_FIELD_ENABLE(VLV_COUNT_RANGE_HIGH));
 		upper = intel_uncore_read_fw(uncore, reg);
 	} while (upper != tmp && --loop);
 
@@ -812,7 +807,7 @@ u64 intel_rc6_residency_ns(struct intel_rc6 *rc6, enum intel_rc6_res_type id)
 	/* On VLV and CHV, residency time is in CZ units rather than 1.28us */
 	if (IS_VALLEYVIEW(i915) || IS_CHERRYVIEW(i915)) {
 		mul = 1000000;
-		div = i915->czclk_freq;
+		div = vlv_clock_get_czclk(&i915->drm);
 		overflow_hw = BIT_ULL(40);
 		time_hw = vlv_residency_raw(uncore, reg);
 	} else {

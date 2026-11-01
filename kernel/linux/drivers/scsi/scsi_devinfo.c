@@ -39,13 +39,12 @@ static LIST_HEAD(scsi_dev_info_list);
 static char scsi_dev_flags[256];
 
 /*
- * scsi_static_device_list: deprecated list of devices that require
- * settings that differ from the default, includes black-listed (broken)
- * devices. The entries here are added to the tail of scsi_dev_info_list
- * via scsi_dev_info_list_init.
+ * scsi_static_device_list: list of devices that require settings that differ
+ * from the default, includes black-listed (broken) devices. The entries here
+ * are added to the tail of scsi_dev_info_list via scsi_dev_info_list_init.
  *
- * Do not add to this list, use the command line or proc interface to add
- * to the scsi_dev_info_list. This table will eventually go away.
+ * If possible, set the BLIST_* flags from inside a SCSI LLD rather than
+ * adding an entry to this list.
  */
 static struct {
 	char *vendor;
@@ -162,7 +161,7 @@ static struct {
 	{"DGC", "DISK", NULL, BLIST_SPARSELUN},	/* EMC CLARiiON, no storage on LUN 0 */
 	{"EMC",  "Invista", "*", BLIST_SPARSELUN | BLIST_LARGELUN},
 	{"EMC", "SYMMETRIX", NULL, BLIST_SPARSELUN | BLIST_LARGELUN |
-	 BLIST_REPORTLUN2 | BLIST_RETRY_ITF},
+	 BLIST_REPORTLUN2 | BLIST_RETRY_ITF | BLIST_SKIP_IO_HINTS},
 	{"EMULEX", "MD21/S2     ESDI", NULL, BLIST_SINGLELUN},
 	{"easyRAID", "16P", NULL, BLIST_NOREPORTLUN},
 	{"easyRAID", "X6P", NULL, BLIST_NOREPORTLUN},
@@ -191,7 +190,7 @@ static struct {
 	{"IBM", "2076", NULL, BLIST_NO_VPD_SIZE},
 	{"IBM", "2105", NULL, BLIST_RETRY_HWERROR},
 	{"iomega", "jaz 1GB", "J.86", BLIST_NOTQ | BLIST_NOLUN},
-	{"IOMEGA", "ZIP", NULL, BLIST_NOTQ | BLIST_NOLUN},
+	{"IOMEGA", "ZIP", NULL, BLIST_NOTQ | BLIST_NOLUN | BLIST_SKIP_IO_HINTS},
 	{"IOMEGA", "Io20S         *F", NULL, BLIST_KEY},
 	{"INSITE", "Floptical   F*8I", NULL, BLIST_KEY},
 	{"INSITE", "I325VM", NULL, BLIST_KEY},
@@ -219,7 +218,8 @@ static struct {
 	{"PIONEER", "CD-ROM DRM-602X", NULL, BLIST_FORCELUN | BLIST_SINGLELUN},
 	{"PIONEER", "CD-ROM DRM-604X", NULL, BLIST_FORCELUN | BLIST_SINGLELUN},
 	{"PIONEER", "CD-ROM DRM-624X", NULL, BLIST_FORCELUN | BLIST_SINGLELUN},
-	{"Promise", "VTrak E610f", NULL, BLIST_SPARSELUN | BLIST_NO_RSOC},
+	{"Promise", "VTrak E310", NULL, BLIST_SPARSELUN | BLIST_NO_RSOC},
+	{"Promise", "VTrak E610", NULL, BLIST_SPARSELUN | BLIST_NO_RSOC},
 	{"Promise", "", NULL, BLIST_SPARSELUN},
 	{"QEMU", "QEMU CD-ROM", NULL, BLIST_SKIP_VPD_PAGES},
 	{"QNAP", "iSCSI Storage", NULL, BLIST_MAX_1024},
@@ -270,17 +270,12 @@ static struct {
 static struct scsi_dev_info_list_table *scsi_devinfo_lookup_by_key(int key)
 {
 	struct scsi_dev_info_list_table *devinfo_table;
-	int found = 0;
 
 	list_for_each_entry(devinfo_table, &scsi_dev_info_list, node)
-		if (devinfo_table->key == key) {
-			found = 1;
-			break;
-		}
-	if (!found)
-		return ERR_PTR(-EINVAL);
+		if (devinfo_table->key == key)
+			return devinfo_table;
 
-	return devinfo_table;
+	return ERR_PTR(-EINVAL);
 }
 
 /*
@@ -293,14 +288,16 @@ static void scsi_strcpy_devinfo(char *name, char *to, size_t to_length,
 	size_t from_length;
 
 	from_length = strlen(from);
-	/* This zero-pads the destination */
-	strncpy(to, from, to_length);
-	if (from_length < to_length && !compatible) {
-		/*
-		 * space pad the string if it is short.
-		 */
-		memset(&to[from_length], ' ', to_length - from_length);
-	}
+
+	/*
+	 * null pad and null terminate if compatible
+	 * otherwise space pad
+	 */
+	if (compatible)
+		strscpy_pad(to, from, to_length);
+	else
+		memcpy_and_pad(to, to_length, from, from_length, ' ');
+
 	if (from_length > to_length)
 		 printk(KERN_WARNING "%s: %s string '%s' is too long\n",
 			__func__, name, from);
@@ -359,7 +356,7 @@ int scsi_dev_info_list_add_keyed(int compatible, char *vendor, char *model,
 	if (IS_ERR(devinfo_table))
 		return PTR_ERR(devinfo_table);
 
-	devinfo = kmalloc(sizeof(*devinfo), GFP_KERNEL);
+	devinfo = kmalloc_obj(*devinfo);
 	if (!devinfo) {
 		printk(KERN_ERR "%s: no memory\n", __func__);
 		return -ENOMEM;
@@ -485,33 +482,6 @@ static struct scsi_dev_info_list *scsi_dev_info_list_find(const char *vendor,
 }
 
 /**
- * scsi_dev_info_list_del_keyed - remove one dev_info list entry.
- * @vendor:	vendor string
- * @model:	model (product) string
- * @key:	specify list to use
- *
- * Description:
- *	Remove and destroy one dev_info entry for @vendor, @model
- *	in list specified by @key.
- *
- * Returns: 0 OK, -error on failure.
- **/
-int scsi_dev_info_list_del_keyed(char *vendor, char *model,
-				 enum scsi_devinfo_key key)
-{
-	struct scsi_dev_info_list *found;
-
-	found = scsi_dev_info_list_find(vendor, model, key);
-	if (IS_ERR(found))
-		return PTR_ERR(found);
-
-	list_del(&found->dev_info_list);
-	kfree(found);
-	return 0;
-}
-EXPORT_SYMBOL(scsi_dev_info_list_del_keyed);
-
-/**
  * scsi_dev_info_list_add_str - parse dev_list and add to the scsi_dev_info_list.
  * @dev_list:	string of device flags to add
  *
@@ -551,9 +521,9 @@ static int scsi_dev_info_list_add_str(char *dev_list)
 		if (model)
 			strflags = strsep(&next, next_check);
 		if (!model || !strflags) {
-			printk(KERN_ERR "%s: bad dev info string '%s' '%s'"
-			       " '%s'\n", __func__, vendor, model,
-			       strflags);
+			pr_err("%s: bad dev info string '%s' '%s' '%s'\n",
+			       __func__, vendor, model ? model : "",
+			       strflags ? strflags : "");
 			res = -EINVAL;
 		} else
 			res = scsi_dev_info_list_add(0 /* compatible */, vendor,
@@ -646,7 +616,7 @@ static int devinfo_seq_show(struct seq_file *m, void *v)
 
 static void *devinfo_seq_start(struct seq_file *m, loff_t *ppos)
 {
-	struct double_list *dl = kmalloc(sizeof(*dl), GFP_KERNEL);
+	struct double_list *dl = kmalloc_obj(*dl);
 	loff_t pos = *ppos;
 
 	if (!dl)
@@ -790,7 +760,7 @@ int scsi_dev_info_add_list(enum scsi_devinfo_key key, const char *name)
 		/* list already exists */
 		return -EEXIST;
 
-	devinfo_table = kmalloc(sizeof(*devinfo_table), GFP_KERNEL);
+	devinfo_table = kmalloc_obj(*devinfo_table);
 
 	if (!devinfo_table)
 		return -ENOMEM;
@@ -862,7 +832,7 @@ int __init scsi_init_devinfo(void)
 		goto out;
 
 	for (i = 0; scsi_static_device_list[i].vendor; i++) {
-		error = scsi_dev_info_list_add(1 /* compatibile */,
+		error = scsi_dev_info_list_add(1 /* compatible */,
 				scsi_static_device_list[i].vendor,
 				scsi_static_device_list[i].model,
 				NULL,

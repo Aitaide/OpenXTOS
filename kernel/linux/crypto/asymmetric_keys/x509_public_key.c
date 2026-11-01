@@ -7,10 +7,10 @@
 
 #define pr_fmt(fmt) "X.509: "fmt
 #include <crypto/hash.h>
-#include <crypto/sm2.h>
 #include <keys/asymmetric-parser.h>
 #include <keys/asymmetric-subtype.h>
 #include <keys/system_keyring.h>
+#include <linux/hex.h>
 #include <linux/module.h>
 #include <linux/kernel.h>
 #include <linux/slab.h>
@@ -32,11 +32,32 @@ int x509_get_sig_params(struct x509_certificate *cert)
 
 	pr_devel("==>%s()\n", __func__);
 
+	/* Calculate a SHA256 hash of the TBS and check it against the
+	 * blacklist.
+	 */
+	sha256(cert->tbs, cert->tbs_size, cert->sha256);
+	ret = is_hash_blacklisted(cert->sha256, sizeof(cert->sha256),
+				  BLACKLIST_HASH_X509_TBS);
+	if (ret == -EKEYREJECTED) {
+		pr_err("Cert %*phN is blacklisted\n",
+		       (int)sizeof(cert->sha256), cert->sha256);
+		cert->blacklisted = true;
+		ret = 0;
+	}
+
 	sig->s = kmemdup(cert->raw_sig, cert->raw_sig_size, GFP_KERNEL);
 	if (!sig->s)
 		return -ENOMEM;
 
 	sig->s_size = cert->raw_sig_size;
+
+	if (sig->algo_takes_data) {
+		/* The signature algorithm does whatever passes for hashing. */
+		sig->m = (u8 *)cert->tbs;
+		sig->m_size = cert->tbs_size;
+		sig->m_free = false;
+		goto out;
+	}
 
 	/* Allocate the hashing algorithm we're going to need and find out how
 	 * big the hash operational data will be.
@@ -51,12 +72,13 @@ int x509_get_sig_params(struct x509_certificate *cert)
 	}
 
 	desc_size = crypto_shash_descsize(tfm) + sizeof(*desc);
-	sig->digest_size = crypto_shash_digestsize(tfm);
+	sig->m_size = crypto_shash_digestsize(tfm);
 
 	ret = -ENOMEM;
-	sig->digest = kmalloc(sig->digest_size, GFP_KERNEL);
-	if (!sig->digest)
+	sig->m = kmalloc(sig->m_size, GFP_KERNEL);
+	if (!sig->m)
 		goto error;
+	sig->m_free = true;
 
 	desc = kzalloc(desc_size, GFP_KERNEL);
 	if (!desc)
@@ -64,37 +86,15 @@ int x509_get_sig_params(struct x509_certificate *cert)
 
 	desc->tfm = tfm;
 
-	if (strcmp(cert->pub->pkey_algo, "sm2") == 0) {
-		ret = strcmp(sig->hash_algo, "sm3") != 0 ? -EINVAL :
-		      crypto_shash_init(desc) ?:
-		      sm2_compute_z_digest(desc, cert->pub->key,
-					   cert->pub->keylen, sig->digest) ?:
-		      crypto_shash_init(desc) ?:
-		      crypto_shash_update(desc, sig->digest,
-					  sig->digest_size) ?:
-		      crypto_shash_finup(desc, cert->tbs, cert->tbs_size,
-					 sig->digest);
-	} else {
-		ret = crypto_shash_digest(desc, cert->tbs, cert->tbs_size,
-					  sig->digest);
-	}
-
+	ret = crypto_shash_digest(desc, cert->tbs, cert->tbs_size, sig->m);
 	if (ret < 0)
 		goto error_2;
-
-	ret = is_hash_blacklisted(sig->digest, sig->digest_size,
-				  BLACKLIST_HASH_X509_TBS);
-	if (ret == -EKEYREJECTED) {
-		pr_err("Cert %*phN is blacklisted\n",
-		       sig->digest_size, sig->digest);
-		cert->blacklisted = true;
-		ret = 0;
-	}
 
 error_2:
 	kfree(desc);
 error:
 	crypto_free_shash(tfm);
+out:
 	pr_devel("<==%s() = %d\n", __func__, ret);
 	return ret;
 }
@@ -161,12 +161,11 @@ not_self_signed:
  */
 static int x509_key_preparse(struct key_preparsed_payload *prep)
 {
-	struct asymmetric_key_ids *kids;
-	struct x509_certificate *cert;
+	struct x509_certificate *cert __free(x509_free_certificate) = NULL;
+	struct asymmetric_key_ids *kids __free(kfree) = NULL;
+	char *p, *desc __free(kfree) = NULL;
 	const char *q;
 	size_t srlen, sulen;
-	char *desc = NULL, *p;
-	int ret;
 
 	cert = x509_cert_parse(prep->data, prep->datalen);
 	if (IS_ERR(cert))
@@ -188,9 +187,8 @@ static int x509_key_preparse(struct key_preparsed_payload *prep)
 	}
 
 	/* Don't permit addition of blacklisted keys */
-	ret = -EKEYREJECTED;
 	if (cert->blacklisted)
-		goto error_free_cert;
+		return -EKEYREJECTED;
 
 	/* Propose a description */
 	sulen = strlen(cert->subject);
@@ -202,10 +200,9 @@ static int x509_key_preparse(struct key_preparsed_payload *prep)
 		q = cert->raw_serial;
 	}
 
-	ret = -ENOMEM;
 	desc = kmalloc(sulen + 2 + srlen * 2 + 1, GFP_KERNEL);
 	if (!desc)
-		goto error_free_cert;
+		return -ENOMEM;
 	p = memcpy(desc, cert->subject, sulen);
 	p += sulen;
 	*p++ = ':';
@@ -213,18 +210,16 @@ static int x509_key_preparse(struct key_preparsed_payload *prep)
 	p = bin2hex(p, q, srlen);
 	*p = 0;
 
-	kids = kmalloc(sizeof(struct asymmetric_key_ids), GFP_KERNEL);
+	kids = kmalloc_obj(struct asymmetric_key_ids);
 	if (!kids)
-		goto error_free_desc;
+		return -ENOMEM;
 	kids->id[0] = cert->id;
 	kids->id[1] = cert->skid;
 	kids->id[2] = asymmetric_key_generate_id(cert->raw_subject,
 						 cert->raw_subject_size,
 						 "", 0);
-	if (IS_ERR(kids->id[2])) {
-		ret = PTR_ERR(kids->id[2]);
-		goto error_free_kids;
-	}
+	if (IS_ERR(kids->id[2]))
+		return PTR_ERR(kids->id[2]);
 
 	/* We're pinning the module by being linked against it */
 	__module_get(public_key_subtype.owner);
@@ -242,15 +237,7 @@ static int x509_key_preparse(struct key_preparsed_payload *prep)
 	cert->sig = NULL;
 	desc = NULL;
 	kids = NULL;
-	ret = 0;
-
-error_free_kids:
-	kfree(kids);
-error_free_desc:
-	kfree(desc);
-error_free_cert:
-	x509_free_certificate(cert);
-	return ret;
+	return 0;
 }
 
 static struct asymmetric_key_parser x509_key_parser = {
@@ -262,15 +249,9 @@ static struct asymmetric_key_parser x509_key_parser = {
 /*
  * Module stuff
  */
-extern int __init certs_selftest(void);
 static int __init x509_key_init(void)
 {
-	int ret;
-
-	ret = register_asymmetric_key_parser(&x509_key_parser);
-	if (ret < 0)
-		return ret;
-	return fips_signature_selftest();
+	return register_asymmetric_key_parser(&x509_key_parser);
 }
 
 static void __exit x509_key_exit(void)

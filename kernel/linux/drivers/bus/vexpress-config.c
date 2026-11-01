@@ -54,7 +54,7 @@ struct vexpress_syscfg_func {
 	struct vexpress_syscfg *syscfg;
 	struct regmap *regmap;
 	int num_templates;
-	u32 template[]; /* Keep it last! */
+	u32 template[] __counted_by(num_templates); /* Keep it last! */
 };
 
 struct vexpress_config_bridge_ops {
@@ -284,7 +284,7 @@ static struct regmap *vexpress_syscfg_regmap_init(struct device *dev,
 		val = energy_quirk;
 	}
 
-	func = kzalloc(struct_size(func, template, num), GFP_KERNEL);
+	func = kzalloc_flex(*func, template, num);
 	if (!func)
 		return ERR_PTR(-ENOMEM);
 
@@ -414,4 +414,5 @@ static struct platform_driver vexpress_syscfg_driver = {
 	.probe = vexpress_syscfg_probe,
 };
 module_platform_driver(vexpress_syscfg_driver);
+MODULE_DESCRIPTION("Versatile Express configuration bus");
 MODULE_LICENSE("GPL v2");

@@ -49,6 +49,14 @@ if [ ! -f "$OPENSBI" ]; then
     exit 1
 fi
 
+# Bind the running guest to the build output, not a version-string suffix.
+EXPECTED_RELEASE_FILE="$BUILD_ROOT/kernel-build-riscv64/include/config/kernel.release"
+if [ ! -s "$EXPECTED_RELEASE_FILE" ]; then
+    error "Expected kernel release missing: $EXPECTED_RELEASE_FILE"
+    exit 1
+fi
+EXPECTED_RELEASE="$(cat "$EXPECTED_RELEASE_FILE")"
+
 # Build the validation initramfs in a copy so the build output stays intact.
 log "Packing validation initramfs..."
 VALIDATION="$BUILD_ROOT/initramfs-riscv64-guestcheck.cpio.gz"
@@ -66,6 +74,7 @@ rm -f "$OUTPUT"
 log "Booting RISC-V 64 QEMU for in-guest validation (OpenSBI -> Linux)..."
 log "Output: $OUTPUT"
 
+set +e
 timeout "$QEMU_TIMEOUT" qemu-system-riscv64 \
     -machine virt \
     -cpu rv64 \
@@ -77,7 +86,13 @@ timeout "$QEMU_TIMEOUT" qemu-system-riscv64 \
     -append "console=ttyS0 panic=1" \
     -nographic \
     -no-reboot \
-    2>&1 | tee "$OUTPUT" || true
+    2>&1 | tee "$OUTPUT"
+PIPE_RESULTS=("${PIPESTATUS[@]}")
+set -e
+if [ "${PIPE_RESULTS[0]}" -ne 0 ] || [ "${PIPE_RESULTS[1]}" -ne 0 ]; then
+    error "QEMU/capture failed: ${PIPE_RESULTS[*]}"
+    exit 1
+fi
 
 sleep 1
 
@@ -90,7 +105,11 @@ FAIL=0
 check() {
     local pattern="$1"
     local description="$2"
-    if grep -q "$pattern" "$OUTPUT" 2>/dev/null; then
+    local field="${pattern%%=*}=" exact fields expected_fields=1
+    exact=$(tr -d '\r' < "$OUTPUT" | grep -Fxc -- "$pattern" || true)
+    fields=$(tr -d '\r' < "$OUTPUT" | grep -c "^${field}" || true)
+    [[ "$field" == XTOS_GUEST_CHECK= ]] && expected_fields=2
+    if [[ "$exact" == 1 && "$fields" == "$expected_fields" ]]; then
         log "[✓] $description"
         PASS=$((PASS+1))
     else
@@ -100,8 +119,12 @@ check() {
 }
 
 check "XTOS_GUEST_CHECK=START" "Guest check ran"
-check "OpenSBI" "OpenSBI firmware booted"
-check "realtime=1" "PREEMPT_RT active (/sys/kernel/realtime)"
+check "kernel=$EXPECTED_RELEASE" "Exact built kernel release"
+if ! grep -q "OpenSBI" "$OUTPUT"; then
+    error "OpenSBI firmware boot missing"
+    FAIL=$((FAIL+1))
+fi
+check "realtime=1" "PREEMPT_RT active (running-kernel evidence)"
 check "preempt_rt=y" "CONFIG_PREEMPT_RT in ikconfig"
 check "xtos_sched=y" "XTOS scheduler built in"
 check "xtos_modules=pass" "XTOS BCI modules loaded"
@@ -114,7 +137,7 @@ check "guest_test_signal=pass" "test_signal in guest"
 check "guest_userspace=pass" "All guest user-space tests"
 check "XTOS_GUEST_CHECK=DONE" "Guest check completed (clean poweroff)"
 
-if grep -q "Kernel panic" "$OUTPUT" 2>/dev/null; then
+if grep -Eq "Kernel panic|BUG:|WARNING:|^(module_[A-Za-z0-9_]+|guest_test_[A-Za-z0-9_]+)=(fail|missing)" "$OUTPUT" 2>/dev/null; then
     error "[✗] Kernel panic detected"
     FAIL=$((FAIL+1))
 else

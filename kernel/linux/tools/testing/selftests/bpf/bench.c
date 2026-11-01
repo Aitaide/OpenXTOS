@@ -10,6 +10,7 @@
 #include <sys/sysinfo.h>
 #include <signal.h>
 #include "bench.h"
+#include "bpf_util.h"
 #include "testing_helpers.h"
 
 struct env env = {
@@ -264,6 +265,7 @@ static const struct argp_option opts[] = {
 	{ "verbose", 'v', NULL, 0, "Verbose debug output"},
 	{ "affinity", 'a', NULL, 0, "Set consumer/producer thread affinity"},
 	{ "quiet", 'q', NULL, 0, "Be more quiet"},
+	{ "stacktrace", 's', NULL, 0, "Get stack trace"},
 	{ "prod-affinity", ARG_PROD_AFFINITY_SET, "CPUSET", 0,
 	  "Set of CPUs for producer threads; implies --affinity"},
 	{ "cons-affinity", ARG_CONS_AFFINITY_SET, "CPUSET", 0,
@@ -274,17 +276,24 @@ static const struct argp_option opts[] = {
 extern struct argp bench_ringbufs_argp;
 extern struct argp bench_bloom_map_argp;
 extern struct argp bench_bpf_loop_argp;
+extern struct argp bench_bpf_for_argp;
 extern struct argp bench_local_storage_argp;
 extern struct argp bench_local_storage_rcu_tasks_trace_argp;
 extern struct argp bench_strncmp_argp;
 extern struct argp bench_hashmap_lookup_argp;
 extern struct argp bench_local_storage_create_argp;
 extern struct argp bench_htab_mem_argp;
+extern struct argp bench_trigger_batch_argp;
+extern struct argp bench_crypto_argp;
+extern struct argp bench_sockmap_argp;
+extern struct argp bench_lpm_trie_map_argp;
+extern struct argp bench_xdp_lb_argp;
 
 static const struct argp_child bench_parsers[] = {
 	{ &bench_ringbufs_argp, 0, "Ring buffers benchmark", 0 },
 	{ &bench_bloom_map_argp, 0, "Bloom filter map benchmark", 0 },
 	{ &bench_bpf_loop_argp, 0, "bpf_loop helper benchmark", 0 },
+	{ &bench_bpf_for_argp, 0, "bpf_for loop benchmark", 0 },
 	{ &bench_local_storage_argp, 0, "local_storage benchmark", 0 },
 	{ &bench_strncmp_argp, 0, "bpf_strncmp helper benchmark", 0 },
 	{ &bench_local_storage_rcu_tasks_trace_argp, 0,
@@ -292,6 +301,11 @@ static const struct argp_child bench_parsers[] = {
 	{ &bench_hashmap_lookup_argp, 0, "Hashmap lookup benchmark", 0 },
 	{ &bench_local_storage_create_argp, 0, "local-storage-create benchmark", 0 },
 	{ &bench_htab_mem_argp, 0, "hash map memory benchmark", 0 },
+	{ &bench_trigger_batch_argp, 0, "BPF triggering benchmark", 0 },
+	{ &bench_crypto_argp, 0, "bpf crypto benchmark", 0 },
+	{ &bench_sockmap_argp, 0, "bpf sockmap benchmark", 0 },
+	{ &bench_lpm_trie_map_argp, 0, "LPM trie map benchmark", 0 },
+	{ &bench_xdp_lb_argp, 0, "XDP load-balancer benchmark", 0 },
 	{},
 };
 
@@ -323,14 +337,14 @@ static error_t parse_arg(int key, char *arg, struct argp_state *state)
 		break;
 	case 'p':
 		env.producer_cnt = strtol(arg, NULL, 10);
-		if (env.producer_cnt <= 0) {
+		if (env.producer_cnt < 0) {
 			fprintf(stderr, "Invalid producer count: %s\n", arg);
 			argp_usage(state);
 		}
 		break;
 	case 'c':
 		env.consumer_cnt = strtol(arg, NULL, 10);
-		if (env.consumer_cnt <= 0) {
+		if (env.consumer_cnt < 0) {
 			fprintf(stderr, "Invalid consumer count: %s\n", arg);
 			argp_usage(state);
 		}
@@ -340,6 +354,9 @@ static error_t parse_arg(int key, char *arg, struct argp_state *state)
 		break;
 	case 'q':
 		env.quiet = true;
+		break;
+	case 's':
+		env.stacktrace = true;
 		break;
 	case ARG_PROD_AFFINITY_SET:
 		env.affinity = true;
@@ -491,18 +508,47 @@ extern const struct bench bench_rename_kretprobe;
 extern const struct bench bench_rename_rawtp;
 extern const struct bench bench_rename_fentry;
 extern const struct bench bench_rename_fexit;
-extern const struct bench bench_trig_base;
+
+/* pure counting benchmarks to establish theoretical limits */
+extern const struct bench bench_trig_usermode_count;
+extern const struct bench bench_trig_syscall_count;
+extern const struct bench bench_trig_kernel_count;
+
+/* batched, staying mostly in-kernel benchmarks */
+extern const struct bench bench_trig_kprobe;
+extern const struct bench bench_trig_kretprobe;
+extern const struct bench bench_trig_kprobe_multi;
+extern const struct bench bench_trig_kretprobe_multi;
+extern const struct bench bench_trig_fentry;
+extern const struct bench bench_trig_kprobe_multi_all;
+extern const struct bench bench_trig_kretprobe_multi_all;
+extern const struct bench bench_trig_fexit;
+extern const struct bench bench_trig_fmodret;
 extern const struct bench bench_trig_tp;
 extern const struct bench bench_trig_rawtp;
-extern const struct bench bench_trig_kprobe;
-extern const struct bench bench_trig_fentry;
-extern const struct bench bench_trig_fentry_sleep;
-extern const struct bench bench_trig_fmodret;
-extern const struct bench bench_trig_uprobe_base;
-extern const struct bench bench_trig_uprobe_with_nop;
-extern const struct bench bench_trig_uretprobe_with_nop;
-extern const struct bench bench_trig_uprobe_without_nop;
-extern const struct bench bench_trig_uretprobe_without_nop;
+
+/* uprobe/uretprobe benchmarks */
+extern const struct bench bench_trig_uprobe_nop;
+extern const struct bench bench_trig_uretprobe_nop;
+extern const struct bench bench_trig_uprobe_push;
+extern const struct bench bench_trig_uretprobe_push;
+extern const struct bench bench_trig_uprobe_ret;
+extern const struct bench bench_trig_uretprobe_ret;
+extern const struct bench bench_trig_uprobe_multi_nop;
+extern const struct bench bench_trig_uretprobe_multi_nop;
+extern const struct bench bench_trig_uprobe_multi_push;
+extern const struct bench bench_trig_uretprobe_multi_push;
+extern const struct bench bench_trig_uprobe_multi_ret;
+extern const struct bench bench_trig_uretprobe_multi_ret;
+#ifdef __x86_64__
+extern const struct bench bench_trig_uprobe_nop10;
+extern const struct bench bench_trig_uretprobe_nop10;
+extern const struct bench bench_trig_uprobe_multi_nop10;
+extern const struct bench bench_trig_uretprobe_multi_nop10;
+extern const struct bench bench_trig_usdt_nop;
+extern const struct bench bench_trig_usdt_nop10;
+#endif
+
 extern const struct bench bench_rb_libbpf;
 extern const struct bench bench_rb_custom;
 extern const struct bench bench_pb_libbpf;
@@ -513,16 +559,32 @@ extern const struct bench bench_bloom_false_positive;
 extern const struct bench bench_hashmap_without_bloom;
 extern const struct bench bench_hashmap_with_bloom;
 extern const struct bench bench_bpf_loop;
+extern const struct bench bench_bpf_for;
 extern const struct bench bench_strncmp_no_helper;
 extern const struct bench bench_strncmp_helper;
 extern const struct bench bench_bpf_hashmap_full_update;
+extern const struct bench bench_bpf_rhashmap_full_update;
 extern const struct bench bench_local_storage_cache_seq_get;
 extern const struct bench bench_local_storage_cache_interleaved_get;
 extern const struct bench bench_local_storage_cache_hashmap_control;
 extern const struct bench bench_local_storage_tasks_trace;
 extern const struct bench bench_bpf_hashmap_lookup;
+extern const struct bench bench_bpf_rhashmap_lookup;
 extern const struct bench bench_local_storage_create;
 extern const struct bench bench_htab_mem;
+extern const struct bench bench_rhtab_mem;
+extern const struct bench bench_crypto_encrypt;
+extern const struct bench bench_crypto_decrypt;
+extern const struct bench bench_sockmap;
+extern const struct bench bench_lpm_trie_noop;
+extern const struct bench bench_lpm_trie_baseline;
+extern const struct bench bench_lpm_trie_lookup;
+extern const struct bench bench_lpm_trie_insert;
+extern const struct bench bench_lpm_trie_update;
+extern const struct bench bench_lpm_trie_delete;
+extern const struct bench bench_lpm_trie_free;
+extern const struct bench bench_bpf_nop;
+extern const struct bench bench_xdp_lb;
 
 static const struct bench *benchs[] = {
 	&bench_count_global,
@@ -533,18 +595,44 @@ static const struct bench *benchs[] = {
 	&bench_rename_rawtp,
 	&bench_rename_fentry,
 	&bench_rename_fexit,
-	&bench_trig_base,
+	/* pure counting benchmarks for establishing theoretical limits */
+	&bench_trig_usermode_count,
+	&bench_trig_kernel_count,
+	&bench_trig_syscall_count,
+	/* batched, staying mostly in-kernel triggers */
+	&bench_trig_kprobe,
+	&bench_trig_kretprobe,
+	&bench_trig_kprobe_multi,
+	&bench_trig_kretprobe_multi,
+	&bench_trig_fentry,
+	&bench_trig_kprobe_multi_all,
+	&bench_trig_kretprobe_multi_all,
+	&bench_trig_fexit,
+	&bench_trig_fmodret,
 	&bench_trig_tp,
 	&bench_trig_rawtp,
-	&bench_trig_kprobe,
-	&bench_trig_fentry,
-	&bench_trig_fentry_sleep,
-	&bench_trig_fmodret,
-	&bench_trig_uprobe_base,
-	&bench_trig_uprobe_with_nop,
-	&bench_trig_uretprobe_with_nop,
-	&bench_trig_uprobe_without_nop,
-	&bench_trig_uretprobe_without_nop,
+	/* uprobes */
+	&bench_trig_uprobe_nop,
+	&bench_trig_uretprobe_nop,
+	&bench_trig_uprobe_push,
+	&bench_trig_uretprobe_push,
+	&bench_trig_uprobe_ret,
+	&bench_trig_uretprobe_ret,
+	&bench_trig_uprobe_multi_nop,
+	&bench_trig_uretprobe_multi_nop,
+	&bench_trig_uprobe_multi_push,
+	&bench_trig_uretprobe_multi_push,
+	&bench_trig_uprobe_multi_ret,
+	&bench_trig_uretprobe_multi_ret,
+#ifdef __x86_64__
+	&bench_trig_uprobe_nop10,
+	&bench_trig_uretprobe_nop10,
+	&bench_trig_uprobe_multi_nop10,
+	&bench_trig_uretprobe_multi_nop10,
+	&bench_trig_usdt_nop,
+	&bench_trig_usdt_nop10,
+#endif
+	/* ringbuf/perfbuf benchmarks */
 	&bench_rb_libbpf,
 	&bench_rb_custom,
 	&bench_pb_libbpf,
@@ -555,16 +643,32 @@ static const struct bench *benchs[] = {
 	&bench_hashmap_without_bloom,
 	&bench_hashmap_with_bloom,
 	&bench_bpf_loop,
+	&bench_bpf_for,
 	&bench_strncmp_no_helper,
 	&bench_strncmp_helper,
 	&bench_bpf_hashmap_full_update,
+	&bench_bpf_rhashmap_full_update,
 	&bench_local_storage_cache_seq_get,
 	&bench_local_storage_cache_interleaved_get,
 	&bench_local_storage_cache_hashmap_control,
 	&bench_local_storage_tasks_trace,
 	&bench_bpf_hashmap_lookup,
+	&bench_bpf_rhashmap_lookup,
 	&bench_local_storage_create,
 	&bench_htab_mem,
+	&bench_rhtab_mem,
+	&bench_crypto_encrypt,
+	&bench_crypto_decrypt,
+	&bench_sockmap,
+	&bench_lpm_trie_noop,
+	&bench_lpm_trie_baseline,
+	&bench_lpm_trie_lookup,
+	&bench_lpm_trie_insert,
+	&bench_lpm_trie_update,
+	&bench_lpm_trie_delete,
+	&bench_lpm_trie_free,
+	&bench_bpf_nop,
+	&bench_xdp_lb,
 };
 
 static void find_benchmark(void)
@@ -607,6 +711,10 @@ static void setup_benchmark(void)
 		bench->setup();
 
 	for (i = 0; i < env.consumer_cnt; i++) {
+		if (!bench->consumer_thread) {
+			fprintf(stderr, "benchmark doesn't support consumers!\n");
+			exit(1);
+		}
 		err = pthread_create(&state.consumers[i], NULL,
 				     bench->consumer_thread, (void *)(long)i);
 		if (err) {
@@ -626,6 +734,10 @@ static void setup_benchmark(void)
 		env.prod_cpus.next_cpu = env.cons_cpus.next_cpu;
 
 	for (i = 0; i < env.producer_cnt; i++) {
+		if (!bench->producer_thread) {
+			fprintf(stderr, "benchmark doesn't support producers!\n");
+			exit(1);
+		}
 		err = pthread_create(&state.producers[i], NULL,
 				     bench->producer_thread, (void *)(long)i);
 		if (err) {
@@ -645,6 +757,13 @@ static void setup_benchmark(void)
 static pthread_mutex_t bench_done_mtx = PTHREAD_MUTEX_INITIALIZER;
 static pthread_cond_t bench_done = PTHREAD_COND_INITIALIZER;
 
+void bench_force_done(void)
+{
+	pthread_mutex_lock(&bench_done_mtx);
+	pthread_cond_signal(&bench_done);
+	pthread_mutex_unlock(&bench_done_mtx);
+}
+
 static void collect_measurements(long delta_ns) {
 	int iter = state.res_cnt++;
 	struct bench_res *res = &state.results[iter];
@@ -654,11 +773,8 @@ static void collect_measurements(long delta_ns) {
 	if (bench->report_progress)
 		bench->report_progress(iter, res, delta_ns);
 
-	if (iter == env.duration_sec + env.warmup_sec) {
-		pthread_mutex_lock(&bench_done_mtx);
-		pthread_cond_signal(&bench_done);
-		pthread_mutex_unlock(&bench_done_mtx);
-	}
+	if (iter == env.duration_sec + env.warmup_sec)
+		bench_force_done();
 }
 
 int main(int argc, char **argv)

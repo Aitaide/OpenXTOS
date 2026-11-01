@@ -6,12 +6,16 @@
 #include "bpf_tracing_net.h"
 
 char _license[] SEC("license") = "GPL";
+int pid;
 
 SEC("fmod_ret/update_socket_protocol")
 int BPF_PROG(mptcpify, int family, int type, int protocol)
 {
+	if (bpf_get_current_pid_tgid() >> 32 != pid)
+		return protocol;
+
 	if ((family == AF_INET || family == AF_INET6) &&
-	    type == SOCK_STREAM &&
+	    (type & SOCK_TYPE_MASK) == SOCK_STREAM &&
 	    (!protocol || protocol == IPPROTO_TCP)) {
 		return IPPROTO_MPTCP;
 	}

@@ -338,11 +338,11 @@ struct i5000_pvt {
 
 	u16 mir0, mir1, mir2;
 
-	u16 b0_mtr[NUM_MTRS];	/* Memory Technlogy Reg */
+	u16 b0_mtr[NUM_MTRS];	/* Memory Technology Reg */
 	u16 b0_ambpresent0;	/* Branch 0, Channel 0 */
-	u16 b0_ambpresent1;	/* Brnach 0, Channel 1 */
+	u16 b0_ambpresent1;	/* Branch 0, Channel 1 */
 
-	u16 b1_mtr[NUM_MTRS];	/* Memory Technlogy Reg */
+	u16 b1_mtr[NUM_MTRS];	/* Memory Technology Reg */
 	u16 b1_ambpresent0;	/* Branch 1, Channel 8 */
 	u16 b1_ambpresent1;	/* Branch 1, Channel 1 */
 
@@ -352,6 +352,9 @@ struct i5000_pvt {
 	/* Actual values for this controller */
 	int maxch;		/* Max channels */
 	int maxdimmperch;	/* Max DIMMs per channel */
+
+	/* Hardware error reporting status */
+	bool enabled_error_reporting;
 };
 
 /* I5000 MCH error information retrieved from Hardware */
@@ -1111,6 +1114,7 @@ static void calculate_dimm_size(struct i5000_pvt *pvt)
 
 	n = snprintf(p, space, "           ");
 	p += n;
+	space -= n;
 	for (branch = 0; branch < MAX_BRANCHES; branch++) {
 		n = snprintf(p, space, "       branch %d       | ", branch);
 		p += n;
@@ -1210,7 +1214,7 @@ static void i5000_get_mc_regs(struct mem_ctl_info *mci)
 			&pvt->b0_ambpresent1);
 	edac_dbg(2, "\t\tAMB-Branch 0-present1 0x%x:\n", pvt->b0_ambpresent1);
 
-	/* Only if we have 2 branchs (4 channels) */
+	/* Only if we have 2 branches (4 channels) */
 	if (pvt->maxch < CHANNELS_PER_BRANCH) {
 		pvt->b1_ambpresent0 = 0;
 		pvt->b1_ambpresent1 = 0;
@@ -1301,10 +1305,10 @@ static int i5000_init_csrows(struct mem_ctl_info *mci)
 }
 
 /*
- *	i5000_enable_error_reporting
- *			Turn on the memory reporting features of the hardware
+ *	i5000_set_error_reporting
+ *			Turn on/off the memory reporting features of the hardware
  */
-static void i5000_enable_error_reporting(struct mem_ctl_info *mci)
+static void i5000_set_error_reporting(struct mem_ctl_info *mci, bool enable)
 {
 	struct i5000_pvt *pvt;
 	u32 fbd_error_mask;
@@ -1315,8 +1319,11 @@ static void i5000_enable_error_reporting(struct mem_ctl_info *mci)
 	pci_read_config_dword(pvt->branchmap_werrors, EMASK_FBD,
 			&fbd_error_mask);
 
-	/* Enable with a '0' */
-	fbd_error_mask &= ~(ENABLE_EMASK_ALL);
+	/* Enable with 0, disable with 1 */
+	if (enable)
+		fbd_error_mask &= ~(ENABLE_EMASK_ALL);
+	else
+		fbd_error_mask |= ENABLE_EMASK_ALL;
 
 	pci_write_config_dword(pvt->branchmap_werrors, EMASK_FBD,
 			fbd_error_mask);
@@ -1434,17 +1441,19 @@ static int i5000_probe1(struct pci_dev *pdev, int dev_idx)
 	if (i5000_init_csrows(mci)) {
 		edac_dbg(0, "MC: Setting mci->edac_cap to EDAC_FLAG_NONE because i5000_init_csrows() returned nonzero value\n");
 		mci->edac_cap = EDAC_FLAG_NONE;	/* no csrows found */
+		pvt->enabled_error_reporting = false;
 	} else {
 		edac_dbg(1, "MC: Enable error reporting now\n");
-		i5000_enable_error_reporting(mci);
+		i5000_set_error_reporting(mci, true);
+		pvt->enabled_error_reporting = true;
 	}
 
 	/* add this new MC control structure to EDAC's list of MCs */
 	if (edac_mc_add_mc(mci)) {
 		edac_dbg(0, "MC: failed edac_mc_add_mc()\n");
-		/* FIXME: perhaps some code should go here that disables error
-		 * reporting if we just enabled it
-		 */
+		/* Disable error reporting if we previously enabled it */
+		if (pvt->enabled_error_reporting)
+			i5000_set_error_reporting(mci, false);
 		goto fail1;
 	}
 
@@ -1502,6 +1511,7 @@ static int i5000_init_one(struct pci_dev *pdev, const struct pci_device_id *id)
 static void i5000_remove_one(struct pci_dev *pdev)
 {
 	struct mem_ctl_info *mci;
+	struct i5000_pvt *pvt;
 
 	edac_dbg(0, "\n");
 
@@ -1510,6 +1520,12 @@ static void i5000_remove_one(struct pci_dev *pdev)
 
 	if ((mci = edac_mc_del_mc(&pdev->dev)) == NULL)
 		return;
+
+	pvt = mci->pvt_info;
+
+	/* Disable error reporting on teardown */
+	if (pvt->enabled_error_reporting)
+		i5000_set_error_reporting(mci, false);
 
 	/* retrieve references to resources, and free those resources */
 	i5000_put_devices(mci);

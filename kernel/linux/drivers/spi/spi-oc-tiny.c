@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0-only
 /*
- * OpenCores tiny SPI master driver
+ * OpenCores tiny SPI host driver
  *
  * https://opencores.org/project,tiny_spi
  *
@@ -53,7 +53,7 @@ struct tiny_spi {
 
 static inline struct tiny_spi *tiny_spi_to_hw(struct spi_device *sdev)
 {
-	return spi_master_get_devdata(sdev->master);
+	return spi_controller_get_devdata(sdev->controller);
 }
 
 static unsigned int tiny_spi_baud(struct spi_device *spi, unsigned int hz)
@@ -184,8 +184,6 @@ static irqreturn_t tiny_spi_irq(int irq, void *dev)
 }
 
 #ifdef CONFIG_OF
-#include <linux/of_gpio.h>
-
 static int tiny_spi_of_probe(struct platform_device *pdev)
 {
 	struct tiny_spi *hw = platform_get_drvdata(pdev);
@@ -194,7 +192,6 @@ static int tiny_spi_of_probe(struct platform_device *pdev)
 
 	if (!np)
 		return 0;
-	hw->bitbang.master->dev.of_node = pdev->dev.of_node;
 	if (!of_property_read_u32(np, "clock-frequency", &val))
 		hw->freq = val;
 	if (!of_property_read_u32(np, "baud-width", &val))
@@ -212,33 +209,31 @@ static int tiny_spi_probe(struct platform_device *pdev)
 {
 	struct tiny_spi_platform_data *platp = dev_get_platdata(&pdev->dev);
 	struct tiny_spi *hw;
-	struct spi_master *master;
-	int err = -ENODEV;
+	struct spi_controller *host;
+	int err;
 
-	master = spi_alloc_master(&pdev->dev, sizeof(struct tiny_spi));
-	if (!master)
-		return err;
+	host = devm_spi_alloc_host(&pdev->dev, sizeof(struct tiny_spi));
+	if (!host)
+		return -ENOMEM;
 
-	/* setup the master state. */
-	master->bus_num = pdev->id;
-	master->mode_bits = SPI_CPOL | SPI_CPHA | SPI_CS_HIGH;
-	master->setup = tiny_spi_setup;
-	master->use_gpio_descriptors = true;
+	/* setup the host state. */
+	host->bus_num = pdev->id;
+	host->mode_bits = SPI_CPOL | SPI_CPHA | SPI_CS_HIGH;
+	host->setup = tiny_spi_setup;
+	host->use_gpio_descriptors = true;
 
-	hw = spi_master_get_devdata(master);
+	hw = spi_controller_get_devdata(host);
 	platform_set_drvdata(pdev, hw);
 
 	/* setup the state for the bitbang driver */
-	hw->bitbang.master = master;
+	hw->bitbang.ctlr = host;
 	hw->bitbang.setup_transfer = tiny_spi_setup_transfer;
 	hw->bitbang.txrx_bufs = tiny_spi_txrx_bufs;
 
 	/* find and map our resources */
 	hw->base = devm_platform_ioremap_resource(pdev, 0);
-	if (IS_ERR(hw->base)) {
-		err = PTR_ERR(hw->base);
-		goto exit;
-	}
+	if (IS_ERR(hw->base))
+		return PTR_ERR(hw->base);
 	/* irq is optional */
 	hw->irq = platform_get_irq(pdev, 0);
 	if (hw->irq >= 0) {
@@ -246,7 +241,7 @@ static int tiny_spi_probe(struct platform_device *pdev)
 		err = devm_request_irq(&pdev->dev, hw->irq, tiny_spi_irq, 0,
 				       pdev->name, hw);
 		if (err)
-			goto exit;
+			return err;
 	}
 	/* find platform data */
 	if (platp) {
@@ -255,29 +250,23 @@ static int tiny_spi_probe(struct platform_device *pdev)
 	} else {
 		err = tiny_spi_of_probe(pdev);
 		if (err)
-			goto exit;
+			return err;
 	}
 
 	/* register our spi controller */
 	err = spi_bitbang_start(&hw->bitbang);
 	if (err)
-		goto exit;
+		return err;
 	dev_info(&pdev->dev, "base %p, irq %d\n", hw->base, hw->irq);
 
 	return 0;
-
-exit:
-	spi_master_put(master);
-	return err;
 }
 
 static void tiny_spi_remove(struct platform_device *pdev)
 {
 	struct tiny_spi *hw = platform_get_drvdata(pdev);
-	struct spi_master *master = hw->bitbang.master;
 
 	spi_bitbang_stop(&hw->bitbang);
-	spi_master_put(master);
 }
 
 #ifdef CONFIG_OF
@@ -290,7 +279,7 @@ MODULE_DEVICE_TABLE(of, tiny_spi_match);
 
 static struct platform_driver tiny_spi_driver = {
 	.probe = tiny_spi_probe,
-	.remove_new = tiny_spi_remove,
+	.remove = tiny_spi_remove,
 	.driver = {
 		.name = DRV_NAME,
 		.pm = NULL,

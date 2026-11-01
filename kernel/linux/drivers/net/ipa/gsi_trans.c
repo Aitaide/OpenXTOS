@@ -1,22 +1,22 @@
 // SPDX-License-Identifier: GPL-2.0
 
 /* Copyright (c) 2012-2018, The Linux Foundation. All rights reserved.
- * Copyright (C) 2019-2022 Linaro Ltd.
+ * Copyright (C) 2019-2024 Linaro Ltd.
  */
 
-#include <linux/types.h>
-#include <linux/bits.h>
 #include <linux/bitfield.h>
+#include <linux/bits.h>
+#include <linux/dma-direction.h>
 #include <linux/refcount.h>
 #include <linux/scatterlist.h>
-#include <linux/dma-direction.h>
+#include <linux/types.h>
 
 #include "gsi.h"
 #include "gsi_private.h"
 #include "gsi_trans.h"
-#include "ipa_gsi.h"
-#include "ipa_data.h"
 #include "ipa_cmd.h"
+#include "ipa_data.h"
+#include "ipa_gsi.h"
 
 /**
  * DOC: GSI Transactions
@@ -730,8 +730,7 @@ int gsi_channel_trans_init(struct gsi *gsi, u32 channel_id)
 	 * modulo that number to determine the next one that's free.
 	 * Transactions are allocated one at a time.
 	 */
-	trans_info->trans = kcalloc(tre_count, sizeof(*trans_info->trans),
-				    GFP_KERNEL);
+	trans_info->trans = kzalloc_objs(*trans_info->trans, tre_count);
 	if (!trans_info->trans)
 		return -ENOMEM;
 	trans_info->free_id = 0;	/* all modulo channel->tre_count */
@@ -746,8 +745,7 @@ int gsi_channel_trans_init(struct gsi *gsi, u32 channel_id)
 	 * Each entry in this map records the transaction associated
 	 * with a corresponding completed TRE.
 	 */
-	trans_info->map = kcalloc(tre_count, sizeof(*trans_info->map),
-				  GFP_KERNEL);
+	trans_info->map = kzalloc_objs(*trans_info->map, tre_count);
 	if (!trans_info->map) {
 		ret = -ENOMEM;
 		goto err_trans_free;

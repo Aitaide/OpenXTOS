@@ -6,6 +6,7 @@
  */
 
 #include <linux/trace_clock.h>
+#include <linux/cpumask.h>
 #include <linux/delay.h>
 #include <linux/interrupt.h>
 #include <linux/irq.h>
@@ -33,8 +34,6 @@ MODULE_PARM_DESC(burst_size, "The size of a burst (default 1)");
 MODULE_PARM_DESC(cpu_affinity, "Cpu num test is running on");
 
 static struct completion done;
-
-#define MIN(x, y) ((x) < (y) ? (x) : (y))
 
 static void busy_wait(ulong time)
 {
@@ -119,18 +118,29 @@ static int preemptirq_delay_run(void *data)
 {
 	int i;
 	int s = MIN(burst_size, NR_TEST_FUNCS);
-	struct cpumask cpu_mask;
+	cpumask_var_t cpu_mask;
+
+	if (!alloc_cpumask_var(&cpu_mask, GFP_KERNEL))
+		return -ENOMEM;
 
 	if (cpu_affinity > -1) {
-		cpumask_clear(&cpu_mask);
-		cpumask_set_cpu(cpu_affinity, &cpu_mask);
-		if (set_cpus_allowed_ptr(current, &cpu_mask))
+		unsigned int cpu = cpu_affinity;
+
+		if (cpu >= nr_cpu_ids || !cpu_possible(cpu)) {
+			pr_err("cpu_affinity:%d, invalid CPU\n", cpu_affinity);
+			goto out;
+		}
+
+		cpumask_clear(cpu_mask);
+		cpumask_set_cpu(cpu_affinity, cpu_mask);
+		if (set_cpus_allowed_ptr(current, cpu_mask))
 			pr_err("cpu_affinity:%d, failed\n", cpu_affinity);
 	}
 
 	for (i = 0; i < s; i++)
 		(testfuncs[i])(i);
 
+out:
 	complete(&done);
 
 	set_current_state(TASK_INTERRUPTIBLE);
@@ -140,6 +150,8 @@ static int preemptirq_delay_run(void *data)
 	}
 
 	__set_current_state(TASK_RUNNING);
+
+	free_cpumask_var(cpu_mask);
 
 	return 0;
 }
@@ -215,4 +227,5 @@ static void __exit preemptirq_delay_exit(void)
 
 module_init(preemptirq_delay_init)
 module_exit(preemptirq_delay_exit)
+MODULE_DESCRIPTION("Preempt / IRQ disable delay thread to test latency tracers");
 MODULE_LICENSE("GPL v2");

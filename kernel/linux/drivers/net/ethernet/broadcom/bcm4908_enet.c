@@ -181,7 +181,7 @@ static int bcm4908_dma_alloc_buf_descs(struct bcm4908_enet *enet,
 		goto err_free_buf_descs;
 	}
 
-	ring->slots = kcalloc(ring->length, sizeof(*ring->slots), GFP_KERNEL);
+	ring->slots = kzalloc_objs(*ring->slots, ring->length);
 	if (!ring->slots)
 		goto err_free_buf_descs;
 
@@ -768,7 +768,7 @@ err_dma_free:
 	return err;
 }
 
-static int bcm4908_enet_remove(struct platform_device *pdev)
+static void bcm4908_enet_remove(struct platform_device *pdev)
 {
 	struct bcm4908_enet *enet = platform_get_drvdata(pdev);
 
@@ -776,8 +776,6 @@ static int bcm4908_enet_remove(struct platform_device *pdev)
 	netif_napi_del(&enet->rx_ring.napi);
 	netif_napi_del(&enet->tx_ring.napi);
 	bcm4908_enet_dma_free(enet);
-
-	return 0;
 }
 
 static const struct of_device_id bcm4908_enet_of_match[] = {
@@ -795,5 +793,6 @@ static struct platform_driver bcm4908_enet_driver = {
 };
 module_platform_driver(bcm4908_enet_driver);
 
+MODULE_DESCRIPTION("Broadcom BCM4908 Gigabit Ethernet driver");
 MODULE_LICENSE("GPL v2");
 MODULE_DEVICE_TABLE(of, bcm4908_enet_of_match);

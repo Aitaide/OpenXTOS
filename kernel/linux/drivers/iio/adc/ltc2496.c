@@ -14,7 +14,6 @@
 #include <linux/iio/iio.h>
 #include <linux/iio/driver.h>
 #include <linux/module.h>
-#include <linux/mod_devicetable.h>
 #include <linux/property.h>
 
 #include "ltc2497.h"
@@ -94,7 +93,7 @@ static const struct ltc2497_chip_info ltc2496_info = {
 
 static const struct of_device_id ltc2496_of_match[] = {
 	{ .compatible = "lltc,ltc2496", .data = &ltc2496_info, },
-	{},
+	{ }
 };
 MODULE_DEVICE_TABLE(of, ltc2496_of_match);
 

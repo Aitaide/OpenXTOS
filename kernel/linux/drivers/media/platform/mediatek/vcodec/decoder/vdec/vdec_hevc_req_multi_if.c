@@ -254,7 +254,7 @@ struct vdec_hevc_slice_lat_dec_param {
  * struct vdec_hevc_slice_info - decode information
  *
  * @wdma_end_addr_offset: wdma end address offset
- * @timeout:              Decode timeout: 1 timeout, 0 no timeount
+ * @timeout:              Decode timeout: 1 timeout, 0 no timeout
  * @vdec_fb_va:           VDEC frame buffer struct virtual address
  * @crc:                  Used to check whether hardware's status is right
  */
@@ -342,7 +342,7 @@ struct vdec_hevc_slice_share_info {
 /**
  * struct vdec_hevc_slice_inst - hevc decoder instance
  *
- * @slice_dec_num:      how many picture be decoded
+ * @slice_dec_num:      Number of frames to be decoded
  * @ctx:                point to mtk_vcodec_dec_ctx
  * @mv_buf:             HW working motion vector buffer
  * @vpu:                VPU instance
@@ -742,7 +742,8 @@ static int vdec_hevc_slice_setup_lat_buffer(struct vdec_hevc_slice_inst *inst,
 
 	src_buf_info = container_of(bs, struct mtk_video_dec_buf, bs_buffer);
 	lat_buf->src_buf_req = src_buf_info->m2m_buf.vb.vb2_buf.req_obj.req;
-	v4l2_m2m_buf_copy_metadata(&src_buf_info->m2m_buf.vb, &lat_buf->ts_info, true);
+	v4l2_m2m_buf_copy_metadata(&src_buf_info->m2m_buf.vb,
+				   &lat_buf->ts_info);
 
 	*res_chg = inst->resolution_changed;
 	if (inst->resolution_changed) {
@@ -821,7 +822,7 @@ static int vdec_hevc_slice_setup_core_buffer(struct vdec_hevc_slice_inst *inst,
 	inst->vsi_core->fb.y.dma_addr = y_fb_dma;
 	inst->vsi_core->fb.y.size = ctx->picinfo.fb_sz[0];
 	inst->vsi_core->fb.c.dma_addr = c_fb_dma;
-	inst->vsi_core->fb.y.size = ctx->picinfo.fb_sz[1];
+	inst->vsi_core->fb.c.size = ctx->picinfo.fb_sz[1];
 
 	inst->vsi_core->dec.vdec_fb_va = (unsigned long)fb;
 
@@ -847,7 +848,7 @@ static int vdec_hevc_slice_setup_core_buffer(struct vdec_hevc_slice_inst *inst,
 	}
 
 	vb2_v4l2 = v4l2_m2m_next_dst_buf(ctx->m2m_ctx);
-	v4l2_m2m_buf_copy_metadata(&lat_buf->ts_info, vb2_v4l2, true);
+	v4l2_m2m_buf_copy_metadata(&lat_buf->ts_info, vb2_v4l2);
 
 	return 0;
 }
@@ -857,7 +858,7 @@ static int vdec_hevc_slice_init(struct mtk_vcodec_dec_ctx *ctx)
 	struct vdec_hevc_slice_inst *inst;
 	int err, vsi_size;
 
-	inst = kzalloc(sizeof(*inst), GFP_KERNEL);
+	inst = kzalloc_obj(*inst);
 	if (!inst)
 		return -ENOMEM;
 
@@ -869,7 +870,6 @@ static int vdec_hevc_slice_init(struct mtk_vcodec_dec_ctx *ctx)
 	inst->vpu.codec_type = ctx->current_codec;
 	inst->vpu.capture_type = ctx->capture_fourcc;
 
-	ctx->drv_handle = inst;
 	err = vpu_dec_init(&inst->vpu);
 	if (err) {
 		mtk_vdec_err(ctx, "vdec_hevc init err=%d", err);
@@ -898,6 +898,7 @@ static int vdec_hevc_slice_init(struct mtk_vcodec_dec_ctx *ctx)
 	mtk_vdec_debug(ctx, "lat hevc instance >> %p, codec_type = 0x%x",
 		       inst, inst->vpu.codec_type);
 
+	ctx->drv_handle = inst;
 	return 0;
 error_free_inst:
 	kfree(inst);

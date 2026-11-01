@@ -298,14 +298,14 @@ static void find_next_position(struct mtdoops_context *cxt)
 }
 
 static void mtdoops_do_dump(struct kmsg_dumper *dumper,
-			    enum kmsg_dump_reason reason)
+			    struct kmsg_dump_detail *detail)
 {
 	struct mtdoops_context *cxt = container_of(dumper,
 			struct mtdoops_context, dump);
 	struct kmsg_dump_iter iter;
 
 	/* Only dump oopses if dump_oops is set */
-	if (reason == KMSG_DUMP_OOPS && !dump_oops)
+	if (detail->reason == KMSG_DUMP_OOPS && !dump_oops)
 		return;
 
 	kmsg_dump_rewind(&iter);
@@ -317,7 +317,7 @@ static void mtdoops_do_dump(struct kmsg_dumper *dumper,
 			     record_size - sizeof(struct mtdoops_hdr), NULL);
 	clear_bit(0, &cxt->oops_buf_busy);
 
-	if (reason != KMSG_DUMP_OOPS) {
+	if (detail->reason != KMSG_DUMP_OOPS) {
 		/* Panics must be written immediately */
 		mtdoops_write(cxt, 1);
 	} else {
@@ -356,9 +356,8 @@ static void mtdoops_notify_add(struct mtd_info *mtd)
 
 	/* oops_page_used is a bit field */
 	cxt->oops_page_used =
-		vmalloc(array_size(sizeof(unsigned long),
-				   DIV_ROUND_UP(mtdoops_pages,
-						BITS_PER_LONG)));
+		vmalloc_array(DIV_ROUND_UP(mtdoops_pages, BITS_PER_LONG),
+			      sizeof(unsigned long));
 	if (!cxt->oops_page_used) {
 		pr_err("could not allocate page array\n");
 		return;
@@ -393,6 +392,9 @@ static void mtdoops_notify_remove(struct mtd_info *mtd)
 	cxt->mtd = NULL;
 	flush_work(&cxt->work_erase);
 	flush_work(&cxt->work_write);
+	vfree(cxt->oops_page_used);
+	cxt->oops_page_used = NULL;
+	cxt->oops_pages = 0;
 }
 
 
@@ -404,8 +406,7 @@ static struct mtd_notifier mtdoops_notifier = {
 static int __init mtdoops_init(void)
 {
 	struct mtdoops_context *cxt = &oops_cxt;
-	int mtd_index;
-	char *endp;
+	unsigned int mtd_index;
 
 	if (strlen(mtddev) == 0) {
 		pr_err("mtd device (mtddev=name/number) must be supplied\n");
@@ -422,9 +423,9 @@ static int __init mtdoops_init(void)
 
 	/* Setup the MTD device to use */
 	cxt->mtd_index = -1;
-	mtd_index = simple_strtoul(mtddev, &endp, 0);
-	if (*endp == '\0')
+	if (kstrtouint(mtddev, 0, &mtd_index) == 0) {
 		cxt->mtd_index = mtd_index;
+	}
 
 	cxt->oops_buf = vmalloc(record_size);
 	if (!cxt->oops_buf)

@@ -19,10 +19,10 @@
 #include <sys/wait.h>
 #include <unistd.h>
 
-#include "../kselftest_harness.h"
+#include "kselftest_harness.h"
 
 #define __DEV_FULL "/sys/devices/virtual/mem/full/uevent"
-#define __UEVENT_BUFFER_SIZE (2048 * 2)
+#define __UEVENT_BUFFER_SIZE (1024 * 1024)
 #define __UEVENT_HEADER "add@/devices/virtual/mem/full"
 #define __UEVENT_HEADER_LEN sizeof("add@/devices/virtual/mem/full")
 #define __UEVENT_LISTEN_ALL -1
@@ -78,7 +78,7 @@ static int uevent_listener(unsigned long post_flags, bool expect_uevent,
 {
 	int sk_fd, ret;
 	socklen_t sk_addr_len;
-	int fret = -1, rcv_buf_sz = __UEVENT_BUFFER_SIZE;
+	int rcv_buf_sz = __UEVENT_BUFFER_SIZE;
 	uint64_t sync_add = 1;
 	struct sockaddr_nl sk_addr = { 0 }, rcv_addr = { 0 };
 	char buf[__UEVENT_BUFFER_SIZE] = { 0 };
@@ -121,6 +121,7 @@ static int uevent_listener(unsigned long post_flags, bool expect_uevent,
 
 	if ((size_t)sk_addr_len != sizeof(sk_addr)) {
 		fprintf(stderr, "Invalid socket address size\n");
+		ret = -1;
 		goto on_error;
 	}
 
@@ -147,11 +148,12 @@ static int uevent_listener(unsigned long post_flags, bool expect_uevent,
 	ret = write_nointr(sync_fd, &sync_add, sizeof(sync_add));
 	close(sync_fd);
 	if (ret != sizeof(sync_add)) {
+		ret = -1;
 		fprintf(stderr, "Failed to synchronize with parent process\n");
 		goto on_error;
 	}
 
-	fret = 0;
+	ret = 0;
 	for (;;) {
 		ssize_t r;
 
@@ -187,7 +189,7 @@ static int uevent_listener(unsigned long post_flags, bool expect_uevent,
 on_error:
 	close(sk_fd);
 
-	return fret;
+	return ret;
 }
 
 int trigger_uevent(unsigned int times)

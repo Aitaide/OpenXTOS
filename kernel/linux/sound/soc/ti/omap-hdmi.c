@@ -24,8 +24,6 @@
 #define DRV_NAME "omap-hdmi-audio"
 
 struct hdmi_audio_data {
-	struct snd_soc_card *card;
-
 	const struct omap_hdmi_audio_ops *ops;
 	struct device *dssdev;
 	struct snd_dmaengine_dai_dma_data dma_data;
@@ -40,7 +38,7 @@ struct hdmi_audio_data {
 static
 struct hdmi_audio_data *card_drvdata_substream(struct snd_pcm_substream *ss)
 {
-	struct snd_soc_pcm_runtime *rtd = ss->private_data;
+	struct snd_soc_pcm_runtime *rtd = snd_soc_substream_to_rtd(ss);
 
 	return snd_soc_card_get_drvdata(rtd->card);
 }
@@ -49,7 +47,7 @@ static void hdmi_dai_abort(struct device *dev)
 {
 	struct hdmi_audio_data *ad = dev_get_drvdata(dev);
 
-	mutex_lock(&ad->current_stream_lock);
+	guard(mutex)(&ad->current_stream_lock);
 	if (ad->current_stream && ad->current_stream->runtime &&
 	    snd_pcm_running(ad->current_stream)) {
 		dev_err(dev, "HDMI display disabled, aborting playback\n");
@@ -57,7 +55,6 @@ static void hdmi_dai_abort(struct device *dev)
 		snd_pcm_stop(ad->current_stream, SNDRV_PCM_STATE_DISCONNECTED);
 		snd_pcm_stream_unlock_irq(ad->current_stream);
 	}
-	mutex_unlock(&ad->current_stream_lock);
 }
 
 static int hdmi_dai_startup(struct snd_pcm_substream *substream,
@@ -86,16 +83,14 @@ static int hdmi_dai_startup(struct snd_pcm_substream *substream,
 
 	snd_soc_dai_set_dma_data(dai, substream, &ad->dma_data);
 
-	mutex_lock(&ad->current_stream_lock);
-	ad->current_stream = substream;
-	mutex_unlock(&ad->current_stream_lock);
+	scoped_guard(mutex, &ad->current_stream_lock)
+		ad->current_stream = substream;
 
 	ret = ad->ops->audio_startup(ad->dssdev, hdmi_dai_abort);
 
 	if (ret) {
-		mutex_lock(&ad->current_stream_lock);
-		ad->current_stream = NULL;
-		mutex_unlock(&ad->current_stream_lock);
+		scoped_guard(mutex, &ad->current_stream_lock)
+			ad->current_stream = NULL;
 	}
 
 	return ret;
@@ -261,9 +256,8 @@ static void hdmi_dai_shutdown(struct snd_pcm_substream *substream,
 
 	ad->ops->audio_shutdown(ad->dssdev);
 
-	mutex_lock(&ad->current_stream_lock);
-	ad->current_stream = NULL;
-	mutex_unlock(&ad->current_stream_lock);
+	scoped_guard(mutex, &ad->current_stream_lock)
+		ad->current_stream = NULL;
 }
 
 static const struct snd_soc_dai_ops hdmi_dai_ops = {
@@ -354,38 +348,34 @@ static int omap_hdmi_audio_probe(struct platform_device *pdev)
 	if (!card)
 		return -ENOMEM;
 
-	card->name = devm_kasprintf(dev, GFP_KERNEL,
-				    "HDMI %s", dev_name(ad->dssdev));
-	if (!card->name)
-		return -ENOMEM;
-
+	card->name = "HDMI";
 	card->owner = THIS_MODULE;
 	card->dai_link =
 		devm_kzalloc(dev, sizeof(*(card->dai_link)), GFP_KERNEL);
 	if (!card->dai_link)
 		return -ENOMEM;
 
-	compnent = devm_kzalloc(dev, sizeof(*compnent), GFP_KERNEL);
+	compnent = devm_kzalloc(dev, 2 * sizeof(*compnent), GFP_KERNEL);
 	if (!compnent)
 		return -ENOMEM;
-	card->dai_link->cpus		= compnent;
+	card->dai_link->cpus		= &compnent[0];
 	card->dai_link->num_cpus	= 1;
-	card->dai_link->codecs		= &asoc_dummy_dlc;
+	card->dai_link->codecs		= &snd_soc_dummy_dlc;
 	card->dai_link->num_codecs	= 1;
+	card->dai_link->platforms	= &compnent[1];
+	card->dai_link->num_platforms	= 1;
 
 	card->dai_link->name = card->name;
 	card->dai_link->stream_name = card->name;
 	card->dai_link->cpus->dai_name = dev_name(ad->dssdev);
+	card->dai_link->platforms->name = dev_name(ad->dssdev);
 	card->num_links = 1;
 	card->dev = dev;
 
-	ret = snd_soc_register_card(card);
-	if (ret) {
-		dev_err(dev, "snd_soc_register_card failed (%d)\n", ret);
-		return ret;
-	}
+	ret = devm_snd_soc_register_card(dev, card);
+	if (ret)
+		return dev_err_probe(dev, ret, "snd_soc_register_card() failed\n");
 
-	ad->card = card;
 	snd_soc_card_set_drvdata(card, ad);
 
 	dev_set_drvdata(dev, ad);
@@ -393,19 +383,11 @@ static int omap_hdmi_audio_probe(struct platform_device *pdev)
 	return 0;
 }
 
-static void omap_hdmi_audio_remove(struct platform_device *pdev)
-{
-	struct hdmi_audio_data *ad = platform_get_drvdata(pdev);
-
-	snd_soc_unregister_card(ad->card);
-}
-
 static struct platform_driver hdmi_audio_driver = {
 	.driver = {
 		.name = DRV_NAME,
 	},
 	.probe = omap_hdmi_audio_probe,
-	.remove_new = omap_hdmi_audio_remove,
 };
 
 module_platform_driver(hdmi_audio_driver);

@@ -24,19 +24,39 @@
 #define CHAN_MINTDIS(t)		(CTRL_STRIDE_OFF(t, 3) + 0x4)
 #define CHAN_MASTRSTAT(t)	(CTRL_STRIDE_OFF(t, 3) + 0x8)
 
-#define CHAN_MAX_OUTPUT_INT	0x8
+#define CHAN_MAX_OUTPUT_INT	0xF
+
+/* SoC does not implement the CHANCTRL register */
+#define IRQSTEER_QUIRK_NO_CHANCTRL	BIT(0)
+
+struct irqsteer_devtype_data {
+	u32	quirks;
+};
 
 struct irqsteer_data {
-	void __iomem		*regs;
-	struct clk		*ipg_clk;
-	int			irq[CHAN_MAX_OUTPUT_INT];
-	int			irq_count;
-	raw_spinlock_t		lock;
-	int			reg_num;
-	int			channel;
-	struct irq_domain	*domain;
-	u32			*saved_reg;
+	void __iomem				*regs;
+	struct clk				*ipg_clk;
+	int					irq[CHAN_MAX_OUTPUT_INT];
+	int					irq_count;
+	raw_spinlock_t				lock;
+	int					reg_num;
+	int					channel;
+	struct irq_domain			*domain;
+	u32					*saved_reg;
+	struct device				*dev;
+	const struct irqsteer_devtype_data	*devtype_data;
 };
+
+static const struct irqsteer_devtype_data imx_data = { };
+
+static const struct irqsteer_devtype_data s32n79_data = {
+	.quirks	= IRQSTEER_QUIRK_NO_CHANCTRL,
+};
+
+static bool irqsteer_has_chanctrl(const struct irqsteer_devtype_data *data)
+{
+	return !(data->quirks & IRQSTEER_QUIRK_NO_CHANCTRL);
+}
 
 static int imx_irqsteer_get_reg_index(struct irqsteer_data *data,
 				      unsigned long irqnum)
@@ -72,10 +92,26 @@ static void imx_irqsteer_irq_mask(struct irq_data *d)
 	raw_spin_unlock_irqrestore(&data->lock, flags);
 }
 
+static void imx_irqsteer_irq_bus_lock(struct irq_data *d)
+{
+	struct irqsteer_data *data = d->chip_data;
+
+	pm_runtime_get_sync(data->dev);
+}
+
+static void imx_irqsteer_irq_bus_sync_unlock(struct irq_data *d)
+{
+	struct irqsteer_data *data = d->chip_data;
+
+	pm_runtime_put_autosuspend(data->dev);
+}
+
 static const struct irq_chip imx_irqsteer_irq_chip = {
-	.name		= "irqsteer",
-	.irq_mask	= imx_irqsteer_irq_mask,
-	.irq_unmask	= imx_irqsteer_irq_unmask,
+	.name			= "irqsteer",
+	.irq_mask		= imx_irqsteer_irq_mask,
+	.irq_unmask		= imx_irqsteer_irq_unmask,
+	.irq_bus_lock		= imx_irqsteer_irq_bus_lock,
+	.irq_bus_sync_unlock	= imx_irqsteer_irq_bus_sync_unlock,
 };
 
 static int imx_irqsteer_irq_map(struct irq_domain *h, unsigned int irq,
@@ -150,6 +186,7 @@ static int imx_irqsteer_probe(struct platform_device *pdev)
 	if (!data)
 		return -ENOMEM;
 
+	data->dev = &pdev->dev;
 	data->regs = devm_platform_ioremap_resource(pdev, 0);
 	if (IS_ERR(data->regs)) {
 		dev_err(&pdev->dev, "failed to initialize reg\n");
@@ -169,6 +206,10 @@ static int imx_irqsteer_probe(struct platform_device *pdev)
 	ret = of_property_read_u32(np, "fsl,channel", &data->channel);
 	if (ret)
 		return ret;
+
+	data->devtype_data = device_get_match_data(&pdev->dev);
+	if (!data->devtype_data)
+		return dev_err_probe(&pdev->dev, -ENODEV, "failed to match device data\n");
 
 	/*
 	 * There is one output irq for each group of 64 inputs.
@@ -192,10 +233,11 @@ static int imx_irqsteer_probe(struct platform_device *pdev)
 	}
 
 	/* steer all IRQs into configured channel */
-	writel_relaxed(BIT(data->channel), data->regs + CHANCTRL);
+	if (irqsteer_has_chanctrl(data->devtype_data))
+		writel_relaxed(BIT(data->channel), data->regs + CHANCTRL);
 
-	data->domain = irq_domain_add_linear(np, data->reg_num * 32,
-					     &imx_irqsteer_domain_ops, data);
+	data->domain = irq_domain_create_linear(dev_fwnode(&pdev->dev), data->reg_num * 32,
+						&imx_irqsteer_domain_ops, data);
 	if (!data->domain) {
 		dev_err(&pdev->dev, "failed to create IRQ domain\n");
 		ret = -ENOMEM;
@@ -210,10 +252,8 @@ static int imx_irqsteer_probe(struct platform_device *pdev)
 
 	for (i = 0; i < data->irq_count; i++) {
 		data->irq[i] = irq_of_parse_and_map(np, i);
-		if (!data->irq[i]) {
-			ret = -EINVAL;
-			goto out;
-		}
+		if (!data->irq[i])
+			break;
 
 		irq_set_chained_handler_and_data(data->irq[i],
 						 imx_irqsteer_irq_handler,
@@ -231,20 +271,22 @@ out:
 	return ret;
 }
 
-static int imx_irqsteer_remove(struct platform_device *pdev)
+static void imx_irqsteer_remove(struct platform_device *pdev)
 {
 	struct irqsteer_data *irqsteer_data = platform_get_drvdata(pdev);
 	int i;
 
-	for (i = 0; i < irqsteer_data->irq_count; i++)
+	for (i = 0; i < irqsteer_data->irq_count; i++) {
+		if (!irqsteer_data->irq[i])
+			break;
+
 		irq_set_chained_handler_and_data(irqsteer_data->irq[i],
 						 NULL, NULL);
+	}
 
 	irq_domain_remove(irqsteer_data->domain);
 
 	clk_disable_unprepare(irqsteer_data->ipg_clk);
-
-	return 0;
 }
 
 #ifdef CONFIG_PM
@@ -261,7 +303,9 @@ static void imx_irqsteer_restore_regs(struct irqsteer_data *data)
 {
 	int i;
 
-	writel_relaxed(BIT(data->channel), data->regs + CHANCTRL);
+	if (irqsteer_has_chanctrl(data->devtype_data))
+		writel_relaxed(BIT(data->channel), data->regs + CHANCTRL);
+
 	for (i = 0; i < data->reg_num; i++)
 		writel_relaxed(data->saved_reg[i],
 			       data->regs + CHANMASK(i, data->reg_num));
@@ -301,17 +345,18 @@ static const struct dev_pm_ops imx_irqsteer_pm_ops = {
 };
 
 static const struct of_device_id imx_irqsteer_dt_ids[] = {
-	{ .compatible = "fsl,imx-irqsteer", },
+	{ .compatible = "fsl,imx-irqsteer",	.data = &imx_data },
+	{ .compatible = "nxp,s32n79-irqsteer",	.data = &s32n79_data },
 	{},
 };
 
 static struct platform_driver imx_irqsteer_driver = {
 	.driver = {
-		.name = "imx-irqsteer",
-		.of_match_table = imx_irqsteer_dt_ids,
-		.pm = &imx_irqsteer_pm_ops,
+		.name		= "imx-irqsteer",
+		.of_match_table	= imx_irqsteer_dt_ids,
+		.pm		= &imx_irqsteer_pm_ops,
 	},
-	.probe = imx_irqsteer_probe,
-	.remove = imx_irqsteer_remove,
+	.probe		= imx_irqsteer_probe,
+	.remove		= imx_irqsteer_remove,
 };
 builtin_platform_driver(imx_irqsteer_driver);

@@ -52,6 +52,7 @@ struct dc_dsc_policy {
 	uint32_t max_target_bpp;
 	uint32_t min_target_bpp;
 	bool enable_dsc_when_not_needed;
+	bool ycbcr422_simple;
 };
 
 struct dc_dsc_config_options {
@@ -59,11 +60,20 @@ struct dc_dsc_config_options {
 	uint32_t max_target_bpp_limit_override_x16;
 	uint32_t slice_height_granularity;
 	uint32_t dsc_force_odm_hslice_override;
+	bool force_dsc_when_not_needed;
 };
 
+struct dc_dsc_primary_bpp {
+	uint32_t vic;
+	uint32_t target_bpp;
+};
 bool dc_dsc_parse_dsc_dpcd(const struct dc *dc,
 		const uint8_t *dpcd_dsc_basic_data,
 		const uint8_t *dpcd_dsc_ext_data,
+		struct dsc_dec_dpcd_caps *dsc_sink_caps);
+
+bool dc_dsc_parse_dsc_edid(const struct dc *dc,
+		const struct dc_edid_caps *edid_caps,
 		struct dsc_dec_dpcd_caps *dsc_sink_caps);
 
 bool dc_dsc_compute_bandwidth_range(
@@ -90,8 +100,13 @@ uint32_t dc_dsc_stream_bandwidth_in_kbps(const struct dc_crtc_timing *timing,
 
 uint32_t dc_dsc_stream_bandwidth_overhead_in_kbps(
 		const struct dc_crtc_timing *timing,
-		const int num_slices_h,
+		const uint32_t num_slices_h,
 		const bool is_dp);
+
+void dc_dsc_dump_decoder_caps(const struct display_stream_compressor *dsc,
+			      const struct dsc_dec_dpcd_caps *dsc_sink_caps);
+void dc_dsc_dump_encoder_caps(const struct display_stream_compressor *dsc,
+			      const struct dc_crtc_timing *timing);
 
 /* TODO - Hardware/specs limitation should be owned by dc dsc and returned to DM,
  * and DM can choose to OVERRIDE the limitation on CASE BY CASE basis.
@@ -100,7 +115,8 @@ uint32_t dc_dsc_stream_bandwidth_overhead_in_kbps(
  */
 void dc_dsc_get_policy_for_timing(const struct dc_crtc_timing *timing,
 		uint32_t max_target_bpp_limit_override_x16,
-		struct dc_dsc_policy *policy);
+		struct dc_dsc_policy *policy,
+		const enum dc_link_encoding_format link_encoding);
 
 void dc_dsc_policy_set_max_target_bpp_limit(uint32_t limit);
 

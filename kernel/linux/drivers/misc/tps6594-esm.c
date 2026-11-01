@@ -62,7 +62,7 @@ static int tps6594_esm_probe(struct platform_device *pdev)
 						tps6594_esm_isr, IRQF_ONESHOT,
 						pdev->resource[i].name, pdev);
 		if (ret)
-			return dev_err_probe(dev, ret, "Failed to request irq\n");
+			return ret;
 	}
 
 	ret = regmap_set_bits(tps->regmap, TPS6594_REG_ESM_SOC_MODE_CFG,
@@ -135,7 +135,7 @@ static struct platform_driver tps6594_esm_driver = {
 		.pm = pm_sleep_ptr(&tps6594_esm_pm_ops),
 	},
 	.probe = tps6594_esm_probe,
-	.remove_new = tps6594_esm_remove,
+	.remove = tps6594_esm_remove,
 };
 
 module_platform_driver(tps6594_esm_driver);

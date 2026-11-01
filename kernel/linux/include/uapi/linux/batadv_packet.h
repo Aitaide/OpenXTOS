@@ -9,6 +9,7 @@
 
 #include <asm/byteorder.h>
 #include <linux/if_ether.h>
+#include <linux/stddef.h>
 #include <linux/types.h>
 
 /**
@@ -116,6 +117,9 @@ enum batadv_icmp_packettype {
  * only need routable IPv4 multicast packets we signed up for explicitly
  * @BATADV_MCAST_WANT_NO_RTR6: we have no IPv6 multicast router and therefore
  * only need routable IPv6 multicast packets we signed up for explicitly
+ * @BATADV_MCAST_HAVE_MC_PTYPE_CAPA: we can parse, receive and forward
+ * batman-adv multicast packets with a multicast tracker TVLV. And all our
+ * hard interfaces have an MTU of at least 1280 bytes.
  */
 enum batadv_mcast_flags {
 	BATADV_MCAST_WANT_ALL_UNSNOOPABLES	= 1UL << 0,
@@ -123,6 +127,7 @@ enum batadv_mcast_flags {
 	BATADV_MCAST_WANT_ALL_IPV6		= 1UL << 2,
 	BATADV_MCAST_WANT_NO_RTR4		= 1UL << 3,
 	BATADV_MCAST_WANT_NO_RTR6		= 1UL << 4,
+	BATADV_MCAST_HAVE_MC_PTYPE_CAPA		= 1UL << 5,
 };
 
 /* tt data subtypes */
@@ -174,24 +179,32 @@ enum batadv_bla_claimframe {
  * @BATADV_TVLV_TT: translation table tvlv
  * @BATADV_TVLV_ROAM: roaming advertisement tvlv
  * @BATADV_TVLV_MCAST: multicast capability tvlv
+ * @BATADV_TVLV_MCAST_TRACKER: multicast tracker tvlv
  */
 enum batadv_tvlv_type {
-	BATADV_TVLV_GW		= 0x01,
-	BATADV_TVLV_DAT		= 0x02,
-	BATADV_TVLV_NC		= 0x03,
-	BATADV_TVLV_TT		= 0x04,
-	BATADV_TVLV_ROAM	= 0x05,
-	BATADV_TVLV_MCAST	= 0x06,
+	BATADV_TVLV_GW			= 0x01,
+	BATADV_TVLV_DAT			= 0x02,
+	BATADV_TVLV_NC			= 0x03,
+	BATADV_TVLV_TT			= 0x04,
+	BATADV_TVLV_ROAM		= 0x05,
+	BATADV_TVLV_MCAST		= 0x06,
+	BATADV_TVLV_MCAST_TRACKER	= 0x07,
 };
 
 #pragma pack(2)
-/* the destination hardware field in the ARP frame is used to
- * transport the claim type and the group id
+/**
+ * struct batadv_bla_claim_dst - layout of the destination MAC of a BLA claim
+ *  frame
+ * @magic: fixed magic prefix (FF:43:05) identifying claim frames
+ * @type: claim frame type, see &enum batadv_bla_claimframe
+ * @group: group identifier of the announcing backbone gateway
+ *
+ * used in the destination hardware field of the ARP frame
  */
 struct batadv_bla_claim_dst {
-	__u8   magic[3];	/* FF:43:05 */
-	__u8   type;		/* bla_claimframe */
-	__be16 group;		/* group id */
+	__u8   magic[3];
+	__u8   type;
+	__be16 group;
 };
 
 /**
@@ -488,20 +501,39 @@ struct batadv_bcast_packet {
 };
 
 /**
+ * struct batadv_mcast_packet - multicast packet for network payload
+ * @packet_type: batman-adv packet type, part of the general header
+ * @version: batman-adv protocol version, part of the general header
+ * @ttl: time to live for this packet, part of the general header
+ * @reserved: reserved byte for alignment
+ * @tvlv_len: length of the appended tvlv buffer (in bytes)
+ */
+struct batadv_mcast_packet {
+	__u8 packet_type;
+	__u8 version;
+	__u8 ttl;
+	__u8 reserved;
+	__be16 tvlv_len;
+	/* "4 bytes boundary + 2 bytes" long to make the payload after the
+	 * following ethernet header again 4 bytes boundary aligned
+	 */
+};
+
+/**
  * struct batadv_coded_packet - network coded packet
  * @packet_type: batman-adv packet type, part of the general header
  * @version: batman-adv protocol version, part of the general header
  * @ttl: time to live for this packet, part of the general header
+ * @first_ttvn: tt-version number of first included packet
  * @first_source: original source of first included packet
  * @first_orig_dest: original destination of first included packet
  * @first_crc: checksum of first included packet
- * @first_ttvn: tt-version number of first included packet
  * @second_ttl: ttl of second packet
+ * @second_ttvn: tt version number of second included packet
  * @second_dest: second receiver of this coded packet
  * @second_source: original source of second included packet
  * @second_orig_dest: original destination of second included packet
  * @second_crc: checksum of second included packet
- * @second_ttvn: tt version number of second included packet
  * @coded_len: length of network coded part of the payload
  */
 struct batadv_coded_packet {
@@ -528,8 +560,8 @@ struct batadv_coded_packet {
  * @version: batman-adv protocol version, part of the general header
  * @ttl: time to live for this packet, part of the general header
  * @reserved: reserved field (for packet alignment)
- * @src: address of the source
  * @dst: address of the destination
+ * @src: address of the source
  * @tvlv_len: length of tvlv data following the unicast tvlv header
  * @align: 2 bytes to align the header to a 4 byte boundary
  */
@@ -568,19 +600,6 @@ struct batadv_tvlv_gateway_data {
 };
 
 /**
- * struct batadv_tvlv_tt_data - tt data propagated through the tt tvlv container
- * @flags: translation table flags (see batadv_tt_data_flags)
- * @ttvn: translation table version number
- * @num_vlan: number of announced VLANs. In the TVLV this struct is followed by
- *  one batadv_tvlv_tt_vlan_data object per announced vlan
- */
-struct batadv_tvlv_tt_data {
-	__u8   flags;
-	__u8   ttvn;
-	__be16 num_vlan;
-};
-
-/**
  * struct batadv_tvlv_tt_vlan_data - vlan specific tt data propagated through
  *  the tt tvlv container
  * @crc: crc32 checksum of the entries belonging to this vlan
@@ -591,6 +610,21 @@ struct batadv_tvlv_tt_vlan_data {
 	__be32 crc;
 	__be16 vid;
 	__u16  reserved;
+};
+
+/**
+ * struct batadv_tvlv_tt_data - tt data propagated through the tt tvlv container
+ * @flags: translation table flags (see batadv_tt_data_flags)
+ * @ttvn: translation table version number
+ * @num_vlan: number of announced VLANs. In the TVLV this struct is followed by
+ *  one batadv_tvlv_tt_vlan_data object per announced vlan
+ * @vlan_data: array of batadv_tvlv_tt_vlan_data objects
+ */
+struct batadv_tvlv_tt_data {
+	__u8   flags;
+	__u8   ttvn;
+	__be16 num_vlan;
+	struct batadv_tvlv_tt_vlan_data vlan_data[] __counted_by_be(num_vlan);
 };
 
 /**
@@ -626,6 +660,14 @@ struct batadv_tvlv_roam_adv {
 struct batadv_tvlv_mcast_data {
 	__u8 flags;
 	__u8 reserved[3];
+};
+
+/**
+ * struct batadv_tvlv_mcast_tracker - payload of a multicast tracker tvlv
+ * @num_dests: number of subsequent destination originator MAC addresses
+ */
+struct batadv_tvlv_mcast_tracker {
+	__be16	num_dests;
 };
 
 #pragma pack()

@@ -16,21 +16,38 @@ struct _ccu_nkm {
 	unsigned long	m, min_m, max_m;
 };
 
+static bool ccu_nkm_is_valid_rate(struct ccu_common *common, unsigned long parent,
+				  unsigned long n, unsigned long m)
+{
+	struct ccu_nkm *nkm = container_of(common, struct ccu_nkm, common);
+
+	if (nkm->max_m_n_ratio && (m > nkm->max_m_n_ratio * n))
+		return false;
+
+	if (nkm->min_parent_m_ratio && (parent < nkm->min_parent_m_ratio * m))
+		return false;
+
+	return true;
+}
+
 static unsigned long ccu_nkm_find_best_with_parent_adj(struct ccu_common *common,
 						       struct clk_hw *parent_hw,
 						       unsigned long *parent, unsigned long rate,
 						       struct _ccu_nkm *nkm)
 {
-	unsigned long best_rate = 0, best_parent_rate = *parent, tmp_parent = *parent;
+	unsigned long best_rate = 0, best_parent_rate = *parent;
 	unsigned long best_n = 0, best_k = 0, best_m = 0;
 	unsigned long _n, _k, _m;
 
 	for (_k = nkm->min_k; _k <= nkm->max_k; _k++) {
 		for (_n = nkm->min_n; _n <= nkm->max_n; _n++) {
 			for (_m = nkm->min_m; _m <= nkm->max_m; _m++) {
-				unsigned long tmp_rate;
+				unsigned long tmp_rate, tmp_parent;
 
 				tmp_parent = clk_hw_round_rate(parent_hw, rate * _m / (_n * _k));
+
+				if (!ccu_nkm_is_valid_rate(common, tmp_parent, _n, _m))
+					continue;
 
 				tmp_rate = tmp_parent * _n * _k / _m;
 
@@ -65,6 +82,9 @@ static unsigned long ccu_nkm_find_best(unsigned long parent, unsigned long rate,
 	for (_k = nkm->min_k; _k <= nkm->max_k; _k++) {
 		for (_n = nkm->min_n; _n <= nkm->max_n; _n++) {
 			for (_m = nkm->min_m; _m <= nkm->max_m; _m++) {
+				if (!ccu_nkm_is_valid_rate(common, parent, _n, _m))
+					continue;
+
 				unsigned long tmp_rate;
 
 				tmp_rate = parent * _n * _k / _m;
@@ -142,11 +162,9 @@ static unsigned long ccu_nkm_recalc_rate(struct clk_hw *hw,
 	return rate;
 }
 
-static unsigned long ccu_nkm_round_rate(struct ccu_mux_internal *mux,
-					struct clk_hw *parent_hw,
-					unsigned long *parent_rate,
-					unsigned long rate,
-					void *data)
+static int ccu_nkm_determine_rate_helper(struct ccu_mux_internal *mux,
+					 struct clk_rate_request *req,
+					 void *data)
 {
 	struct ccu_nkm *nkm = data;
 	struct _ccu_nkm _nkm;
@@ -159,18 +177,21 @@ static unsigned long ccu_nkm_round_rate(struct ccu_mux_internal *mux,
 	_nkm.max_m = nkm->m.max ?: 1 << nkm->m.width;
 
 	if (nkm->common.features & CCU_FEATURE_FIXED_POSTDIV)
-		rate *= nkm->fixed_post_div;
+		req->rate *= nkm->fixed_post_div;
 
 	if (!clk_hw_can_set_rate_parent(&nkm->common.hw))
-		rate = ccu_nkm_find_best(*parent_rate, rate, &_nkm, &nkm->common);
+		req->rate = ccu_nkm_find_best(req->best_parent_rate, req->rate,
+					      &_nkm, &nkm->common);
 	else
-		rate = ccu_nkm_find_best_with_parent_adj(&nkm->common, parent_hw, parent_rate, rate,
-							 &_nkm);
+		req->rate = ccu_nkm_find_best_with_parent_adj(&nkm->common,
+							      req->best_parent_hw,
+							      &req->best_parent_rate,
+							      req->rate, &_nkm);
 
 	if (nkm->common.features & CCU_FEATURE_FIXED_POSTDIV)
-		rate /= nkm->fixed_post_div;
+		req->rate /= nkm->fixed_post_div;
 
-	return rate;
+	return 0;
 }
 
 static int ccu_nkm_determine_rate(struct clk_hw *hw,
@@ -179,7 +200,7 @@ static int ccu_nkm_determine_rate(struct clk_hw *hw,
 	struct ccu_nkm *nkm = hw_to_ccu_nkm(hw);
 
 	return ccu_mux_helper_determine_rate(&nkm->common, &nkm->mux,
-					     req, ccu_nkm_round_rate, nkm);
+					     req, ccu_nkm_determine_rate_helper, nkm);
 }
 
 static int ccu_nkm_set_rate(struct clk_hw *hw, unsigned long rate,
@@ -247,4 +268,4 @@ const struct clk_ops ccu_nkm_ops = {
 	.recalc_rate	= ccu_nkm_recalc_rate,
 	.set_rate	= ccu_nkm_set_rate,
 };
-EXPORT_SYMBOL_NS_GPL(ccu_nkm_ops, SUNXI_CCU);
+EXPORT_SYMBOL_NS_GPL(ccu_nkm_ops, "SUNXI_CCU");

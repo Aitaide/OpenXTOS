@@ -3,21 +3,21 @@
 #ifndef GPIOLIB_SYSFS_H
 #define GPIOLIB_SYSFS_H
 
-#ifdef CONFIG_GPIO_SYSFS
-
 struct gpio_device;
 
-int gpiochip_sysfs_register(struct gpio_device *gdev);
-void gpiochip_sysfs_unregister(struct gpio_device *gdev);
+#ifdef CONFIG_GPIO_SYSFS
+
+int gpiochip_sysfs_register(struct gpio_chip *gc);
+void gpiochip_sysfs_unregister(struct gpio_chip *gc);
 
 #else
 
-static inline int gpiochip_sysfs_register(struct gpio_device *gdev)
+static inline int gpiochip_sysfs_register(struct gpio_chip *gc)
 {
 	return 0;
 }
 
-static inline void gpiochip_sysfs_unregister(struct gpio_device *gdev)
+static inline void gpiochip_sysfs_unregister(struct gpio_chip *gc)
 {
 }
 

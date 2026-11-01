@@ -6,7 +6,7 @@
 
 #include "mdp5_kms.h"
 
-int mdp5_pipe_assign(struct drm_atomic_state *s, struct drm_plane *plane,
+int mdp5_pipe_assign(struct drm_atomic_commit *s, struct drm_plane *plane,
 		     uint32_t caps, uint32_t blkcfg,
 		     struct mdp5_hw_pipe **hwpipe,
 		     struct mdp5_hw_pipe **r_hwpipe)
@@ -119,7 +119,7 @@ int mdp5_pipe_assign(struct drm_atomic_state *s, struct drm_plane *plane,
 	return 0;
 }
 
-int mdp5_pipe_release(struct drm_atomic_state *s, struct mdp5_hw_pipe *hwpipe)
+int mdp5_pipe_release(struct drm_atomic_commit *s, struct mdp5_hw_pipe *hwpipe)
 {
 	struct msm_drm_private *priv = s->dev->dev_private;
 	struct mdp5_kms *mdp5_kms = to_mdp5_kms(to_mdp_kms(priv->kms));
@@ -151,17 +151,13 @@ int mdp5_pipe_release(struct drm_atomic_state *s, struct mdp5_hw_pipe *hwpipe)
 	return 0;
 }
 
-void mdp5_pipe_destroy(struct mdp5_hw_pipe *hwpipe)
-{
-	kfree(hwpipe);
-}
-
-struct mdp5_hw_pipe *mdp5_pipe_init(enum mdp5_pipe pipe,
+struct mdp5_hw_pipe *mdp5_pipe_init(struct drm_device *dev,
+		enum mdp5_pipe pipe,
 		uint32_t reg_offset, uint32_t caps)
 {
 	struct mdp5_hw_pipe *hwpipe;
 
-	hwpipe = kzalloc(sizeof(*hwpipe), GFP_KERNEL);
+	hwpipe = devm_kzalloc(dev->dev, sizeof(*hwpipe), GFP_KERNEL);
 	if (!hwpipe)
 		return ERR_PTR(-ENOMEM);
 

@@ -1,5 +1,13 @@
 // SPDX-License-Identifier: GPL-2.0-only
-#define _GNU_SOURCE /* for program_invocation_short_name */
+
+/*
+ * Include rseq.c without _GNU_SOURCE defined, before including any headers, so
+ * that rseq.c is compiled with its configuration, not KVM selftests' config.
+ */
+#undef _GNU_SOURCE
+#include "../rseq/rseq.c"
+#define _GNU_SOURCE
+
 #include <errno.h>
 #include <fcntl.h>
 #include <pthread.h>
@@ -19,8 +27,7 @@
 #include "kvm_util.h"
 #include "processor.h"
 #include "test_util.h"
-
-#include "../rseq/rseq.c"
+#include "ucall_common.h"
 
 /*
  * Any bug related to task migration is likely to be timing-dependent; perform
@@ -68,7 +75,7 @@ static void *migration_worker(void *__rseq_tid)
 {
 	pid_t rseq_tid = (pid_t)(unsigned long)__rseq_tid;
 	cpu_set_t allowed_mask;
-	int r, i, cpu;
+	int i, cpu;
 
 	CPU_ZERO(&allowed_mask);
 
@@ -89,9 +96,7 @@ static void *migration_worker(void *__rseq_tid)
 		 * stable, i.e. while changing affinity is in-progress.
 		 */
 		smp_wmb();
-		r = sched_setaffinity(rseq_tid, sizeof(allowed_mask), &allowed_mask);
-		TEST_ASSERT(!r, "sched_setaffinity failed, errno = %d (%s)",
-			    errno, strerror(errno));
+		kvm_sched_setaffinity(rseq_tid, sizeof(allowed_mask), &allowed_mask);
 		smp_wmb();
 		atomic_inc(&seq_cnt);
 
@@ -186,16 +191,40 @@ static void calc_min_max_cpu(void)
 		       "Only one usable CPU, task migration not possible");
 }
 
+static void help(const char *name)
+{
+	puts("");
+	printf("usage: %s [-h] [-u] [-l latency]\n", name);
+	printf(" -u: Don't sanity check the number of successful KVM_RUNs\n");
+	printf(" -l: Set /dev/cpu_dma_latency to suppress deep sleep states\n");
+	puts("");
+	exit(0);
+}
+
 int main(int argc, char *argv[])
 {
-	int r, i, snapshot;
+	int r, i, snapshot, opt, fd = -1, latency = -1;
+	bool skip_sanity_check = false;
 	struct kvm_vm *vm;
 	struct kvm_vcpu *vcpu;
 	u32 cpu, rseq_cpu;
 
-	r = sched_getaffinity(0, sizeof(possible_mask), &possible_mask);
-	TEST_ASSERT(!r, "sched_getaffinity failed, errno = %d (%s)", errno,
-		    strerror(errno));
+	while ((opt = getopt(argc, argv, "hl:u")) != -1) {
+		switch (opt) {
+		case 'u':
+			skip_sanity_check = true;
+			break;
+		case 'l':
+			latency = atoi_paranoid(optarg);
+			break;
+		case 'h':
+		default:
+			help(argv[0]);
+			break;
+		}
+	}
+
+	kvm_sched_getaffinity(0, sizeof(possible_mask), &possible_mask);
 
 	calc_min_max_cpu();
 
@@ -210,8 +239,22 @@ int main(int argc, char *argv[])
 	 */
 	vm = vm_create_with_one_vcpu(&vcpu, guest_code);
 
-	pthread_create(&migration_thread, NULL, migration_worker,
-		       (void *)(unsigned long)syscall(SYS_gettid));
+	kvm_pthread_create(&migration_thread, NULL, migration_worker,
+			   (void *)(unsigned long)kvm_gettid());
+
+	if (latency >= 0) {
+		/*
+		 * Writes to cpu_dma_latency persist only while the file is
+		 * open, i.e. it allows userspace to provide guaranteed latency
+		 * while running a workload.  Keep the file open until the test
+		 * completes, otherwise writing cpu_dma_latency is meaningless.
+		 */
+		fd = open("/dev/cpu_dma_latency", O_RDWR);
+		TEST_ASSERT(fd >= 0, __KVM_SYSCALL_ERROR("open() /dev/cpu_dma_latency", fd));
+
+		r = write(fd, &latency, 4);
+		TEST_ASSERT(r >= 1, "Error setting /dev/cpu_dma_latency");
+	}
 
 	for (i = 0; !done; i++) {
 		vcpu_run(vcpu);
@@ -245,8 +288,11 @@ int main(int argc, char *argv[])
 		} while (snapshot != atomic_read(&seq_cnt));
 
 		TEST_ASSERT(rseq_cpu == cpu,
-			    "rseq CPU = %d, sched CPU = %d\n", rseq_cpu, cpu);
+			    "rseq CPU = %d, sched CPU = %d", rseq_cpu, cpu);
 	}
+
+	if (fd > 0)
+		close(fd);
 
 	/*
 	 * Sanity check that the test was able to enter the guest a reasonable
@@ -254,11 +300,19 @@ int main(int argc, char *argv[])
 	 * getcpu() to stabilize.  A 2:1 migration:KVM_RUN ratio is a fairly
 	 * conservative ratio on x86-64, which can do _more_ KVM_RUNs than
 	 * migrations given the 1us+ delay in the migration task.
+	 *
+	 * Another reason why it may have small migration:KVM_RUN ratio is that,
+	 * on systems with large low power mode wakeup latency, it may happen
+	 * quite often that the scheduler is not able to wake up the target CPU
+	 * before the vCPU thread is scheduled to another CPU.
 	 */
-	TEST_ASSERT(i > (NR_TASK_MIGRATIONS / 2),
-		    "Only performed %d KVM_RUNs, task stalled too much?\n", i);
+	TEST_ASSERT(skip_sanity_check || i > (NR_TASK_MIGRATIONS / 2),
+		    "Only performed %d KVM_RUNs, task stalled too much?\n\n"
+		    "  Try disabling deep sleep states to reduce CPU wakeup latency,\n"
+		    "  e.g. via cpuidle.off=1 or via -l <latency>, or run with -u to\n"
+		    "  disable this sanity check.", i);
 
-	pthread_join(migration_thread, NULL);
+	kvm_pthread_join(migration_thread, NULL);
 
 	kvm_vm_free(vm);
 

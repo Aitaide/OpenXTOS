@@ -202,7 +202,7 @@
 	};
 	display-timings {
 		native-mode = <&timing0>;
-		timing0: 480x272 {
+		timing0: timing-480x272 {
 			clock-frequency = <18400000>;
 			hactive = <480>;
 			vactive = <272>;
@@ -347,7 +347,7 @@
 	status = "okay";
 	pinctrl-names = "default";
 	pinctrl-0 = <&wireless_pins>;
-	vmmmc-supply = <&v3v3c_reg>;
+	vmmc-supply = <&v3v3c_reg>;
 	bus-width = <4>;
 	non-removable;
 	dmas = <&edma_xbar 12 0 1

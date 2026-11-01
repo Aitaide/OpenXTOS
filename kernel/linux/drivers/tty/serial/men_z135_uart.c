@@ -16,6 +16,7 @@
 #include <linux/tty_flip.h>
 #include <linux/bitops.h>
 #include <linux/mcb.h>
+#include <linux/slab.h>
 
 #define MEN_Z135_MAX_PORTS		12
 #define MEN_Z135_BASECLK		29491200
@@ -293,17 +294,14 @@ static void men_z135_handle_rx(struct men_z135_port *uart)
 static void men_z135_handle_tx(struct men_z135_port *uart)
 {
 	struct uart_port *port = &uart->port;
-	struct circ_buf *xmit = &port->state->xmit;
+	struct tty_port *tport = &port->state->port;
+	unsigned char *tail;
+	unsigned int n, txfree;
 	u32 txc;
 	u32 wptr;
 	int qlen;
-	int n;
-	int txfree;
-	int head;
-	int tail;
-	int s;
 
-	if (uart_circ_empty(xmit))
+	if (kfifo_is_empty(&tport->xmit_fifo))
 		goto out;
 
 	if (uart_tx_stopped(port))
@@ -313,7 +311,7 @@ static void men_z135_handle_tx(struct men_z135_port *uart)
 		goto out;
 
 	/* calculate bytes to copy */
-	qlen = uart_circ_chars_pending(xmit);
+	qlen = kfifo_len(&tport->xmit_fifo);
 	if (qlen <= 0)
 		goto out;
 
@@ -345,21 +343,18 @@ static void men_z135_handle_tx(struct men_z135_port *uart)
 	if (n <= 0)
 		goto irq_en;
 
-	head = xmit->head & (UART_XMIT_SIZE - 1);
-	tail = xmit->tail & (UART_XMIT_SIZE - 1);
+	n = kfifo_out_linear_ptr(&tport->xmit_fifo, &tail,
+			min_t(unsigned int, UART_XMIT_SIZE, n));
+	memcpy_toio(port->membase + MEN_Z135_TX_RAM, tail, n);
 
-	s = ((head >= tail) ? head : UART_XMIT_SIZE) - tail;
-	n = min(n, s);
-
-	memcpy_toio(port->membase + MEN_Z135_TX_RAM, &xmit->buf[xmit->tail], n);
 	iowrite32(n & 0x3ff, port->membase + MEN_Z135_TX_CTRL);
 	uart_xmit_advance(port, n);
 
-	if (uart_circ_chars_pending(xmit) < WAKEUP_CHARS)
+	if (kfifo_len(&tport->xmit_fifo) < WAKEUP_CHARS)
 		uart_write_wakeup(port);
 
 irq_en:
-	if (!uart_circ_empty(xmit))
+	if (!kfifo_is_empty(&tport->xmit_fifo))
 		men_z135_reg_set(uart, MEN_Z135_CONF_REG, MEN_Z135_IER_TXCIEN);
 	else
 		men_z135_reg_clr(uart, MEN_Z135_CONF_REG, MEN_Z135_IER_TXCIEN);
@@ -817,7 +812,7 @@ static int men_z135_probe(struct mcb_device *mdev,
 	if (!uart)
 		return -ENOMEM;
 
-	uart->rxbuf = (unsigned char *)__get_free_page(GFP_KERNEL);
+	uart->rxbuf = kmalloc(PAGE_SIZE, GFP_KERNEL);
 	if (!uart->rxbuf)
 		return -ENOMEM;
 
@@ -847,7 +842,7 @@ static int men_z135_probe(struct mcb_device *mdev,
 	return 0;
 
 err:
-	free_page((unsigned long) uart->rxbuf);
+	kfree(uart->rxbuf);
 	dev_err(dev, "Failed to add UART: %d\n", err);
 
 	return err;
@@ -864,7 +859,7 @@ static void men_z135_remove(struct mcb_device *mdev)
 
 	line--;
 	uart_remove_one_port(&men_z135_driver, &uart->port);
-	free_page((unsigned long) uart->rxbuf);
+	kfree(uart->rxbuf);
 }
 
 static const struct mcb_device_id men_z135_ids[] = {
@@ -925,5 +920,4 @@ module_exit(men_z135_exit);
 MODULE_AUTHOR("Johannes Thumshirn <johannes.thumshirn@men.de>");
 MODULE_LICENSE("GPL v2");
 MODULE_DESCRIPTION("MEN 16z135 High Speed UART");
-MODULE_ALIAS("mcb:16z135");
-MODULE_IMPORT_NS(MCB);
+MODULE_IMPORT_NS("MCB");

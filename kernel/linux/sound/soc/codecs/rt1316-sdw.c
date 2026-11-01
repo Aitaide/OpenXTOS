@@ -8,7 +8,6 @@
 #include <linux/delay.h>
 #include <linux/device.h>
 #include <linux/pm_runtime.h>
-#include <linux/mod_devicetable.h>
 #include <linux/module.h>
 #include <linux/regmap.h>
 #include <sound/core.h>
@@ -60,13 +59,13 @@ static const struct reg_default rt1316_reg_defaults[] = {
 	{ 0xd101, 0x00 },
 	{ 0xd102, 0x30 },
 	{ 0xd103, 0x00 },
-	{ SDW_SDCA_CTL(FUNC_NUM_SMART_AMP, RT1316_SDCA_ENT_UDMPU21, RT1316_SDCA_CTL_UDMPU_CLUSTER, 0), 0x00 },
 	{ SDW_SDCA_CTL(FUNC_NUM_SMART_AMP, RT1316_SDCA_ENT_FU21, RT1316_SDCA_CTL_FU_MUTE, CH_L), 0x01 },
 	{ SDW_SDCA_CTL(FUNC_NUM_SMART_AMP, RT1316_SDCA_ENT_FU21, RT1316_SDCA_CTL_FU_MUTE, CH_R), 0x01 },
 	{ SDW_SDCA_CTL(FUNC_NUM_SMART_AMP, RT1316_SDCA_ENT_XU24, RT1316_SDCA_CTL_BYPASS, 0), 0x01 },
 	{ SDW_SDCA_CTL(FUNC_NUM_SMART_AMP, RT1316_SDCA_ENT_PDE23, RT1316_SDCA_CTL_REQ_POWER_STATE, 0), 0x03 },
 	{ SDW_SDCA_CTL(FUNC_NUM_SMART_AMP, RT1316_SDCA_ENT_PDE22, RT1316_SDCA_CTL_REQ_POWER_STATE, 0), 0x03 },
 	{ SDW_SDCA_CTL(FUNC_NUM_SMART_AMP, RT1316_SDCA_ENT_PDE24, RT1316_SDCA_CTL_REQ_POWER_STATE, 0), 0x03 },
+	{ SDW_SDCA_CTL(FUNC_NUM_SMART_AMP, RT1316_SDCA_ENT_UDMPU21, RT1316_SDCA_CTL_UDMPU_CLUSTER, 0), 0x00 },
 };
 
 static const struct reg_sequence rt1316_blind_write[] = {
@@ -302,7 +301,6 @@ static int rt1316_io_init(struct device *dev, struct sdw_slave *slave)
 	/* Mark Slave initialization complete */
 	rt1316->hw_init = true;
 
-	pm_runtime_mark_last_busy(&slave->dev);
 	pm_runtime_put_autosuspend(&slave->dev);
 
 	dev_dbg(&slave->dev, "%s hw_init complete\n", __func__);
@@ -537,7 +535,7 @@ static int rt1316_sdw_hw_params(struct snd_pcm_substream *substream,
 	retval = sdw_stream_add_slave(rt1316->sdw_slave, &stream_config,
 				&port_config, 1, sdw_stream);
 	if (retval) {
-		dev_err(dai->dev, "Unable to configure port\n");
+		dev_err(dai->dev, "%s: Unable to configure port\n", __func__);
 		return retval;
 	}
 
@@ -577,12 +575,12 @@ static int rt1316_sdw_parse_dt(struct rt1316_sdw_priv *rt1316, struct device *de
 	if (rt1316->bq_params_cnt) {
 		rt1316->bq_params = devm_kzalloc(dev, rt1316->bq_params_cnt, GFP_KERNEL);
 		if (!rt1316->bq_params) {
-			dev_err(dev, "Could not allocate bq_params memory\n");
+			dev_err(dev, "%s: Could not allocate bq_params memory\n", __func__);
 			ret = -ENOMEM;
 		} else {
 			ret = device_property_read_u8_array(dev, "realtek,bq-params", rt1316->bq_params, rt1316->bq_params_cnt);
 			if (ret < 0)
-				dev_err(dev, "Could not read list of realtek,bq-params\n");
+				dev_err(dev, "%s: Could not read list of realtek,bq-params\n", __func__);
 		}
 	}
 
@@ -717,11 +715,9 @@ static int rt1316_sdw_probe(struct sdw_slave *slave,
 	return rt1316_sdw_init(&slave->dev, regmap, slave);
 }
 
-static int rt1316_sdw_remove(struct sdw_slave *slave)
+static void rt1316_sdw_remove(struct sdw_slave *slave)
 {
 	pm_runtime_disable(&slave->dev);
-
-	return 0;
 }
 
 static const struct sdw_device_id rt1316_id[] = {
@@ -730,7 +726,7 @@ static const struct sdw_device_id rt1316_id[] = {
 };
 MODULE_DEVICE_TABLE(sdw, rt1316_id);
 
-static int __maybe_unused rt1316_dev_suspend(struct device *dev)
+static int rt1316_dev_suspend(struct device *dev)
 {
 	struct rt1316_sdw_priv *rt1316 = dev_get_drvdata(dev);
 
@@ -744,45 +740,41 @@ static int __maybe_unused rt1316_dev_suspend(struct device *dev)
 
 #define RT1316_PROBE_TIMEOUT 5000
 
-static int __maybe_unused rt1316_dev_resume(struct device *dev)
+static int rt1316_dev_resume(struct device *dev)
 {
 	struct sdw_slave *slave = dev_to_sdw_dev(dev);
 	struct rt1316_sdw_priv *rt1316 = dev_get_drvdata(dev);
-	unsigned long time;
+	int ret;
 
 	if (!rt1316->first_hw_init)
 		return 0;
 
-	if (!slave->unattach_request)
-		goto regmap_sync;
-
-	time = wait_for_completion_timeout(&slave->initialization_complete,
-				msecs_to_jiffies(RT1316_PROBE_TIMEOUT));
-	if (!time) {
-		dev_err(&slave->dev, "Initialization not complete, timed out\n");
+	ret = sdw_slave_wait_for_init(slave, RT1316_PROBE_TIMEOUT);
+	if (ret) {
 		sdw_show_ping_status(slave->bus, true);
-
-		return -ETIMEDOUT;
+		return ret;
 	}
 
-regmap_sync:
-	slave->unattach_request = 0;
 	regcache_cache_only(rt1316->regmap, false);
-	regcache_sync(rt1316->regmap);
+	ret = regcache_sync(rt1316->regmap);
+	if (ret) {
+		regcache_cache_only(rt1316->regmap, true);
+		regcache_mark_dirty(rt1316->regmap);
+		return ret;
+	}
 
 	return 0;
 }
 
 static const struct dev_pm_ops rt1316_pm = {
-	SET_SYSTEM_SLEEP_PM_OPS(rt1316_dev_suspend, rt1316_dev_resume)
-	SET_RUNTIME_PM_OPS(rt1316_dev_suspend, rt1316_dev_resume, NULL)
+	SYSTEM_SLEEP_PM_OPS(rt1316_dev_suspend, rt1316_dev_resume)
+	RUNTIME_PM_OPS(rt1316_dev_suspend, rt1316_dev_resume, NULL)
 };
 
 static struct sdw_driver rt1316_sdw_driver = {
 	.driver = {
 		.name = "rt1316-sdca",
-		.owner = THIS_MODULE,
-		.pm = &rt1316_pm,
+		.pm = pm_ptr(&rt1316_pm),
 	},
 	.probe = rt1316_sdw_probe,
 	.remove = rt1316_sdw_remove,

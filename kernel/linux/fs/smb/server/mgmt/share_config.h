@@ -11,6 +11,8 @@
 #include <linux/path.h>
 #include <linux/unicode.h>
 
+struct ksmbd_work;
+
 struct ksmbd_share_config {
 	char			*name;
 	char			*path;
@@ -22,6 +24,9 @@ struct ksmbd_share_config {
 	struct path		vfs_path;
 
 	atomic_t		refcount;
+#ifdef CONFIG_PROC_FS
+	atomic_t		tree_connections;
+#endif
 	struct hlist_node	hlist;
 	unsigned short		create_mask;
 	unsigned short		directory_mask;
@@ -58,6 +63,27 @@ static inline int test_share_config_flag(struct ksmbd_share_config *share,
 	return share->flags & flag;
 }
 
+#ifdef CONFIG_PROC_FS
+static inline void ksmbd_share_tree_conn_init(struct ksmbd_share_config *share)
+{
+	atomic_set(&share->tree_connections, 0);
+}
+
+static inline void ksmbd_share_tree_conn_inc(struct ksmbd_share_config *share)
+{
+	atomic_inc(&share->tree_connections);
+}
+
+static inline void ksmbd_share_tree_conn_dec(struct ksmbd_share_config *share)
+{
+	atomic_dec(&share->tree_connections);
+}
+#else
+static inline void ksmbd_share_tree_conn_init(struct ksmbd_share_config *share) {}
+static inline void ksmbd_share_tree_conn_inc(struct ksmbd_share_config *share) {}
+static inline void ksmbd_share_tree_conn_dec(struct ksmbd_share_config *share) {}
+#endif
+
 void ksmbd_share_config_del(struct ksmbd_share_config *share);
 void __ksmbd_share_config_put(struct ksmbd_share_config *share);
 
@@ -68,8 +94,9 @@ static inline void ksmbd_share_config_put(struct ksmbd_share_config *share)
 	__ksmbd_share_config_put(share);
 }
 
-struct ksmbd_share_config *ksmbd_share_config_get(struct unicode_map *um,
+struct ksmbd_share_config *ksmbd_share_config_get(struct ksmbd_work *work,
 						  const char *name);
 bool ksmbd_share_veto_filename(struct ksmbd_share_config *share,
 			       const char *filename);
+int create_proc_shares(void);
 #endif /* __SHARE_CONFIG_MANAGEMENT_H__ */

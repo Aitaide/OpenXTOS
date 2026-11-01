@@ -6,10 +6,16 @@
 #ifndef _ASM_RISCV_ASM_H
 #define _ASM_RISCV_ASM_H
 
-#ifdef __ASSEMBLY__
+#ifdef __ASSEMBLER__
 #define __ASM_STR(x)	x
 #else
 #define __ASM_STR(x)	#x
+#endif
+
+#ifdef CONFIG_AS_HAS_INSN
+#define ASM_INSN_I(__x) ".insn " __x
+#else
+#define ASM_INSN_I(__x) ".4byte " __x
 #endif
 
 #if __riscv_xlen == 64
@@ -27,9 +33,11 @@
 #define REG_ASM		__REG_SEL(.dword, .word)
 #define SZREG		__REG_SEL(8, 4)
 #define LGREG		__REG_SEL(3, 2)
+#define SRLI		__REG_SEL(srliw, srli)
+#define SLLI		__REG_SEL(slliw, slli)
 
 #if __SIZEOF_POINTER__ == 8
-#ifdef __ASSEMBLY__
+#ifdef __ASSEMBLER__
 #define RISCV_PTR		.dword
 #define RISCV_SZPTR		8
 #define RISCV_LGPTR		3
@@ -39,7 +47,7 @@
 #define RISCV_LGPTR		"3"
 #endif
 #elif __SIZEOF_POINTER__ == 4
-#ifdef __ASSEMBLY__
+#ifdef __ASSEMBLER__
 #define RISCV_PTR		.word
 #define RISCV_SZPTR		4
 #define RISCV_LGPTR		2
@@ -68,7 +76,7 @@
 #error "Unexpected __SIZEOF_SHORT__"
 #endif
 
-#ifdef __ASSEMBLY__
+#ifdef __ASSEMBLER__
 #include <asm/asm-offsets.h>
 
 /* Common assembly source macros */
@@ -81,6 +89,41 @@
 	nop
 	.endr
 .endm
+
+#ifdef CONFIG_SMP
+.macro asm_per_cpu dst sym tmp
+	lw    \tmp, TASK_TI_CPU_NUM(tp)
+	slli  \tmp, \tmp, RISCV_LGPTR
+	la    \dst, __per_cpu_offset
+	add   \dst, \dst, \tmp
+	REG_L \tmp, 0(\dst)
+	la    \dst, \sym
+	add   \dst, \dst, \tmp
+.endm
+#else /* CONFIG_SMP */
+.macro asm_per_cpu dst sym tmp
+	la    \dst, \sym
+.endm
+#endif /* CONFIG_SMP */
+
+.macro load_per_cpu dst ptr tmp
+	asm_per_cpu \dst \ptr \tmp
+	REG_L \dst, 0(\dst)
+.endm
+
+#ifdef CONFIG_SHADOW_CALL_STACK
+/* gp is used as the shadow call stack pointer instead */
+.macro load_global_pointer
+.endm
+#else
+/* load __global_pointer to gp */
+.macro load_global_pointer
+.option push
+.option norelax
+	la gp, __global_pointer$
+.option pop
+.endm
+#endif /* CONFIG_SHADOW_CALL_STACK */
 
 	/* save all GPs except x1 ~ x5 */
 	.macro save_from_x6_to_x31
@@ -142,6 +185,16 @@
 	REG_L x31, PT_T6(sp)
 	.endm
 
-#endif /* __ASSEMBLY__ */
+/* Annotate a function as being unsuitable for kprobes. */
+#ifdef CONFIG_KPROBES
+#define ASM_NOKPROBE(name)				\
+	.pushsection "_kprobe_blacklist", "aw";		\
+	RISCV_PTR name;					\
+	.popsection
+#else
+#define ASM_NOKPROBE(name)
+#endif
+
+#endif /* __ASSEMBLER__ */
 
 #endif /* _ASM_RISCV_ASM_H */

@@ -13,6 +13,7 @@
 #include <linux/delay.h>
 #include <linux/sched.h>
 #include <linux/slab.h>
+#include <linux/string_choices.h>
 #include <linux/errno.h>
 #include <linux/list.h>
 #include <linux/dma-mapping.h>
@@ -798,10 +799,9 @@ static void musb_ep_program(struct musb *musb, u8 epnum,
 		}
 
 		if (can_bulk_split(musb, qh->type))
-			load_count = min((u32) hw_ep->max_packet_sz_tx,
-						len);
+			load_count = min_t(u32, hw_ep->max_packet_sz_tx, len);
 		else
-			load_count = min((u32) packet_sz, len);
+			load_count = min_t(u32, packet_sz, len);
 
 		if (dma_channel && musb_tx_dma_program(dma_controller,
 					hw_ep, qh, urb, offset, len))
@@ -1029,7 +1029,7 @@ static bool musb_h_ep0_continue(struct musb *musb, u16 len, struct urb *urb)
 					+ urb->actual_length);
 			musb_dbg(musb, "Sending %d byte%s to ep0 fifo %p",
 					fifo_count,
-					(fifo_count == 1) ? "" : "s",
+					str_plural(fifo_count),
 					fifo_dest);
 			musb_write_fifo(hw_ep, fifo_count, fifo_dest);
 
@@ -1774,7 +1774,8 @@ void musb_host_rx(struct musb *musb, u8 epnum)
 		status = -EPIPE;
 
 	} else if (rx_csr & MUSB_RXCSR_H_ERROR) {
-		dev_err(musb->controller, "ep%d RX three-strikes error", epnum);
+		dev_err_ratelimited(musb->controller,
+				    "ep%d RX three-strikes error\n", epnum);
 
 		/*
 		 * The three-strikes error could only happen when the USB
@@ -1787,6 +1788,17 @@ void musb_host_rx(struct musb *musb, u8 epnum)
 
 		rx_csr &= ~MUSB_RXCSR_H_ERROR;
 		musb_writew(epio, MUSB_RXCSR, rx_csr);
+
+		/*
+		 * Unplugging a USB-Ethernet adapter while it is busy can make
+		 * the controller keep re-asserting the three-strikes error for
+		 * this endpoint before the disconnect is processed. That floods
+		 * the log and can wedge the host port until reboot. Drop the
+		 * stale pending RX interrupt on platforms that support it (e.g.
+		 * AM335x/DSPS) to break the storm; the transfer is still
+		 * aborted below via the fault path.
+		 */
+		musb_platform_clear_ep_rxintr(musb, epnum);
 
 	} else if (rx_csr & MUSB_RXCSR_DATAERROR) {
 
@@ -2154,7 +2166,7 @@ static int musb_urb_enqueue(
 	 * REVISIT consider a dedicated qh kmem_cache, so it's harder
 	 * for bugs in other kernel code to break this driver...
 	 */
-	qh = kzalloc(sizeof *qh, mem_flags);
+	qh = kzalloc_obj(*qh, mem_flags);
 	if (!qh) {
 		spin_lock_irqsave(&musb->lock, flags);
 		usb_hcd_unlink_urb_from_ep(hcd, urb);

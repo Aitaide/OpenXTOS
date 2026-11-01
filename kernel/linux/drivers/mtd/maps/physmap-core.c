@@ -30,6 +30,7 @@
 #include <linux/slab.h>
 #include <linux/device.h>
 #include <linux/platform_device.h>
+#include <linux/property.h>
 #include <linux/mtd/mtd.h>
 #include <linux/mtd/map.h>
 #include <linux/mtd/partitions.h>
@@ -37,11 +38,10 @@
 #include <linux/mtd/concat.h>
 #include <linux/mtd/cfi_endian.h>
 #include <linux/io.h>
-#include <linux/of_device.h>
+#include <linux/of.h>
 #include <linux/pm_runtime.h>
 #include <linux/gpio/consumer.h>
 
-#include "physmap-bt1-rom.h"
 #include "physmap-gemini.h"
 #include "physmap-ixp4xx.h"
 #include "physmap-versatile.h"
@@ -62,7 +62,7 @@ struct physmap_flash_info {
 	unsigned int		win_order;
 };
 
-static int physmap_flash_remove(struct platform_device *dev)
+static void physmap_flash_remove(struct platform_device *dev)
 {
 	struct physmap_flash_info *info;
 	struct physmap_flash_data *physmap_data;
@@ -88,7 +88,6 @@ static int physmap_flash_remove(struct platform_device *dev)
 
 	pm_runtime_put(&dev->dev);
 	pm_runtime_disable(&dev->dev);
-	return 0;
 }
 
 static void physmap_set_vpp(struct map_info *map, int state)
@@ -268,7 +267,7 @@ static const struct of_device_id of_flash_match[] = {
 MODULE_DEVICE_TABLE(of, of_flash_match);
 
 static const char * const of_default_part_probes[] = {
-	"cmdlinepart", "RedBoot", "ofpart", "ofoldpart", NULL
+	"cmdlinepart", "ofpart", "ofoldpart", "RedBoot", NULL
 };
 
 static const char * const *of_get_part_probes(struct platform_device *dev)
@@ -296,14 +295,9 @@ static const char * const *of_get_part_probes(struct platform_device *dev)
 static const char *of_select_probe_type(struct platform_device *dev)
 {
 	struct device_node *dp = dev->dev.of_node;
-	const struct of_device_id *match;
 	const char *probe_type;
 
-	match = of_match_device(of_flash_match, &dev->dev);
-	if (!match)
-		return NULL;
-
-	probe_type = match->data;
+	probe_type = device_get_match_data(&dev->dev);
 	if (probe_type)
 		return probe_type;
 
@@ -369,10 +363,6 @@ static int physmap_flash_of_init(struct platform_device *dev)
 		info->maps[i].swap = swap;
 		info->maps[i].bankwidth = bankwidth;
 		info->maps[i].device_node = dp;
-
-		err = of_flash_probe_bt1_rom(dev, dp, &info->maps[i]);
-		if (err)
-			return err;
 
 		err = of_flash_probe_gemini(dev, dp, &info->maps[i]);
 		if (err)
@@ -523,7 +513,7 @@ static int physmap_flash_probe(struct platform_device *dev)
 		if (!info->maps[i].phys)
 			info->maps[i].phys = res->start;
 
-		info->win_order = get_bitmask_order(resource_size(res)) - 1;
+		info->win_order = fls64(resource_size(res)) - 1;
 		info->maps[i].size = BIT(info->win_order +
 					 (info->gpios ?
 					  info->gpios->ndescs : 0));

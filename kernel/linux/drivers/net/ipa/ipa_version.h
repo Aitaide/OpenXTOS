@@ -1,10 +1,12 @@
 /* SPDX-License-Identifier: GPL-2.0 */
 
 /* Copyright (c) 2012-2018, The Linux Foundation. All rights reserved.
- * Copyright (C) 2019-2022 Linaro Ltd.
+ * Copyright (C) 2019-2024 Linaro Ltd.
  */
 #ifndef _IPA_VERSION_H_
 #define _IPA_VERSION_H_
+
+#include <linux/types.h>
 
 /**
  * enum ipa_version
@@ -21,6 +23,7 @@
  * @IPA_VERSION_4_11:	IPA version 4.11/GSI version 2.11 (2.1.1)
  * @IPA_VERSION_5_0:	IPA version 5.0/GSI version 3.0
  * @IPA_VERSION_5_1:	IPA version 5.1/GSI version 3.0
+ * @IPA_VERSION_5_2:	IPA version 5.2/GSI version 5.2
  * @IPA_VERSION_5_5:	IPA version 5.5/GSI version 5.5
  * @IPA_VERSION_COUNT:	Number of defined IPA versions
  *
@@ -41,26 +44,10 @@ enum ipa_version {
 	IPA_VERSION_4_11,
 	IPA_VERSION_5_0,
 	IPA_VERSION_5_1,
+	IPA_VERSION_5_2,
 	IPA_VERSION_5_5,
 	IPA_VERSION_COUNT,			/* Last; not a version */
 };
-
-static inline bool ipa_version_supported(enum ipa_version version)
-{
-	switch (version) {
-	case IPA_VERSION_3_1:
-	case IPA_VERSION_3_5_1:
-	case IPA_VERSION_4_2:
-	case IPA_VERSION_4_5:
-	case IPA_VERSION_4_7:
-	case IPA_VERSION_4_9:
-	case IPA_VERSION_4_11:
-	case IPA_VERSION_5_0:
-		return true;
-	default:
-		return false;
-	}
-}
 
 /* Execution environment IDs */
 enum gsi_ee_id {

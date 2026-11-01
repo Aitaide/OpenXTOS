@@ -10,109 +10,25 @@
 #include <linux/bitops.h>
 #include <linux/errno.h>
 #include <linux/err.h>
+#include <linux/nospec.h>
 #include <linux/uaccess.h>
 #include <linux/kvm_host.h>
 #include <asm/cacheflush.h>
-#include <asm/hwcap.h>
+#include <asm/cpufeature.h>
+#include <asm/kvm_isa.h>
 #include <asm/kvm_vcpu_vector.h>
-#include <asm/vector.h>
 
 #define KVM_RISCV_BASE_ISA_MASK		GENMASK(25, 0)
 
-#define KVM_ISA_EXT_ARR(ext)		\
-[KVM_RISCV_ISA_EXT_##ext] = RISCV_ISA_EXT_##ext
-
-/* Mapping between KVM ISA Extension ID & Host ISA extension ID */
-static const unsigned long kvm_isa_ext_arr[] = {
-	/* Single letter extensions (alphabetically sorted) */
-	[KVM_RISCV_ISA_EXT_A] = RISCV_ISA_EXT_a,
-	[KVM_RISCV_ISA_EXT_C] = RISCV_ISA_EXT_c,
-	[KVM_RISCV_ISA_EXT_D] = RISCV_ISA_EXT_d,
-	[KVM_RISCV_ISA_EXT_F] = RISCV_ISA_EXT_f,
-	[KVM_RISCV_ISA_EXT_H] = RISCV_ISA_EXT_h,
-	[KVM_RISCV_ISA_EXT_I] = RISCV_ISA_EXT_i,
-	[KVM_RISCV_ISA_EXT_M] = RISCV_ISA_EXT_m,
-	[KVM_RISCV_ISA_EXT_V] = RISCV_ISA_EXT_v,
-	/* Multi letter extensions (alphabetically sorted) */
-	KVM_ISA_EXT_ARR(SSAIA),
-	KVM_ISA_EXT_ARR(SSTC),
-	KVM_ISA_EXT_ARR(SVINVAL),
-	KVM_ISA_EXT_ARR(SVNAPOT),
-	KVM_ISA_EXT_ARR(SVPBMT),
-	KVM_ISA_EXT_ARR(ZBA),
-	KVM_ISA_EXT_ARR(ZBB),
-	KVM_ISA_EXT_ARR(ZBS),
-	KVM_ISA_EXT_ARR(ZICBOM),
-	KVM_ISA_EXT_ARR(ZICBOZ),
-	KVM_ISA_EXT_ARR(ZICNTR),
-	KVM_ISA_EXT_ARR(ZICSR),
-	KVM_ISA_EXT_ARR(ZIFENCEI),
-	KVM_ISA_EXT_ARR(ZIHINTPAUSE),
-	KVM_ISA_EXT_ARR(ZIHPM),
-};
-
-static unsigned long kvm_riscv_vcpu_base2isa_ext(unsigned long base_ext)
-{
-	unsigned long i;
-
-	for (i = 0; i < KVM_RISCV_ISA_EXT_MAX; i++) {
-		if (kvm_isa_ext_arr[i] == base_ext)
-			return i;
-	}
-
-	return KVM_RISCV_ISA_EXT_MAX;
-}
-
-static bool kvm_riscv_vcpu_isa_enable_allowed(unsigned long ext)
-{
-	switch (ext) {
-	case KVM_RISCV_ISA_EXT_H:
-		return false;
-	case KVM_RISCV_ISA_EXT_V:
-		return riscv_v_vstate_ctrl_user_allowed();
-	default:
-		break;
-	}
-
-	return true;
-}
-
-static bool kvm_riscv_vcpu_isa_disable_allowed(unsigned long ext)
-{
-	switch (ext) {
-	case KVM_RISCV_ISA_EXT_A:
-	case KVM_RISCV_ISA_EXT_C:
-	case KVM_RISCV_ISA_EXT_I:
-	case KVM_RISCV_ISA_EXT_M:
-	case KVM_RISCV_ISA_EXT_SSAIA:
-	case KVM_RISCV_ISA_EXT_SSTC:
-	case KVM_RISCV_ISA_EXT_SVINVAL:
-	case KVM_RISCV_ISA_EXT_SVNAPOT:
-	case KVM_RISCV_ISA_EXT_ZBA:
-	case KVM_RISCV_ISA_EXT_ZBB:
-	case KVM_RISCV_ISA_EXT_ZBS:
-	case KVM_RISCV_ISA_EXT_ZICNTR:
-	case KVM_RISCV_ISA_EXT_ZICSR:
-	case KVM_RISCV_ISA_EXT_ZIFENCEI:
-	case KVM_RISCV_ISA_EXT_ZIHINTPAUSE:
-	case KVM_RISCV_ISA_EXT_ZIHPM:
-		return false;
-	default:
-		break;
-	}
-
-	return true;
-}
-
 void kvm_riscv_vcpu_setup_isa(struct kvm_vcpu *vcpu)
 {
-	unsigned long host_isa, i;
+	unsigned long guest_ext, i;
 
-	for (i = 0; i < ARRAY_SIZE(kvm_isa_ext_arr); i++) {
-		host_isa = kvm_isa_ext_arr[i];
-		if (__riscv_isa_extension_available(NULL, host_isa) &&
-		    kvm_riscv_vcpu_isa_enable_allowed(i))
-			set_bit(host_isa, vcpu->arch.isa);
+	for (i = 0; i < KVM_RISCV_ISA_EXT_MAX; i++) {
+		if (__kvm_riscv_isa_check_host(i, &guest_ext))
+			continue;
+		if (kvm_riscv_isa_enable_allowed(i))
+			set_bit(guest_ext, vcpu->arch.isa);
 	}
 }
 
@@ -134,14 +50,13 @@ static int kvm_riscv_vcpu_get_reg_config(struct kvm_vcpu *vcpu,
 		reg_val = vcpu->arch.isa[0] & KVM_RISCV_BASE_ISA_MASK;
 		break;
 	case KVM_REG_RISCV_CONFIG_REG(zicbom_block_size):
-		if (!riscv_isa_extension_available(vcpu->arch.isa, ZICBOM))
-			return -ENOENT;
-		reg_val = riscv_cbom_block_size;
+		reg_val = (kvm_riscv_isa_check_host(ZICBOM)) ? 0 : riscv_cbom_block_size;
 		break;
 	case KVM_REG_RISCV_CONFIG_REG(zicboz_block_size):
-		if (!riscv_isa_extension_available(vcpu->arch.isa, ZICBOZ))
-			return -ENOENT;
-		reg_val = riscv_cboz_block_size;
+		reg_val = (kvm_riscv_isa_check_host(ZICBOZ)) ? 0 : riscv_cboz_block_size;
+		break;
+	case KVM_REG_RISCV_CONFIG_REG(zicbop_block_size):
+		reg_val = (kvm_riscv_isa_check_host(ZICBOP)) ? 0 : riscv_cbop_block_size;
 		break;
 	case KVM_REG_RISCV_CONFIG_REG(mvendorid):
 		reg_val = vcpu->arch.mvendorid;
@@ -200,15 +115,15 @@ static int kvm_riscv_vcpu_set_reg_config(struct kvm_vcpu *vcpu,
 		if (!vcpu->arch.ran_atleast_once) {
 			/* Ignore the enable/disable request for certain extensions */
 			for (i = 0; i < RISCV_ISA_EXT_BASE; i++) {
-				isa_ext = kvm_riscv_vcpu_base2isa_ext(i);
+				isa_ext = kvm_riscv_base2isa_ext(i);
 				if (isa_ext >= KVM_RISCV_ISA_EXT_MAX) {
 					reg_val &= ~BIT(i);
 					continue;
 				}
-				if (!kvm_riscv_vcpu_isa_enable_allowed(isa_ext))
+				if (!kvm_riscv_isa_enable_allowed(isa_ext))
 					if (reg_val & BIT(i))
 						reg_val &= ~BIT(i);
-				if (!kvm_riscv_vcpu_isa_disable_allowed(isa_ext))
+				if (!kvm_riscv_isa_disable_allowed(isa_ext))
 					if (!(reg_val & BIT(i)))
 						reg_val |= BIT(i);
 			}
@@ -223,15 +138,15 @@ static int kvm_riscv_vcpu_set_reg_config(struct kvm_vcpu *vcpu,
 		}
 		break;
 	case KVM_REG_RISCV_CONFIG_REG(zicbom_block_size):
-		if (!riscv_isa_extension_available(vcpu->arch.isa, ZICBOM))
-			return -ENOENT;
-		if (reg_val != riscv_cbom_block_size)
+		if (reg_val && reg_val != riscv_cbom_block_size)
 			return -EINVAL;
 		break;
 	case KVM_REG_RISCV_CONFIG_REG(zicboz_block_size):
-		if (!riscv_isa_extension_available(vcpu->arch.isa, ZICBOZ))
-			return -ENOENT;
-		if (reg_val != riscv_cboz_block_size)
+		if (reg_val && reg_val != riscv_cboz_block_size)
+			return -EINVAL;
+		break;
+	case KVM_REG_RISCV_CONFIG_REG(zicbop_block_size):
+		if (reg_val && reg_val != riscv_cbop_block_size)
 			return -EINVAL;
 		break;
 	case KVM_REG_RISCV_CONFIG_REG(mvendorid):
@@ -278,12 +193,15 @@ static int kvm_riscv_vcpu_get_reg_core(struct kvm_vcpu *vcpu,
 	unsigned long reg_num = reg->id & ~(KVM_REG_ARCH_MASK |
 					    KVM_REG_SIZE_MASK |
 					    KVM_REG_RISCV_CORE);
+	unsigned long regs_max = sizeof(struct kvm_riscv_core) / sizeof(unsigned long);
 	unsigned long reg_val;
 
 	if (KVM_REG_SIZE(reg->id) != sizeof(unsigned long))
 		return -EINVAL;
-	if (reg_num >= sizeof(struct kvm_riscv_core) / sizeof(unsigned long))
+	if (reg_num >= regs_max)
 		return -ENOENT;
+
+	reg_num = array_index_nospec(reg_num, regs_max);
 
 	if (reg_num == KVM_REG_RISCV_CORE_REG(regs.pc))
 		reg_val = cntx->sepc;
@@ -311,12 +229,15 @@ static int kvm_riscv_vcpu_set_reg_core(struct kvm_vcpu *vcpu,
 	unsigned long reg_num = reg->id & ~(KVM_REG_ARCH_MASK |
 					    KVM_REG_SIZE_MASK |
 					    KVM_REG_RISCV_CORE);
+	unsigned long regs_max = sizeof(struct kvm_riscv_core) / sizeof(unsigned long);
 	unsigned long reg_val;
 
 	if (KVM_REG_SIZE(reg->id) != sizeof(unsigned long))
 		return -EINVAL;
-	if (reg_num >= sizeof(struct kvm_riscv_core) / sizeof(unsigned long))
+	if (reg_num >= regs_max)
 		return -ENOENT;
+
+	reg_num = array_index_nospec(reg_num, regs_max);
 
 	if (copy_from_user(&reg_val, uaddr, KVM_REG_SIZE(reg->id)))
 		return -EFAULT;
@@ -342,13 +263,16 @@ static int kvm_riscv_vcpu_general_get_csr(struct kvm_vcpu *vcpu,
 					  unsigned long *out_val)
 {
 	struct kvm_vcpu_csr *csr = &vcpu->arch.guest_csr;
+	unsigned long regs_max = sizeof(struct kvm_riscv_csr) / sizeof(unsigned long);
 
-	if (reg_num >= sizeof(struct kvm_riscv_csr) / sizeof(unsigned long))
+	if (reg_num >= regs_max)
 		return -ENOENT;
+
+	reg_num = array_index_nospec(reg_num, regs_max);
 
 	if (reg_num == KVM_REG_RISCV_CSR_REG(sip)) {
 		kvm_riscv_vcpu_flush_interrupts(vcpu);
-		*out_val = (csr->hvip >> VSIP_TO_HVIP_SHIFT) & VSIP_VALID_MASK;
+		*out_val = hvip_to_vsip(csr->hvip);
 		*out_val |= csr->hvip & ~IRQ_LOCAL_MASK;
 	} else
 		*out_val = ((unsigned long *)csr)[reg_num];
@@ -361,20 +285,101 @@ static int kvm_riscv_vcpu_general_set_csr(struct kvm_vcpu *vcpu,
 					  unsigned long reg_val)
 {
 	struct kvm_vcpu_csr *csr = &vcpu->arch.guest_csr;
+	unsigned long regs_max = sizeof(struct kvm_riscv_csr) / sizeof(unsigned long);
+	unsigned long flags;
 
-	if (reg_num >= sizeof(struct kvm_riscv_csr) / sizeof(unsigned long))
+	if (reg_num >= regs_max)
 		return -ENOENT;
 
-	if (reg_num == KVM_REG_RISCV_CSR_REG(sip)) {
-		reg_val &= VSIP_VALID_MASK;
-		reg_val <<= VSIP_TO_HVIP_SHIFT;
-	}
+	reg_num = array_index_nospec(reg_num, regs_max);
+
+	if (reg_num == KVM_REG_RISCV_CSR_REG(sip))
+		reg_val = vsip_to_hvip(reg_val);
 
 	((unsigned long *)csr)[reg_num] = reg_val;
 
-	if (reg_num == KVM_REG_RISCV_CSR_REG(sip))
-		WRITE_ONCE(vcpu->arch.irqs_pending_mask[0], 0);
+	if (reg_num == KVM_REG_RISCV_CSR_REG(sip)) {
+		raw_spin_lock_irqsave(&vcpu->arch.irqs_pending_lock, flags);
+		vcpu->arch.irqs_pending_mask[0] = 0;
+		raw_spin_unlock_irqrestore(&vcpu->arch.irqs_pending_lock, flags);
+	}
 
+	return 0;
+}
+
+static inline int kvm_riscv_vcpu_smstateen_set_csr(struct kvm_vcpu *vcpu,
+						   unsigned long reg_num,
+						   unsigned long reg_val)
+{
+	struct kvm_vcpu_smstateen_csr *csr = &vcpu->arch.smstateen_csr;
+	unsigned long regs_max = sizeof(struct kvm_riscv_smstateen_csr) /
+		sizeof(unsigned long);
+
+	if (!riscv_isa_extension_available(vcpu->arch.isa, SMSTATEEN))
+		return -ENOENT;
+	if (reg_num >= regs_max)
+		return -ENOENT;
+
+	reg_num = array_index_nospec(reg_num, regs_max);
+
+	((unsigned long *)csr)[reg_num] = reg_val;
+	return 0;
+}
+
+static int kvm_riscv_vcpu_smstateen_get_csr(struct kvm_vcpu *vcpu,
+					    unsigned long reg_num,
+					    unsigned long *out_val)
+{
+	struct kvm_vcpu_smstateen_csr *csr = &vcpu->arch.smstateen_csr;
+	unsigned long regs_max = sizeof(struct kvm_riscv_smstateen_csr) /
+		sizeof(unsigned long);
+
+	if (!riscv_isa_extension_available(vcpu->arch.isa, SMSTATEEN))
+		return -ENOENT;
+	if (reg_num >= regs_max)
+		return -ENOENT;
+
+	reg_num = array_index_nospec(reg_num, regs_max);
+
+	*out_val = ((unsigned long *)csr)[reg_num];
+	return 0;
+}
+
+static inline int kvm_riscv_vcpu_zicfiss_set_csr(struct kvm_vcpu *vcpu,
+						 unsigned long reg_num,
+						 unsigned long reg_val)
+{
+	struct kvm_vcpu_zicfiss_csr *csr = &vcpu->arch.zicfiss_csr;
+	unsigned long regs_max = sizeof(struct kvm_vcpu_zicfiss_csr) /
+		sizeof(unsigned long);
+
+	if (!riscv_isa_extension_available(vcpu->arch.isa, ZICFISS))
+		return -ENOENT;
+	if (reg_num >= regs_max)
+		return -ENOENT;
+
+	reg_num = array_index_nospec(reg_num, regs_max);
+
+	((unsigned long *)csr)[reg_num] = reg_val;
+	return 0;
+}
+
+static int kvm_riscv_vcpu_zicfiss_get_csr(struct kvm_vcpu *vcpu,
+					  unsigned long reg_num,
+					  unsigned long *out_val)
+{
+	struct kvm_vcpu_zicfiss_csr *csr = &vcpu->arch.zicfiss_csr;
+	unsigned long regs_max = sizeof(struct kvm_vcpu_zicfiss_csr) /
+		sizeof(unsigned long);
+
+	if (!riscv_isa_extension_available(vcpu->arch.isa, ZICFISS))
+		return -ENOENT;
+	if (reg_num >= regs_max)
+		return -ENOENT;
+
+	reg_num = array_index_nospec(reg_num, regs_max);
+
+	*out_val = ((unsigned long *)csr)[reg_num];
 	return 0;
 }
 
@@ -400,6 +405,12 @@ static int kvm_riscv_vcpu_get_reg_csr(struct kvm_vcpu *vcpu,
 		break;
 	case KVM_REG_RISCV_CSR_AIA:
 		rc = kvm_riscv_vcpu_aia_get_csr(vcpu, reg_num, &reg_val);
+		break;
+	case KVM_REG_RISCV_CSR_SMSTATEEN:
+		rc = kvm_riscv_vcpu_smstateen_get_csr(vcpu, reg_num, &reg_val);
+		break;
+	case KVM_REG_RISCV_CSR_ZICFISS:
+		rc = kvm_riscv_vcpu_zicfiss_get_csr(vcpu, reg_num, &reg_val);
 		break;
 	default:
 		rc = -ENOENT;
@@ -440,12 +451,20 @@ static int kvm_riscv_vcpu_set_reg_csr(struct kvm_vcpu *vcpu,
 	case KVM_REG_RISCV_CSR_AIA:
 		rc = kvm_riscv_vcpu_aia_set_csr(vcpu, reg_num, reg_val);
 		break;
+	case KVM_REG_RISCV_CSR_SMSTATEEN:
+		rc = kvm_riscv_vcpu_smstateen_set_csr(vcpu, reg_num, reg_val);
+		break;
+	case KVM_REG_RISCV_CSR_ZICFISS:
+		rc = kvm_riscv_vcpu_zicfiss_set_csr(vcpu, reg_num, reg_val);
+		break;
 	default:
 		rc = -ENOENT;
 		break;
 	}
 	if (rc)
 		return rc;
+
+	vcpu->arch.csr_dirty = true;
 
 	return 0;
 }
@@ -454,18 +473,15 @@ static int riscv_vcpu_get_isa_ext_single(struct kvm_vcpu *vcpu,
 					 unsigned long reg_num,
 					 unsigned long *reg_val)
 {
-	unsigned long host_isa_ext;
+	unsigned long guest_ext;
+	int ret;
 
-	if (reg_num >= KVM_RISCV_ISA_EXT_MAX ||
-	    reg_num >= ARRAY_SIZE(kvm_isa_ext_arr))
-		return -ENOENT;
-
-	host_isa_ext = kvm_isa_ext_arr[reg_num];
-	if (!__riscv_isa_extension_available(NULL, host_isa_ext))
-		return -ENOENT;
+	ret = __kvm_riscv_isa_check_host(reg_num, &guest_ext);
+	if (ret)
+		return ret;
 
 	*reg_val = 0;
-	if (__riscv_isa_extension_available(vcpu->arch.isa, host_isa_ext))
+	if (__riscv_isa_extension_available(vcpu->arch.isa, guest_ext))
 		*reg_val = 1; /* Mark the given extension as available */
 
 	return 0;
@@ -475,17 +491,14 @@ static int riscv_vcpu_set_isa_ext_single(struct kvm_vcpu *vcpu,
 					 unsigned long reg_num,
 					 unsigned long reg_val)
 {
-	unsigned long host_isa_ext;
+	unsigned long guest_ext;
+	int ret;
 
-	if (reg_num >= KVM_RISCV_ISA_EXT_MAX ||
-	    reg_num >= ARRAY_SIZE(kvm_isa_ext_arr))
-		return -ENOENT;
+	ret = __kvm_riscv_isa_check_host(reg_num, &guest_ext);
+	if (ret)
+		return ret;
 
-	host_isa_ext = kvm_isa_ext_arr[reg_num];
-	if (!__riscv_isa_extension_available(NULL, host_isa_ext))
-		return -ENOENT;
-
-	if (reg_val == test_bit(host_isa_ext, vcpu->arch.isa))
+	if (reg_val == test_bit(guest_ext, vcpu->arch.isa))
 		return 0;
 
 	if (!vcpu->arch.ran_atleast_once) {
@@ -494,11 +507,11 @@ static int riscv_vcpu_set_isa_ext_single(struct kvm_vcpu *vcpu,
 		 * extension can be disabled
 		 */
 		if (reg_val == 1 &&
-		    kvm_riscv_vcpu_isa_enable_allowed(reg_num))
-			set_bit(host_isa_ext, vcpu->arch.isa);
+		    kvm_riscv_isa_enable_allowed(reg_num))
+			set_bit(guest_ext, vcpu->arch.isa);
 		else if (!reg_val &&
-			 kvm_riscv_vcpu_isa_disable_allowed(reg_num))
-			clear_bit(host_isa_ext, vcpu->arch.isa);
+			 kvm_riscv_isa_disable_allowed(reg_num))
+			clear_bit(guest_ext, vcpu->arch.isa);
 		else
 			return -EINVAL;
 		kvm_riscv_vcpu_fp_reset(vcpu);
@@ -614,9 +627,9 @@ static int kvm_riscv_vcpu_set_reg_isa_ext(struct kvm_vcpu *vcpu,
 	switch (reg_subtype) {
 	case KVM_REG_RISCV_ISA_SINGLE:
 		return riscv_vcpu_set_isa_ext_single(vcpu, reg_num, reg_val);
-	case KVM_REG_RISCV_SBI_MULTI_EN:
+	case KVM_REG_RISCV_ISA_MULTI_EN:
 		return riscv_vcpu_set_isa_ext_multi(vcpu, reg_num, reg_val, true);
-	case KVM_REG_RISCV_SBI_MULTI_DIS:
+	case KVM_REG_RISCV_ISA_MULTI_DIS:
 		return riscv_vcpu_set_isa_ext_multi(vcpu, reg_num, reg_val, false);
 	default:
 		return -ENOENT;
@@ -634,17 +647,6 @@ static int copy_config_reg_indices(const struct kvm_vcpu *vcpu,
 		 i++) {
 		u64 size;
 		u64 reg;
-
-		/*
-		 * Avoid reporting config reg if the corresponding extension
-		 * was not available.
-		 */
-		if (i == KVM_REG_RISCV_CONFIG_REG(zicbom_block_size) &&
-			!riscv_isa_extension_available(vcpu->arch.isa, ZICBOM))
-			continue;
-		else if (i == KVM_REG_RISCV_CONFIG_REG(zicboz_block_size) &&
-			!riscv_isa_extension_available(vcpu->arch.isa, ZICBOZ))
-			continue;
 
 		size = IS_ENABLED(CONFIG_32BIT) ? KVM_REG_SIZE_U32 : KVM_REG_SIZE_U64;
 		reg = KVM_REG_RISCV | size | KVM_REG_RISCV_CONFIG | i;
@@ -696,6 +698,10 @@ static inline unsigned long num_csr_regs(const struct kvm_vcpu *vcpu)
 
 	if (riscv_isa_extension_available(vcpu->arch.isa, SSAIA))
 		n += sizeof(struct kvm_riscv_aia_csr) / sizeof(unsigned long);
+	if (riscv_isa_extension_available(vcpu->arch.isa, SMSTATEEN))
+		n += sizeof(struct kvm_riscv_smstateen_csr) / sizeof(unsigned long);
+	if (riscv_isa_extension_available(vcpu->arch.isa, ZICFISS))
+		n += sizeof(struct kvm_riscv_zicfiss_csr) / sizeof(unsigned long);
 
 	return n;
 }
@@ -704,7 +710,7 @@ static int copy_csr_reg_indices(const struct kvm_vcpu *vcpu,
 				u64 __user *uindices)
 {
 	int n1 = sizeof(struct kvm_riscv_csr) / sizeof(unsigned long);
-	int n2 = 0;
+	int n2 = 0, n3 = 0, n4 = 0;
 
 	/* copy general csr regs */
 	for (int i = 0; i < n1; i++) {
@@ -738,7 +744,43 @@ static int copy_csr_reg_indices(const struct kvm_vcpu *vcpu,
 		}
 	}
 
-	return n1 + n2;
+	/* copy Smstateen csr regs */
+	if (riscv_isa_extension_available(vcpu->arch.isa, SMSTATEEN)) {
+		n3 = sizeof(struct kvm_riscv_smstateen_csr) / sizeof(unsigned long);
+
+		for (int i = 0; i < n3; i++) {
+			u64 size = IS_ENABLED(CONFIG_32BIT) ?
+				   KVM_REG_SIZE_U32 : KVM_REG_SIZE_U64;
+			u64 reg = KVM_REG_RISCV | size | KVM_REG_RISCV_CSR |
+					  KVM_REG_RISCV_CSR_SMSTATEEN | i;
+
+			if (uindices) {
+				if (put_user(reg, uindices))
+					return -EFAULT;
+				uindices++;
+			}
+		}
+	}
+
+	/* copy Zicfiss csr regs */
+	if (riscv_isa_extension_available(vcpu->arch.isa, ZICFISS)) {
+		n4 = sizeof(struct kvm_riscv_zicfiss_csr) / sizeof(unsigned long);
+
+		for (int i = 0; i < n4; i++) {
+			u64 size = IS_ENABLED(CONFIG_32BIT) ?
+				   KVM_REG_SIZE_U32 : KVM_REG_SIZE_U64;
+			u64 reg = KVM_REG_RISCV | size | KVM_REG_RISCV_CSR |
+					  KVM_REG_RISCV_CSR_ZICFISS | i;
+
+			if (uindices) {
+				if (put_user(reg, uindices))
+					return -EFAULT;
+				uindices++;
+			}
+		}
+	}
+
+	return n1 + n2 + n3 + n4;
 }
 
 static inline unsigned long num_timer_regs(void)
@@ -768,7 +810,7 @@ static inline unsigned long num_fp_f_regs(const struct kvm_vcpu *vcpu)
 {
 	const struct kvm_cpu_context *cntx = &vcpu->arch.guest_context;
 
-	if (riscv_isa_extension_available(vcpu->arch.isa, f))
+	if (riscv_isa_extension_available(vcpu->arch.isa, F))
 		return sizeof(cntx->fp.f) / sizeof(u32);
 	else
 		return 0;
@@ -797,7 +839,7 @@ static inline unsigned long num_fp_d_regs(const struct kvm_vcpu *vcpu)
 {
 	const struct kvm_cpu_context *cntx = &vcpu->arch.guest_context;
 
-	if (riscv_isa_extension_available(vcpu->arch.isa, d))
+	if (riscv_isa_extension_available(vcpu->arch.isa, D))
 		return sizeof(cntx->fp.d.f) / sizeof(u64) + 1;
 	else
 		return 0;
@@ -836,16 +878,15 @@ static int copy_fp_d_reg_indices(const struct kvm_vcpu *vcpu,
 static int copy_isa_ext_reg_indices(const struct kvm_vcpu *vcpu,
 				u64 __user *uindices)
 {
+	unsigned long guest_ext;
 	unsigned int n = 0;
-	unsigned long isa_ext;
 
 	for (int i = 0; i < KVM_RISCV_ISA_EXT_MAX; i++) {
 		u64 size = IS_ENABLED(CONFIG_32BIT) ?
 			   KVM_REG_SIZE_U32 : KVM_REG_SIZE_U64;
 		u64 reg = KVM_REG_RISCV | size | KVM_REG_RISCV_ISA_EXT | i;
 
-		isa_ext = kvm_isa_ext_arr[i];
-		if (!__riscv_isa_extension_available(NULL, isa_ext))
+		if (__kvm_riscv_isa_check_host(i, &guest_ext))
 			continue;
 
 		if (uindices) {
@@ -862,29 +903,43 @@ static int copy_isa_ext_reg_indices(const struct kvm_vcpu *vcpu,
 
 static inline unsigned long num_isa_ext_regs(const struct kvm_vcpu *vcpu)
 {
-	return copy_isa_ext_reg_indices(vcpu, NULL);;
+	return copy_isa_ext_reg_indices(vcpu, NULL);
 }
 
-static inline unsigned long num_sbi_ext_regs(void)
+static unsigned long num_sbi_ext_regs(struct kvm_vcpu *vcpu)
 {
-	/*
-	 * number of KVM_REG_RISCV_SBI_SINGLE +
-	 * 2 x (number of KVM_REG_RISCV_SBI_MULTI)
-	 */
-	return KVM_RISCV_SBI_EXT_MAX + 2*(KVM_REG_RISCV_SBI_MULTI_REG_LAST+1);
+	return kvm_riscv_vcpu_reg_indices_sbi_ext(vcpu, NULL);
 }
 
-static int copy_sbi_ext_reg_indices(u64 __user *uindices)
+static inline unsigned long num_sbi_regs(struct kvm_vcpu *vcpu)
 {
-	int n;
+	return kvm_riscv_vcpu_reg_indices_sbi(vcpu, NULL);
+}
 
-	/* copy KVM_REG_RISCV_SBI_SINGLE */
-	n = KVM_RISCV_SBI_EXT_MAX;
-	for (int i = 0; i < n; i++) {
-		u64 size = IS_ENABLED(CONFIG_32BIT) ?
-			   KVM_REG_SIZE_U32 : KVM_REG_SIZE_U64;
-		u64 reg = KVM_REG_RISCV | size | KVM_REG_RISCV_SBI_EXT |
-			  KVM_REG_RISCV_SBI_SINGLE | i;
+static inline unsigned long num_vector_regs(const struct kvm_vcpu *vcpu)
+{
+	if (!riscv_isa_extension_available(vcpu->arch.isa, V))
+		return 0;
+
+	/* vstart, vl, vtype, vcsr, vlenb and 32 vector regs */
+	return 37;
+}
+
+static int copy_vector_reg_indices(const struct kvm_vcpu *vcpu,
+				u64 __user *uindices)
+{
+	const struct kvm_cpu_context *cntx = &vcpu->arch.guest_context;
+	int n = num_vector_regs(vcpu);
+	u64 reg, size;
+	int i;
+
+	if (n == 0)
+		return 0;
+
+	/* copy vstart, vl, vtype, vcsr and vlenb */
+	size = IS_ENABLED(CONFIG_32BIT) ? KVM_REG_SIZE_U32 : KVM_REG_SIZE_U64;
+	for (i = 0; i < 5; i++) {
+		reg = KVM_REG_RISCV | size | KVM_REG_RISCV_VECTOR | i;
 
 		if (uindices) {
 			if (put_user(reg, uindices))
@@ -893,22 +948,12 @@ static int copy_sbi_ext_reg_indices(u64 __user *uindices)
 		}
 	}
 
-	/* copy KVM_REG_RISCV_SBI_MULTI */
-	n = KVM_REG_RISCV_SBI_MULTI_REG_LAST + 1;
-	for (int i = 0; i < n; i++) {
-		u64 size = IS_ENABLED(CONFIG_32BIT) ?
-			   KVM_REG_SIZE_U32 : KVM_REG_SIZE_U64;
-		u64 reg = KVM_REG_RISCV | size | KVM_REG_RISCV_SBI_EXT |
-			  KVM_REG_RISCV_SBI_MULTI_EN | i;
-
-		if (uindices) {
-			if (put_user(reg, uindices))
-				return -EFAULT;
-			uindices++;
-		}
-
-		reg = KVM_REG_RISCV | size | KVM_REG_RISCV_SBI_EXT |
-			  KVM_REG_RISCV_SBI_MULTI_DIS | i;
+	/* vector_regs have a variable 'vlenb' size */
+	size = __builtin_ctzl(cntx->vector.vlenb);
+	size <<= KVM_REG_SIZE_SHIFT;
+	for (i = 0; i < 32; i++) {
+		reg = KVM_REG_RISCV | KVM_REG_RISCV_VECTOR | size |
+			KVM_REG_RISCV_VECTOR_REG(i);
 
 		if (uindices) {
 			if (put_user(reg, uindices))
@@ -917,7 +962,7 @@ static int copy_sbi_ext_reg_indices(u64 __user *uindices)
 		}
 	}
 
-	return num_sbi_ext_regs();
+	return n;
 }
 
 /*
@@ -935,8 +980,10 @@ unsigned long kvm_riscv_vcpu_num_regs(struct kvm_vcpu *vcpu)
 	res += num_timer_regs();
 	res += num_fp_f_regs(vcpu);
 	res += num_fp_d_regs(vcpu);
+	res += num_vector_regs(vcpu);
 	res += num_isa_ext_regs(vcpu);
-	res += num_sbi_ext_regs();
+	res += num_sbi_ext_regs(vcpu);
+	res += num_sbi_regs(vcpu);
 
 	return res;
 }
@@ -979,14 +1026,25 @@ int kvm_riscv_vcpu_copy_reg_indices(struct kvm_vcpu *vcpu,
 		return ret;
 	uindices += ret;
 
+	ret = copy_vector_reg_indices(vcpu, uindices);
+	if (ret < 0)
+		return ret;
+	uindices += ret;
+
 	ret = copy_isa_ext_reg_indices(vcpu, uindices);
 	if (ret < 0)
 		return ret;
 	uindices += ret;
 
-	ret = copy_sbi_ext_reg_indices(uindices);
+	ret = kvm_riscv_vcpu_reg_indices_sbi_ext(vcpu, uindices);
 	if (ret < 0)
 		return ret;
+	uindices += ret;
+
+	ret = kvm_riscv_vcpu_reg_indices_sbi(vcpu, uindices);
+	if (ret < 0)
+		return ret;
+	uindices += ret;
 
 	return 0;
 }
@@ -1009,12 +1067,14 @@ int kvm_riscv_vcpu_set_reg(struct kvm_vcpu *vcpu,
 	case KVM_REG_RISCV_FP_D:
 		return kvm_riscv_vcpu_set_reg_fp(vcpu, reg,
 						 KVM_REG_RISCV_FP_D);
+	case KVM_REG_RISCV_VECTOR:
+		return kvm_riscv_vcpu_set_reg_vector(vcpu, reg);
 	case KVM_REG_RISCV_ISA_EXT:
 		return kvm_riscv_vcpu_set_reg_isa_ext(vcpu, reg);
 	case KVM_REG_RISCV_SBI_EXT:
 		return kvm_riscv_vcpu_set_reg_sbi_ext(vcpu, reg);
-	case KVM_REG_RISCV_VECTOR:
-		return kvm_riscv_vcpu_set_reg_vector(vcpu, reg);
+	case KVM_REG_RISCV_SBI_STATE:
+		return kvm_riscv_vcpu_set_reg_sbi(vcpu, reg);
 	default:
 		break;
 	}
@@ -1040,12 +1100,14 @@ int kvm_riscv_vcpu_get_reg(struct kvm_vcpu *vcpu,
 	case KVM_REG_RISCV_FP_D:
 		return kvm_riscv_vcpu_get_reg_fp(vcpu, reg,
 						 KVM_REG_RISCV_FP_D);
+	case KVM_REG_RISCV_VECTOR:
+		return kvm_riscv_vcpu_get_reg_vector(vcpu, reg);
 	case KVM_REG_RISCV_ISA_EXT:
 		return kvm_riscv_vcpu_get_reg_isa_ext(vcpu, reg);
 	case KVM_REG_RISCV_SBI_EXT:
 		return kvm_riscv_vcpu_get_reg_sbi_ext(vcpu, reg);
-	case KVM_REG_RISCV_VECTOR:
-		return kvm_riscv_vcpu_get_reg_vector(vcpu, reg);
+	case KVM_REG_RISCV_SBI_STATE:
+		return kvm_riscv_vcpu_get_reg_sbi(vcpu, reg);
 	default:
 		break;
 	}

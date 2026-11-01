@@ -110,7 +110,7 @@ static int uhid_queue_event(struct uhid_device *uhid, __u32 event)
 	unsigned long flags;
 	struct uhid_event *ev;
 
-	ev = kzalloc(sizeof(*ev), GFP_KERNEL);
+	ev = kzalloc_obj(*ev);
 	if (!ev)
 		return -ENOMEM;
 
@@ -129,7 +129,7 @@ static int uhid_hid_start(struct hid_device *hid)
 	struct uhid_event *ev;
 	unsigned long flags;
 
-	ev = kzalloc(sizeof(*ev), GFP_KERNEL);
+	ev = kzalloc_obj(*ev);
 	if (!ev)
 		return -ENOMEM;
 
@@ -240,7 +240,7 @@ static int uhid_hid_get_report(struct hid_device *hid, unsigned char rnum,
 	if (!READ_ONCE(uhid->running))
 		return -EIO;
 
-	ev = kzalloc(sizeof(*ev), GFP_KERNEL);
+	ev = kzalloc_obj(*ev);
 	if (!ev)
 		return -ENOMEM;
 
@@ -282,7 +282,7 @@ static int uhid_hid_set_report(struct hid_device *hid, unsigned char rnum,
 	if (!READ_ONCE(uhid->running) || count > UHID_DATA_MAX)
 		return -EIO;
 
-	ev = kzalloc(sizeof(*ev), GFP_KERNEL);
+	ev = kzalloc_obj(*ev);
 	if (!ev)
 		return -ENOMEM;
 
@@ -365,7 +365,7 @@ static int uhid_hid_output_raw(struct hid_device *hid, __u8 *buf, size_t count,
 	if (count < 1 || count > UHID_DATA_MAX)
 		return -EINVAL;
 
-	ev = kzalloc(sizeof(*ev), GFP_KERNEL);
+	ev = kzalloc_obj(*ev);
 	if (!ev)
 		return -ENOMEM;
 
@@ -433,7 +433,7 @@ static int uhid_event_from_user(const char __user *buffer, size_t len,
 			 */
 			struct uhid_create_req_compat *compat;
 
-			compat = kzalloc(sizeof(*compat), GFP_KERNEL);
+			compat = kzalloc_obj(*compat);
 			if (!compat)
 				return -ENOMEM;
 
@@ -490,7 +490,7 @@ static int uhid_dev_create2(struct uhid_device *uhid,
 			    const struct uhid_event *ev)
 {
 	struct hid_device *hid;
-	size_t rd_size, len;
+	size_t rd_size;
 	void *rd_data;
 	int ret;
 
@@ -514,13 +514,12 @@ static int uhid_dev_create2(struct uhid_device *uhid,
 		goto err_free;
 	}
 
-	/* @hid is zero-initialized, strncpy() is correct, strlcpy() not */
-	len = min(sizeof(hid->name), sizeof(ev->u.create2.name)) - 1;
-	strncpy(hid->name, ev->u.create2.name, len);
-	len = min(sizeof(hid->phys), sizeof(ev->u.create2.phys)) - 1;
-	strncpy(hid->phys, ev->u.create2.phys, len);
-	len = min(sizeof(hid->uniq), sizeof(ev->u.create2.uniq)) - 1;
-	strncpy(hid->uniq, ev->u.create2.uniq, len);
+	BUILD_BUG_ON(sizeof(hid->name) != sizeof(ev->u.create2.name));
+	strscpy(hid->name, ev->u.create2.name, sizeof(hid->name));
+	BUILD_BUG_ON(sizeof(hid->phys) != sizeof(ev->u.create2.phys));
+	strscpy(hid->phys, ev->u.create2.phys, sizeof(hid->phys));
+	BUILD_BUG_ON(sizeof(hid->uniq) != sizeof(ev->u.create2.uniq));
+	strscpy(hid->uniq, ev->u.create2.uniq, sizeof(hid->uniq));
 
 	hid->ll_driver = &uhid_hid_driver;
 	hid->bus = ev->u.create2.bus;
@@ -596,8 +595,8 @@ static int uhid_dev_input(struct uhid_device *uhid, struct uhid_event *ev)
 	if (!READ_ONCE(uhid->running))
 		return -EINVAL;
 
-	hid_input_report(uhid->hid, HID_INPUT_REPORT, ev->u.input.data,
-			 min_t(size_t, ev->u.input.size, UHID_DATA_MAX), 0);
+	hid_safe_input_report(uhid->hid, HID_INPUT_REPORT, ev->u.input.data, UHID_DATA_MAX,
+			      min_t(size_t, ev->u.input.size, UHID_DATA_MAX), 0);
 
 	return 0;
 }
@@ -607,8 +606,8 @@ static int uhid_dev_input2(struct uhid_device *uhid, struct uhid_event *ev)
 	if (!READ_ONCE(uhid->running))
 		return -EINVAL;
 
-	hid_input_report(uhid->hid, HID_INPUT_REPORT, ev->u.input2.data,
-			 min_t(size_t, ev->u.input2.size, UHID_DATA_MAX), 0);
+	hid_safe_input_report(uhid->hid, HID_INPUT_REPORT, ev->u.input2.data, UHID_DATA_MAX,
+			      min_t(size_t, ev->u.input2.size, UHID_DATA_MAX), 0);
 
 	return 0;
 }
@@ -637,7 +636,7 @@ static int uhid_char_open(struct inode *inode, struct file *file)
 {
 	struct uhid_device *uhid;
 
-	uhid = kzalloc(sizeof(*uhid), GFP_KERNEL);
+	uhid = kzalloc_obj(*uhid);
 	if (!uhid)
 		return -ENOMEM;
 
@@ -804,7 +803,6 @@ static const struct file_operations uhid_fops = {
 	.read		= uhid_char_read,
 	.write		= uhid_char_write,
 	.poll		= uhid_char_poll,
-	.llseek		= no_llseek,
 };
 
 static struct miscdevice uhid_misc = {

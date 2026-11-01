@@ -27,14 +27,30 @@ properties:
       - const: mclk
 
   dmas:
-    maxItems: 1
+    minItems: 1
+    maxItems: 2
 
   dma-names:
     items:
       - const: tx
+      - const: mdma_tx
+    minItems: 1
 
   resets:
     maxItems: 1
+
+  access-controllers:
+    minItems: 1
+    maxItems: 2
+
+  power-domains:
+    maxItems: 1
+
+  sram:
+    maxItems: 1
+    description:
+      SRAM region which is used as temporary storage memory between DMA and
+      MDMA engines.
 
   port:
     $ref: /schemas/graph.yaml#/$defs/port-base

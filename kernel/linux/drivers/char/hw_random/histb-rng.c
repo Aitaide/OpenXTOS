@@ -8,7 +8,6 @@
 #include <linux/io.h>
 #include <linux/iopoll.h>
 #include <linux/kernel.h>
-#include <linux/mod_devicetable.h>
 #include <linux/module.h>
 #include <linux/platform_device.h>
 
@@ -89,7 +88,7 @@ depth_show(struct device *dev, struct device_attribute *attr, char *buf)
 	struct histb_rng_priv *priv = dev_get_drvdata(dev);
 	void __iomem *base = priv->base;
 
-	return sprintf(buf, "%d\n", histb_rng_get_depth(base));
+	return sprintf(buf, "%u\n", histb_rng_get_depth(base));
 }
 
 static ssize_t

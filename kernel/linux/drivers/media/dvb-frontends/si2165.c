@@ -513,10 +513,8 @@ static int si2165_upload_firmware(struct si2165_state *state)
 	ret = 0;
 	state->firmware_loaded = true;
 error:
-	if (fw) {
-		release_firmware(fw);
-		fw = NULL;
-	}
+	release_firmware(fw);
+	fw = NULL;
 
 	return ret;
 }
@@ -1160,7 +1158,7 @@ static int si2165_probe(struct i2c_client *client)
 	};
 
 	/* allocate memory for the internal state */
-	state = kzalloc(sizeof(*state), GFP_KERNEL);
+	state = kzalloc_obj(*state);
 	if (!state) {
 		ret = -ENOMEM;
 		goto error;
@@ -1283,8 +1281,8 @@ static void si2165_remove(struct i2c_client *client)
 }
 
 static const struct i2c_device_id si2165_id_table[] = {
-	{"si2165", 0},
-	{}
+	{ .name = "si2165" },
+	{ }
 };
 MODULE_DEVICE_TABLE(i2c, si2165_id_table);
 

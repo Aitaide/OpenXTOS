@@ -6,6 +6,8 @@
  */
 #define pr_fmt(fmt)	"PCI: OF: " fmt
 
+#include <linux/cleanup.h>
+#include <linux/gpio/consumer.h>
 #include <linux/irqdomain.h>
 #include <linux/kernel.h>
 #include <linux/pci.h>
@@ -13,6 +15,8 @@
 #include <linux/of_irq.h>
 #include <linux/of_address.h>
 #include <linux/of_pci.h>
+#include <linux/platform_device.h>
+#include <linux/pm_wakeirq.h>
 #include "pci.h"
 
 #ifdef CONFIG_PCI
@@ -25,16 +29,20 @@
  */
 int pci_set_of_node(struct pci_dev *dev)
 {
-	struct device_node *node;
-
 	if (!dev->bus->dev.of_node)
 		return 0;
 
-	node = of_pci_find_child_device(dev->bus->dev.of_node, dev->devfn);
+	struct device_node *node __free(device_node) =
+		of_pci_find_child_device(dev->bus->dev.of_node, dev->devfn);
 	if (!node)
 		return 0;
 
-	device_set_node(&dev->dev, of_fwnode_handle(node));
+	struct device *pdev __free(put_device) =
+		bus_find_device_by_of_node(&platform_bus_type, node);
+	if (pdev)
+		dev_set_of_node_reused(&dev->bus->dev);
+
+	device_set_node(&dev->dev, of_fwnode_handle(no_free_ptr(node)));
 	return 0;
 }
 
@@ -184,7 +192,8 @@ EXPORT_SYMBOL_GPL(of_pci_get_devfn);
  *
  * Returns 0 on success or a negative error-code on failure.
  */
-int of_pci_parse_bus_range(struct device_node *node, struct resource *res)
+static int of_pci_parse_bus_range(struct device_node *node,
+				  struct resource *res)
 {
 	u32 bus_range[2];
 	int error;
@@ -201,7 +210,6 @@ int of_pci_parse_bus_range(struct device_node *node, struct resource *res)
 
 	return 0;
 }
-EXPORT_SYMBOL_GPL(of_pci_parse_bus_range);
 
 /**
  * of_get_pci_domain_nr - Find the host bridge domain number
@@ -234,27 +242,61 @@ int of_get_pci_domain_nr(struct device_node *node)
 EXPORT_SYMBOL_GPL(of_get_pci_domain_nr);
 
 /**
+ * of_pci_preserve_config - Return true if the boot configuration needs to
+ *                          be preserved
+ * @node: Device tree node.
+ *
+ * Look for "linux,pci-probe-only" property for a given PCI controller's
+ * node and return true if found. Also look in the chosen node if the
+ * property is not found in the given controller's node.  Having this
+ * property ensures that the kernel doesn't reconfigure the BARs and bridge
+ * windows that are already done by the platform firmware.
+ *
+ * Return: true if the property exists; false otherwise.
+ */
+bool of_pci_preserve_config(struct device_node *node)
+{
+	u32 val = 0;
+	int ret;
+
+	if (!node) {
+		pr_warn("device node is NULL, trying with of_chosen\n");
+		node = of_chosen;
+	}
+
+retry:
+	ret = of_property_read_u32(node, "linux,pci-probe-only", &val);
+	if (ret) {
+		if (ret == -ENODATA || ret == -EOVERFLOW) {
+			pr_warn("Incorrect value for linux,pci-probe-only in %pOF, ignoring\n",
+				node);
+			return false;
+		}
+		if (ret == -EINVAL) {
+			if (node == of_chosen)
+				return false;
+
+			node = of_chosen;
+			goto retry;
+		}
+	}
+
+	if (val)
+		return true;
+	else
+		return false;
+}
+
+/**
  * of_pci_check_probe_only - Setup probe only mode if linux,pci-probe-only
  *                           is present and valid
  */
 void of_pci_check_probe_only(void)
 {
-	u32 val;
-	int ret;
-
-	ret = of_property_read_u32(of_chosen, "linux,pci-probe-only", &val);
-	if (ret) {
-		if (ret == -ENODATA || ret == -EOVERFLOW)
-			pr_warn("linux,pci-probe-only without valid value, ignoring\n");
-		return;
-	}
-
-	if (val)
+	if (of_pci_preserve_config(of_chosen))
 		pci_add_flags(PCI_PROBE_ONLY);
 	else
 		pci_clear_flags(PCI_PROBE_ONLY);
-
-	pr_info("PROBE_ONLY %s\n", val ? "enabled" : "disabled");
 }
 EXPORT_SYMBOL_GPL(of_pci_check_probe_only);
 
@@ -262,8 +304,6 @@ EXPORT_SYMBOL_GPL(of_pci_check_probe_only);
  * devm_of_pci_get_host_bridge_resources() - Resource-managed parsing of PCI
  *                                           host bridge resources from DT
  * @dev: host bridge device
- * @busno: bus number associated with the bridge root bus
- * @bus_max: maximum number of buses for this bridge
  * @resources: list where the range of resources will be added after DT parsing
  * @ib_resources: list where the range of inbound resources (with addresses
  *                from 'dma-ranges') will be added after DT parsing
@@ -279,7 +319,6 @@ EXPORT_SYMBOL_GPL(of_pci_check_probe_only);
  * value if it failed.
  */
 static int devm_of_pci_get_host_bridge_resources(struct device *dev,
-			unsigned char busno, unsigned char bus_max,
 			struct list_head *resources,
 			struct list_head *ib_resources,
 			resource_size_t *io_base)
@@ -303,14 +342,15 @@ static int devm_of_pci_get_host_bridge_resources(struct device *dev,
 
 	err = of_pci_parse_bus_range(dev_node, bus_range);
 	if (err) {
-		bus_range->start = busno;
-		bus_range->end = bus_max;
+		bus_range->start = 0;
+		bus_range->end = 0xff;
 		bus_range->flags = IORESOURCE_BUS;
-		dev_info(dev, "  No bus range found for %pOF, using %pR\n",
-			 dev_node, bus_range);
 	} else {
-		if (bus_range->end > bus_range->start + bus_max)
-			bus_range->end = bus_range->start + bus_max;
+		if (bus_range->end > 0xff) {
+			dev_warn(dev, "  Invalid end bus number in %pR, defaulting to 0xff\n",
+				 bus_range);
+			bus_range->end = 0xff;
+		}
 	}
 	pci_add_resource(resources, bus_range);
 
@@ -417,9 +457,9 @@ failed:
  * @out_irq:    structure of_phandle_args filled by this function
  *
  * This function resolves the PCI interrupt for a given PCI device. If a
- * device-node exists for a given pci_dev, it will use normal OF tree
+ * device node exists for a given pci_dev, it will use normal OF tree
  * walking. If not, it will implement standard swizzling and walk up the
- * PCI tree until an device-node is found, at which point it will finish
+ * PCI tree until a device node is found, at which point it will finish
  * resolving using the OF tree walking.
  */
 static int of_irq_parse_pci(const struct pci_dev *pdev, struct of_phandle_args *out_irq)
@@ -479,13 +519,16 @@ static int of_irq_parse_pci(const struct pci_dev *pdev, struct of_phandle_args *
 		}
 
 		/*
-		 * Ok, we have found a parent with a device-node, hand over to
+		 * Ok, we have found a parent with a device node, hand over to
 		 * the OF parsing code.
+		 *
 		 * We build a unit address from the linux device to be used for
 		 * resolution. Note that we use the linux bus number which may
 		 * not match your firmware bus numbering.
+		 *
 		 * Fortunately, in most cases, interrupt-map-mask doesn't
 		 * include the bus number as part of the matching.
+		 *
 		 * You should still be careful about that though if you intend
 		 * to rely on this function (you ship a firmware that doesn't
 		 * create device nodes for all PCI devices).
@@ -545,6 +588,83 @@ int of_irq_parse_and_map_pci(const struct pci_dev *dev, u8 slot, u8 pin)
 	return irq_create_of_mapping(&oirq);
 }
 EXPORT_SYMBOL_GPL(of_irq_parse_and_map_pci);
+
+static void pci_configure_wake_irq(struct pci_dev *pdev, struct gpio_desc *wake)
+{
+	int ret, wake_irq, irq_type;
+
+	wake_irq = gpiod_to_irq(wake);
+	if (wake_irq < 0) {
+		pci_err(pdev, "Failed to get wake IRQ: %d\n", wake_irq);
+		return;
+	}
+
+	/*
+	 * dev_pm_set_dedicated_wake_irq() associates a wakeup IRQ with the
+	 * device and requests it, but the PM core keeps it disabled by
+	 * default.  The IRQ is enabled only when the device is allowed to
+	 * wake the system (during system suspend and after runtime
+	 * suspend), and only if device wakeup is enabled.
+	 *
+	 * When the wake IRQ fires, the wakeirq handler invokes
+	 * pm_runtime_resume() to bring the device back to an active power
+	 * state (e.g. from D3cold to D0).  Once the device is active and
+	 * the link is usable, the endpoint may signal a PME, which is then
+	 * handled by the PCI core (either via PME polling or the PCIe PME
+	 * service driver) to wakeup the particular endpoint.
+	 */
+	ret = dev_pm_set_dedicated_wake_irq(&pdev->dev, wake_irq);
+	if (ret < 0) {
+		pci_err(pdev, "Failed to set WAKE# IRQ: %d\n", ret);
+		return;
+	}
+
+	irq_type = gpiod_is_active_low(wake) ? IRQ_TYPE_LEVEL_LOW :
+						IRQ_TYPE_LEVEL_HIGH;
+	ret = irq_set_irq_type(wake_irq, irq_type);
+	if (ret < 0) {
+		dev_pm_clear_wake_irq(&pdev->dev);
+		pci_err(pdev, "Failed to set irq_type: %d\n", ret);
+		return;
+	}
+
+	device_init_wakeup(&pdev->dev, true);
+}
+
+void pci_configure_of_wake_gpio(struct pci_dev *dev)
+{
+	struct device_node *dn = pci_device_to_OF_node(dev);
+	struct gpio_desc *gpio;
+
+	if (!dn && !dev->wake)
+		return;
+	/*
+	 * fwnode_gpiod_get() may fail with -EBUSY (e.g. shared WAKE#), but
+	 * the actual WAKE# trigger from the device would still work and
+	 * the host controller driver will enable power to the topology.
+	 *
+	 * -EPROBE_DEFER cannot be propagated here since pci_device_add()
+	 * has no retry mechanism.
+	 */
+	gpio = fwnode_gpiod_get(of_fwnode_handle(dn), "wake", GPIOD_IN, NULL);
+	if (!IS_ERR(gpio)) {
+		dev->wake = gpio;
+		pci_configure_wake_irq(dev, gpio);
+	}
+}
+
+void pci_remove_of_wake_gpio(struct pci_dev *dev)
+{
+	struct device_node *dn = pci_device_to_OF_node(dev);
+
+	if (!dn)
+		return;
+
+	device_init_wakeup(&dev->dev, false);
+	dev_pm_clear_wake_irq(&dev->dev);
+	gpiod_put(dev->wake);
+	dev->wake = NULL;
+}
 #endif	/* CONFIG_OF_IRQ */
 
 static int pci_parse_request_of_pci_ranges(struct device *dev,
@@ -557,7 +677,7 @@ static int pci_parse_request_of_pci_ranges(struct device *dev,
 	INIT_LIST_HEAD(&bridge->windows);
 	INIT_LIST_HEAD(&bridge->dma_ranges);
 
-	err = devm_of_pci_get_host_bridge_resources(dev, 0, 0xff, &bridge->windows,
+	err = devm_of_pci_get_host_bridge_resources(dev, &bridge->windows,
 						    &bridge->dma_ranges, &iobase);
 	if (err)
 		return err;
@@ -615,8 +735,8 @@ void of_pci_remove_node(struct pci_dev *pdev)
 	np = pci_device_to_OF_node(pdev);
 	if (!np || !of_node_check_flag(np, OF_DYNAMIC))
 		return;
-	pdev->dev.of_node = NULL;
 
+	device_remove_of_node(&pdev->dev);
 	of_changeset_revert(np->data);
 	of_changeset_destroy(np->data);
 	of_node_put(np);
@@ -655,7 +775,7 @@ void of_pci_make_dev_node(struct pci_dev *pdev)
 	if (!name)
 		return;
 
-	cset = kmalloc(sizeof(*cset), GFP_KERNEL);
+	cset = kmalloc_obj(*cset);
 	if (!cset)
 		goto out_free_name;
 	of_changeset_init(cset);
@@ -673,11 +793,18 @@ void of_pci_make_dev_node(struct pci_dev *pdev)
 		goto out_free_node;
 
 	np->data = cset;
-	pdev->dev.of_node = np;
+
+	ret = device_add_of_node(&pdev->dev, np);
+	if (ret)
+		goto out_revert_cset;
+
 	kfree(name);
 
 	return;
 
+out_revert_cset:
+	np->data = NULL;
+	of_changeset_revert(cset);
 out_free_node:
 	of_node_put(np);
 out_destroy_cset:
@@ -686,7 +813,140 @@ out_destroy_cset:
 out_free_name:
 	kfree(name);
 }
-#endif
+
+void of_pci_remove_host_bridge_node(struct pci_host_bridge *bridge)
+{
+	struct device_node *np;
+
+	np = pci_bus_to_OF_node(bridge->bus);
+	if (!np || !of_node_check_flag(np, OF_DYNAMIC))
+		return;
+
+	device_remove_of_node(&bridge->bus->dev);
+	device_remove_of_node(&bridge->dev);
+	of_changeset_revert(np->data);
+	of_changeset_destroy(np->data);
+	of_node_put(np);
+}
+
+void of_pci_make_host_bridge_node(struct pci_host_bridge *bridge)
+{
+	struct device_node *np = NULL;
+	struct of_changeset *cset;
+	const char *name;
+	int ret;
+
+	/*
+	 * If there is already a device tree node linked to the PCI bus handled
+	 * by this bridge (i.e. the PCI root bus), nothing to do.
+	 */
+	if (pci_bus_to_OF_node(bridge->bus))
+		return;
+
+	/*
+	 * The root bus has no node. Check that the host bridge has no node
+	 * too
+	 */
+	if (bridge->dev.of_node) {
+		dev_err(&bridge->dev, "PCI host bridge of_node already set");
+		return;
+	}
+
+	/* Check if there is a DT root node to attach the created node */
+	if (!of_root) {
+		pr_debug("of_root node is NULL, cannot create PCI host bridge node\n");
+		return;
+	}
+
+	name = kasprintf(GFP_KERNEL, "pci@%x,%x", pci_domain_nr(bridge->bus),
+			 bridge->bus->number);
+	if (!name)
+		return;
+
+	cset = kmalloc_obj(*cset);
+	if (!cset)
+		goto out_free_name;
+	of_changeset_init(cset);
+
+	np = of_changeset_create_node(cset, of_root, name);
+	if (!np)
+		goto out_destroy_cset;
+
+	ret = of_pci_add_host_bridge_properties(bridge, cset, np);
+	if (ret)
+		goto out_free_node;
+
+	/*
+	 * This of_node will be added to an existing device. The of_node parent
+	 * is the root OF node and so this node will be handled by the platform
+	 * bus. Avoid any new device creation.
+	 */
+	of_node_set_flag(np, OF_POPULATED);
+	np->fwnode.dev = &bridge->dev;
+	fwnode_dev_initialized(&np->fwnode, true);
+
+	ret = of_changeset_apply(cset);
+	if (ret)
+		goto out_free_node;
+
+	np->data = cset;
+
+	/* Add the of_node to host bridge and the root bus */
+	ret = device_add_of_node(&bridge->dev, np);
+	if (ret)
+		goto out_revert_cset;
+
+	ret = device_add_of_node(&bridge->bus->dev, np);
+	if (ret)
+		goto out_remove_bridge_dev_of_node;
+
+	kfree(name);
+
+	return;
+
+out_remove_bridge_dev_of_node:
+	device_remove_of_node(&bridge->dev);
+out_revert_cset:
+	np->data = NULL;
+	of_changeset_revert(cset);
+out_free_node:
+	of_node_put(np);
+out_destroy_cset:
+	of_changeset_destroy(cset);
+	kfree(cset);
+out_free_name:
+	kfree(name);
+}
+
+#endif /* CONFIG_PCI_DYNAMIC_OF_NODES */
+
+/**
+ * of_pci_supply_present() - Check if the power supply is present for the PCI
+ *				device
+ * @np: Device tree node
+ *
+ * Check if the power supply for the PCI device is present in the device tree
+ * node or not.
+ *
+ * Return: true if at least one power supply exists; false otherwise.
+ */
+bool of_pci_supply_present(struct device_node *np)
+{
+	struct property *prop;
+	char *supply;
+
+	if (!np)
+		return false;
+
+	for_each_property_of_node(np, prop) {
+		supply = strrchr(prop->name, '-');
+		if (supply && !strcmp(supply, "-supply"))
+			return true;
+	}
+
+	return false;
+}
+EXPORT_SYMBOL_GPL(of_pci_supply_present);
 
 #endif /* CONFIG_PCI */
 
@@ -694,24 +954,19 @@ out_free_name:
  * of_pci_get_max_link_speed - Find the maximum link speed of the given device node.
  * @node: Device tree node with the maximum link speed information.
  *
- * This function will try to find the limitation of link speed by finding
- * a property called "max-link-speed" of the given device node.
+ * This function will try to read the "max-link-speed" property of the given
+ * device tree node. It does NOT validate the value of the property.
  *
- * Return:
- * * > 0	- On success, a maximum link speed.
- * * -EINVAL	- Invalid "max-link-speed" property value, or failure to access
- *		  the property of the device tree node.
- *
- * Returns the associated max link speed from DT, or a negative value if the
- * required property is not found or is invalid.
+ * Return: Maximum link speed value on success, errno on failure.
  */
 int of_pci_get_max_link_speed(struct device_node *node)
 {
 	u32 max_link_speed;
+	int ret;
 
-	if (of_property_read_u32(node, "max-link-speed", &max_link_speed) ||
-	    max_link_speed == 0 || max_link_speed > 4)
-		return -EINVAL;
+	ret = of_property_read_u32(node, "max-link-speed", &max_link_speed);
+	if (ret)
+		return ret;
 
 	return max_link_speed;
 }
@@ -786,3 +1041,47 @@ u32 of_pci_get_slot_power_limit(struct device_node *node,
 	return slot_power_limit_mw;
 }
 EXPORT_SYMBOL_GPL(of_pci_get_slot_power_limit);
+
+/**
+ * of_pci_get_equalization_presets - Parses the "eq-presets-Ngts" property.
+ *
+ * @dev: Device containing the properties.
+ * @presets: Pointer to store the parsed data.
+ * @num_lanes: Maximum number of lanes supported.
+ *
+ * If the property is present, read and store the data in the @presets structure.
+ * Else, assign a default value of PCI_EQ_RESV.
+ *
+ * Return: 0 if the property is not available or successfully parsed else
+ * errno otherwise.
+ */
+int of_pci_get_equalization_presets(struct device *dev,
+				    struct pci_eq_presets *presets,
+				    int num_lanes)
+{
+	char name[20];
+	int ret;
+
+	presets->eq_presets_8gts[0] = PCI_EQ_RESV;
+	ret = of_property_read_u16_array(dev->of_node, "eq-presets-8gts",
+					 presets->eq_presets_8gts, num_lanes);
+	if (ret && ret != -EINVAL) {
+		dev_err(dev, "Error reading eq-presets-8gts: %d\n", ret);
+		return ret;
+	}
+
+	for (int i = 0; i < EQ_PRESET_TYPE_MAX - 1; i++) {
+		presets->eq_presets_Ngts[i][0] = PCI_EQ_RESV;
+		snprintf(name, sizeof(name), "eq-presets-%dgts", 8 << (i + 1));
+		ret = of_property_read_u8_array(dev->of_node, name,
+						presets->eq_presets_Ngts[i],
+						num_lanes);
+		if (ret && ret != -EINVAL) {
+			dev_err(dev, "Error reading %s: %d\n", name, ret);
+			return ret;
+		}
+	}
+
+	return 0;
+}
+EXPORT_SYMBOL_GPL(of_pci_get_equalization_presets);

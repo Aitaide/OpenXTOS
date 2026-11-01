@@ -7,6 +7,7 @@
 
 #include <linux/types.h>
 #include <linux/irq.h>
+#include <linux/seq_file.h>
 #include <linux/smp.h>
 #include <linux/interrupt.h>
 #include <linux/init.h>
@@ -51,7 +52,7 @@ static int __init xive_irq_bitmap_add(int base, int count)
 {
 	struct xive_irq_bitmap *xibm;
 
-	xibm = kzalloc(sizeof(*xibm), GFP_KERNEL);
+	xibm = kzalloc_obj(*xibm);
 	if (!xibm)
 		return -ENOMEM;
 
@@ -666,17 +667,9 @@ static void xive_spapr_sync_source(u32 hw_irq)
 static int xive_spapr_debug_show(struct seq_file *m, void *private)
 {
 	struct xive_irq_bitmap *xibm;
-	char *buf = kmalloc(PAGE_SIZE, GFP_KERNEL);
 
-	if (!buf)
-		return -ENOMEM;
-
-	list_for_each_entry(xibm, &xive_irq_bitmaps, list) {
-		memset(buf, 0, PAGE_SIZE);
-		bitmap_print_to_pagebuf(true, buf, xibm->bitmap, xibm->count);
-		seq_printf(m, "bitmap #%d: %s", xibm->count, buf);
-	}
-	kfree(buf);
+	list_for_each_entry(xibm, &xive_irq_bitmaps, list)
+		seq_printf(m, "bitmap #%d: %*pbl\n", xibm->count, xibm->count, xibm->bitmap);
 
 	return 0;
 }
@@ -814,7 +807,6 @@ bool __init xive_spapr_init(void)
 	struct device_node *np;
 	struct resource r;
 	void __iomem *tima;
-	struct property *prop;
 	u8 max_prio;
 	u32 val;
 	u32 len;
@@ -866,7 +858,7 @@ bool __init xive_spapr_init(void)
 	}
 
 	/* Iterate the EQ sizes and pick one */
-	of_property_for_each_u32(np, "ibm,xive-eq-sizes", prop, reg, val) {
+	of_property_for_each_u32(np, "ibm,xive-eq-sizes", val) {
 		xive_queue_shift = val;
 		if (val == PAGE_SHIFT)
 			break;

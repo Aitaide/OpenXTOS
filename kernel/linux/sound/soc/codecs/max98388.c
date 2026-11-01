@@ -3,12 +3,10 @@
 
 #include <linux/acpi.h>
 #include <linux/delay.h>
-#include <linux/gpio.h>
+#include <linux/gpio/consumer.h>
 #include <linux/i2c.h>
 #include <linux/module.h>
-#include <linux/mod_devicetable.h>
 #include <linux/of.h>
-#include <linux/of_gpio.h>
 #include <linux/pm_runtime.h>
 #include <linux/regmap.h>
 #include <linux/slab.h>
@@ -19,7 +17,7 @@
 #include <sound/tlv.h>
 #include "max98388.h"
 
-static struct reg_default max98388_reg[] = {
+static const struct reg_default max98388_reg[] = {
 	{MAX98388_R2000_SW_RESET, 0x00},
 	{MAX98388_R2001_INT_RAW1, 0x00},
 	{MAX98388_R2002_INT_RAW2, 0x00},
@@ -764,6 +762,7 @@ static int max98388_dai_tdm_slot(struct snd_soc_dai *dai,
 			addr = MAX98388_R2044_PCM_TX_CTRL1 + (cnt / 8);
 			bits = cnt % 8;
 			regmap_update_bits(max98388->regmap, addr, bits, bits);
+			slot_found++;
 			if (slot_found >= MAX_NUM_CH)
 				break;
 		}
@@ -864,10 +863,16 @@ static int max98388_suspend(struct device *dev)
 static int max98388_resume(struct device *dev)
 {
 	struct max98388_priv *max98388 = dev_get_drvdata(dev);
+	int ret;
 
 	regcache_cache_only(max98388->regmap, false);
 	max98388_reset(max98388, dev);
-	regcache_sync(max98388->regmap);
+	ret = regcache_sync(max98388->regmap);
+	if (ret) {
+		regcache_cache_only(max98388->regmap, true);
+		regcache_mark_dirty(max98388->regmap);
+		return ret;
+	}
 
 	return 0;
 }
@@ -977,8 +982,8 @@ static int max98388_i2c_probe(struct i2c_client *i2c)
 }
 
 static const struct i2c_device_id max98388_i2c_id[] = {
-	{ "max98388", 0},
-	{ },
+	{ .name = "max98388" },
+	{ }
 };
 
 MODULE_DEVICE_TABLE(i2c, max98388_i2c_id);

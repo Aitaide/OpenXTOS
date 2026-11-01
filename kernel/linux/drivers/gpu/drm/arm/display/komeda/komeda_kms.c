@@ -9,6 +9,7 @@
 #include <drm/drm_atomic.h>
 #include <drm/drm_atomic_helper.h>
 #include <drm/drm_drv.h>
+#include <drm/drm_fbdev_dma.h>
 #include <drm/drm_gem_dma_helper.h>
 #include <drm/drm_gem_framebuffer_helper.h>
 #include <drm/drm_managed.h>
@@ -58,15 +59,15 @@ static irqreturn_t komeda_kms_irq_handler(int irq, void *data)
 static const struct drm_driver komeda_kms_driver = {
 	.driver_features = DRIVER_GEM | DRIVER_MODESET | DRIVER_ATOMIC,
 	DRM_GEM_DMA_DRIVER_OPS_WITH_DUMB_CREATE(komeda_gem_dma_dumb_create),
+	DRM_FBDEV_DMA_DRIVER_OPS,
 	.fops = &komeda_cma_fops,
 	.name = "komeda",
 	.desc = "Arm Komeda Display Processor driver",
-	.date = "20181101",
 	.major = 0,
 	.minor = 1,
 };
 
-static void komeda_kms_atomic_commit_hw_done(struct drm_atomic_state *state)
+static void komeda_kms_atomic_commit_hw_done(struct drm_atomic_commit *state)
 {
 	struct drm_device *dev = state->dev;
 	struct komeda_kms_dev *kms = to_kdev(dev);
@@ -85,7 +86,7 @@ static void komeda_kms_atomic_commit_hw_done(struct drm_atomic_state *state)
 	drm_atomic_helper_commit_hw_done(state);
 }
 
-static void komeda_kms_commit_tail(struct drm_atomic_state *old_state)
+static void komeda_kms_commit_tail(struct drm_atomic_commit *old_state)
 {
 	struct drm_device *dev = old_state->dev;
 	bool fence_cookie = dma_fence_begin_signalling();
@@ -152,7 +153,7 @@ static int komeda_plane_state_list_add(struct drm_plane_state *plane_st,
 static int komeda_crtc_normalize_zpos(struct drm_crtc *crtc,
 				      struct drm_crtc_state *crtc_st)
 {
-	struct drm_atomic_state *state = crtc_st->state;
+	struct drm_atomic_commit *state = crtc_st->state;
 	struct komeda_crtc *kcrtc = to_kcrtc(crtc);
 	struct komeda_crtc_state *kcrtc_st = to_kcrtc_st(crtc_st);
 	struct komeda_plane_state *kplane_st;
@@ -160,6 +161,7 @@ static int komeda_crtc_normalize_zpos(struct drm_crtc *crtc,
 	struct drm_plane *plane;
 	struct list_head zorder_list;
 	int order = 0, err;
+	u32 slave_zpos = 0;
 
 	DRM_DEBUG_ATOMIC("[CRTC:%d:%s] calculating normalized zpos values\n",
 			 crtc->base.id, crtc->name);
@@ -199,10 +201,13 @@ static int komeda_crtc_normalize_zpos(struct drm_crtc *crtc,
 				 plane_st->zpos, plane_st->normalized_zpos);
 
 		/* calculate max slave zorder */
-		if (has_bit(drm_plane_index(plane), kcrtc->slave_planes))
+		if (has_bit(drm_plane_index(plane), kcrtc->slave_planes)) {
+			slave_zpos = plane_st->normalized_zpos;
+			if (to_kplane_st(plane_st)->layer_split)
+				slave_zpos++;
 			kcrtc_st->max_slave_zorder =
-				max(plane_st->normalized_zpos,
-				    kcrtc_st->max_slave_zorder);
+				max(slave_zpos, kcrtc_st->max_slave_zorder);
+		}
 	}
 
 	crtc_st->zpos_changed = true;
@@ -211,7 +216,7 @@ static int komeda_crtc_normalize_zpos(struct drm_crtc *crtc,
 }
 
 static int komeda_kms_check(struct drm_device *dev,
-			    struct drm_atomic_state *state)
+			    struct drm_atomic_commit *state)
 {
 	struct drm_crtc *crtc;
 	struct drm_crtc_state *new_crtc_st;
@@ -223,7 +228,7 @@ static int komeda_kms_check(struct drm_device *dev,
 
 	/* Komeda need to re-calculate resource assumption in every commit
 	 * so need to add all affected_planes (even unchanged) to
-	 * drm_atomic_state.
+	 * drm_atomic_commit.
 	 */
 	for_each_new_crtc_in_state(state, crtc, new_crtc_st, i) {
 		err = drm_atomic_add_affected_planes(state, crtc);
@@ -339,4 +344,11 @@ void komeda_kms_detach(struct komeda_kms_dev *kms)
 	drm_mode_config_cleanup(drm);
 	komeda_kms_cleanup_private_objs(kms);
 	drm->dev_private = NULL;
+}
+
+void komeda_kms_shutdown(struct komeda_kms_dev *kms)
+{
+	struct drm_device *drm = &kms->base;
+
+	drm_atomic_helper_shutdown(drm);
 }

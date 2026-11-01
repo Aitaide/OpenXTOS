@@ -20,6 +20,23 @@ static inline void fb_unregister_chrdev(void)
 { }
 #endif
 
+/* fb_logo.c */
+#if defined(CONFIG_LOGO)
+extern bool fb_center_logo;
+extern int fb_logo_count;
+int fb_prepare_logo(struct fb_info *fb_info, int rotate);
+int fb_show_logo(struct fb_info *fb_info, int rotate);
+#else
+static inline int fb_prepare_logo(struct fb_info *info, int rotate)
+{
+	return 0;
+}
+static inline int fb_show_logo(struct fb_info *info, int rotate)
+{
+	return 0;
+}
+#endif /* CONFIG_LOGO */
+
 /* fbmem.c */
 extern struct class *fb_class;
 extern struct mutex registration_lock;
@@ -27,6 +44,7 @@ extern struct fb_info *registered_fb[FB_MAX];
 extern int num_registered_fb;
 struct fb_info *get_fb_info(unsigned int idx);
 void put_fb_info(struct fb_info *fb_info);
+int fb_blank_from_user(struct fb_info *info, int blank);
 
 /* fb_procfs.c */
 #if defined(CONFIG_FB_DEVICE)

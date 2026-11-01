@@ -19,6 +19,7 @@
  */
 
 #include <linux/trace_events.h>
+#include <linux/btf_ids.h>
 
 #ifndef TRACE_SYSTEM_VAR
 #define TRACE_SYSTEM_VAR TRACE_SYSTEM
@@ -45,6 +46,16 @@
 			     PARAMS(print));		       \
 	DEFINE_EVENT(name, name, PARAMS(proto), PARAMS(args));
 
+#undef TRACE_EVENT_SYSCALL
+#define TRACE_EVENT_SYSCALL(name, proto, args, tstruct, assign, print, reg, unreg) \
+	DECLARE_EVENT_SYSCALL_CLASS(name,		       \
+			     PARAMS(proto),		       \
+			     PARAMS(args),		       \
+			     PARAMS(tstruct),		       \
+			     PARAMS(assign),		       \
+			     PARAMS(print));		       \
+	DEFINE_EVENT(name, name, PARAMS(proto), PARAMS(args));
+
 #include "stages/stage1_struct_define.h"
 
 #undef DECLARE_EVENT_CLASS
@@ -56,6 +67,9 @@
 	};								\
 									\
 	static struct trace_event_class event_class_##name;
+
+#undef DECLARE_EVENT_SYSCALL_CLASS
+#define DECLARE_EVENT_SYSCALL_CLASS DECLARE_EVENT_CLASS
 
 #undef DEFINE_EVENT
 #define DEFINE_EVENT(template, name, proto, args)	\
@@ -116,6 +130,9 @@
 	struct trace_event_data_offsets_##call {			\
 		tstruct;						\
 	};
+
+#undef DECLARE_EVENT_SYSCALL_CLASS
+#define DECLARE_EVENT_SYSCALL_CLASS DECLARE_EVENT_CLASS
 
 #undef DEFINE_EVENT
 #define DEFINE_EVENT(template, name, proto, args)
@@ -208,6 +225,9 @@ static struct trace_event_functions trace_event_type_funcs_##call = {	\
 	.trace			= trace_raw_output_##call,		\
 };
 
+#undef DECLARE_EVENT_SYSCALL_CLASS
+#define DECLARE_EVENT_SYSCALL_CLASS DECLARE_EVENT_CLASS
+
 #undef DEFINE_EVENT_PRINT
 #define DEFINE_EVENT_PRINT(template, call, proto, args, print)		\
 static notrace enum print_line_t					\
@@ -244,6 +264,9 @@ static struct trace_event_fields trace_event_fields_##call[] = {	\
 	tstruct								\
 	{} };
 
+#undef DECLARE_EVENT_SYSCALL_CLASS
+#define DECLARE_EVENT_SYSCALL_CLASS DECLARE_EVENT_CLASS
+
 #undef DEFINE_EVENT_PRINT
 #define DEFINE_EVENT_PRINT(template, name, proto, args, print)
 
@@ -264,6 +287,9 @@ static inline notrace int trace_event_get_offsets_##call(		\
 									\
 	return __data_size;						\
 }
+
+#undef DECLARE_EVENT_SYSCALL_CLASS
+#define DECLARE_EVENT_SYSCALL_CLASS DECLARE_EVENT_CLASS
 
 #include TRACE_INCLUDE(TRACE_INCLUDE_FILE)
 
@@ -372,13 +398,33 @@ static inline notrace int trace_event_get_offsets_##call(		\
 #define _TRACE_PERF_INIT(call)
 #endif /* CONFIG_PERF_EVENTS */
 
+#if defined(CONFIG_BPF_EVENTS) && defined(CONFIG_DEBUG_INFO_BTF)
+/*
+ * Per-template BTF id list, populated at link time by resolve_btfids:
+ *   [0] FUNC   __bpf_trace_<call>     (the BPF dispatcher)
+ *   [1] STRUCT trace_event_raw_<call> (the ring-buffer record)
+ * Exposed via the events/<sys>/<name>/btf_ids tracefs file.
+ */
+#define _TRACE_BTF_IDS_DECLARE(call)					\
+	BTF_ID_LIST(__bpf_trace_btf_ids_##call)				\
+	BTF_ID(func,   __bpf_trace_##call)				\
+	BTF_ID(struct, trace_event_raw_##call)
+
+#define _TRACE_BTF_IDS_INIT(call)					\
+	.btf_ids		= __bpf_trace_btf_ids_##call,
+
+#else
+#define _TRACE_BTF_IDS_DECLARE(call)
+#define _TRACE_BTF_IDS_INIT(call)
+#endif /* CONFIG_BPF_EVENTS && CONFIG_DEBUG_INFO_BTF */
+
 #include "stages/stage6_event_callback.h"
 
-#undef DECLARE_EVENT_CLASS
-#define DECLARE_EVENT_CLASS(call, proto, args, tstruct, assign, print)	\
-									\
+
+#undef __DECLARE_EVENT_CLASS
+#define __DECLARE_EVENT_CLASS(call, proto, args, tstruct, assign, print) \
 static notrace void							\
-trace_event_raw_event_##call(void *__data, proto)			\
+do_trace_event_raw_event_##call(void *__data, proto)			\
 {									\
 	struct trace_event_file *trace_file = __data;			\
 	struct trace_event_data_offsets_##call __maybe_unused __data_offsets;\
@@ -403,6 +449,30 @@ trace_event_raw_event_##call(void *__data, proto)			\
 									\
 	trace_event_buffer_commit(&fbuffer);				\
 }
+
+#undef DECLARE_EVENT_CLASS
+#define DECLARE_EVENT_CLASS(call, proto, args, tstruct, assign, print)	\
+__DECLARE_EVENT_CLASS(call, PARAMS(proto), PARAMS(args), PARAMS(tstruct), \
+		      PARAMS(assign), PARAMS(print))			\
+static notrace void							\
+trace_event_raw_event_##call(void *__data, proto)			\
+{									\
+	guard(preempt_notrace)();					\
+	do_trace_event_raw_event_##call(__data, args);			\
+}
+
+#undef DECLARE_EVENT_SYSCALL_CLASS
+#define DECLARE_EVENT_SYSCALL_CLASS(call, proto, args, tstruct, assign, print) \
+__DECLARE_EVENT_CLASS(call, PARAMS(proto), PARAMS(args), PARAMS(tstruct), \
+		      PARAMS(assign), PARAMS(print))			\
+static notrace void							\
+trace_event_raw_event_##call(void *__data, proto)			\
+{									\
+	might_fault();							\
+	guard(preempt_notrace)();					\
+	do_trace_event_raw_event_##call(__data, args);			\
+}
+
 /*
  * The ftrace_test_probe is compiled out, it is only here as a build time check
  * to make sure that if the tracepoint handling changes, the ftrace probe will
@@ -418,11 +488,14 @@ static inline void ftrace_test_probe_##call(void)			\
 
 #include TRACE_INCLUDE(TRACE_INCLUDE_FILE)
 
+#undef __DECLARE_EVENT_CLASS
+
 #include "stages/stage7_class_define.h"
 
 #undef DECLARE_EVENT_CLASS
 #define DECLARE_EVENT_CLASS(call, proto, args, tstruct, assign, print)	\
 _TRACE_PERF_PROTO(call, PARAMS(proto));					\
+_TRACE_BTF_IDS_DECLARE(call)						\
 static char print_fmt_##call[] = print;					\
 static struct trace_event_class __used __refdata event_class_##call = { \
 	.system			= TRACE_SYSTEM_STRING,			\
@@ -432,7 +505,11 @@ static struct trace_event_class __used __refdata event_class_##call = { \
 	.probe			= trace_event_raw_event_##call,		\
 	.reg			= trace_event_reg,			\
 	_TRACE_PERF_INIT(call)						\
+	_TRACE_BTF_IDS_INIT(call)					\
 };
+
+#undef DECLARE_EVENT_SYSCALL_CLASS
+#define DECLARE_EVENT_SYSCALL_CLASS DECLARE_EVENT_CLASS
 
 #undef DEFINE_EVENT
 #define DEFINE_EVENT(template, call, proto, args)			\

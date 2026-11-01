@@ -24,6 +24,8 @@
 #define HWC_INIT_DATA_PF_DEST_CQ_ID	11
 
 #define HWC_DATA_CFG_HWC_TIMEOUT 1
+#define HWC_DATA_HW_LINK_CONNECT 2
+#define HWC_DATA_HW_LINK_DISCONNECT 3
 
 #define HW_CHANNEL_WAIT_RESOURCE_TIMEOUT_MS 30000
 
@@ -46,6 +48,15 @@ union hwc_init_type_data {
 	struct {
 		u32 value	: 24;
 		u32 type	:  8;
+	};
+}; /* HW DATA */
+
+union hwc_init_soc_service_type {
+	u32 as_uint32;
+
+	struct {
+		u32 value	: 28;
+		u32 type	:  4;
 	};
 }; /* HW DATA */
 
@@ -121,7 +132,7 @@ struct hwc_dma_buf {
 	u32 gpa_mkey;
 
 	u32 num_reqs;
-	struct hwc_work_request reqs[];
+	struct hwc_work_request reqs[] __counted_by(num_reqs);
 };
 
 typedef void hwc_rx_event_handler_t(void *ctx, u32 gdma_rxq_id,

@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
 /*
  *  arch/m68k/q40/config.c
  *
@@ -6,24 +7,18 @@
  * originally based on:
  *
  *  linux/bvme/config.c
- *
- * This file is subject to the terms and conditions of the GNU General Public
- * License.  See the file README.legal in the main directory of this archive
- * for more details.
  */
 
 #include <linux/errno.h>
 #include <linux/types.h>
 #include <linux/kernel.h>
 #include <linux/mm.h>
-#include <linux/tty.h>
 #include <linux/console.h>
 #include <linux/linkage.h>
 #include <linux/init.h>
 #include <linux/major.h>
 #include <linux/serial_reg.h>
 #include <linux/rtc.h>
-#include <linux/vt_kern.h>
 #include <linux/bcd.h>
 #include <linux/platform_device.h>
 
@@ -36,15 +31,13 @@
 #include <asm/q40_master.h>
 #include <asm/config.h>
 
-extern void q40_init_IRQ(void);
+#include "q40.h"
+
 static void q40_get_model(char *model);
-extern void q40_sched_init(void);
 
 static int q40_hwclk(int, struct rtc_time *);
 static int q40_get_rtc_pll(struct rtc_pll_info *pll);
 static int q40_set_rtc_pll(struct rtc_pll_info *pll);
-
-extern void q40_mksound(unsigned int /*freq*/, unsigned int /*ticks*/);
 
 static void q40_mem_console_write(struct console *co, const char *b,
 				  unsigned int count);
@@ -81,7 +74,6 @@ static int __init q40_debug_setup(char *arg)
 {
 	/* useful for early debugging stages - writes kernel messages into SRAM */
 	if (MACH_IS_Q40 && !strncmp(arg, "mem", 3)) {
-		/*pr_info("using NVRAM debug, q40_mem_cptr=%p\n",q40_mem_cptr);*/
 		_cpleft = 2000 - ((long)q40_mem_cptr-0xff020000) / 4;
 		register_console(&q40_console_driver);
 	}
@@ -89,20 +81,6 @@ static int __init q40_debug_setup(char *arg)
 }
 
 early_param("debug", q40_debug_setup);
-
-#if 0
-void printq40(char *str)
-{
-	int l = strlen(str);
-	char *p = q40_mem_cptr;
-
-	while (l-- > 0 && _cpleft-- > 0) {
-		*p = *str++;
-		p += 4;
-	}
-	q40_mem_cptr = p;
-}
-#endif
 
 static int halted;
 

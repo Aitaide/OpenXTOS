@@ -14,6 +14,9 @@
 #include <uapi/rdma/rdma_netlink.h>
 #include <linux/xarray.h>
 
+/* Mark entry as containing driver specific details, it is used to provide QP subtype for now */
+#define RESTRACK_DD XA_MARK_1
+
 struct ib_device;
 struct sk_buff;
 
@@ -54,6 +57,14 @@ enum rdma_restrack_type {
 	 */
 	RDMA_RESTRACK_SRQ,
 	/**
+	 * @RDMA_RESTRACK_DMAH: DMA handle
+	 */
+	RDMA_RESTRACK_DMAH,
+	/**
+	 * @RDMA_RESTRACK_COMP_CNTR: Completion Counter
+	 */
+	RDMA_RESTRACK_COMP_CNTR,
+	/**
 	 * @RDMA_RESTRACK_MAX: Last entry, used for array dclarations
 	 */
 	RDMA_RESTRACK_MAX
@@ -80,11 +91,11 @@ struct rdma_restrack_entry {
 	 * query stage.
 	 */
 	u8			no_track : 1;
-	/*
+	/**
 	 * @kref: Protect destroy of the resource
 	 */
 	struct kref		kref;
-	/*
+	/**
 	 * @comp: Signal that all consumers of resource are completed their work
 	 */
 	struct completion	comp;
@@ -116,8 +127,8 @@ struct rdma_restrack_entry {
 	u32 id;
 };
 
-int rdma_restrack_count(struct ib_device *dev,
-			enum rdma_restrack_type type);
+u32 rdma_restrack_count(struct ib_device *dev, enum rdma_restrack_type type,
+			bool show_details);
 /**
  * rdma_is_kernel_res() - check the owner of resource
  * @res:  resource entry

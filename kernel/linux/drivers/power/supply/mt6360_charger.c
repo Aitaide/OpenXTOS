@@ -154,13 +154,6 @@ enum mt6360_pmu_chg_type {
 	MT6360_CHG_TYPE_MAX,
 };
 
-static enum power_supply_usb_type mt6360_charger_usb_types[] = {
-	POWER_SUPPLY_USB_TYPE_UNKNOWN,
-	POWER_SUPPLY_USB_TYPE_SDP,
-	POWER_SUPPLY_USB_TYPE_DCP,
-	POWER_SUPPLY_USB_TYPE_CDP,
-};
-
 static int mt6360_get_chrdet_ext_stat(struct mt6360_chg_info *mci,
 					     bool *pwr_rdy)
 {
@@ -574,8 +567,10 @@ static const struct power_supply_desc mt6360_charger_desc = {
 	.get_property		= mt6360_charger_get_property,
 	.set_property		= mt6360_charger_set_property,
 	.property_is_writeable	= mt6360_charger_property_is_writeable,
-	.usb_types		= mt6360_charger_usb_types,
-	.num_usb_types		= ARRAY_SIZE(mt6360_charger_usb_types),
+	.usb_types		= BIT(POWER_SUPPLY_USB_TYPE_SDP) |
+				  BIT(POWER_SUPPLY_USB_TYPE_CDP) |
+				  BIT(POWER_SUPPLY_USB_TYPE_DCP) |
+				  BIT(POWER_SUPPLY_USB_TYPE_UNKNOWN),
 };
 
 static const struct regulator_ops mt6360_chg_otg_ops = {
@@ -588,7 +583,7 @@ static const struct regulator_ops mt6360_chg_otg_ops = {
 };
 
 static const struct regulator_desc mt6360_otg_rdesc = {
-	.of_match = "usb-otg-vbus",
+	.of_match = "usb-otg-vbus-regulator",
 	.name = "usb-otg-vbus",
 	.ops = &mt6360_chg_otg_ops,
 	.owner = THIS_MODULE,
@@ -726,8 +721,7 @@ static int mt6360_chg_irq_register(struct platform_device *pdev)
 						irq_descs[i].name,
 						platform_get_drvdata(pdev));
 		if (ret < 0)
-			return dev_err_probe(&pdev->dev, ret, "Failed to request %s irq\n",
-					     irq_descs[i].name);
+			return ret;
 	}
 
 	return 0;
@@ -815,7 +809,7 @@ static int mt6360_charger_probe(struct platform_device *pdev)
 	memcpy(&mci->psy_desc, &mt6360_charger_desc, sizeof(mci->psy_desc));
 	mci->psy_desc.name = dev_name(&pdev->dev);
 	charger_cfg.drv_data = mci;
-	charger_cfg.of_node = pdev->dev.of_node;
+	charger_cfg.fwnode = dev_fwnode(&pdev->dev);
 	mci->psy = devm_power_supply_register(&pdev->dev,
 					      &mci->psy_desc, &charger_cfg);
 	if (IS_ERR(mci->psy))
@@ -846,15 +840,15 @@ static const struct of_device_id __maybe_unused mt6360_charger_of_id[] = {
 MODULE_DEVICE_TABLE(of, mt6360_charger_of_id);
 
 static const struct platform_device_id mt6360_charger_id[] = {
-	{ "mt6360-chg", 0 },
-	{},
+	{ .name = "mt6360-chg" },
+	{ }
 };
 MODULE_DEVICE_TABLE(platform, mt6360_charger_id);
 
 static struct platform_driver mt6360_charger_driver = {
 	.driver = {
 		.name = "mt6360-chg",
-		.of_match_table = of_match_ptr(mt6360_charger_of_id),
+		.of_match_table = mt6360_charger_of_id,
 	},
 	.probe = mt6360_charger_probe,
 	.id_table = mt6360_charger_id,

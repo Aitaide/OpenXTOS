@@ -57,13 +57,6 @@ sun4e_notsup:
 
 	.align PAGE_SIZE
 
-/* This was the only reasonable way I could think of to properly align
- * these page-table data structures.
- */
-	.globl empty_zero_page
-empty_zero_page:	.skip PAGE_SIZE
-EXPORT_SYMBOL(empty_zero_page)
-
 	.global root_flags
 	.global ram_flags
 	.global root_dev
@@ -118,9 +111,12 @@ current_pc:
 		mov	%o7, %g3
 
 		tst	%o0
-		be	no_sun4u_here
+		bne	2f
 		 mov	%g4, %o7		/* Previous %o7. */
-
+		sethi	%hi(no_sun4u_here), %l1
+		jmpl	%l1 + %lo(no_sun4u_here), %g0
+		 nop
+2:
 		mov	%o0, %l0		! stash away romvec
 		mov	%o0, %g7		! put it here too
 		mov	%o1, %l1		! stash away debug_vec too
@@ -195,7 +191,8 @@ halt_notsup:
 		sub	%o0, %l6, %o0
 		call	%o1
 		 nop
-		ba	halt_me
+		sethi	%hi(halt_me), %o0
+		jmpl	%o0 + %lo(halt_me), %g0
 		 nop
 
 not_a_sun4:
@@ -431,8 +428,11 @@ leon_init:
 #ifdef CONFIG_SMP
 		ldub	[%g2 + %lo(boot_cpu_id)], %g1
 		cmp	%g1, 0xff		! unset means first CPU
-		bne	leon_smp_cpu_startup	! continue only with master
+		be 1f
+		 sethi	%hi(leon_smp_cpu_startup), %g1
+		jmpl	%g1 + %lo(leon_smp_cpu_startup), %g0
 		 nop
+1:
 #endif
 		/* Get CPU-ID from most significant 4-bit of ASR17 */
 		rd     %asr17, %g1

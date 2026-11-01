@@ -37,7 +37,7 @@ static void imon_ir_data(struct imon *imon)
 	if (packet_no == 0xff)
 		return;
 
-	dev_dbg(imon->dev, "data: %*ph", 8, imon->ir_buf);
+	dev_dbg(imon->dev, "data: %8ph", imon->ir_buf);
 
 	/*
 	 * Only the first 5 bytes contain IR data. Right shift so we move
@@ -105,26 +105,16 @@ static void imon_ir_rx(struct urb *urb)
 static int imon_probe(struct usb_interface *intf,
 		      const struct usb_device_id *id)
 {
-	struct usb_endpoint_descriptor *ir_ep = NULL;
-	struct usb_host_interface *idesc;
+	struct usb_endpoint_descriptor *ir_ep;
 	struct usb_device *udev;
 	struct rc_dev *rcdev;
 	struct imon *imon;
-	int i, ret;
+	int ret;
 
 	udev = interface_to_usbdev(intf);
-	idesc = intf->cur_altsetting;
 
-	for (i = 0; i < idesc->desc.bNumEndpoints; i++) {
-		struct usb_endpoint_descriptor *ep = &idesc->endpoint[i].desc;
-
-		if (usb_endpoint_is_int_in(ep)) {
-			ir_ep = ep;
-			break;
-		}
-	}
-
-	if (!ir_ep) {
+	ret = usb_find_int_in_endpoint(intf->cur_altsetting, &ir_ep);
+	if (ret) {
 		dev_err(&intf->dev, "IR endpoint missing");
 		return -ENODEV;
 	}

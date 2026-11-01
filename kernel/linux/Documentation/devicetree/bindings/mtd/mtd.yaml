@@ -10,6 +10,8 @@ maintainers:
   - Miquel Raynal <miquel.raynal@bootlin.com>
   - Richard Weinberger <richard@nod.at>
 
+select: false
+
 properties:
   $nodename:
     pattern: "^(flash|.*sram|nand)(@.*)?$"
@@ -28,22 +30,23 @@ properties:
     deprecated: true
 
   partitions:
-    $ref: /schemas/mtd/partitions/partitions.yaml
+    type: object
 
     required:
       - compatible
 
 patternProperties:
-  "@[0-9a-f]+$":
-    $ref: partitions/partition.yaml
-    deprecated: true
-
-  "^partition@[0-9a-f]+":
-    $ref: partitions/partition.yaml
+  "(^partition)?@[0-9a-f]+$":
+    $ref: /schemas/mtd/partitions/partition.yaml#/$defs/partition-node
     deprecated: true
 
   "^otp(-[0-9]+)?$":
-    $ref: ../nvmem/nvmem.yaml#
+    type: object
+
+    allOf:
+      - $ref: /schemas/nvmem/nvmem.yaml#
+      - $ref: /schemas/nvmem/nvmem-deprecated-cells.yaml#
+
     unevaluatedProperties: false
 
     description: |

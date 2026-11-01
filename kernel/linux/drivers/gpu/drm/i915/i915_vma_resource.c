@@ -94,7 +94,7 @@ static void unbind_fence_release(struct dma_fence *fence)
 	call_rcu(&fence->rcu, unbind_fence_free_rcu);
 }
 
-static struct dma_fence_ops unbind_fence_ops = {
+static const struct dma_fence_ops unbind_fence_ops = {
 	.get_driver_name = get_driver_name,
 	.get_timeline_name = get_timeline_name,
 	.release = unbind_fence_release,
@@ -202,7 +202,7 @@ i915_vma_resource_fence_notify(struct i915_sw_fence *fence,
 			i915_vma_resource_unbind_work(&vma_res->work);
 		} else {
 			INIT_WORK(&vma_res->work, i915_vma_resource_unbind_work);
-			queue_work(system_unbound_wq, &vma_res->work);
+			queue_work(system_dfl_wq, &vma_res->work);
 		}
 		break;
 	case FENCE_FREE:

@@ -5,7 +5,6 @@
 #if !defined(_TRACE_LOCK_H) || defined(TRACE_HEADER_MULTI_READ)
 #define _TRACE_LOCK_H
 
-#include <linux/sched.h>
 #include <linux/tracepoint.h>
 
 /* flags for lock:contention_begin */
@@ -37,7 +36,7 @@ TRACE_EVENT(lock_acquire,
 
 	TP_fast_assign(
 		__entry->flags = (trylock ? 1 : 0) | (read ? 2 : 0);
-		__assign_str(name, lock->name);
+		__assign_str(name);
 		__entry->lockdep_addr = lock;
 	),
 
@@ -59,7 +58,7 @@ DECLARE_EVENT_CLASS(lock,
 	),
 
 	TP_fast_assign(
-		__assign_str(name, lock->name);
+		__assign_str(name);
 		__entry->lockdep_addr = lock;
 	),
 
@@ -136,6 +135,29 @@ TRACE_EVENT(contention_end,
 	),
 
 	TP_printk("%p (ret=%d)", __entry->lock_addr, __entry->ret)
+);
+
+/* kernel/locking/mutex.c */
+int arch_contended_release_trace_reg(void);
+void arch_contended_release_trace_unreg(void);
+
+TRACE_EVENT_FN(contended_release,
+
+	TP_PROTO(void *lock),
+
+	TP_ARGS(lock),
+
+	TP_STRUCT__entry(
+		__field(void *, lock_addr)
+	),
+
+	TP_fast_assign(
+		__entry->lock_addr = lock;
+	),
+
+	TP_printk("%p", __entry->lock_addr),
+
+	arch_contended_release_trace_reg, arch_contended_release_trace_unreg
 );
 
 #endif /* _TRACE_LOCK_H */

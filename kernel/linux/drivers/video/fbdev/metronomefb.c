@@ -37,7 +37,7 @@
 
 #include <video/metronomefb.h>
 
-#include <asm/unaligned.h>
+#include <linux/unaligned.h>
 
 /* Display specific information */
 #define DPY_W 832
@@ -645,12 +645,14 @@ static int metronomefb_probe(struct platform_device *dev)
 	info->flags = FBINFO_VIRTFB;
 
 	info->fbdefio = &metronomefb_defio;
-	fb_deferred_io_init(info);
+	retval = fb_deferred_io_init(info);
+	if (retval)
+		goto err_free_irq;
 
 	retval = fb_alloc_cmap(&info->cmap, 8, 0);
 	if (retval < 0) {
 		dev_err(&dev->dev, "Failed to allocate colormap\n");
-		goto err_free_irq;
+		goto err_fbdefio;
 	}
 
 	/* set cmap */
@@ -673,6 +675,8 @@ static int metronomefb_probe(struct platform_device *dev)
 
 err_cmap:
 	fb_dealloc_cmap(&info->cmap);
+err_fbdefio:
+	fb_deferred_io_cleanup(info);
 err_free_irq:
 	board->cleanup(par);
 err_csum_table:
@@ -707,7 +711,7 @@ static void metronomefb_remove(struct platform_device *dev)
 
 static struct platform_driver metronomefb_driver = {
 	.probe	= metronomefb_probe,
-	.remove_new = metronomefb_remove,
+	.remove	= metronomefb_remove,
 	.driver	= {
 		.name	= "metronomefb",
 	},

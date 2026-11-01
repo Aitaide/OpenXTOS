@@ -254,6 +254,7 @@ static const struct ad_sigma_delta_info ad7791_sigma_delta_info = {
 	.addr_shift = 4,
 	.read_mask = BIT(3),
 	.irq_flags = IRQF_TRIGGER_FALLING,
+	.num_resetclks = 32,
 };
 
 static int ad7791_read_raw(struct iio_dev *indio_dev,
@@ -309,15 +310,11 @@ static int ad7791_read_raw(struct iio_dev *indio_dev,
 	return -EINVAL;
 }
 
-static int ad7791_write_raw(struct iio_dev *indio_dev,
+static int __ad7791_write_raw(struct iio_dev *indio_dev,
 	struct iio_chan_spec const *chan, int val, int val2, long mask)
 {
 	struct ad7791_state *st = iio_priv(indio_dev);
-	int ret, i;
-
-	ret = iio_device_claim_direct_mode(indio_dev);
-	if (ret)
-		return ret;
+	int i;
 
 	switch (mask) {
 	case IIO_CHAN_INFO_SAMP_FREQ:
@@ -327,22 +324,31 @@ static int ad7791_write_raw(struct iio_dev *indio_dev,
 				break;
 		}
 
-		if (i == ARRAY_SIZE(ad7791_sample_freq_avail)) {
-			ret = -EINVAL;
-			break;
-		}
+		if (i == ARRAY_SIZE(ad7791_sample_freq_avail))
+			return -EINVAL;
 
 		st->filter &= ~AD7791_FILTER_RATE_MASK;
 		st->filter |= i;
 		ad_sd_write_reg(&st->sd, AD7791_REG_FILTER,
 				sizeof(st->filter),
 				st->filter);
-		break;
+		return 0;
 	default:
-		ret = -EINVAL;
+		return -EINVAL;
 	}
+}
 
-	iio_device_release_direct_mode(indio_dev);
+static int ad7791_write_raw(struct iio_dev *indio_dev,
+	struct iio_chan_spec const *chan, int val, int val2, long mask)
+{
+	int ret;
+
+	if (!iio_device_claim_direct(indio_dev))
+		return -EBUSY;
+
+	ret = __ad7791_write_raw(indio_dev, chan, val, val2, mask);
+
+	iio_device_release_direct(indio_dev);
 	return ret;
 }
 
@@ -371,7 +377,7 @@ static const struct iio_info ad7791_no_filter_info = {
 };
 
 static int ad7791_setup(struct ad7791_state *st,
-			struct ad7791_platform_data *pdata)
+			const struct ad7791_platform_data *pdata)
 {
 	/* Set to poweron-reset default values */
 	st->mode = AD7791_MODE_BUFFER;
@@ -401,23 +407,22 @@ static void ad7791_reg_disable(void *reg)
 
 static int ad7791_probe(struct spi_device *spi)
 {
-	struct ad7791_platform_data *pdata = spi->dev.platform_data;
+	struct device *dev = &spi->dev;
+	const struct ad7791_platform_data *pdata = dev_get_platdata(dev);
 	struct iio_dev *indio_dev;
 	struct ad7791_state *st;
 	int ret;
 
-	if (!spi->irq) {
-		dev_err(&spi->dev, "Missing IRQ.\n");
-		return -ENXIO;
-	}
+	if (!spi->irq)
+		return dev_err_probe(dev, -ENXIO, "Missing IRQ.\n");
 
-	indio_dev = devm_iio_device_alloc(&spi->dev, sizeof(*st));
+	indio_dev = devm_iio_device_alloc(dev, sizeof(*st));
 	if (!indio_dev)
 		return -ENOMEM;
 
 	st = iio_priv(indio_dev);
 
-	st->reg = devm_regulator_get(&spi->dev, "refin");
+	st->reg = devm_regulator_get(dev, "refin");
 	if (IS_ERR(st->reg))
 		return PTR_ERR(st->reg);
 
@@ -425,7 +430,7 @@ static int ad7791_probe(struct spi_device *spi)
 	if (ret)
 		return ret;
 
-	ret = devm_add_action_or_reset(&spi->dev, ad7791_reg_disable, st->reg);
+	ret = devm_add_action_or_reset(dev, ad7791_reg_disable, st->reg);
 	if (ret)
 		return ret;
 
@@ -441,7 +446,7 @@ static int ad7791_probe(struct spi_device *spi)
 	else
 		indio_dev->info = &ad7791_no_filter_info;
 
-	ret = devm_ad_sd_setup_buffer_and_trigger(&spi->dev, indio_dev);
+	ret = devm_ad_sd_setup_buffer_and_trigger(dev, indio_dev);
 	if (ret)
 		return ret;
 
@@ -449,16 +454,16 @@ static int ad7791_probe(struct spi_device *spi)
 	if (ret)
 		return ret;
 
-	return devm_iio_device_register(&spi->dev, indio_dev);
+	return devm_iio_device_register(dev, indio_dev);
 }
 
 static const struct spi_device_id ad7791_spi_ids[] = {
-	{ "ad7787", AD7787 },
-	{ "ad7788", AD7788 },
-	{ "ad7789", AD7789 },
-	{ "ad7790", AD7790 },
-	{ "ad7791", AD7791 },
-	{}
+	{ .name = "ad7787", .driver_data = AD7787 },
+	{ .name = "ad7788", .driver_data = AD7788 },
+	{ .name = "ad7789", .driver_data = AD7789 },
+	{ .name = "ad7790", .driver_data = AD7790 },
+	{ .name = "ad7791", .driver_data = AD7791 },
+	{ }
 };
 MODULE_DEVICE_TABLE(spi, ad7791_spi_ids);
 
@@ -474,4 +479,4 @@ module_spi_driver(ad7791_driver);
 MODULE_AUTHOR("Lars-Peter Clausen <lars@metafoo.de>");
 MODULE_DESCRIPTION("Analog Devices AD7787/AD7788/AD7789/AD7790/AD7791 ADC driver");
 MODULE_LICENSE("GPL v2");
-MODULE_IMPORT_NS(IIO_AD_SIGMA_DELTA);
+MODULE_IMPORT_NS("IIO_AD_SIGMA_DELTA");

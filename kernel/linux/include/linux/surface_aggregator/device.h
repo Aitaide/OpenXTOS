@@ -14,7 +14,7 @@
 #define _LINUX_SURFACE_AGGREGATOR_DEVICE_H
 
 #include <linux/device.h>
-#include <linux/mod_devicetable.h>
+#include <linux/device-id/ssam.h>
 #include <linux/property.h>
 #include <linux/types.h>
 
@@ -193,7 +193,6 @@ struct ssam_device_driver {
 
 #ifdef CONFIG_SURFACE_AGGREGATOR_BUS
 
-extern struct bus_type ssam_bus_type;
 extern const struct device_type ssam_device_type;
 
 /**

@@ -79,6 +79,15 @@
 
 #include "ni_stc.h"
 
+static const struct comedi_lrange range_ni_E_ao_ext = {
+	4, {
+		BIP_RANGE(10),
+		UNI_RANGE(10),
+		RANGE_ext(-1, 1),
+		RANGE_ext(0, 1)
+	}
+};
+
 /* AT specific setup */
 static const struct ni_board_struct ni_boards[] = {
 	{
@@ -207,12 +216,12 @@ static const int ni_irqpin[] = {
 #include "ni_mio_common.c"
 
 static const struct pnp_device_id device_ids[] = {
-	{.id = "NIC1900", .driver_data = 0},
-	{.id = "NIC2400", .driver_data = 0},
-	{.id = "NIC2500", .driver_data = 0},
-	{.id = "NIC2600", .driver_data = 0},
-	{.id = "NIC2700", .driver_data = 0},
-	{.id = ""}
+	{ .id = "NIC1900" },
+	{ .id = "NIC2400" },
+	{ .id = "NIC2500" },
+	{ .id = "NIC2600" },
+	{ .id = "NIC2700" },
+	{ }
 };
 
 MODULE_DEVICE_TABLE(pnp, device_ids);
@@ -302,7 +311,8 @@ static int ni_atmio_attach(struct comedi_device *dev,
 		comedi_set_hw_dev(dev, &isapnp_dev->dev);
 	}
 
-	ret = comedi_request_region(dev, iobase, 0x20);
+	ret = comedi_check_request_region(dev, iobase, 0x20,
+					  0x20, 0xffff, 32);
 	if (ret)
 		return ret;
 

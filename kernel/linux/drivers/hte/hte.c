@@ -17,8 +17,6 @@
 #include <linux/debugfs.h>
 #include <linux/device.h>
 
-#define HTE_TS_NAME_LEN		10
-
 /* Global list of the HTE devices */
 static DEFINE_SPINLOCK(hte_lock);
 static LIST_HEAD(hte_devices);
@@ -88,7 +86,7 @@ struct hte_device {
 	struct list_head list;
 	struct hte_chip *chip;
 	struct module *owner;
-	struct hte_ts_info ei[];
+	struct hte_ts_info ei[] __counted_by(nlines);
 };
 
 #ifdef CONFIG_DEBUG_FS
@@ -389,13 +387,10 @@ static int __hte_req_ts(struct hte_ts_desc *desc, hte_ts_cb_t cb,
 
 	atomic_inc(&gdev->ts_req);
 
-	ei->line_name = NULL;
-	if (!desc->attr.name) {
-		ei->line_name = kzalloc(HTE_TS_NAME_LEN, GFP_KERNEL);
-		if (ei->line_name)
-			scnprintf(ei->line_name, HTE_TS_NAME_LEN, "ts_%u",
-				  desc->attr.line_id);
-	}
+	if (desc->attr.name)
+		ei->line_name = NULL;
+	else
+		ei->line_name = kasprintf(GFP_KERNEL, "ts_%u", desc->attr.line_id);
 
 	hte_ts_dbgfs_init(desc->attr.name == NULL ?
 			  ei->line_name : desc->attr.name, ei);
@@ -831,7 +826,7 @@ int hte_push_ts_ns(const struct hte_chip *chip, u32 xlated_id,
 
 	ret = ei->cb(data, ei->cl_data);
 	if (ret == HTE_RUN_SECOND_CB && ei->tcb) {
-		queue_work(system_unbound_wq, &ei->cb_work);
+		queue_work(system_dfl_wq, &ei->cb_work);
 		set_bit(HTE_TS_QUEUE_WK, &ei->flags);
 	}
 
@@ -855,7 +850,7 @@ static int hte_register_chip(struct hte_chip *chip)
 		return -EINVAL;
 	}
 
-	gdev = kzalloc(struct_size(gdev, ei, chip->nlines), GFP_KERNEL);
+	gdev = kzalloc_flex(*gdev, ei, chip->nlines);
 	if (!gdev)
 		return -ENOMEM;
 

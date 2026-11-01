@@ -8,7 +8,6 @@
 #include <linux/device.h>
 #include <linux/module.h>
 #include <linux/of.h>
-#include <linux/mod_devicetable.h>
 #include <linux/platform_device.h>
 #include <sound/pcm.h>
 #include <sound/pcm_params.h>
@@ -19,7 +18,7 @@
 static int storm_ops_hw_params(struct snd_pcm_substream *substream,
 		struct snd_pcm_hw_params *params)
 {
-	struct snd_soc_pcm_runtime *soc_runtime = asoc_substream_to_rtd(substream);
+	struct snd_soc_pcm_runtime *soc_runtime = snd_soc_substream_to_rtd(substream);
 	struct snd_soc_card *card = soc_runtime->card;
 	snd_pcm_format_t format = params_format(params);
 	unsigned int rate = params_rate(params);
@@ -39,7 +38,7 @@ static int storm_ops_hw_params(struct snd_pcm_substream *substream,
 	 */
 	sysclk_freq = rate * bitwidth * 2 * STORM_SYSCLK_MULT;
 
-	ret = snd_soc_dai_set_sysclk(asoc_rtd_to_cpu(soc_runtime, 0), 0, sysclk_freq, 0);
+	ret = snd_soc_dai_set_sysclk(snd_soc_rtd_to_cpu(soc_runtime, 0), 0, sysclk_freq, 0);
 	if (ret) {
 		dev_err(card->dev, "error setting sysclk to %u: %d\n",
 			sysclk_freq, ret);
@@ -65,21 +64,21 @@ static struct snd_soc_dai_link storm_dai_link = {
 	SND_SOC_DAILINK_REG(hifi),
 };
 
-static int storm_parse_of(struct snd_soc_card *card)
+static int storm_parse_of(struct device *dev)
 {
-	struct snd_soc_dai_link *dai_link = card->dai_link;
-	struct device_node *np = card->dev->of_node;
+	struct snd_soc_dai_link *dai_link = &storm_dai_link;
+	struct device_node *np = dev->of_node;
 
 	dai_link->cpus->of_node = of_parse_phandle(np, "cpu", 0);
 	if (!dai_link->cpus->of_node) {
-		dev_err(card->dev, "error getting cpu phandle\n");
+		dev_err(dev, "error getting cpu phandle\n");
 		return -EINVAL;
 	}
 	dai_link->platforms->of_node = dai_link->cpus->of_node;
 
 	dai_link->codecs->of_node = of_parse_phandle(np, "codec", 0);
 	if (!dai_link->codecs->of_node) {
-		dev_err(card->dev, "error getting codec phandle\n");
+		dev_err(dev, "error getting codec phandle\n");
 		return -EINVAL;
 	}
 
@@ -107,7 +106,7 @@ static int storm_platform_probe(struct platform_device *pdev)
 	card->dai_link	= &storm_dai_link;
 	card->num_links	= 1;
 
-	ret = storm_parse_of(card);
+	ret = storm_parse_of(&pdev->dev);
 	if (ret) {
 		dev_err(&pdev->dev, "error resolving dai links: %d\n", ret);
 		return ret;
@@ -140,4 +139,4 @@ static struct platform_driver storm_platform_driver = {
 module_platform_driver(storm_platform_driver);
 
 MODULE_DESCRIPTION("QTi IPQ806x-based Storm Machine Driver");
-MODULE_LICENSE("GPL v2");
+MODULE_LICENSE("GPL");

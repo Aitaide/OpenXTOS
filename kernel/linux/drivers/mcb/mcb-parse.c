@@ -8,11 +8,6 @@
 
 #include "mcb-internal.h"
 
-struct mcb_parse_priv {
-	phys_addr_t mapbase;
-	void __iomem *base;
-};
-
 #define for_each_chameleon_cell(dtype, p)	\
 	for ((dtype) = get_next_dtype((p));	\
 	     (dtype) != CHAMELEON_DTYPE_END;	\
@@ -101,12 +96,12 @@ static int chameleon_parse_gdd(struct mcb_bus *bus,
 
 	ret = mcb_device_register(bus, mdev);
 	if (ret < 0)
-		goto err;
+		return ret;
 
 	return 0;
 
 err:
-	put_device(&mdev->dev);
+	mcb_free_dev(mdev);
 
 	return ret;
 }
@@ -151,15 +146,14 @@ static int chameleon_get_bar(void __iomem **base, phys_addr_t mapbase,
 		if (bar_count <= 0 || bar_count > CHAMELEON_BAR_MAX)
 			return -ENODEV;
 
-		c = kcalloc(bar_count, sizeof(struct chameleon_bar),
-			    GFP_KERNEL);
+		c = kzalloc_objs(struct chameleon_bar, bar_count);
 		if (!c)
 			return -ENOMEM;
 
 		chameleon_parse_bar(*base, c, bar_count);
 		*base += BAR_DESC_SIZE(bar_count);
 	} else {
-		c = kzalloc(sizeof(struct chameleon_bar), GFP_KERNEL);
+		c = kzalloc_obj(struct chameleon_bar);
 		if (!c)
 			return -ENOMEM;
 
@@ -256,4 +250,4 @@ free_header:
 
 	return ret;
 }
-EXPORT_SYMBOL_NS_GPL(chameleon_parse_cells, MCB);
+EXPORT_SYMBOL_NS_GPL(chameleon_parse_cells, "MCB");

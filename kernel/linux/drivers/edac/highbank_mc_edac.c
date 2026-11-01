@@ -235,10 +235,8 @@ static int highbank_mc_probe(struct platform_device *pdev)
 	irq = platform_get_irq(pdev, 0);
 	res = devm_request_irq(&pdev->dev, irq, highbank_mc_err_handler,
 			       0, dev_name(&pdev->dev), mci);
-	if (res < 0) {
-		dev_err(&pdev->dev, "Unable to request irq %d\n", irq);
+	if (res < 0)
 		goto err2;
-	}
 
 	devres_close_group(&pdev->dev, NULL);
 	return 0;
@@ -251,13 +249,12 @@ free:
 	return res;
 }
 
-static int highbank_mc_remove(struct platform_device *pdev)
+static void highbank_mc_remove(struct platform_device *pdev)
 {
 	struct mem_ctl_info *mci = platform_get_drvdata(pdev);
 
 	edac_mc_del_mc(&pdev->dev);
 	edac_mc_free(mci);
-	return 0;
 }
 
 static struct platform_driver highbank_mc_edac_driver = {

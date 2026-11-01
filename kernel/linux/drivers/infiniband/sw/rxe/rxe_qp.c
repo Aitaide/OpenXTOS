@@ -15,31 +15,79 @@
 #include "rxe_queue.h"
 #include "rxe_task.h"
 
+#ifdef CONFIG_DEBUG_LOCK_ALLOC
+/*
+ * lockdep can detect false positive circular dependencies
+ * when there are user-space socket API users or in kernel
+ * users switching between a tcp and rdma transport.
+ * Maybe also switching between siw and rxe may cause
+ * problems as per default sockets are only classified
+ * by family and not by ip protocol. And there might
+ * be different locks used between the application
+ * and the low level sockets.
+ *
+ * Problems were seen with ksmbd.ko and cifs.ko,
+ * switching transports, use git blame to find
+ * more details.
+ */
+static struct lock_class_key rxe_send_sk_key[2];
+static struct lock_class_key rxe_send_slock_key[2];
+#endif /* CONFIG_DEBUG_LOCK_ALLOC */
+
+static inline void rxe_reclassify_send_socket(struct socket *sock)
+{
+#ifdef CONFIG_DEBUG_LOCK_ALLOC
+	struct sock *sk = sock->sk;
+
+	if (WARN_ON_ONCE(!sock_allow_reclassification(sk)))
+		return;
+
+	switch (sk->sk_family) {
+	case AF_INET:
+		sock_lock_init_class_and_name(sk,
+					      "slock-AF_INET-RDMA-RXE-SEND",
+					      &rxe_send_slock_key[0],
+					      "sk_lock-AF_INET-RDMA-RXE-SEND",
+					      &rxe_send_sk_key[0]);
+		break;
+	case AF_INET6:
+		sock_lock_init_class_and_name(sk,
+					      "slock-AF_INET6-RDMA-RXE-SEND",
+					      &rxe_send_slock_key[1],
+					      "sk_lock-AF_INET6-RDMA-RXE-SEND",
+					      &rxe_send_sk_key[1]);
+		break;
+	default:
+		WARN_ON_ONCE(1);
+	}
+#endif /* CONFIG_DEBUG_LOCK_ALLOC */
+}
+
 static int rxe_qp_chk_cap(struct rxe_dev *rxe, struct ib_qp_cap *cap,
 			  int has_srq)
 {
 	if (cap->max_send_wr > rxe->attr.max_qp_wr) {
-		rxe_dbg_dev(rxe, "invalid send wr = %u > %d\n",
-			 cap->max_send_wr, rxe->attr.max_qp_wr);
+		rxe_dbg_dev(rxe, "invalid send wr = %u > %u\n",
+			    cap->max_send_wr, rxe->attr.max_qp_wr);
 		goto err1;
 	}
 
 	if (cap->max_send_sge > rxe->attr.max_send_sge) {
-		rxe_dbg_dev(rxe, "invalid send sge = %u > %d\n",
-			 cap->max_send_sge, rxe->attr.max_send_sge);
+		rxe_dbg_dev(rxe, "invalid send sge = %u > %u\n",
+			    cap->max_send_sge, rxe->attr.max_send_sge);
 		goto err1;
 	}
 
 	if (!has_srq) {
 		if (cap->max_recv_wr > rxe->attr.max_qp_wr) {
-			rxe_dbg_dev(rxe, "invalid recv wr = %u > %d\n",
-				 cap->max_recv_wr, rxe->attr.max_qp_wr);
+			rxe_dbg_dev(rxe, "invalid recv wr = %u > %u\n",
+				    cap->max_recv_wr, rxe->attr.max_qp_wr);
 			goto err1;
 		}
 
 		if (cap->max_recv_sge > rxe->attr.max_recv_sge) {
-			rxe_dbg_dev(rxe, "invalid recv sge = %u > %d\n",
-				 cap->max_recv_sge, rxe->attr.max_recv_sge);
+			rxe_dbg_dev(rxe, "invalid recv sge = %u > %u\n",
+				    cap->max_recv_sge, rxe->attr.max_recv_sge);
 			goto err1;
 		}
 	}
@@ -104,7 +152,7 @@ static int alloc_rd_atomic_resources(struct rxe_qp *qp, unsigned int n)
 {
 	qp->resp.res_head = 0;
 	qp->resp.res_tail = 0;
-	qp->resp.resources = kcalloc(n, sizeof(struct resp_res), GFP_KERNEL);
+	qp->resp.resources = kzalloc_objs(struct resp_res, n);
 
 	if (!qp->resp.resources)
 		return -ENOMEM;
@@ -124,6 +172,7 @@ static void free_rd_atomic_resources(struct rxe_qp *qp)
 		}
 		kfree(qp->resp.resources);
 		qp->resp.resources = NULL;
+		qp->resp.res = NULL;
 	}
 }
 
@@ -201,7 +250,7 @@ static int rxe_init_sq(struct rxe_qp *qp, struct ib_qp_init_attr *init,
 	qp->sq.queue = rxe_queue_init(rxe, &qp->sq.max_wr, wqe_size,
 				      QUEUE_TYPE_FROM_CLIENT);
 	if (!qp->sq.queue) {
-		rxe_err_qp(qp, "Unable to allocate send queue");
+		rxe_err_qp(qp, "Unable to allocate send queue\n");
 		err = -ENOMEM;
 		goto err_out;
 	}
@@ -211,7 +260,7 @@ static int rxe_init_sq(struct rxe_qp *qp, struct ib_qp_init_attr *init,
 			   qp->sq.queue->buf, qp->sq.queue->buf_size,
 			   &qp->sq.queue->ip);
 	if (err) {
-		rxe_err_qp(qp, "do_mmap_info failed, err = %d", err);
+		rxe_err_qp(qp, "do_mmap_info failed, err = %d\n", err);
 		goto err_free;
 	}
 
@@ -244,6 +293,7 @@ static int rxe_qp_init_req(struct rxe_dev *rxe, struct rxe_qp *qp,
 	err = sock_create_kern(&init_net, AF_INET, SOCK_DGRAM, 0, &qp->sk);
 	if (err < 0)
 		return err;
+	rxe_reclassify_send_socket(qp->sk);
 	qp->sk->sk->sk_user_data = qp;
 
 	/* pick a source UDP port number for this QP based on
@@ -265,8 +315,7 @@ static int rxe_qp_init_req(struct rxe_dev *rxe, struct rxe_qp *qp,
 	qp->req.opcode		= -1;
 	qp->comp.opcode		= -1;
 
-	rxe_init_task(&qp->req.task, qp, rxe_requester);
-	rxe_init_task(&qp->comp.task, qp, rxe_completer);
+	rxe_init_task(&qp->send_task, qp, rxe_sender);
 
 	qp->qp_timeout_jiffies = 0; /* Can't be set for UD/UC in modify_qp */
 	if (init->qp_type == IB_QPT_RC) {
@@ -292,7 +341,7 @@ static int rxe_init_rq(struct rxe_qp *qp, struct ib_qp_init_attr *init,
 	qp->rq.queue = rxe_queue_init(rxe, &qp->rq.max_wr, wqe_size,
 				      QUEUE_TYPE_FROM_CLIENT);
 	if (!qp->rq.queue) {
-		rxe_err_qp(qp, "Unable to allocate recv queue");
+		rxe_err_qp(qp, "Unable to allocate recv queue\n");
 		err = -ENOMEM;
 		goto err_out;
 	}
@@ -302,7 +351,7 @@ static int rxe_init_rq(struct rxe_qp *qp, struct ib_qp_init_attr *init,
 			   qp->rq.queue->buf, qp->rq.queue->buf_size,
 			   &qp->rq.queue->ip);
 	if (err) {
-		rxe_err_qp(qp, "do_mmap_info failed, err = %d", err);
+		rxe_err_qp(qp, "do_mmap_info failed, err = %d\n", err);
 		goto err_free;
 	}
 
@@ -337,7 +386,7 @@ static int rxe_qp_init_resp(struct rxe_dev *rxe, struct rxe_qp *qp,
 			return err;
 	}
 
-	rxe_init_task(&qp->resp.task, qp, rxe_responder);
+	rxe_init_task(&qp->recv_task, qp, rxe_receiver);
 
 	qp->resp.opcode		= OPCODE_NONE;
 	qp->resp.msn		= 0;
@@ -489,9 +538,9 @@ int rxe_qp_chk_attr(struct rxe_dev *rxe, struct rxe_qp *qp,
 
 	if (mask & IB_QP_MAX_QP_RD_ATOMIC) {
 		if (attr->max_rd_atomic > rxe->attr.max_qp_rd_atom) {
-			rxe_dbg_qp(qp, "invalid max_rd_atomic %d > %d\n",
-				 attr->max_rd_atomic,
-				 rxe->attr.max_qp_rd_atom);
+			rxe_dbg_qp(qp, "invalid max_rd_atomic %u > %u\n",
+				   attr->max_rd_atomic,
+				   rxe->attr.max_qp_rd_atom);
 			goto err1;
 		}
 	}
@@ -514,14 +563,12 @@ err1:
 static void rxe_qp_reset(struct rxe_qp *qp)
 {
 	/* stop tasks from running */
-	rxe_disable_task(&qp->resp.task);
-	rxe_disable_task(&qp->comp.task);
-	rxe_disable_task(&qp->req.task);
+	rxe_disable_task(&qp->recv_task);
+	rxe_disable_task(&qp->send_task);
 
 	/* drain work and packet queuesc */
-	rxe_requester(qp);
-	rxe_completer(qp);
-	rxe_responder(qp);
+	rxe_sender(qp);
+	rxe_receiver(qp);
 
 	if (qp->rq.queue)
 		rxe_queue_reset(qp->rq.queue);
@@ -548,9 +595,8 @@ static void rxe_qp_reset(struct rxe_qp *qp)
 	cleanup_rd_atomic_resources(qp);
 
 	/* reenable tasks */
-	rxe_enable_task(&qp->resp.task);
-	rxe_enable_task(&qp->comp.task);
-	rxe_enable_task(&qp->req.task);
+	rxe_enable_task(&qp->recv_task);
+	rxe_enable_task(&qp->send_task);
 }
 
 /* move the qp to the error state */
@@ -562,9 +608,8 @@ void rxe_qp_error(struct rxe_qp *qp)
 	qp->attr.qp_state = IB_QPS_ERR;
 
 	/* drain work and packet queues */
-	rxe_sched_task(&qp->resp.task);
-	rxe_sched_task(&qp->comp.task);
-	rxe_sched_task(&qp->req.task);
+	rxe_sched_task(&qp->recv_task);
+	rxe_sched_task(&qp->send_task);
 	spin_unlock_irqrestore(&qp->state_lock, flags);
 }
 
@@ -575,8 +620,7 @@ static void rxe_qp_sqd(struct rxe_qp *qp, struct ib_qp_attr *attr,
 
 	spin_lock_irqsave(&qp->state_lock, flags);
 	qp->attr.sq_draining = 1;
-	rxe_sched_task(&qp->comp.task);
-	rxe_sched_task(&qp->req.task);
+	rxe_sched_task(&qp->send_task);
 	spin_unlock_irqrestore(&qp->state_lock, flags);
 }
 
@@ -664,13 +708,24 @@ int rxe_qp_from_attr(struct rxe_qp *qp, struct ib_qp_attr *attr, int mask,
 		int max_dest_rd_atomic = attr->max_dest_rd_atomic ?
 			roundup_pow_of_two(attr->max_dest_rd_atomic) : 0;
 
-		qp->attr.max_dest_rd_atomic = max_dest_rd_atomic;
-
+		/*
+		 * Not gated by IB_QP_STATE, so the responder task is live.
+		 * Quiesce recv_task like rxe_qp_reset() before swapping the
+		 * rd_atomic array, so rxe_receiver() cannot race the free/
+		 * realloc.
+		 */
+		rxe_disable_task(&qp->recv_task);
 		free_rd_atomic_resources(qp);
-
+		qp->attr.max_dest_rd_atomic = max_dest_rd_atomic;
 		err = alloc_rd_atomic_resources(qp, max_dest_rd_atomic);
+		/*
+		 * On ENOMEM leave recv_task quiesced: qp->resp.resources is
+		 * NULL and rxe_prepare_res()/find_resource() would deref it.
+		 * Re-enable only after a fresh array is installed.
+		 */
 		if (err)
 			return err;
+		rxe_enable_task(&qp->recv_task);
 	}
 
 	if (mask & IB_QP_EN_SQD_ASYNC_NOTIFY)
@@ -781,6 +836,7 @@ int rxe_qp_to_attr(struct rxe_qp *qp, struct ib_qp_attr *attr, int mask)
 	 * Yield the processor
 	 */
 	spin_lock_irqsave(&qp->state_lock, flags);
+	attr->cur_qp_state = qp_state(qp);
 	if (qp->attr.sq_draining) {
 		spin_unlock_irqrestore(&qp->state_lock, flags);
 		cond_resched();
@@ -816,24 +872,25 @@ static void rxe_qp_do_cleanup(struct work_struct *work)
 	spin_unlock_irqrestore(&qp->state_lock, flags);
 	qp->qp_timeout_jiffies = 0;
 
-	if (qp_type(qp) == IB_QPT_RC) {
-		del_timer_sync(&qp->retrans_timer);
-		del_timer_sync(&qp->rnr_nak_timer);
+	/* In the function timer_setup, .function is initialized. If .function
+	 * is NULL, it indicates the function timer_setup is not called, the
+	 * timer is not initialized. Or else, the timer is initialized.
+	 */
+	if (qp_type(qp) == IB_QPT_RC && qp->retrans_timer.function &&
+		qp->rnr_nak_timer.function) {
+		timer_delete_sync(&qp->retrans_timer);
+		timer_delete_sync(&qp->rnr_nak_timer);
 	}
 
-	if (qp->resp.task.func)
-		rxe_cleanup_task(&qp->resp.task);
+	if (qp->recv_task.func)
+		rxe_cleanup_task(&qp->recv_task);
 
-	if (qp->req.task.func)
-		rxe_cleanup_task(&qp->req.task);
-
-	if (qp->comp.task.func)
-		rxe_cleanup_task(&qp->comp.task);
+	if (qp->send_task.func)
+		rxe_cleanup_task(&qp->send_task);
 
 	/* flush out any receive wr's or pending requests */
-	rxe_requester(qp);
-	rxe_completer(qp);
-	rxe_responder(qp);
+	rxe_sender(qp);
+	rxe_receiver(qp);
 
 	if (qp->sq.queue)
 		rxe_queue_cleanup(qp->sq.queue);

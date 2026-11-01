@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0
 /*
- * BCM2835 master mode driver
+ * BCM2835 I2C controller driver
  */
 
 #include <linux/clk.h>
@@ -25,7 +25,7 @@
 #define BCM2835_I2C_DEL		0x18
 /*
  * 16-bit field for the number of SCL cycles to wait after rising SCL
- * before deciding the slave is not responding. 0 disables the
+ * before deciding the target is not responding. 0 disables the
  * timeout detection.
  */
 #define BCM2835_I2C_CLKT	0x1c
@@ -137,12 +137,14 @@ static int clk_bcm2835_i2c_set_rate(struct clk_hw *hw, unsigned long rate,
 	return 0;
 }
 
-static long clk_bcm2835_i2c_round_rate(struct clk_hw *hw, unsigned long rate,
-				unsigned long *parent_rate)
+static int clk_bcm2835_i2c_determine_rate(struct clk_hw *hw,
+					  struct clk_rate_request *req)
 {
-	u32 divider = clk_bcm2835_i2c_calc_divider(rate, *parent_rate);
+	u32 divider = clk_bcm2835_i2c_calc_divider(req->rate, req->best_parent_rate);
 
-	return DIV_ROUND_UP(*parent_rate, divider);
+	req->rate = DIV_ROUND_UP(req->best_parent_rate, divider);
+
+	return 0;
 }
 
 static unsigned long clk_bcm2835_i2c_recalc_rate(struct clk_hw *hw,
@@ -156,7 +158,7 @@ static unsigned long clk_bcm2835_i2c_recalc_rate(struct clk_hw *hw,
 
 static const struct clk_ops clk_bcm2835_i2c_ops = {
 	.set_rate = clk_bcm2835_i2c_set_rate,
-	.round_rate = clk_bcm2835_i2c_round_rate,
+	.determine_rate = clk_bcm2835_i2c_determine_rate,
 	.recalc_rate = clk_bcm2835_i2c_recalc_rate,
 };
 
@@ -223,7 +225,7 @@ static void bcm2835_drain_rxfifo(struct bcm2835_i2c_dev *i2c_dev)
 /*
  * Repeated Start Condition (Sr)
  * The BCM2835 ARM Peripherals datasheet mentions a way to trigger a Sr when it
- * talks about reading from a slave with 10 bit address. This is achieved by
+ * talks about reading from a target with 10 bit address. This is achieved by
  * issuing a write, poll the I2CS.TA flag and wait for it to be set, and then
  * issue a read.
  * A comment in https://github.com/raspberrypi/linux/issues/254 shows how the
@@ -370,7 +372,6 @@ static int bcm2835_i2c_xfer(struct i2c_adapter *adap, struct i2c_msg msgs[],
 	if (!time_left) {
 		bcm2835_i2c_writel(i2c_dev, BCM2835_I2C_C,
 				   BCM2835_I2C_C_CLEAR);
-		dev_err(i2c_dev->dev, "i2c transfer timed out\n");
 		return -ETIMEDOUT;
 	}
 
@@ -391,8 +392,8 @@ static u32 bcm2835_i2c_func(struct i2c_adapter *adap)
 }
 
 static const struct i2c_algorithm bcm2835_i2c_algo = {
-	.master_xfer	= bcm2835_i2c_xfer,
-	.functionality	= bcm2835_i2c_func,
+	.xfer = bcm2835_i2c_xfer,
+	.functionality = bcm2835_i2c_func,
 };
 
 /*
@@ -521,7 +522,7 @@ MODULE_DEVICE_TABLE(of, bcm2835_i2c_of_match);
 
 static struct platform_driver bcm2835_i2c_driver = {
 	.probe		= bcm2835_i2c_probe,
-	.remove_new	= bcm2835_i2c_remove,
+	.remove		= bcm2835_i2c_remove,
 	.driver		= {
 		.name	= "i2c-bcm2835",
 		.of_match_table = bcm2835_i2c_of_match,

@@ -16,6 +16,7 @@
 #include <linux/delay.h>
 #include <linux/ioport.h>
 #include <linux/slab.h>
+#include <linux/string_choices.h>
 #include <linux/errno.h>
 #include <linux/list.h>
 #include <linux/interrupt.h>
@@ -131,7 +132,7 @@ static void proc_ep_show(struct seq_file *s, struct at91_ep *ep)
 	seq_printf(s, "csr %08x rxbytes=%d %s %s %s" EIGHTBITS "\n",
 		csr,
 		(csr & 0x07ff0000) >> 16,
-		(csr & (1 << 15)) ? "enabled" : "disabled",
+		str_enabled_disabled(csr & (1 << 15)),
 		(csr & (1 << 11)) ? "DATA1" : "DATA0",
 		types[(csr & 0x700) >> 8],
 
@@ -584,7 +585,7 @@ at91_ep_alloc_request(struct usb_ep *_ep, gfp_t gfp_flags)
 {
 	struct at91_request *req;
 
-	req = kzalloc(sizeof (struct at91_request), gfp_flags);
+	req = kzalloc_obj(struct at91_request, gfp_flags);
 	if (!req)
 		return NULL;
 
@@ -1540,7 +1541,7 @@ static void at91_vbus_timer_work(struct work_struct *work)
 
 static void at91_vbus_timer(struct timer_list *t)
 {
-	struct at91_udc *udc = from_timer(udc, t, vbus_timer);
+	struct at91_udc *udc = timer_container_of(udc, t, vbus_timer);
 
 	/*
 	 * If we are polling vbus it is likely that the gpio is on an
@@ -1793,6 +1794,19 @@ static void at91udc_of_init(struct at91_udc *udc, struct device_node *np)
 		udc->caps = match->data;
 }
 
+/*
+ * The work handler re-arms this timer, so shut the timer down before
+ * draining the work; otherwise it restarts the polling cycle.
+ */
+static void at91_udc_shutdown_vbus_timer(struct at91_udc *udc)
+{
+	if (!(udc->board.vbus_pin && udc->board.vbus_polled))
+		return;
+
+	timer_shutdown_sync(&udc->vbus_timer);
+	cancel_work_sync(&udc->vbus_timer_work);
+}
+
 static int at91udc_probe(struct platform_device *pdev)
 {
 	struct device	*dev = &pdev->dev;
@@ -1906,7 +1920,7 @@ static int at91udc_probe(struct platform_device *pdev)
 	}
 	retval = usb_add_gadget_udc(dev, &udc->gadget);
 	if (retval)
-		goto err_unprepare_iclk;
+		goto err_shutdown_vbus;
 	dev_set_drvdata(dev, udc);
 	device_init_wakeup(dev, 1);
 	create_debug_file(udc);
@@ -1914,6 +1928,8 @@ static int at91udc_probe(struct platform_device *pdev)
 	INFO("%s version %s\n", driver_name, DRIVER_VERSION);
 	return 0;
 
+err_shutdown_vbus:
+	at91_udc_shutdown_vbus_timer(udc);
 err_unprepare_iclk:
 	clk_unprepare(udc->iclk);
 err_unprepare_fclk:
@@ -1924,7 +1940,7 @@ err_unprepare_fclk:
 	return retval;
 }
 
-static int at91udc_remove(struct platform_device *pdev)
+static void at91udc_remove(struct platform_device *pdev)
 {
 	struct at91_udc *udc = platform_get_drvdata(pdev);
 	unsigned long	flags;
@@ -1932,8 +1948,14 @@ static int at91udc_remove(struct platform_device *pdev)
 	DBG("remove\n");
 
 	usb_del_gadget_udc(&udc->gadget);
-	if (udc->driver)
-		return -EBUSY;
+
+	at91_udc_shutdown_vbus_timer(udc);
+
+	if (udc->driver) {
+		dev_err(&pdev->dev,
+			"Driver still in use but removing anyhow\n");
+		return;
+	}
 
 	spin_lock_irqsave(&udc->lock, flags);
 	pullup(udc, 0);
@@ -1943,8 +1965,6 @@ static int at91udc_remove(struct platform_device *pdev)
 	remove_debug_file(udc);
 	clk_unprepare(udc->fclk);
 	clk_unprepare(udc->iclk);
-
-	return 0;
 }
 
 #ifdef CONFIG_PM
@@ -2000,6 +2020,7 @@ static int at91udc_resume(struct platform_device *pdev)
 #endif
 
 static struct platform_driver at91_udc_driver = {
+	.probe		= at91udc_probe,
 	.remove		= at91udc_remove,
 	.shutdown	= at91udc_shutdown,
 	.suspend	= at91udc_suspend,
@@ -2010,7 +2031,7 @@ static struct platform_driver at91_udc_driver = {
 	},
 };
 
-module_platform_driver_probe(at91_udc_driver, at91udc_probe);
+module_platform_driver(at91_udc_driver);
 
 MODULE_DESCRIPTION("AT91 udc driver");
 MODULE_AUTHOR("Thomas Rathbone, David Brownell");

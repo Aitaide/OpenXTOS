@@ -11,7 +11,7 @@
 #include <linux/spi/spi.h>
 #include <linux/platform_device.h>
 #include <linux/delay.h>
-#include <asm/unaligned.h>
+#include <linux/unaligned.h>
 
 #define FIRMWARE_NAME	"lattice-ecp3.bit"
 
@@ -219,8 +219,8 @@ static void lattice_ecp3_remove(struct spi_device *spi)
 }
 
 static const struct spi_device_id lattice_ecp3_id[] = {
-	{ "ecp3-17", 0 },
-	{ "ecp3-35", 0 },
+	{ .name = "ecp3-17" },
+	{ .name = "ecp3-35" },
 	{ }
 };
 MODULE_DEVICE_TABLE(spi, lattice_ecp3_id);

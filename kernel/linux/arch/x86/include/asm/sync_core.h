@@ -8,7 +8,7 @@
 #include <asm/special_insns.h>
 
 #ifdef CONFIG_X86_32
-static inline void iret_to_self(void)
+static __always_inline void iret_to_self(void)
 {
 	asm volatile (
 		"pushfl\n\t"
@@ -19,7 +19,7 @@ static inline void iret_to_self(void)
 		: ASM_CALL_CONSTRAINT : : "memory");
 }
 #else
-static inline void iret_to_self(void)
+static __always_inline void iret_to_self(void)
 {
 	unsigned int tmp;
 
@@ -55,13 +55,13 @@ static inline void iret_to_self(void)
  * Like all of Linux's memory ordering operations, this is a
  * compiler barrier as well.
  */
-static inline void sync_core(void)
+static __always_inline void sync_core(void)
 {
 	/*
 	 * The SERIALIZE instruction is the most straightforward way to
 	 * do this, but it is not universally available.
 	 */
-	if (static_cpu_has(X86_FEATURE_SERIALIZE)) {
+	if (cpu_feature_enabled(X86_FEATURE_SERIALIZE)) {
 		serialize();
 		return;
 	}
@@ -96,7 +96,7 @@ static inline void sync_core(void)
 static inline void sync_core_before_usermode(void)
 {
 	/* With PTI, we unconditionally serialize before running user code. */
-	if (static_cpu_has(X86_FEATURE_PTI))
+	if (cpu_feature_enabled(X86_FEATURE_PTI))
 		return;
 
 	/*

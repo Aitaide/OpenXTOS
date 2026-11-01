@@ -50,6 +50,9 @@ struct vcap_stream_iter {
 
 /* Check that the control has a valid set of callbacks */
 int vcap_api_check(struct vcap_control *ctrl);
+/* Serialize access to the vcap instances of a control */
+void vcap_lock(struct vcap_admin *admin);
+void vcap_unlock(struct vcap_admin *admin);
 /* Erase the VCAP cache area used or encoding and decoding */
 void vcap_erase_cache(struct vcap_rule_internal *ri);
 
@@ -109,7 +112,7 @@ int vcap_addr_keysets(struct vcap_control *vctrl, struct net_device *ndev,
 		      struct vcap_keyset_list *kslist);
 
 /* Verify that the typegroup information, subword count, keyset and type id
- * are in sync and correct, return the list of matchin keysets
+ * are in sync and correct, return the list of matching keysets
  */
 int vcap_find_keystream_keysets(struct vcap_control *vctrl, enum vcap_type vt,
 				u32 *keystream, u32 *mskstream, bool mask,

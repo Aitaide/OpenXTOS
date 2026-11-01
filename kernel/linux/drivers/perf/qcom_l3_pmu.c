@@ -609,18 +609,9 @@ static void qcom_l3_cache__event_read(struct perf_event *event)
 
 /* formats */
 
-static ssize_t l3cache_pmu_format_show(struct device *dev,
-				       struct device_attribute *attr, char *buf)
-{
-	struct dev_ext_attribute *eattr;
-
-	eattr = container_of(attr, struct dev_ext_attribute, attr);
-	return sysfs_emit(buf, "%s\n", (char *) eattr->var);
-}
-
 #define L3CACHE_PMU_FORMAT_ATTR(_name, _config)				      \
 	(&((struct dev_ext_attribute[]) {				      \
-		{ .attr = __ATTR(_name, 0444, l3cache_pmu_format_show, NULL), \
+		{ .attr = __ATTR(_name, 0444, device_show_string, NULL),      \
 		  .var = (void *) _config, }				      \
 	})[0].attr.attr)
 
@@ -672,7 +663,7 @@ static ssize_t cpumask_show(struct device *dev,
 {
 	struct l3cache_pmu *l3pmu = to_l3cache_pmu(dev_get_drvdata(dev));
 
-	return cpumap_print_to_pagebuf(true, buf, &l3pmu->cpumask);
+	return sysfs_emit(buf, "%*pbl\n", cpumask_pr_args(&l3pmu->cpumask));
 }
 
 static DEVICE_ATTR_RO(cpumask);
@@ -742,12 +733,13 @@ static int qcom_l3_cache_pmu_probe(struct platform_device *pdev)
 
 	l3pmu = devm_kzalloc(&pdev->dev, sizeof(*l3pmu), GFP_KERNEL);
 	name = devm_kasprintf(&pdev->dev, GFP_KERNEL, "l3cache_%s_%s",
-		      acpi_dev_parent(acpi_dev)->pnp.unique_id,
-		      acpi_dev->pnp.unique_id);
+		      acpi_device_uid(acpi_dev_parent(acpi_dev)),
+		      acpi_device_uid(acpi_dev));
 	if (!l3pmu || !name)
 		return -ENOMEM;
 
 	l3pmu->pmu = (struct pmu) {
+		.parent		= &pdev->dev,
 		.task_ctx_nr	= perf_invalid_context,
 
 		.pmu_enable	= qcom_l3_cache__pmu_enable,
@@ -775,11 +767,8 @@ static int qcom_l3_cache_pmu_probe(struct platform_device *pdev)
 
 	ret = devm_request_irq(&pdev->dev, ret, qcom_l3_cache__handle_irq, 0,
 			       name, l3pmu);
-	if (ret) {
-		dev_err(&pdev->dev, "Request for IRQ failed for slice @%pa\n",
-			&memrc->start);
+	if (ret)
 		return ret;
-	}
 
 	/* Add this instance to the list used by the offline callback */
 	ret = cpuhp_state_add_instance(CPUHP_AP_PERF_ARM_QCOM_L3_ONLINE, &l3pmu->node);

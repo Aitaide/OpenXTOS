@@ -84,7 +84,7 @@ module_param(balloon_boot_timeout, uint, 0444);
 #ifdef CONFIG_XEN_BALLOON_MEMORY_HOTPLUG
 static int xen_hotplug_unpopulated;
 
-static struct ctl_table balloon_table[] = {
+static const struct ctl_table balloon_table[] = {
 	{
 		.procname	= "hotplug_unpopulated",
 		.data		= &xen_hotplug_unpopulated,
@@ -94,7 +94,6 @@ static struct ctl_table balloon_table[] = {
 		.extra1         = SYSCTL_ZERO,
 		.extra2         = SYSCTL_ONE,
 	},
-	{ }
 };
 
 #else
@@ -147,7 +146,8 @@ static DECLARE_WAIT_QUEUE_HEAD(balloon_wq);
 /* balloon_append: add the given page to the balloon. */
 static void balloon_append(struct page *page)
 {
-	__SetPageOffline(page);
+	if (!PageOffline(page))
+		__SetPageOffline(page);
 
 	/* Lowmem is re-populated first, so highmem pages go at list tail. */
 	if (PageHighMem(page)) {
@@ -157,6 +157,8 @@ static void balloon_append(struct page *page)
 		list_add(&page->lru, &ballooned_pages);
 		balloon_stats.balloon_low++;
 	}
+	inc_node_page_state(page, NR_BALLOON_PAGES);
+
 	wake_up(&balloon_wq);
 }
 
@@ -179,6 +181,8 @@ static struct page *balloon_retrieve(bool require_lowmem)
 		balloon_stats.balloon_low--;
 
 	__ClearPageOffline(page);
+	dec_node_page_state(page, NR_BALLOON_PAGES);
+
 	return page;
 }
 
@@ -238,7 +242,7 @@ static struct resource *additional_memory_resource(phys_addr_t size)
 	struct resource *res;
 	int ret;
 
-	res = kzalloc(sizeof(*res), GFP_KERNEL);
+	res = kzalloc_obj(*res);
 	if (!res)
 		return NULL;
 
@@ -298,7 +302,7 @@ static enum bp_state reserve_additional_memory(void)
          * are not restored since this region is now known not to
          * conflict with any devices.
          */ 
-	if (!xen_feature(XENFEAT_auto_translated_physmap)) {
+	if (xen_pv_domain()) {
 		unsigned long pfn, i;
 
 		pfn = PFN_DOWN(resource->start);
@@ -413,7 +417,11 @@ static enum bp_state increase_reservation(unsigned long nr_pages)
 
 		xenmem_reservation_va_mapping_update(1, &page, &frame_list[i]);
 
-		/* Relinquish the page back to the allocator. */
+		/*
+		 * Relinquish the page back to the allocator. Note that
+		 * some pages, including ones added via xen_online_page(), might
+		 * not be marked reserved; free_reserved_page() will handle that.
+		 */
 		free_reserved_page(page);
 	}
 
@@ -618,7 +626,7 @@ int xen_alloc_ballooned_pages(unsigned int nr_pages, struct page **pages)
 			 */
 			BUILD_BUG_ON(XEN_PAGE_SIZE != PAGE_SIZE);
 
-			if (!xen_feature(XENFEAT_auto_translated_physmap)) {
+			if (xen_pv_domain()) {
 				ret = xen_alloc_p2m_entry(page_to_pfn(page));
 				if (ret < 0)
 					goto out_undo;
@@ -671,9 +679,8 @@ void xen_free_ballooned_pages(unsigned int nr_pages, struct page **pages)
 }
 EXPORT_SYMBOL(xen_free_ballooned_pages);
 
-static void __init balloon_add_regions(void)
+static int __init balloon_add_regions(bool append)
 {
-#if defined(CONFIG_XEN_PV)
 	unsigned long start_pfn, pages;
 	unsigned long pfn, extra_pfn_end;
 	unsigned int i;
@@ -695,27 +702,64 @@ static void __init balloon_add_regions(void)
 		for (pfn = start_pfn; pfn < extra_pfn_end; pfn++)
 			balloon_append(pfn_to_page(pfn));
 
-		balloon_stats.total_pages += extra_pfn_end - start_pfn;
+		/*
+		 * There are two different use-cases depending on how the
+		 * initial memory target is fetched.  For PVH dom0 and PV the
+		 * target is usually set to reflect the domain assigned memory,
+		 * and hence extra regions need adding.
+		 *
+		 * OTOH for HVM and PVH domU the target is set to the amount of
+		 * RAM reported in the memory map, and hence extra regions need
+		 * subtracting to reflect the real memory usage.
+		 */
+		pages = extra_pfn_end - start_pfn;
+		if (append) {
+			balloon_stats.total_pages += pages;
+		} else if (pages >= balloon_stats.current_pages ||
+		           pages >= balloon_stats.target_pages) {
+			WARN(1, "Extra pages underflow current target");
+			return -ERANGE;
+		} else {
+			balloon_stats.current_pages -= pages;
+			balloon_stats.target_pages -= pages;
+		}
 	}
-#endif
+
+	return 0;
 }
 
 static int __init balloon_init(void)
 {
 	struct task_struct *task;
+	long current_pages = 0;
+	domid_t domid = DOMID_SELF;
+	bool append = true;
+	int rc;
 
 	if (!xen_domain())
 		return -ENODEV;
 
 	pr_info("Initialising balloon driver\n");
 
-#ifdef CONFIG_XEN_PV
-	balloon_stats.current_pages = xen_pv_domain()
-		? min(xen_start_info->nr_pages - xen_released_pages, max_pfn)
-		: get_num_physpages();
-#else
-	balloon_stats.current_pages = get_num_physpages();
-#endif
+	if (xen_initial_domain())
+		current_pages = HYPERVISOR_memory_op(XENMEM_current_reservation,
+		                                     &domid);
+	if (current_pages <= 0) {
+		if (xen_pv_domain()) {
+			if (xen_released_pages >= xen_start_info->nr_pages)
+				goto underflow;
+			current_pages = min(xen_start_info->nr_pages -
+			                    xen_released_pages, max_pfn);
+		} else {
+			if (xen_unpopulated_pages >= get_num_physpages())
+				goto underflow;
+			append = false;
+			current_pages = get_num_physpages() -
+			                xen_unpopulated_pages;
+		}
+	}
+
+	balloon_stats.current_pages = current_pages;
 	balloon_stats.target_pages  = balloon_stats.current_pages;
 	balloon_stats.balloon_low   = 0;
 	balloon_stats.balloon_high  = 0;
@@ -732,7 +776,9 @@ static int __init balloon_init(void)
 	register_sysctl_init("xen/balloon", balloon_table);
 #endif
 
-	balloon_add_regions();
+	rc = balloon_add_regions(append);
+	if (rc)
+		return rc;
 
 	task = kthread_run(balloon_thread, NULL, "xen-balloon");
 	if (IS_ERR(task)) {
@@ -744,6 +790,10 @@ static int __init balloon_init(void)
 	xen_balloon_init();
 
 	return 0;
+
+ underflow:
+	WARN(1, "Released pages underflow current target");
+	return -ERANGE;
 }
 subsys_initcall(balloon_init);
 

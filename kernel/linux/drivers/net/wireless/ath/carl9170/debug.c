@@ -54,7 +54,6 @@ struct carl9170_debugfs_fops {
 	char *(*read)(struct ar9170 *ar, char *buf, size_t bufsize,
 		      ssize_t *len);
 	ssize_t (*write)(struct ar9170 *aru, const char *buf, size_t size);
-	const struct file_operations fops;
 
 	enum carl9170_device_state req_dev_state;
 };
@@ -62,7 +61,7 @@ struct carl9170_debugfs_fops {
 static ssize_t carl9170_debugfs_read(struct file *file, char __user *userbuf,
 				     size_t count, loff_t *ppos)
 {
-	struct carl9170_debugfs_fops *dfops;
+	const struct carl9170_debugfs_fops *dfops;
 	struct ar9170 *ar;
 	char *buf = NULL, *res_buf = NULL;
 	ssize_t ret = 0;
@@ -75,8 +74,7 @@ static ssize_t carl9170_debugfs_read(struct file *file, char __user *userbuf,
 
 	if (!ar)
 		return -ENODEV;
-	dfops = container_of(debugfs_real_fops(file),
-			     struct carl9170_debugfs_fops, fops);
+	dfops = debugfs_get_aux(file);
 
 	if (!dfops->read)
 		return -ENOSYS;
@@ -113,7 +111,7 @@ out_free:
 static ssize_t carl9170_debugfs_write(struct file *file,
 	const char __user *userbuf, size_t count, loff_t *ppos)
 {
-	struct carl9170_debugfs_fops *dfops;
+	const struct carl9170_debugfs_fops *dfops;
 	struct ar9170 *ar;
 	char *buf = NULL;
 	int err = 0;
@@ -128,8 +126,7 @@ static ssize_t carl9170_debugfs_write(struct file *file,
 
 	if (!ar)
 		return -ENODEV;
-	dfops = container_of(debugfs_real_fops(file),
-			     struct carl9170_debugfs_fops, fops);
+	dfops = debugfs_get_aux(file);
 
 	if (!dfops->write)
 		return -ENOSYS;
@@ -165,6 +162,11 @@ out_free:
 	return err;
 }
 
+static struct debugfs_short_fops debugfs_fops = {
+	.read	= carl9170_debugfs_read,
+	.write	= carl9170_debugfs_write,
+};
+
 #define __DEBUGFS_DECLARE_FILE(name, _read, _write, _read_bufsize,	\
 			       _attr, _dstate)				\
 static const struct carl9170_debugfs_fops carl_debugfs_##name ##_ops = {\
@@ -173,12 +175,6 @@ static const struct carl9170_debugfs_fops carl_debugfs_##name ##_ops = {\
 	.write = _write,						\
 	.attr = _attr,							\
 	.req_dev_state = _dstate,					\
-	.fops = {							\
-		.open	= simple_open,					\
-		.read	= carl9170_debugfs_read,			\
-		.write	= carl9170_debugfs_write,			\
-		.owner	= THIS_MODULE					\
-	},								\
 }
 
 #define DEBUGFS_DECLARE_FILE(name, _read, _write, _read_bufsize, _attr)	\
@@ -798,6 +794,7 @@ DEBUGFS_READONLY_FILE(tx_janitor_last_run, 64, "last run:%d ms ago",
 DEBUGFS_READONLY_FILE(tx_dropped, 20, "%d", ar->tx_dropped);
 
 DEBUGFS_READONLY_FILE(rx_dropped, 20, "%d", ar->rx_dropped);
+DEBUGFS_READONLY_FILE(rx_phy_errors, 20, "%d", ar->rx_phy_errors);
 
 DEBUGFS_READONLY_FILE(sniffer_enabled, 20, "%d", ar->sniffer_enabled);
 DEBUGFS_READONLY_FILE(rx_software_decryption, 20, "%d",
@@ -816,9 +813,9 @@ void carl9170_debugfs_register(struct ar9170 *ar)
 		ar->hw->wiphy->debugfsdir);
 
 #define DEBUGFS_ADD(name)						\
-	debugfs_create_file(#name, carl_debugfs_##name ##_ops.attr,	\
-			    ar->debug_dir, ar,				\
-			    &carl_debugfs_##name ## _ops.fops)
+	debugfs_create_file_aux(#name, carl_debugfs_##name ##_ops.attr,	\
+			    ar->debug_dir, ar, &carl_debugfs_##name ## _ops, \
+			    &debugfs_fops)
 
 	DEBUGFS_ADD(usb_tx_anch_urbs);
 	DEBUGFS_ADD(usb_rx_pool_urbs);
@@ -834,6 +831,7 @@ void carl9170_debugfs_register(struct ar9170 *ar)
 	DEBUGFS_ADD(tx_ampdu_list_len);
 
 	DEBUGFS_ADD(rx_dropped);
+	DEBUGFS_ADD(rx_phy_errors);
 	DEBUGFS_ADD(sniffer_enabled);
 	DEBUGFS_ADD(rx_software_decryption);
 

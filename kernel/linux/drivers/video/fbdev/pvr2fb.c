@@ -192,7 +192,7 @@ static unsigned long pvr2fb_map;
 
 #ifdef CONFIG_PVR2_DMA
 static unsigned int shdma = PVR2_CASCADE_CHAN;
-static unsigned int pvr2dma = ONCHIP_NR_DMA_CHANNELS;
+static unsigned int pvr2dma = CONFIG_NR_ONCHIP_DMA_CHANNELS;
 #endif
 
 static struct fb_videomode pvr2_modedb[] = {
@@ -639,7 +639,7 @@ static irqreturn_t __maybe_unused pvr2fb_interrupt(int irq, void *dev_id)
 }
 
 #ifdef CONFIG_PVR2_DMA
-static ssize_t pvr2fb_write(struct fb_info *info, const char *buf,
+static ssize_t pvr2fb_write(struct fb_info *info, const char __user *buf,
 			    size_t count, loff_t *ppos)
 {
 	unsigned long dst, start, end, len;
@@ -652,7 +652,7 @@ static ssize_t pvr2fb_write(struct fb_info *info, const char *buf,
 
 	nr_pages = (count + PAGE_SIZE - 1) >> PAGE_SHIFT;
 
-	pages = kmalloc_array(nr_pages, sizeof(struct page *), GFP_KERNEL);
+	pages = kmalloc_objs(struct page *, nr_pages);
 	if (!pages)
 		return -ENOMEM;
 
@@ -725,16 +725,18 @@ out_unmap:
 
 static const struct fb_ops pvr2fb_ops = {
 	.owner		= THIS_MODULE,
+#ifdef CONFIG_PVR2_DMA
+	.fb_read	= fb_io_read,
+	.fb_write	= pvr2fb_write,
+#else
+	__FB_DEFAULT_IOMEM_OPS_RDWR,
+#endif
 	.fb_setcolreg	= pvr2fb_setcolreg,
 	.fb_blank	= pvr2fb_blank,
+	__FB_DEFAULT_IOMEM_OPS_DRAW,
 	.fb_check_var	= pvr2fb_check_var,
 	.fb_set_par	= pvr2fb_set_par,
-#ifdef CONFIG_PVR2_DMA
-	.fb_write	= pvr2fb_write,
-#endif
-	.fb_fillrect	= cfb_fillrect,
-	.fb_copyarea	= cfb_copyarea,
-	.fb_imageblit	= cfb_imageblit,
+	__FB_DEFAULT_IOMEM_OPS_MMAP,
 };
 
 #ifndef MODULE
@@ -991,9 +993,8 @@ static void pvr2fb_pci_remove(struct pci_dev *pdev)
 }
 
 static const struct pci_device_id pvr2fb_pci_tbl[] = {
-	{ PCI_VENDOR_ID_NEC, PCI_DEVICE_ID_NEC_NEON250,
-	  PCI_ANY_ID, PCI_ANY_ID, 0, 0, 0 },
-	{ 0, },
+	{ PCI_VDEVICE(NEC, PCI_DEVICE_ID_NEC_NEON250) },
+	{ }
 };
 
 MODULE_DEVICE_TABLE(pci, pvr2fb_pci_tbl);
@@ -1076,7 +1077,7 @@ static struct pvr2_board {
 #ifdef CONFIG_PCI
 	{ pvr2fb_pci_init, pvr2fb_pci_exit, "PCI PVR2" },
 #endif
-	{ 0, },
+	{ },
 };
 
 static int __init pvr2fb_init(void)

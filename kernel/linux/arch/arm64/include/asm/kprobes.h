@@ -26,6 +26,12 @@
 struct prev_kprobe {
 	struct kprobe *kp;
 	unsigned int status;
+
+	/*
+	 * The original DAIF state of the outer kprobe, saved here before
+	 * a nested kprobe overwrites kcb->saved_irqflag during reentry.
+	 */
+	unsigned long saved_irqflag;
 };
 
 /* per-cpu kprobe control block */
@@ -37,10 +43,16 @@ struct kprobe_ctlblk {
 
 void arch_remove_kprobe(struct kprobe *);
 int kprobe_fault_handler(struct pt_regs *regs, unsigned int fsr);
-int kprobe_exceptions_notify(struct notifier_block *self,
-			     unsigned long val, void *data);
 void __kretprobe_trampoline(void);
 void __kprobes *trampoline_probe_handler(struct pt_regs *regs);
 
 #endif /* CONFIG_KPROBES */
+
+int __kprobes kprobe_brk_handler(struct pt_regs *regs,
+				 unsigned long esr);
+int __kprobes kprobe_ss_brk_handler(struct pt_regs *regs,
+				 unsigned long esr);
+int __kprobes kretprobe_brk_handler(struct pt_regs *regs,
+				 unsigned long esr);
+
 #endif /* _ARM_KPROBES_H */

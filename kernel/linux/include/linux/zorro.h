@@ -17,7 +17,7 @@
 #include <linux/device.h>
 #include <linux/init.h>
 #include <linux/ioport.h>
-#include <linux/mod_devicetable.h>
+#include <linux/device-id/zorro.h>
 
 #include <asm/zorro.h>
 
@@ -52,7 +52,7 @@ struct zorro_driver {
     struct device_driver driver;
 };
 
-#define	to_zorro_driver(drv)	container_of(drv, struct zorro_driver, driver)
+#define	to_zorro_driver(drv)	container_of_const(drv, struct zorro_driver, driver)
 
 
 #define zorro_for_each_dev(dev)	\

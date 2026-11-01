@@ -93,7 +93,7 @@ static void tls_handshake_remote_peerids(struct tls_handshake_req *treq,
  *
  */
 static void tls_handshake_done(struct handshake_req *req,
-			       unsigned int status, struct genl_info *info)
+			       int status, struct genl_info *info)
 {
 	struct tls_handshake_req *treq = handshake_req_private(req);
 
@@ -104,7 +104,7 @@ static void tls_handshake_done(struct handshake_req *req,
 	if (!status)
 		set_bit(HANDSHAKE_F_REQ_SESSION, &req->hr_flags);
 
-	treq->th_consumer_done(treq->th_consumer_data, -status,
+	treq->th_consumer_done(treq->th_consumer_data, status,
 			       treq->th_peerid[0]);
 }
 
@@ -173,9 +173,9 @@ static int tls_handshake_put_certificate(struct sk_buff *msg,
 	if (!entry_attr)
 		return -EMSGSIZE;
 
-	if (nla_put_u32(msg, HANDSHAKE_A_X509_CERT,
+	if (nla_put_s32(msg, HANDSHAKE_A_X509_CERT,
 			treq->th_certificate) ||
-	    nla_put_u32(msg, HANDSHAKE_A_X509_PRIVKEY,
+	    nla_put_s32(msg, HANDSHAKE_A_X509_PRIVKEY,
 			treq->th_privkey)) {
 		nla_nest_cancel(msg, entry_attr);
 		return -EMSGSIZE;
@@ -213,8 +213,7 @@ static int tls_handshake_accept(struct handshake_req *req,
 	if (!hdr)
 		goto out_cancel;
 
-	ret = -EMSGSIZE;
-	ret = nla_put_u32(msg, HANDSHAKE_A_ACCEPT_SOCKFD, fd);
+	ret = nla_put_s32(msg, HANDSHAKE_A_ACCEPT_SOCKFD, fd);
 	if (ret < 0)
 		goto out_cancel;
 	ret = nla_put_u32(msg, HANDSHAKE_A_ACCEPT_MESSAGE_TYPE, treq->th_type);
@@ -228,6 +227,12 @@ static int tls_handshake_accept(struct handshake_req *req,
 	}
 	if (treq->th_timeout_ms) {
 		ret = nla_put_u32(msg, HANDSHAKE_A_ACCEPT_TIMEOUT, treq->th_timeout_ms);
+		if (ret < 0)
+			goto out_cancel;
+	}
+	if (treq->th_keyring) {
+		ret = nla_put_u32(msg, HANDSHAKE_A_ACCEPT_KEYRING,
+				  treq->th_keyring);
 		if (ret < 0)
 			goto out_cancel;
 	}
@@ -254,6 +259,7 @@ static int tls_handshake_accept(struct handshake_req *req,
 
 out_cancel:
 	genlmsg_cancel(msg, hdr);
+	nlmsg_free(msg);
 out:
 	return ret;
 }
@@ -418,6 +424,8 @@ EXPORT_SYMBOL(tls_server_hello_psk);
  *
  * Request cancellation races with request completion. To determine
  * who won, callers examine the return value from this function.
+ *
+ * Context: May be called from process or softirq context.
  *
  * Return values:
  *   %true - Uncompleted handshake request was canceled

@@ -127,10 +127,6 @@ uint32_t generic_reg_update_ex(const struct dc_context *ctx,
 struct dc_dmub_srv *dc_dmub_srv_create(struct dc *dc, struct dmub_srv *dmub);
 void dc_dmub_srv_destroy(struct dc_dmub_srv **dmub_srv);
 
-void reg_sequence_start_gather(const struct dc_context *ctx);
-void reg_sequence_start_execute(const struct dc_context *ctx);
-void reg_sequence_wait_done(const struct dc_context *ctx);
-
 #define FD(reg_field)	reg_field ## __SHIFT, \
 						reg_field ## _MASK
 
@@ -143,7 +139,7 @@ void generic_reg_wait(const struct dc_context *ctx,
 	unsigned int delay_between_poll_us, unsigned int time_out_num_tries,
 	const char *func_name, int line);
 
-unsigned int snprintf_count(char *pBuf, unsigned int bufSize, char *fmt, ...);
+unsigned int snprintf_count(char *pBuf, unsigned int bufSize, const char *fmt, ...);
 
 /* These macros need to be used with soc15 registers in order to retrieve
  * the actual offset.
@@ -224,17 +220,9 @@ bool dm_pp_apply_display_requirements(
 	const struct dc_context *ctx,
 	const struct dm_pp_display_configuration *pp_display_cfg);
 
-bool dm_pp_apply_power_level_change_request(
-	const struct dc_context *ctx,
-	struct dm_pp_power_level_change_request *level_change_req);
-
 bool dm_pp_apply_clock_for_voltage_request(
 	const struct dc_context *ctx,
 	struct dm_pp_clock_for_voltage_req *clock_for_voltage_req);
-
-bool dm_pp_get_static_clocks(
-	const struct dc_context *ctx,
-	struct dm_pp_static_clock_info *static_clk_info);
 
 /****** end of PP interfaces ******/
 
@@ -275,10 +263,28 @@ void dm_perf_trace_timestamp(const char *func_name, unsigned int line, struct dc
 #define PERF_TRACE_CTX(__CTX)	dm_perf_trace_timestamp(__func__, __LINE__, __CTX)
 
 /*
+ * SMU message tracing
+ */
+void dm_trace_smu_enter(uint32_t msg_id, uint32_t param_in, unsigned int delay, struct dc_context *ctx);
+void dm_trace_smu_exit(bool success, uint32_t response, struct dc_context *ctx);
+
+#define TRACE_SMU_MSG_DELAY(msg_id, param_in, delay, ctx)	dm_trace_smu_enter(msg_id, param_in, delay, ctx)
+#define TRACE_SMU_MSG(msg_id, param_in, ctx)	dm_trace_smu_enter(msg_id, param_in, 0, ctx)
+#define TRACE_SMU_MSG_ENTER(msg_id, param_in, ctx)	dm_trace_smu_enter(msg_id, param_in, 0, ctx)
+#define TRACE_SMU_MSG_EXIT(success, response, ctx)	dm_trace_smu_exit(success, response, ctx)
+
+/*
  * DMUB Interfaces
  */
 bool dm_execute_dmub_cmd(const struct dc_context *ctx, union dmub_rb_cmd *cmd, enum dm_dmub_wait_type wait_type);
 bool dm_execute_dmub_cmd_list(const struct dc_context *ctx, unsigned int count, union dmub_rb_cmd *cmd, enum dm_dmub_wait_type wait_type);
+
+/*
+ * ACPI Interfaces
+ */
+void dm_acpi_process_phy_transition_interlock(
+	const struct dc_context *ctx,
+	struct dm_process_phy_transition_init_params process_phy_transition_init_params);
 
 /*
  * Debug and verification hooks
@@ -293,5 +299,7 @@ void dm_dtn_log_end(struct dc_context *ctx,
 	struct dc_log_buffer_ctx *log_ctx);
 
 char *dce_version_to_string(const int version);
+
+bool dc_supports_vrr(const enum dce_version v);
 
 #endif /* __DM_SERVICES_H__ */

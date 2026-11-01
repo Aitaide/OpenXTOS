@@ -1,6 +1,6 @@
 /* SPDX-License-Identifier: GPL-2.0 OR BSD-2-Clause */
 /*
- * Copyright 2018-2021 Amazon.com, Inc. or its affiliates. All rights reserved.
+ * Copyright 2018-2026 Amazon.com, Inc. or its affiliates. All rights reserved.
  */
 
 #ifndef _EFA_H_
@@ -57,14 +57,15 @@ struct efa_dev {
 	u64 db_bar_addr;
 	u64 db_bar_len;
 
-	int admin_msix_vector_idx;
+	u32 num_irq_vectors;
+	u32 admin_msix_vector_idx;
 	struct efa_irq admin_irq;
 
 	struct efa_stats stats;
 
 	/* Array of completion EQs */
 	struct efa_eq *eqs;
-	unsigned int neqs;
+	u32 neqs;
 
 	/* Only stores CQs with interrupts enabled */
 	struct xarray cqs_xa;
@@ -80,9 +81,19 @@ struct efa_pd {
 	u16 pdn;
 };
 
+struct efa_mr_interconnect_info {
+	u16 recv_ic_id;
+	u16 rdma_read_ic_id;
+	u16 rdma_recv_ic_id;
+	u8 recv_ic_id_valid : 1;
+	u8 rdma_read_ic_id_valid : 1;
+	u8 rdma_recv_ic_id_valid : 1;
+};
+
 struct efa_mr {
 	struct ib_mr ibmr;
 	struct ib_umem *umem;
+	struct efa_mr_interconnect_info ic_info;
 };
 
 struct efa_cq {
@@ -96,6 +107,15 @@ struct efa_cq {
 	u16 cq_idx;
 	/* NULL when no interrupts requested */
 	struct efa_eq *eq;
+	struct ib_umem *umem;
+};
+
+struct efa_comp_cntr {
+	struct ib_comp_cntr ibcc;
+	struct ib_umem *comp_umem;
+	struct ib_umem *err_umem;
+	u32 comp_handle;
+	u32 err_handle;
 };
 
 struct efa_qp {
@@ -136,6 +156,7 @@ int efa_query_device(struct ib_device *ibdev,
 		     struct ib_udata *udata);
 int efa_query_port(struct ib_device *ibdev, u32 port,
 		   struct ib_port_attr *props);
+int efa_query_port_speed(struct ib_device *ibdev, u32 port_num, u64 *speed);
 int efa_query_qp(struct ib_qp *ibqp, struct ib_qp_attr *qp_attr,
 		 int qp_attr_mask,
 		 struct ib_qp_init_attr *qp_init_attr);
@@ -149,15 +170,27 @@ int efa_destroy_qp(struct ib_qp *ibqp, struct ib_udata *udata);
 int efa_create_qp(struct ib_qp *ibqp, struct ib_qp_init_attr *init_attr,
 		  struct ib_udata *udata);
 int efa_destroy_cq(struct ib_cq *ibcq, struct ib_udata *udata);
-int efa_create_cq(struct ib_cq *ibcq, const struct ib_cq_init_attr *attr,
-		  struct ib_udata *udata);
+int efa_create_user_cq(struct ib_cq *ibcq, const struct ib_cq_init_attr *attr,
+		       struct uverbs_attr_bundle *attrs);
+int efa_query_comp_cntr_caps(struct ib_device *ibdev,
+			     struct ib_comp_cntr_caps *caps,
+			     struct uverbs_attr_bundle *attrs);
+int efa_create_comp_cntr(struct ib_comp_cntr *ibcc,
+			 struct uverbs_attr_bundle *attrs);
+int efa_destroy_comp_cntr(struct ib_comp_cntr *ibcc);
+int efa_modify_comp_cntr(struct ib_comp_cntr *ibcc, enum ib_comp_cntr_entry entry,
+			 enum ib_comp_cntr_modify_op op, u64 value);
+int efa_qp_attach_comp_cntr(struct ib_qp *ibqp, struct ib_comp_cntr *ibcc,
+			    struct ib_qp_attach_comp_cntr_attr *attr);
 struct ib_mr *efa_reg_mr(struct ib_pd *ibpd, u64 start, u64 length,
 			 u64 virt_addr, int access_flags,
+			 struct ib_dmah *dmah,
 			 struct ib_udata *udata);
 struct ib_mr *efa_reg_user_mr_dmabuf(struct ib_pd *ibpd, u64 start,
 				     u64 length, u64 virt_addr,
 				     int fd, int access_flags,
-				     struct ib_udata *udata);
+				     struct ib_dmah *dmah,
+				     struct uverbs_attr_bundle *attrs);
 int efa_dereg_mr(struct ib_mr *ibmr, struct ib_udata *udata);
 int efa_get_port_immutable(struct ib_device *ibdev, u32 port_num,
 			   struct ib_port_immutable *immutable);

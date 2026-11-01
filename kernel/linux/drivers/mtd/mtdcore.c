@@ -30,9 +30,11 @@
 #include <linux/debugfs.h>
 #include <linux/nvmem-provider.h>
 #include <linux/root_dev.h>
+#include <linux/error-injection.h>
 
 #include <linux/mtd/mtd.h>
 #include <linux/mtd/partitions.h>
+#include <linux/mtd/concat.h>
 
 #include "mtdcore.h"
 
@@ -101,6 +103,15 @@ static void mtd_release(struct device *dev)
 
 	/* remove /dev/mtdXro node */
 	device_destroy(&mtd_class, index + 1);
+}
+
+/*
+ * No-op device release used in add_mtd_device() error paths.
+ * Prevents mtd_release() from being called via device_release(),
+ * which would free the mtd_info that the caller still manages.
+ */
+static void mtd_dev_release_nop(struct device *dev)
+{
 }
 
 static void mtd_device_release(struct kref *kref)
@@ -383,14 +394,64 @@ EXPORT_SYMBOL_GPL(mtd_check_expert_analysis_mode);
 
 static struct dentry *dfs_dir_mtd;
 
+static int mtd_ooblayout_show(struct seq_file *s, void *p,
+			      int (*iter)(struct mtd_info *, int section,
+					  struct mtd_oob_region *region))
+{
+	struct mtd_info *mtd = s->private;
+	int section;
+
+	for (section = 0;; section++) {
+		struct mtd_oob_region region;
+		int err;
+
+		err = iter(mtd, section, &region);
+		if (err) {
+			if (err == -ERANGE)
+				break;
+
+			return err;
+		}
+
+		seq_printf(s, "%-3d %4u %4u\n", section, region.offset,
+			   region.length);
+	}
+
+	return 0;
+}
+
+static int mtd_ooblayout_ecc_show(struct seq_file *s, void *p)
+{
+	return mtd_ooblayout_show(s, p, mtd_ooblayout_ecc);
+}
+DEFINE_SHOW_ATTRIBUTE(mtd_ooblayout_ecc);
+
+static int mtd_ooblayout_free_show(struct seq_file *s, void *p)
+{
+	return mtd_ooblayout_show(s, p, mtd_ooblayout_free);
+}
+DEFINE_SHOW_ATTRIBUTE(mtd_ooblayout_free);
+
 static void mtd_debugfs_populate(struct mtd_info *mtd)
 {
 	struct device *dev = &mtd->dev;
+	struct mtd_oob_region region;
 
 	if (IS_ERR_OR_NULL(dfs_dir_mtd))
 		return;
 
 	mtd->dbg.dfs_dir = debugfs_create_dir(dev_name(dev), dfs_dir_mtd);
+	if (IS_ERR_OR_NULL(mtd->dbg.dfs_dir))
+		return;
+
+	/* Create ooblayout files only if at least one region is present. */
+	if (mtd_ooblayout_ecc(mtd, 0, &region) == 0)
+		debugfs_create_file("ooblayout_ecc", 0444, mtd->dbg.dfs_dir,
+				    mtd, &mtd_ooblayout_ecc_fops);
+
+	if (mtd_ooblayout_free(mtd, 0, &region) == 0)
+		debugfs_create_file("ooblayout_free", 0444, mtd->dbg.dfs_dir,
+				    mtd, &mtd_ooblayout_free_fops);
 }
 
 #ifndef CONFIG_MMU
@@ -552,6 +613,7 @@ static int mtd_nvmem_add(struct mtd_info *mtd)
 	config.dev = &mtd->dev;
 	config.name = dev_name(&mtd->dev);
 	config.owner = THIS_MODULE;
+	config.add_legacy_fixed_of_cells = of_device_is_compatible(node, "nvmem-cells");
 	config.reg_read = mtd_nvmem_reg_read;
 	config.size = mtd->size;
 	config.word_size = 1;
@@ -559,7 +621,6 @@ static int mtd_nvmem_add(struct mtd_info *mtd)
 	config.read_only = true;
 	config.root_only = true;
 	config.ignore_wp = true;
-	config.no_of_node = !of_device_is_compatible(node, "nvmem-cells");
 	config.priv = mtd;
 
 	mtd->nvmem = nvmem_register(&config);
@@ -620,6 +681,7 @@ static void mtd_check_of_node(struct mtd_info *mtd)
 		if (plen == mtd_name_len &&
 		    !strncmp(mtd->name, pname + offset, plen)) {
 			mtd_set_of_node(mtd, mtd_dn);
+			of_node_put(mtd_dn);
 			break;
 		}
 	}
@@ -739,15 +801,15 @@ int add_mtd_device(struct mtd_info *mtd)
 	mtd->dev.type = &mtd_devtype;
 	mtd->dev.class = &mtd_class;
 	mtd->dev.devt = MTD_DEVT(i);
-	dev_set_name(&mtd->dev, "mtd%d", i);
+	error = dev_set_name(&mtd->dev, "mtd%d", i);
+	if (error)
+		goto fail_devname;
 	dev_set_drvdata(&mtd->dev, mtd);
 	mtd_check_of_node(mtd);
 	of_node_get(mtd_get_of_node(mtd));
 	error = device_register(&mtd->dev);
-	if (error) {
-		put_device(&mtd->dev);
+	if (error)
 		goto fail_added;
-	}
 
 	/* Add the nvmem provider */
 	error = mtd_nvmem_add(mtd);
@@ -785,9 +847,18 @@ int add_mtd_device(struct mtd_info *mtd)
 	return 0;
 
 fail_nvmem_add:
-	device_unregister(&mtd->dev);
+	device_del(&mtd->dev);
 fail_added:
+	/*
+	 * Clear type and set nop release to prevent mtd_release() ->
+	 * release_mtd_partition() -> free_partition() from freeing mtd.
+	 * The caller handles cleanup on failure.
+	 */
+	mtd->dev.type = NULL;
+	mtd->dev.release = mtd_dev_release_nop;
+	put_device(&mtd->dev);
 	of_node_put(mtd_get_of_node(mtd));
+fail_devname:
 	idr_remove(&mtd_idr, i);
 fail_locked:
 	mutex_unlock(&mtd_table_mutex);
@@ -898,6 +969,7 @@ static struct nvmem_device *mtd_otp_nvmem_register(struct mtd_info *mtd,
 	config.name = compatible;
 	config.id = NVMEM_DEVID_AUTO;
 	config.owner = THIS_MODULE;
+	config.add_legacy_fixed_of_cells = !mtd_type_is_nand(mtd);
 	config.type = NVMEM_TYPE_OTP;
 	config.root_only = true;
 	config.ignore_wp = true;
@@ -953,8 +1025,10 @@ static int mtd_otp_nvmem_add(struct mtd_info *mtd)
 
 	if (mtd->_get_user_prot_info && mtd->_read_user_prot_reg) {
 		size = mtd_otp_size(mtd, true);
-		if (size < 0)
-			return size;
+		if (size < 0) {
+			err = size;
+			goto err;
+		}
 
 		if (size > 0) {
 			nvmem = mtd_otp_nvmem_register(mtd, "user-otp", size,
@@ -1009,6 +1083,10 @@ static int mtd_otp_nvmem_add(struct mtd_info *mtd)
 
 err:
 	nvmem_unregister(mtd->otp_user_nvmem);
+	mtd->otp_user_nvmem = NULL;
+	/* Don't report error if OTP is not supported. */
+	if (err == -EOPNOTSUPP)
+		return 0;
 	return dev_err_probe(dev, err, "Failed to register OTP NVMEM device\n");
 }
 
@@ -1045,7 +1123,7 @@ int mtd_device_parse_register(struct mtd_info *mtd, const char * const *types,
 			      const struct mtd_partition *parts,
 			      int nr_parts)
 {
-	int ret;
+	int ret, err;
 
 	mtd_set_dev_defaults(mtd);
 
@@ -1056,6 +1134,12 @@ int mtd_device_parse_register(struct mtd_info *mtd, const char * const *types,
 	if (IS_ENABLED(CONFIG_MTD_PARTITIONED_MASTER)) {
 		ret = add_mtd_device(mtd);
 		if (ret)
+			goto out;
+	}
+
+	if (IS_REACHABLE(CONFIG_MTD_VIRT_CONCAT)) {
+		ret = mtd_virt_concat_node_create();
+		if (ret < 0)
 			goto out;
 	}
 
@@ -1076,6 +1160,11 @@ int mtd_device_parse_register(struct mtd_info *mtd, const char * const *types,
 	if (ret)
 		goto out;
 
+	if (IS_REACHABLE(CONFIG_MTD_VIRT_CONCAT)) {
+		ret = mtd_virt_concat_create_join();
+		if (ret < 0)
+			goto out;
+	}
 	/*
 	 * FIXME: some drivers unfortunately call this function more than once.
 	 * So we have to check if we've already assigned the reboot notifier.
@@ -1097,8 +1186,11 @@ out:
 		nvmem_unregister(mtd->otp_factory_nvmem);
 	}
 
-	if (ret && device_is_registered(&mtd->dev))
-		del_mtd_device(mtd);
+	if (ret && device_is_registered(&mtd->dev)) {
+		err = del_mtd_device(mtd);
+		if (err)
+			pr_err("Error when deleting MTD device (%d)\n", err);
+	}
 
 	return ret;
 }
@@ -1122,6 +1214,11 @@ int mtd_device_unregister(struct mtd_info *master)
 	nvmem_unregister(master->otp_user_nvmem);
 	nvmem_unregister(master->otp_factory_nvmem);
 
+	if (IS_REACHABLE(CONFIG_MTD_VIRT_CONCAT)) {
+		err = mtd_virt_concat_destroy(master);
+		if (err)
+			return err;
+	}
 	err = del_mtd_partitions(master);
 	if (err)
 		return err;
@@ -1236,7 +1333,7 @@ int __get_mtd_device(struct mtd_info *mtd)
 	int err;
 
 	if (master->_get_device) {
-		err = master->_get_device(mtd);
+		err = master->_get_device(master);
 		if (err)
 			return err;
 	}
@@ -1411,6 +1508,7 @@ int mtd_erase(struct mtd_info *mtd, struct erase_info *instr)
 	return ret;
 }
 EXPORT_SYMBOL_GPL(mtd_erase);
+ALLOW_ERROR_INJECTION(mtd_erase, ERRNO);
 
 /*
  * This stuff for eXecute-In-Place. phys is optional and may be set to NULL.
@@ -1505,9 +1603,12 @@ int mtd_read(struct mtd_info *mtd, loff_t from, size_t len, size_t *retlen,
 	ret = mtd_read_oob(mtd, from, &ops);
 	*retlen = ops.retlen;
 
+	WARN_ON_ONCE(*retlen != len && mtd_is_bitflip_or_eccerr(ret));
+
 	return ret;
 }
 EXPORT_SYMBOL_GPL(mtd_read);
+ALLOW_ERROR_INJECTION(mtd_read, ERRNO);
 
 int mtd_write(struct mtd_info *mtd, loff_t to, size_t len, size_t *retlen,
 	      const u_char *buf)
@@ -1524,6 +1625,7 @@ int mtd_write(struct mtd_info *mtd, loff_t to, size_t len, size_t *retlen,
 	return ret;
 }
 EXPORT_SYMBOL_GPL(mtd_write);
+ALLOW_ERROR_INJECTION(mtd_write, ERRNO);
 
 /*
  * In blackbox flight recorder like scenarios we want to make successful writes
@@ -2320,6 +2422,7 @@ EXPORT_SYMBOL_GPL(mtd_block_isbad);
 int mtd_block_markbad(struct mtd_info *mtd, loff_t ofs)
 {
 	struct mtd_info *master = mtd_get_master(mtd);
+	loff_t moffs;
 	int ret;
 
 	if (!master->_block_markbad)
@@ -2332,7 +2435,15 @@ int mtd_block_markbad(struct mtd_info *mtd, loff_t ofs)
 	if (mtd->flags & MTD_SLC_ON_MLC_EMULATION)
 		ofs = (loff_t)mtd_div_by_eb(ofs, mtd) * master->erasesize;
 
-	ret = master->_block_markbad(master, mtd_get_master_ofs(mtd, ofs));
+	moffs = mtd_get_master_ofs(mtd, ofs);
+
+	if (master->_block_isbad) {
+		ret = master->_block_isbad(master, moffs);
+		if (ret > 0)
+			return 0;
+	}
+
+	ret = master->_block_markbad(master, moffs);
 	if (ret)
 		return ret;
 
@@ -2344,6 +2455,7 @@ int mtd_block_markbad(struct mtd_info *mtd, loff_t ofs)
 	return 0;
 }
 EXPORT_SYMBOL_GPL(mtd_block_markbad);
+ALLOW_ERROR_INJECTION(mtd_block_markbad, ERRNO);
 
 /*
  * default_mtd_writev - the default writev method
@@ -2542,6 +2654,10 @@ err_reg:
 
 static void __exit cleanup_mtd(void)
 {
+	if (IS_REACHABLE(CONFIG_MTD_VIRT_CONCAT)) {
+		mtd_virt_concat_destroy_joins();
+		mtd_virt_concat_destroy_items();
+	}
 	debugfs_remove_recursive(dfs_dir_mtd);
 	cleanup_mtdchar();
 	if (proc_mtd)

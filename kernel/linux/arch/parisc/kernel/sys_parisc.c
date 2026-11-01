@@ -50,9 +50,13 @@ static inline unsigned long COLOR_ALIGN(unsigned long addr,
 }
 
 
+#ifdef CONFIG_COMPAT
 #define STACK_SIZE_DEFAULT (USER_WIDE_MODE			\
 			? (1 << 30)	/* 1 GB */		\
 			: (CONFIG_STACK_MAX_DEFAULT_SIZE_MB*1024*1024))
+#else
+#define STACK_SIZE_DEFAULT (1 << 30)
+#endif
 
 unsigned long calc_max_stack_size(unsigned long stack_max)
 {
@@ -77,7 +81,7 @@ unsigned long calc_max_stack_size(unsigned long stack_max)
  * indicating that "current" should be used instead of a passed-in
  * value from the exec bprm as done with arch_pick_mmap_layout().
  */
-static unsigned long mmap_upper_limit(struct rlimit *rlim_stack)
+unsigned long mmap_upper_limit(const struct rlimit *rlim_stack)
 {
 	unsigned long stack_base;
 
@@ -104,7 +108,9 @@ static unsigned long arch_get_unmapped_area_common(struct file *filp,
 	struct vm_area_struct *vma, *prev;
 	unsigned long filp_pgoff;
 	int do_color_align;
-	struct vm_unmapped_area_info info;
+	struct vm_unmapped_area_info info = {
+		.length = len
+	};
 
 	if (unlikely(len > TASK_SIZE))
 		return -ENOMEM;
@@ -139,7 +145,6 @@ static unsigned long arch_get_unmapped_area_common(struct file *filp,
 			return addr;
 	}
 
-	info.length = len;
 	info.align_mask = do_color_align ? (PAGE_MASK & (SHM_COLOUR - 1)) : 0;
 	info.align_offset = shared_align_offset(filp_pgoff, pgoff);
 
@@ -160,14 +165,14 @@ static unsigned long arch_get_unmapped_area_common(struct file *filp,
 		 */
 	}
 
-	info.flags = 0;
 	info.low_limit = mm->mmap_base;
 	info.high_limit = mmap_upper_limit(NULL);
 	return vm_unmapped_area(&info);
 }
 
 unsigned long arch_get_unmapped_area(struct file *filp, unsigned long addr,
-	unsigned long len, unsigned long pgoff, unsigned long flags)
+	unsigned long len, unsigned long pgoff, unsigned long flags,
+	vm_flags_t vm_flags)
 {
 	return arch_get_unmapped_area_common(filp,
 			addr, len, pgoff, flags, UP);
@@ -175,7 +180,7 @@ unsigned long arch_get_unmapped_area(struct file *filp, unsigned long addr,
 
 unsigned long arch_get_unmapped_area_topdown(struct file *filp,
 	unsigned long addr, unsigned long len, unsigned long pgoff,
-	unsigned long flags)
+	unsigned long flags, vm_flags_t vm_flags)
 {
 	return arch_get_unmapped_area_common(filp,
 			addr, len, pgoff, flags, DOWN);
@@ -215,7 +220,7 @@ asmlinkage long parisc_truncate64(const char __user * path,
 asmlinkage long parisc_ftruncate64(unsigned int fd,
 					unsigned int high, unsigned int low)
 {
-	return ksys_ftruncate(fd, (long)high << 32 | low);
+	return ksys_ftruncate(fd, (long)high << 32 | low, FTRUNCATE_LFS);
 }
 
 /* stubs for the benefit of the syscall_table since truncate64 and truncate 
@@ -226,7 +231,7 @@ asmlinkage long sys_truncate64(const char __user * path, unsigned long length)
 }
 asmlinkage long sys_ftruncate64(unsigned int fd, unsigned long length)
 {
-	return ksys_ftruncate(fd, length);
+	return ksys_ftruncate(fd, length, FTRUNCATE_LFS);
 }
 asmlinkage long sys_fcntl64(unsigned int fd, unsigned int cmd, unsigned long arg)
 {

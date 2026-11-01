@@ -8,6 +8,7 @@
 
 #define pr_fmt(fmt) "ACPI: " fmt
 
+#include <linux/cleanup.h>
 #include <linux/kernel.h>
 #include <linux/module.h>
 #include <linux/init.h>
@@ -24,8 +25,6 @@
 #include <linux/platform_data/x86/apple.h>
 #include "internal.h"
 
-#define ACPI_PCI_ROOT_CLASS		"pci_bridge"
-#define ACPI_PCI_ROOT_DEVICE_NAME	"PCI Root Bridge"
 static int acpi_pci_root_add(struct acpi_device *device,
 			     const struct acpi_device_id *not_used);
 static void acpi_pci_root_remove(struct acpi_device *device);
@@ -293,47 +292,38 @@ struct acpi_pci_root *acpi_pci_find_root(acpi_handle handle)
 }
 EXPORT_SYMBOL_GPL(acpi_pci_find_root);
 
-struct acpi_handle_node {
-	struct list_head node;
-	acpi_handle handle;
-};
-
 /**
- * acpi_get_pci_dev - convert ACPI CA handle to struct pci_dev
- * @handle: the handle in question
+ * acpi_dev_get_pci_dev - Get a struct pci_dev for a given ACPI device
+ * @adev: Target ACPI device.
  *
- * Given an ACPI CA handle, the desired PCI device is located in the
- * list of PCI devices.
+ * Find the PCI device associated with @adev, if any, and bump up its reference
+ * counter.
  *
- * If the device is found, its reference count is increased and this
- * function returns a pointer to its data structure.  The caller must
- * decrement the reference count by calling pci_dev_put().
- * If no device is found, %NULL is returned.
+ * Callers are responsible for dropping the PCI device reference obtained by
+ * this function.
+ *
+ * Return: The struct pci_dev pointer of a reference-counted PCI device on
+ * success or NULL on failure.
  */
-struct pci_dev *acpi_get_pci_dev(acpi_handle handle)
+struct pci_dev *acpi_dev_get_pci_dev(struct acpi_device *adev)
 {
-	struct acpi_device *adev = acpi_fetch_acpi_dev(handle);
 	struct acpi_device_physical_node *pn;
-	struct pci_dev *pci_dev = NULL;
 
 	if (!adev)
 		return NULL;
 
-	mutex_lock(&adev->physical_node_lock);
+	guard(mutex)(&adev->physical_node_lock);
 
 	list_for_each_entry(pn, &adev->physical_node_list, node) {
 		if (dev_is_pci(pn->dev)) {
 			get_device(pn->dev);
-			pci_dev = to_pci_dev(pn->dev);
-			break;
+			return to_pci_dev(pn->dev);
 		}
 	}
 
-	mutex_unlock(&adev->physical_node_lock);
-
-	return pci_dev;
+	return NULL;
 }
-EXPORT_SYMBOL_GPL(acpi_get_pci_dev);
+EXPORT_SYMBOL_GPL(acpi_dev_get_pci_dev);
 
 /**
  * acpi_pci_osc_control_set - Request control of PCI root _OSC features.
@@ -581,6 +571,13 @@ static void negotiate_os_control(struct acpi_pci_root *root, int *no_aspm)
 		return;
 	}
 
+	if (!is_pcie(root) && !is_cxl(root) && !acpi_has_method(handle, "_OSC")) {
+		dev_dbg(&device->dev, "Non-PCIe host bridge without _OSC, skipping\n");
+
+		*no_aspm = 1;
+		return;
+	}
+
 	support = calculate_support();
 
 	decode_osc_support(root, "OS supports", support);
@@ -622,10 +619,6 @@ static void negotiate_os_control(struct acpi_pci_root *root, int *no_aspm)
 		 */
 		*no_aspm = 1;
 
-		/* _OSC is optional for PCI host bridges */
-		if (status == AE_NOT_FOUND && !is_pcie(root))
-			return;
-
 		if (control) {
 			decode_osc_control(root, "OS requested", requested);
 			decode_osc_control(root, "platform willing to grant", control);
@@ -653,7 +646,7 @@ static int acpi_pci_root_add(struct acpi_device *device,
 	bool hotadd = system_state == SYSTEM_RUNNING;
 	const char *acpi_hid;
 
-	root = kzalloc(sizeof(struct acpi_pci_root), GFP_KERNEL);
+	root = kzalloc_obj(struct acpi_pci_root);
 	if (!root)
 		return -ENOMEM;
 
@@ -694,8 +687,6 @@ static int acpi_pci_root_add(struct acpi_device *device,
 
 	root->device = device;
 	root->segment = segment & 0xFFFF;
-	strcpy(acpi_device_name(device), ACPI_PCI_ROOT_DEVICE_NAME);
-	strcpy(acpi_device_class(device), ACPI_PCI_ROOT_CLASS);
 	device->driver_data = root;
 
 	if (hotadd && dmar_device_add(handle)) {
@@ -703,9 +694,8 @@ static int acpi_pci_root_add(struct acpi_device *device,
 		goto end;
 	}
 
-	pr_info("%s [%s] (domain %04x %pR)\n",
-	       acpi_device_name(device), acpi_device_bid(device),
-	       root->segment, &root->secondary);
+	pr_info("PCI Root Bridge [%s] (domain %04x %pR)\n",
+		acpi_device_bid(device), root->segment, &root->secondary);
 
 	root->mcfg_addr = acpi_pci_root_get_mcfg_addr(handle);
 
@@ -735,7 +725,6 @@ static int acpi_pci_root_add(struct acpi_device *device,
 		dev_err(&device->dev,
 			"Bus %04x:%02x not present in PCI namespace\n",
 			root->segment, (unsigned int)root->secondary.start);
-		device->driver_data = NULL;
 		result = -ENODEV;
 		goto remove_dmar;
 	}
@@ -743,7 +732,7 @@ static int acpi_pci_root_add(struct acpi_device *device,
 	if (no_aspm)
 		pcie_no_aspm();
 
-	pci_acpi_add_bus_pm_notifier(device);
+	pci_acpi_add_root_pm_notifier(device, root);
 	device_set_wakeup_capable(root->bus->bridge, device->wakeup.flags.valid);
 
 	if (hotadd) {
@@ -765,12 +754,17 @@ static int acpi_pci_root_add(struct acpi_device *device,
 	pci_lock_rescan_remove();
 	pci_bus_add_devices(root->bus);
 	pci_unlock_rescan_remove();
+
+	/* Clear _DEP dependencies to allow consumers to enumerate */
+	acpi_dev_clear_dependencies(device);
+
 	return 1;
 
 remove_dmar:
 	if (hotadd)
 		dmar_device_remove(handle);
 end:
+	device->driver_data = NULL;
 	kfree(root);
 	return result;
 }
@@ -794,6 +788,7 @@ static void acpi_pci_root_remove(struct acpi_device *device)
 
 	pci_unlock_rescan_remove();
 
+	device->driver_data = NULL;
 	kfree(root);
 }
 
@@ -863,7 +858,7 @@ next:
 	}
 }
 
-static void acpi_pci_root_remap_iospace(struct fwnode_handle *fwnode,
+static void acpi_pci_root_remap_iospace(const struct fwnode_handle *fwnode,
 			struct resource_entry *entry)
 {
 #ifdef PCI_IOBASE
@@ -1008,7 +1003,6 @@ struct pci_bus *acpi_pci_root_create(struct acpi_pci_root *root,
 	int node = acpi_get_node(device->handle);
 	struct pci_bus *bus;
 	struct pci_host_bridge *host_bridge;
-	union acpi_object *obj;
 
 	info->root = root;
 	info->bridge = device;
@@ -1049,17 +1043,6 @@ struct pci_bus *acpi_pci_root_create(struct acpi_pci_root *root,
 
 	if (!(root->osc_ext_control_set & OSC_CXL_ERROR_REPORTING_CONTROL))
 		host_bridge->native_cxl_error = 0;
-
-	/*
-	 * Evaluate the "PCI Boot Configuration" _DSM Function.  If it
-	 * exists and returns 0, we must preserve any PCI resource
-	 * assignments made by firmware for this host bridge.
-	 */
-	obj = acpi_evaluate_dsm(ACPI_HANDLE(bus->bridge), &pci_acpi_dsm_guid, 1,
-				DSM_PCI_PRESERVE_BOOT_CONFIG, NULL);
-	if (obj && obj->type == ACPI_TYPE_INTEGER && obj->integer.value == 0)
-		host_bridge->preserve_config = 1;
-	ACPI_FREE(obj);
 
 	acpi_dev_power_up_children_with_adr(device);
 

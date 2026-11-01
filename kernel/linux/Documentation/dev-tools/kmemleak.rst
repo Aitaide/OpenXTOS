@@ -161,6 +161,7 @@ See the include/linux/kmemleak.h header for the functions prototype.
 - ``kmemleak_free_percpu``	 - notify of a percpu memory block freeing
 - ``kmemleak_update_trace``	 - update object allocation stack trace
 - ``kmemleak_not_leak``	 - mark an object as not a leak
+- ``kmemleak_transient_leak``	 - mark an object as a transient leak
 - ``kmemleak_ignore``		 - do not scan or report an object as leak
 - ``kmemleak_scan_area``	 - add scan areas inside a memory block
 - ``kmemleak_no_scan``	 - do not scan a memory block
@@ -196,6 +197,16 @@ Some of the reported leaks are only transient, especially on SMP
 systems, because of pointers temporarily stored in CPU registers or
 stacks. Kmemleak defines MSECS_MIN_AGE (defaulting to 1000) representing
 the minimum age of an object to be reported as a memory leak.
+
+The ``min_unref_scans`` module parameter requires an object to be seen
+unreferenced in that many consecutive scans before it is reported. It
+defaults to 2 when CONFIG_DEBUG_KMEMLEAK_VERBOSE is enabled, where the
+periodic scan thread confirms a leak on its own, and to 1 otherwise. A
+value of 1 preserves the historical behaviour; higher values filter the
+transient false positives described above, at the cost of delaying genuine
+reports by up to that many scans. It can be set at boot with
+``kmemleak.min_unref_scans=<n>`` or at run-time via
+``/sys/module/kmemleak/parameters/min_unref_scans``.
 
 Limitations and Drawbacks
 -------------------------

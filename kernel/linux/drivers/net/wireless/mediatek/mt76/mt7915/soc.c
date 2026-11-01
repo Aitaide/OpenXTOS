@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: ISC
+// SPDX-License-Identifier: BSD-3-Clause-Clear
 /* Copyright (C) 2022 MediaTek Inc. */
 
 #include <linux/kernel.h>
@@ -7,7 +7,6 @@
 #include <linux/pinctrl/consumer.h>
 #include <linux/of.h>
 #include <linux/of_reserved_mem.h>
-#include <linux/of_gpio.h>
 #include <linux/iopoll.h>
 #include <linux/reset.h>
 #include <linux/of_net.h>
@@ -285,20 +284,15 @@ static int mt798x_wmac_coninfra_check(struct mt7915_dev *dev)
 static int mt798x_wmac_coninfra_setup(struct mt7915_dev *dev)
 {
 	struct device *pdev = dev->mt76.dev;
-	struct reserved_mem *rmem;
-	struct device_node *np;
+	struct resource res;
 	u32 val;
+	int ret;
 
-	np = of_parse_phandle(pdev->of_node, "memory-region", 0);
-	if (!np)
-		return -EINVAL;
+	ret = of_reserved_mem_region_to_resource(pdev->of_node, 0, &res);
+	if (ret)
+		return ret;
 
-	rmem = of_reserved_mem_lookup(np);
-	of_node_put(np);
-	if (!rmem)
-		return -EINVAL;
-
-	val = (rmem->base >> 16) & MT_TOP_MCU_EMI_BASE_MASK;
+	val = (res.start >> 16) & MT_TOP_MCU_EMI_BASE_MASK;
 
 	if (is_mt7986(&dev->mt76)) {
 		/* Set conninfra subsys PLL check */
@@ -319,8 +313,8 @@ static int mt798x_wmac_coninfra_setup(struct mt7915_dev *dev)
 			       MT_TOP_EFUSE_BASE_MASK, 0x11f20000 >> 16);
 	}
 
-	mt76_wr(dev, MT_INFRA_BUS_EMI_START, rmem->base);
-	mt76_wr(dev, MT_INFRA_BUS_EMI_END, rmem->size);
+	mt76_wr(dev, MT_INFRA_BUS_EMI_START, res.start);
+	mt76_wr(dev, MT_INFRA_BUS_EMI_END, resource_size(&res));
 
 	mt76_rr(dev, MT_CONN_INFRA_EFUSE);
 
@@ -516,7 +510,8 @@ static int mt798x_wmac_adie_patch_7976(struct mt7915_dev *dev, u8 adie)
 	if (ret)
 		return ret;
 
-	if (version == 0x8a00 || version == 0x8a10 || version == 0x8b00) {
+	if (version == 0x8a00 || version == 0x8a10 ||
+	    version == 0x8b00 || version == 0x8c10) {
 		rg_xo_01 = 0x1d59080f;
 		rg_xo_03 = 0x34c00fe0;
 	} else {
@@ -913,7 +908,7 @@ static void mt7986_wmac_clock_enable(struct mt7915_dev *dev, u32 adie_type)
 
 		read_poll_timeout(mt76_rr, cur, !(cur & MT_SLP_CTRL_BSY_MASK),
 				  USEC_PER_MSEC, 50 * USEC_PER_MSEC, false,
-				  dev, MT_ADIE_SLP_CTRL_CK0(0));
+				  dev, MT_ADIE_SLP_CTRL_CK0(1));
 	}
 	mt76_wmac_spi_unlock(dev);
 
@@ -1219,10 +1214,7 @@ static int mt798x_wmac_init(struct mt7915_dev *dev)
 		return PTR_ERR(dev->sku);
 
 	dev->rstc = devm_reset_control_get(pdev, "consys");
-	if (IS_ERR(dev->rstc))
-		return PTR_ERR(dev->rstc);
-
-	return 0;
+	return PTR_ERR_OR_ZERO(dev->rstc);
 }
 
 static int mt798x_wmac_probe(struct platform_device *pdev)
@@ -1285,13 +1277,11 @@ free_device:
 	return ret;
 }
 
-static int mt798x_wmac_remove(struct platform_device *pdev)
+static void mt798x_wmac_remove(struct platform_device *pdev)
 {
 	struct mt7915_dev *dev = platform_get_drvdata(pdev);
 
 	mt7915_unregister_device(dev);
-
-	return 0;
 }
 
 static const struct of_device_id mt798x_wmac_of_match[] = {

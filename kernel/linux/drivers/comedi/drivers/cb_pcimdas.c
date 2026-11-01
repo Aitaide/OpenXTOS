@@ -364,11 +364,11 @@ static int cb_pcimdas_auto_attach(struct comedi_device *dev,
 	devpriv->BADR3 = pci_resource_start(pcidev, 3);
 	dev->iobase = pci_resource_start(pcidev, 4);
 
-	dev->pacer = comedi_8254_init(devpriv->BADR3 + PCIMDAS_8254_BASE,
-				      cb_pcimdas_pacer_clk(dev),
-				      I8254_IO8, 0);
-	if (!dev->pacer)
-		return -ENOMEM;
+	dev->pacer = comedi_8254_io_alloc(devpriv->BADR3 + PCIMDAS_8254_BASE,
+					  cb_pcimdas_pacer_clk(dev),
+					  I8254_IO8, 0);
+	if (IS_ERR(dev->pacer))
+		return PTR_ERR(dev->pacer);
 
 	ret = comedi_alloc_subdevices(dev, 6);
 	if (ret)
@@ -405,7 +405,7 @@ static int cb_pcimdas_auto_attach(struct comedi_device *dev,
 
 	/* Digital I/O subdevice */
 	s = &dev->subdevices[2];
-	ret = subdev_8255_init(dev, s, NULL, PCIMDAS_8255_BASE);
+	ret = subdev_8255_io_init(dev, s, PCIMDAS_8255_BASE);
 	if (ret)
 		return ret;
 
@@ -455,9 +455,9 @@ static int cb_pcimdas_pci_probe(struct pci_dev *dev,
 }
 
 static const struct pci_device_id cb_pcimdas_pci_table[] = {
-	{ PCI_DEVICE(PCI_VENDOR_ID_CB, 0x0056) },	/* PCIM-DAS1602/16 */
-	{ PCI_DEVICE(PCI_VENDOR_ID_CB, 0x0115) },	/* PCIe-DAS1602/16 */
-	{ 0 }
+	{ PCI_VDEVICE(CB, 0x0056) },	/* PCIM-DAS1602/16 */
+	{ PCI_VDEVICE(CB, 0x0115) },	/* PCIe-DAS1602/16 */
+	{ }
 };
 MODULE_DEVICE_TABLE(pci, cb_pcimdas_pci_table);
 

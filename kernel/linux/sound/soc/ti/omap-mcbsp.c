@@ -13,7 +13,6 @@
 #include <linux/device.h>
 #include <linux/pm_runtime.h>
 #include <linux/of.h>
-#include <linux/of_device.h>
 #include <sound/core.h>
 #include <sound/pcm.h>
 #include <sound/pcm_params.h>
@@ -74,14 +73,16 @@ static int omap2_mcbsp_set_clks_src(struct omap_mcbsp *mcbsp, u8 fck_src_id)
 		return 0;
 	}
 
-	pm_runtime_put_sync(mcbsp->dev);
+	if (mcbsp->active)
+		pm_runtime_put_sync(mcbsp->dev);
 
 	r = clk_set_parent(mcbsp->fclk, fck_src);
 	if (r)
 		dev_err(mcbsp->dev, "CLKS: could not clk_set_parent() to %s\n",
 			src);
 
-	pm_runtime_get_sync(mcbsp->dev);
+	if (mcbsp->active)
+		pm_runtime_get_sync(mcbsp->dev);
 
 	clk_put(fck_src);
 
@@ -289,25 +290,24 @@ static u16 omap_mcbsp_get_rx_delay(struct omap_mcbsp *mcbsp)
 
 static int omap_mcbsp_request(struct omap_mcbsp *mcbsp)
 {
-	void *reg_cache;
+	void *reg_cache __free(kfree) = kzalloc(mcbsp->reg_cache_size, GFP_KERNEL);
 	int err;
 
-	reg_cache = kzalloc(mcbsp->reg_cache_size, GFP_KERNEL);
 	if (!reg_cache)
 		return -ENOMEM;
 
-	spin_lock(&mcbsp->lock);
-	if (!mcbsp->free) {
-		dev_err(mcbsp->dev, "McBSP%d is currently in use\n", mcbsp->id);
-		err = -EBUSY;
-		goto err_kfree;
+	scoped_guard(spinlock, &mcbsp->lock) {
+		if (!mcbsp->free) {
+			dev_err(mcbsp->dev, "McBSP%d is currently in use\n", mcbsp->id);
+			return -EBUSY;
+		}
+
+		mcbsp->free = false;
+		mcbsp->reg_cache = reg_cache;
+		reg_cache = NULL;
 	}
 
-	mcbsp->free = false;
-	mcbsp->reg_cache = reg_cache;
-	spin_unlock(&mcbsp->lock);
-
-	if(mcbsp->pdata->ops && mcbsp->pdata->ops->request)
+	if (mcbsp->pdata->ops && mcbsp->pdata->ops->request)
 		mcbsp->pdata->ops->request(mcbsp->id - 1);
 
 	/*
@@ -322,43 +322,40 @@ static int omap_mcbsp_request(struct omap_mcbsp *mcbsp)
 				  "McBSP", (void *)mcbsp);
 		if (err != 0) {
 			dev_err(mcbsp->dev, "Unable to request IRQ\n");
-			goto err_clk_disable;
 		}
 	} else {
 		err = request_irq(mcbsp->tx_irq, omap_mcbsp_tx_irq_handler, 0,
 				  "McBSP TX", (void *)mcbsp);
 		if (err != 0) {
 			dev_err(mcbsp->dev, "Unable to request TX IRQ\n");
-			goto err_clk_disable;
-		}
-
-		err = request_irq(mcbsp->rx_irq, omap_mcbsp_rx_irq_handler, 0,
-				  "McBSP RX", (void *)mcbsp);
-		if (err != 0) {
-			dev_err(mcbsp->dev, "Unable to request RX IRQ\n");
-			goto err_free_irq;
+		} else {
+			err = request_irq(mcbsp->rx_irq, omap_mcbsp_rx_irq_handler, 0,
+					  "McBSP RX", (void *)mcbsp);
+			if (err != 0) {
+				dev_err(mcbsp->dev, "Unable to request RX IRQ\n");
+				free_irq(mcbsp->tx_irq, (void *)mcbsp);
+			}
 		}
 	}
 
+	if (err != 0) {
+		if (mcbsp->pdata->ops && mcbsp->pdata->ops->free)
+			mcbsp->pdata->ops->free(mcbsp->id - 1);
+
+		/* Disable wakeup behavior */
+		if (mcbsp->pdata->has_wakeup)
+			MCBSP_WRITE(mcbsp, WAKEUPEN, 0);
+
+		scoped_guard(spinlock, &mcbsp->lock) {
+			reg_cache = mcbsp->reg_cache;
+			mcbsp->free = true;
+			mcbsp->reg_cache = NULL;
+		}
+
+		return err;
+	}
+
 	return 0;
-err_free_irq:
-	free_irq(mcbsp->tx_irq, (void *)mcbsp);
-err_clk_disable:
-	if(mcbsp->pdata->ops && mcbsp->pdata->ops->free)
-		mcbsp->pdata->ops->free(mcbsp->id - 1);
-
-	/* Disable wakeup behavior */
-	if (mcbsp->pdata->has_wakeup)
-		MCBSP_WRITE(mcbsp, WAKEUPEN, 0);
-
-	spin_lock(&mcbsp->lock);
-	mcbsp->free = true;
-	mcbsp->reg_cache = NULL;
-err_kfree:
-	spin_unlock(&mcbsp->lock);
-	kfree(reg_cache);
-
-	return err;
 }
 
 static void omap_mcbsp_free(struct omap_mcbsp *mcbsp)
@@ -394,13 +391,13 @@ static void omap_mcbsp_free(struct omap_mcbsp *mcbsp)
 	if (!mcbsp_omap1())
 		omap2_mcbsp_set_clks_src(mcbsp, MCBSP_CLKS_PRCM_SRC);
 
-	spin_lock(&mcbsp->lock);
-	if (mcbsp->free)
-		dev_err(mcbsp->dev, "McBSP%d was not reserved\n", mcbsp->id);
-	else
-		mcbsp->free = true;
-	mcbsp->reg_cache = NULL;
-	spin_unlock(&mcbsp->lock);
+	scoped_guard(spinlock, &mcbsp->lock) {
+		if (mcbsp->free)
+			dev_err(mcbsp->dev, "McBSP%d was not reserved\n", mcbsp->id);
+		else
+			mcbsp->free = true;
+		mcbsp->reg_cache = NULL;
+	}
 
 	kfree(reg_cache);
 }
@@ -580,15 +577,11 @@ static ssize_t dma_op_mode_store(struct device *dev,
 	if (i < 0)
 		return i;
 
-	spin_lock_irq(&mcbsp->lock);
+	guard(spinlock_irq)(&mcbsp->lock);
 	if (!mcbsp->free) {
-		size = -EBUSY;
-		goto unlock;
+		return -EBUSY;
 	}
 	mcbsp->dma_op_mode = i;
-
-unlock:
-	spin_unlock_irq(&mcbsp->lock);
 
 	return size;
 }
@@ -720,8 +713,8 @@ static int omap_mcbsp_init(struct platform_device *pdev)
 static void omap_mcbsp_set_threshold(struct snd_pcm_substream *substream,
 		unsigned int packet_size)
 {
-	struct snd_soc_pcm_runtime *rtd = asoc_substream_to_rtd(substream);
-	struct snd_soc_dai *cpu_dai = asoc_rtd_to_cpu(rtd, 0);
+	struct snd_soc_pcm_runtime *rtd = snd_soc_substream_to_rtd(substream);
+	struct snd_soc_dai *cpu_dai = snd_soc_rtd_to_cpu(rtd, 0);
 	struct omap_mcbsp *mcbsp = snd_soc_dai_get_drvdata(cpu_dai);
 	int words;
 
@@ -885,8 +878,8 @@ static snd_pcm_sframes_t omap_mcbsp_dai_delay(
 			struct snd_pcm_substream *substream,
 			struct snd_soc_dai *dai)
 {
-	struct snd_soc_pcm_runtime *rtd = asoc_substream_to_rtd(substream);
-	struct snd_soc_dai *cpu_dai = asoc_rtd_to_cpu(rtd, 0);
+	struct snd_soc_pcm_runtime *rtd = snd_soc_substream_to_rtd(substream);
+	struct snd_soc_dai *cpu_dai = snd_soc_rtd_to_cpu(rtd, 0);
 	struct omap_mcbsp *mcbsp = snd_soc_dai_get_drvdata(cpu_dai);
 	u16 fifo_use;
 	snd_pcm_sframes_t delay;
@@ -1360,23 +1353,22 @@ MODULE_DEVICE_TABLE(of, omap_mcbsp_of_match);
 static int asoc_mcbsp_probe(struct platform_device *pdev)
 {
 	struct omap_mcbsp_platform_data *pdata = dev_get_platdata(&pdev->dev);
+	const struct omap_mcbsp_platform_data *match_pdata =
+		device_get_match_data(&pdev->dev);
 	struct omap_mcbsp *mcbsp;
-	const struct of_device_id *match;
 	int ret;
 
-	match = of_match_device(omap_mcbsp_of_match, &pdev->dev);
-	if (match) {
+	if (match_pdata) {
 		struct device_node *node = pdev->dev.of_node;
 		struct omap_mcbsp_platform_data *pdata_quirk = pdata;
 		int buffer_size;
 
-		pdata = devm_kzalloc(&pdev->dev,
+		pdata = devm_kmemdup(&pdev->dev, match_pdata,
 				     sizeof(struct omap_mcbsp_platform_data),
 				     GFP_KERNEL);
 		if (!pdata)
 			return -ENOMEM;
 
-		memcpy(pdata, match->data, sizeof(*pdata));
 		if (!of_property_read_u32(node, "ti,buffer-size", &buffer_size))
 			pdata->buffer_size = buffer_size;
 		if (pdata_quirk)
@@ -1430,7 +1422,7 @@ static struct platform_driver asoc_mcbsp_driver = {
 	},
 
 	.probe = asoc_mcbsp_probe,
-	.remove_new = asoc_mcbsp_remove,
+	.remove = asoc_mcbsp_remove,
 };
 
 module_platform_driver(asoc_mcbsp_driver);

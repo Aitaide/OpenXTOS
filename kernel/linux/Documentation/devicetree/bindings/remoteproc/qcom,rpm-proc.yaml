@@ -8,7 +8,7 @@ title: Qualcomm Resource Power Manager (RPM) Processor/Subsystem
 
 maintainers:
   - Bjorn Andersson <andersson@kernel.org>
-  - Konrad Dybcio <konrad.dybcio@linaro.org>
+  - Konrad Dybcio <konradybcio@kernel.org>
   - Stephan Gerhold <stephan@gerhold.net>
 
 description: |
@@ -87,6 +87,7 @@ properties:
           - qcom,qcm2290-rpm-proc
           - qcom,qcs404-rpm-proc
           - qcom,sdm660-rpm-proc
+          - qcom,shikra-rpm-proc
           - qcom,sm6115-rpm-proc
           - qcom,sm6125-rpm-proc
           - qcom,sm6375-rpm-proc
@@ -142,7 +143,7 @@ examples:
         qcom,smd-edge = <15>;
 
         rpm-requests {
-          compatible = "qcom,rpm-msm8916";
+          compatible = "qcom,rpm-msm8916", "qcom,smd-rpm";
           qcom,smd-channels = "rpm_requests";
           /* ... */
         };
@@ -163,7 +164,7 @@ examples:
         mboxes = <&apcs_glb 0>;
 
         rpm-requests {
-          compatible = "qcom,rpm-qcm2290";
+          compatible = "qcom,rpm-qcm2290", "qcom,glink-smd-rpm";
           qcom,glink-channels = "rpm_requests";
           /* ... */
         };

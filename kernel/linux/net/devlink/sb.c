@@ -204,7 +204,7 @@ nla_put_failure:
 
 int devlink_nl_sb_get_doit(struct sk_buff *skb, struct genl_info *info)
 {
-	struct devlink *devlink = info->user_ptr[0];
+	struct devlink *devlink = devlink_nl_ctx(info)->devlink;
 	struct devlink_sb *devlink_sb;
 	struct sk_buff *msg;
 	int err;
@@ -306,7 +306,7 @@ nla_put_failure:
 
 int devlink_nl_sb_pool_get_doit(struct sk_buff *skb, struct genl_info *info)
 {
-	struct devlink *devlink = info->user_ptr[0];
+	struct devlink *devlink = devlink_nl_ctx(info)->devlink;
 	struct devlink_sb *devlink_sb;
 	struct sk_buff *msg;
 	u16 pool_index;
@@ -413,9 +413,9 @@ static int devlink_sb_pool_set(struct devlink *devlink, unsigned int sb_index,
 	return -EOPNOTSUPP;
 }
 
-int devlink_nl_cmd_sb_pool_set_doit(struct sk_buff *skb, struct genl_info *info)
+int devlink_nl_sb_pool_set_doit(struct sk_buff *skb, struct genl_info *info)
 {
-	struct devlink *devlink = info->user_ptr[0];
+	struct devlink *devlink = devlink_nl_ctx(info)->devlink;
 	enum devlink_sb_threshold_type threshold_type;
 	struct devlink_sb *devlink_sb;
 	u16 pool_index;
@@ -506,7 +506,7 @@ sb_occ_get_failure:
 int devlink_nl_sb_port_pool_get_doit(struct sk_buff *skb,
 				     struct genl_info *info)
 {
-	struct devlink_port *devlink_port = info->user_ptr[1];
+	struct devlink_port *devlink_port = devlink_nl_ctx(info)->devlink_port;
 	struct devlink *devlink = devlink_port->devlink;
 	struct devlink_sb *devlink_sb;
 	struct sk_buff *msg;
@@ -621,11 +621,11 @@ static int devlink_sb_port_pool_set(struct devlink_port *devlink_port,
 	return -EOPNOTSUPP;
 }
 
-int devlink_nl_cmd_sb_port_pool_set_doit(struct sk_buff *skb,
-					 struct genl_info *info)
+int devlink_nl_sb_port_pool_set_doit(struct sk_buff *skb,
+				     struct genl_info *info)
 {
-	struct devlink_port *devlink_port = info->user_ptr[1];
-	struct devlink *devlink = info->user_ptr[0];
+	struct devlink_port *devlink_port = devlink_nl_ctx(info)->devlink_port;
+	struct devlink *devlink = devlink_nl_ctx(info)->devlink;
 	struct devlink_sb *devlink_sb;
 	u16 pool_index;
 	u32 threshold;
@@ -716,7 +716,7 @@ nla_put_failure:
 int devlink_nl_sb_tc_pool_bind_get_doit(struct sk_buff *skb,
 					struct genl_info *info)
 {
-	struct devlink_port *devlink_port = info->user_ptr[1];
+	struct devlink_port *devlink_port = devlink_nl_ctx(info)->devlink_port;
 	struct devlink *devlink = devlink_port->devlink;
 	struct devlink_sb *devlink_sb;
 	struct sk_buff *msg;
@@ -861,11 +861,11 @@ static int devlink_sb_tc_pool_bind_set(struct devlink_port *devlink_port,
 	return -EOPNOTSUPP;
 }
 
-int devlink_nl_cmd_sb_tc_pool_bind_set_doit(struct sk_buff *skb,
-					    struct genl_info *info)
+int devlink_nl_sb_tc_pool_bind_set_doit(struct sk_buff *skb,
+					struct genl_info *info)
 {
-	struct devlink_port *devlink_port = info->user_ptr[1];
-	struct devlink *devlink = info->user_ptr[0];
+	struct devlink_port *devlink_port = devlink_nl_ctx(info)->devlink_port;
+	struct devlink *devlink = devlink_nl_ctx(info)->devlink;
 	enum devlink_sb_pool_type pool_type;
 	struct devlink_sb *devlink_sb;
 	u16 tc_index;
@@ -900,10 +900,9 @@ int devlink_nl_cmd_sb_tc_pool_bind_set_doit(struct sk_buff *skb,
 					   pool_index, threshold, info->extack);
 }
 
-int devlink_nl_cmd_sb_occ_snapshot_doit(struct sk_buff *skb,
-					struct genl_info *info)
+int devlink_nl_sb_occ_snapshot_doit(struct sk_buff *skb, struct genl_info *info)
 {
-	struct devlink *devlink = info->user_ptr[0];
+	struct devlink *devlink = devlink_nl_ctx(info)->devlink;
 	const struct devlink_ops *ops = devlink->ops;
 	struct devlink_sb *devlink_sb;
 
@@ -916,10 +915,10 @@ int devlink_nl_cmd_sb_occ_snapshot_doit(struct sk_buff *skb,
 	return -EOPNOTSUPP;
 }
 
-int devlink_nl_cmd_sb_occ_max_clear_doit(struct sk_buff *skb,
-					 struct genl_info *info)
+int devlink_nl_sb_occ_max_clear_doit(struct sk_buff *skb,
+				     struct genl_info *info)
 {
-	struct devlink *devlink = info->user_ptr[0];
+	struct devlink *devlink = devlink_nl_ctx(info)->devlink;
 	const struct devlink_ops *ops = devlink->ops;
 	struct devlink_sb *devlink_sb;
 
@@ -944,7 +943,7 @@ int devl_sb_register(struct devlink *devlink, unsigned int sb_index,
 	if (devlink_sb_index_exists(devlink, sb_index))
 		return -EEXIST;
 
-	devlink_sb = kzalloc(sizeof(*devlink_sb), GFP_KERNEL);
+	devlink_sb = kzalloc_obj(*devlink_sb);
 	if (!devlink_sb)
 		return -ENOMEM;
 	devlink_sb->index = sb_index;

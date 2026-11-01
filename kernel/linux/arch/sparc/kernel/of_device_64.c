@@ -4,7 +4,6 @@
 #include <linux/dma-mapping.h>
 #include <linux/init.h>
 #include <linux/export.h>
-#include <linux/mod_devicetable.h>
 #include <linux/slab.h>
 #include <linux/errno.h>
 #include <linux/irq.h>
@@ -560,7 +559,7 @@ static unsigned int __init build_one_device_irq(struct platform_device *op,
 	 *
 	 * If we hit a bus type or situation we cannot handle, we
 	 * stop and assume that the original IRQ number was in a
-	 * format which has special meaning to it's immediate parent.
+	 * format which has special meaning to its immediate parent.
 	 */
 	pp = dp->parent;
 	ip = NULL;
@@ -624,10 +623,7 @@ static unsigned int __init build_one_device_irq(struct platform_device *op,
 out:
 	nid = of_node_to_nid(dp);
 	if (nid != -1) {
-		cpumask_t numa_mask;
-
-		cpumask_copy(&numa_mask, cpumask_of_node(nid));
-		irq_set_affinity(irq, &numa_mask);
+		irq_set_affinity(irq, cpumask_of_node(nid));
 	}
 
 	return irq;
@@ -636,7 +632,7 @@ out:
 static struct platform_device * __init scan_one_device(struct device_node *dp,
 						 struct device *parent)
 {
-	struct platform_device *op = kzalloc(sizeof(*op), GFP_KERNEL);
+	struct platform_device *op = kzalloc_obj(*op);
 	const unsigned int *irq;
 	struct dev_archdata *sd;
 	int len, i;
@@ -680,6 +676,7 @@ static struct platform_device * __init scan_one_device(struct device_node *dp,
 
 	if (of_device_register(op)) {
 		printk("%pOF: Could not register of device.\n", dp);
+		put_device(&op->dev);
 		kfree(op);
 		op = NULL;
 	}

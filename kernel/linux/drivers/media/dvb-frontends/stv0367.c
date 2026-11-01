@@ -118,50 +118,32 @@ static const s32 stv0367cab_RF_LookUp2[RF_LOOKUP_TABLE2_SIZE][RF_LOOKUP_TABLE2_S
 	}
 };
 
-static
-int stv0367_writeregs(struct stv0367_state *state, u16 reg, u8 *data, int len)
+static noinline_for_stack
+int stv0367_writereg(struct stv0367_state *state, u16 reg, u8 data)
 {
-	u8 buf[MAX_XFER_SIZE];
+	u8 buf[3] = { MSB(reg), LSB(reg), data };
 	struct i2c_msg msg = {
 		.addr = state->config->demod_address,
 		.flags = 0,
 		.buf = buf,
-		.len = len + 2
+		.len = 3,
 	};
 	int ret;
 
-	if (2 + len > sizeof(buf)) {
-		printk(KERN_WARNING
-		       "%s: i2c wr reg=%04x: len=%d is too big!\n",
-		       KBUILD_MODNAME, reg, len);
-		return -EINVAL;
-	}
-
-
-	buf[0] = MSB(reg);
-	buf[1] = LSB(reg);
-	memcpy(buf + 2, data, len);
-
 	if (i2cdebug)
 		printk(KERN_DEBUG "%s: [%02x] %02x: %02x\n", __func__,
-			state->config->demod_address, reg, buf[2]);
+			state->config->demod_address, reg, data);
 
 	ret = i2c_transfer(state->i2c, &msg, 1);
 	if (ret != 1)
 		printk(KERN_ERR "%s: i2c write error! ([%02x] %02x: %02x)\n",
-			__func__, state->config->demod_address, reg, buf[2]);
+			__func__, state->config->demod_address, reg, data);
 
 	return (ret != 1) ? -EREMOTEIO : 0;
 }
 
-static int stv0367_writereg(struct stv0367_state *state, u16 reg, u8 data)
-{
-	u8 tmp = data; /* see gcc.gnu.org/bugzilla/show_bug.cgi?id=81715 */
-
-	return stv0367_writeregs(state, reg, &tmp, 1);
-}
-
-static u8 stv0367_readreg(struct stv0367_state *state, u16 reg)
+static noinline_for_stack
+u8 stv0367_readreg(struct stv0367_state *state, u16 reg)
 {
 	u8 b0[] = { 0, 0 };
 	u8 b1[] = { 0 };
@@ -1716,10 +1698,10 @@ struct dvb_frontend *stv0367ter_attach(const struct stv0367_config *config,
 	struct stv0367ter_state *ter_state = NULL;
 
 	/* allocate memory for the internal state */
-	state = kzalloc(sizeof(struct stv0367_state), GFP_KERNEL);
+	state = kzalloc_obj(struct stv0367_state);
 	if (state == NULL)
 		goto error;
-	ter_state = kzalloc(sizeof(struct stv0367ter_state), GFP_KERNEL);
+	ter_state = kzalloc_obj(struct stv0367ter_state);
 	if (ter_state == NULL)
 		goto error;
 
@@ -2883,10 +2865,10 @@ struct dvb_frontend *stv0367cab_attach(const struct stv0367_config *config,
 	struct stv0367cab_state *cab_state = NULL;
 
 	/* allocate memory for the internal state */
-	state = kzalloc(sizeof(struct stv0367_state), GFP_KERNEL);
+	state = kzalloc_obj(struct stv0367_state);
 	if (state == NULL)
 		goto error;
-	cab_state = kzalloc(sizeof(struct stv0367cab_state), GFP_KERNEL);
+	cab_state = kzalloc_obj(struct stv0367cab_state);
 	if (cab_state == NULL)
 		goto error;
 
@@ -3292,13 +3274,13 @@ struct dvb_frontend *stv0367ddb_attach(const struct stv0367_config *config,
 	struct stv0367cab_state *cab_state = NULL;
 
 	/* allocate memory for the internal state */
-	state = kzalloc(sizeof(struct stv0367_state), GFP_KERNEL);
+	state = kzalloc_obj(struct stv0367_state);
 	if (state == NULL)
 		goto error;
-	ter_state = kzalloc(sizeof(struct stv0367ter_state), GFP_KERNEL);
+	ter_state = kzalloc_obj(struct stv0367ter_state);
 	if (ter_state == NULL)
 		goto error;
-	cab_state = kzalloc(sizeof(struct stv0367cab_state), GFP_KERNEL);
+	cab_state = kzalloc_obj(struct stv0367cab_state);
 	if (cab_state == NULL)
 		goto error;
 

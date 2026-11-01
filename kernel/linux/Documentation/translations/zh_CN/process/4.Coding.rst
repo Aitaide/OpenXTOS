@@ -54,7 +54,7 @@
 注意您还可以使用 ``clang-format`` 工具来帮助您处理这些规则，快速自动重新格式
 化部分代码，和审阅完整的文件以发现代码样式错误、拼写错误和可能的改进。它还
 可以方便地排序 ``#includes`` 、对齐变量/宏、重排文本和其他类似任务。有关详细
-信息，请参阅文档 :ref:`Documentation/process/clang-format.rst <clangformat>`
+信息，请参阅文档 :ref:`Documentation/dev-tools/clang-format.rst <clangformat>`
 
 抽象层
 ******
@@ -216,7 +216,7 @@ Documentation/fault-injection/fault-injection.rst。
 可以在 https://sparse.wiki.kernel.org/index.php/Main_page 找到）,
 然后可以通过在make命令中添加“C=1”在代码上运行它。
 
-“Coccinelle”工具 :ref:`http://coccinelle.lip6.fr/ <devtools_coccinelle>`
+“Coccinelle”工具 :ref:`https://coccinelle.gitlabpages.inria.fr/website/ <devtools_coccinelle>`
 能够发现各种潜在的编码问题；它还可以为这些问题提出修复方案。在
 scripts/coccinelle目录下已经打包了相当多的内核“语义补丁”；运行
 “make coccicheck”将运行这些语义补丁并报告发现的任何问题。有关详细信息，请参阅

@@ -28,10 +28,10 @@ static void brcmstb_qspi_remove(struct platform_device *pdev)
 
 static struct platform_driver brcmstb_qspi_driver = {
 	.probe			= brcmstb_qspi_probe,
-	.remove_new		= brcmstb_qspi_remove,
+	.remove			= brcmstb_qspi_remove,
 	.driver = {
 		.name		= "brcmstb_qspi",
-		.pm		= &bcm_qspi_pm_ops,
+		.pm		= pm_sleep_ptr(&bcm_qspi_pm_ops),
 		.of_match_table = brcmstb_qspi_of_match,
 	}
 };

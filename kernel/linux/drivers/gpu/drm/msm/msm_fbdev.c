@@ -9,6 +9,7 @@
 #include <drm/drm_drv.h>
 #include <drm/drm_crtc_helper.h>
 #include <drm/drm_fb_helper.h>
+#include <drm/drm_file.h>
 #include <drm/drm_fourcc.h>
 #include <drm/drm_framebuffer.h>
 #include <drm/drm_prime.h>
@@ -40,20 +41,16 @@ static int msm_fbdev_mmap(struct fb_info *info, struct vm_area_struct *vma)
 static void msm_fbdev_fb_destroy(struct fb_info *info)
 {
 	struct drm_fb_helper *helper = (struct drm_fb_helper *)info->par;
-	struct drm_framebuffer *fb = helper->fb;
-	struct drm_gem_object *bo = msm_framebuffer_bo(fb, 0);
+	struct drm_gem_object *bo = msm_framebuffer_bo(helper->fb, 0);
 
 	DBG();
 
 	drm_fb_helper_fini(helper);
 
-	/* this will free the backing object */
 	msm_gem_put_vaddr(bo);
-	drm_framebuffer_remove(fb);
 
+	drm_client_buffer_delete(helper->buffer);
 	drm_client_release(&helper->client);
-	drm_fb_helper_unprepare(helper);
-	kfree(helper);
 }
 
 static const struct fb_ops msm_fb_ops = {
@@ -64,80 +61,6 @@ static const struct fb_ops msm_fb_ops = {
 	.fb_mmap = msm_fbdev_mmap,
 	.fb_destroy = msm_fbdev_fb_destroy,
 };
-
-static int msm_fbdev_create(struct drm_fb_helper *helper,
-		struct drm_fb_helper_surface_size *sizes)
-{
-	struct drm_device *dev = helper->dev;
-	struct msm_drm_private *priv = dev->dev_private;
-	struct drm_framebuffer *fb = NULL;
-	struct drm_gem_object *bo;
-	struct fb_info *fbi = NULL;
-	uint64_t paddr;
-	uint32_t format;
-	int ret, pitch;
-
-	format = drm_mode_legacy_fb_format(sizes->surface_bpp, sizes->surface_depth);
-
-	DBG("create fbdev: %dx%d@%d (%dx%d)", sizes->surface_width,
-			sizes->surface_height, sizes->surface_bpp,
-			sizes->fb_width, sizes->fb_height);
-
-	pitch = align_pitch(sizes->surface_width, sizes->surface_bpp);
-	fb = msm_alloc_stolen_fb(dev, sizes->surface_width,
-			sizes->surface_height, pitch, format);
-
-	if (IS_ERR(fb)) {
-		DRM_DEV_ERROR(dev->dev, "failed to allocate fb\n");
-		return PTR_ERR(fb);
-	}
-
-	bo = msm_framebuffer_bo(fb, 0);
-
-	/*
-	 * NOTE: if we can be guaranteed to be able to map buffer
-	 * in panic (ie. lock-safe, etc) we could avoid pinning the
-	 * buffer now:
-	 */
-	ret = msm_gem_get_and_pin_iova(bo, priv->kms->aspace, &paddr);
-	if (ret) {
-		DRM_DEV_ERROR(dev->dev, "failed to get buffer obj iova: %d\n", ret);
-		goto fail;
-	}
-
-	fbi = drm_fb_helper_alloc_info(helper);
-	if (IS_ERR(fbi)) {
-		DRM_DEV_ERROR(dev->dev, "failed to allocate fb info\n");
-		ret = PTR_ERR(fbi);
-		goto fail;
-	}
-
-	DBG("fbi=%p, dev=%p", fbi, dev);
-
-	helper->fb = fb;
-
-	fbi->fbops = &msm_fb_ops;
-
-	drm_fb_helper_fill_info(fbi, helper, sizes);
-
-	fbi->screen_buffer = msm_gem_get_vaddr(bo);
-	if (IS_ERR(fbi->screen_buffer)) {
-		ret = PTR_ERR(fbi->screen_buffer);
-		goto fail;
-	}
-	fbi->screen_size = bo->size;
-	fbi->fix.smem_start = paddr;
-	fbi->fix.smem_len = bo->size;
-
-	DBG("par=%p, %dx%d", fbi->par, fbi->var.xres, fbi->var.yres);
-	DBG("allocated %dx%d fb", fb->width, fb->height);
-
-	return 0;
-
-fail:
-	drm_framebuffer_remove(fb);
-	return ret;
-}
 
 static int msm_fbdev_fb_dirty(struct drm_fb_helper *helper,
 			      struct drm_clip_rect *clip)
@@ -158,99 +81,112 @@ static int msm_fbdev_fb_dirty(struct drm_fb_helper *helper,
 	return 0;
 }
 
-static const struct drm_fb_helper_funcs msm_fb_helper_funcs = {
-	.fb_probe = msm_fbdev_create,
+static const struct drm_fb_helper_funcs msm_fbdev_helper_funcs = {
 	.fb_dirty = msm_fbdev_fb_dirty,
 };
 
-/*
- * struct drm_client
- */
-
-static void msm_fbdev_client_unregister(struct drm_client_dev *client)
+int msm_fbdev_driver_fbdev_probe(struct drm_fb_helper *helper,
+				 struct drm_fb_helper_surface_size *sizes)
 {
-	struct drm_fb_helper *fb_helper = drm_fb_helper_from_client(client);
-
-	if (fb_helper->info) {
-		drm_fb_helper_unregister_info(fb_helper);
-	} else {
-		drm_client_release(&fb_helper->client);
-		drm_fb_helper_unprepare(fb_helper);
-		kfree(fb_helper);
-	}
-}
-
-static int msm_fbdev_client_restore(struct drm_client_dev *client)
-{
-	drm_fb_helper_lastclose(client->dev);
-
-	return 0;
-}
-
-static int msm_fbdev_client_hotplug(struct drm_client_dev *client)
-{
-	struct drm_fb_helper *fb_helper = drm_fb_helper_from_client(client);
+	struct drm_client_dev *client = &helper->client;
 	struct drm_device *dev = client->dev;
+	struct drm_file *file = client->file;
+	struct msm_drm_private *priv = dev->dev_private;
+	struct fb_info *fbi = helper->info;
+	const struct drm_format_info *format;
+	u32 fourcc, pitch, handle;
+	u64 size;
+	struct drm_gem_object *bo;
+	struct drm_client_buffer *buffer;
+	uint64_t paddr;
 	int ret;
 
-	if (dev->fb_helper)
-		return drm_fb_helper_hotplug_event(dev->fb_helper);
+	DBG("create fbdev: %dx%d@%d (%dx%d)", sizes->surface_width,
+			sizes->surface_height, sizes->surface_bpp,
+			sizes->fb_width, sizes->fb_height);
 
-	ret = drm_fb_helper_init(dev, fb_helper);
+	fourcc = drm_mode_legacy_fb_format(sizes->surface_bpp, sizes->surface_depth);
+	format = drm_get_format_info(dev, fourcc, DRM_FORMAT_MOD_LINEAR);
+	/* adreno needs pitch aligned to 32 pixels: */
+	pitch = drm_format_info_min_pitch(format, 0, ALIGN(sizes->surface_width, 32));
+	size = ALIGN(pitch * sizes->surface_height, PAGE_SIZE);
+
+	/* allocate backing bo */
+	DBG("allocating %llu bytes for fb %d", size, dev->primary->index);
+	bo = msm_gem_new(dev, size, MSM_BO_SCANOUT | MSM_BO_WC | MSM_BO_STOLEN, NULL);
+	if (IS_ERR(bo)) {
+		drm_warn(dev, "could not allocate stolen bo\n");
+		/* try regular bo: */
+		bo = msm_gem_new(dev, size, MSM_BO_SCANOUT | MSM_BO_WC, NULL);
+		if (IS_ERR(bo)) {
+			drm_err(dev, "failed to allocate buffer object\n");
+			return PTR_ERR(bo);
+		}
+	}
+
+	msm_gem_object_set_name(bo, "stolenfb");
+
+	ret = drm_gem_handle_create(file, bo, &handle);
 	if (ret)
-		goto err_drm_err;
+		goto err_drm_gem_object_put;
 
-	if (!drm_drv_uses_atomic_modeset(dev))
-		drm_helper_disable_unused_functions(dev);
+	buffer = drm_client_buffer_create(client, sizes->surface_width, sizes->surface_height,
+					  fourcc, handle, pitch);
+	if (IS_ERR(buffer)) {
+		ret = PTR_ERR(buffer);
+		goto err_drm_gem_handle_delete;
+	}
 
-	ret = drm_fb_helper_initial_config(fb_helper);
-	if (ret)
-		goto err_drm_fb_helper_fini;
+	/*
+	 * NOTE: if we can be guaranteed to be able to map buffer
+	 * in panic (ie. lock-safe, etc) we could avoid pinning the
+	 * buffer now:
+	 */
+	ret = msm_gem_get_and_pin_iova(bo, priv->kms->vm, &paddr);
+	if (ret) {
+		drm_err(dev, "failed to get buffer obj iova: %d\n", ret);
+		goto err_drm_client_buffer_delete;
+	}
+
+	DBG("fbi=%p, dev=%p", fbi, dev);
+
+	helper->funcs = &msm_fbdev_helper_funcs;
+	helper->buffer = buffer;
+	helper->fb = buffer->fb;
+
+	fbi->fbops = &msm_fb_ops;
+	fbi->flags |= FBINFO_VIRTFB; /* system memory */
+
+	drm_fb_helper_fill_info(fbi, helper, sizes);
+
+	fbi->screen_buffer = msm_gem_get_vaddr(bo);
+	if (IS_ERR(fbi->screen_buffer)) {
+		ret = PTR_ERR(fbi->screen_buffer);
+		goto err_msm_gem_unpin;
+	}
+	fbi->screen_size = bo->size;
+	fbi->fix.smem_start = paddr;
+	fbi->fix.smem_len = bo->size;
+
+	DBG("par=%p, %dx%d", fbi->par, fbi->var.xres, fbi->var.yres);
+	DBG("allocated %dx%d fb", buffer->fb->width, buffer->fb->height);
+
+	/* The handle is only needed for creating the framebuffer. */
+	drm_gem_handle_delete(file, handle);
+
+	/* The framebuffer still holds a reference on the GEM object. */
+	drm_gem_object_put(bo);
 
 	return 0;
 
-err_drm_fb_helper_fini:
-	drm_fb_helper_fini(fb_helper);
-err_drm_err:
-	drm_err(dev, "Failed to setup fbdev emulation (ret=%d)\n", ret);
+err_msm_gem_unpin:
+	msm_gem_unpin_iova(bo, priv->kms->vm);
+	msm_gem_vma_put(bo);
+err_drm_client_buffer_delete:
+	drm_client_buffer_delete(buffer);
+err_drm_gem_handle_delete:
+	drm_gem_handle_delete(file, handle);
+err_drm_gem_object_put:
+	drm_gem_object_put(bo);
 	return ret;
-}
-
-static const struct drm_client_funcs msm_fbdev_client_funcs = {
-	.owner		= THIS_MODULE,
-	.unregister	= msm_fbdev_client_unregister,
-	.restore	= msm_fbdev_client_restore,
-	.hotplug	= msm_fbdev_client_hotplug,
-};
-
-/* initialize fbdev helper */
-void msm_fbdev_setup(struct drm_device *dev)
-{
-	struct drm_fb_helper *helper;
-	int ret;
-
-	if (!fbdev)
-		return;
-
-	drm_WARN(dev, !dev->registered, "Device has not been registered.\n");
-	drm_WARN(dev, dev->fb_helper, "fb_helper is already set!\n");
-
-	helper = kzalloc(sizeof(*helper), GFP_KERNEL);
-	if (!helper)
-		return;
-	drm_fb_helper_prepare(dev, helper, 32, &msm_fb_helper_funcs);
-
-	ret = drm_client_init(dev, &helper->client, "fbdev", &msm_fbdev_client_funcs);
-	if (ret) {
-		drm_err(dev, "Failed to register client: %d\n", ret);
-		goto err_drm_fb_helper_unprepare;
-	}
-
-	drm_client_register(&helper->client);
-
-	return;
-
-err_drm_fb_helper_unprepare:
-	drm_fb_helper_unprepare(helper);
-	kfree(helper);
 }

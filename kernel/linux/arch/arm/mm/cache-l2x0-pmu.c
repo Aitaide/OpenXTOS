@@ -390,7 +390,7 @@ static struct attribute_group l2x0_pmu_event_attrs_group = {
 static ssize_t l2x0_pmu_cpumask_show(struct device *dev,
 				     struct device_attribute *attr, char *buf)
 {
-	return cpumap_print_to_pagebuf(true, buf, &pmu_cpu);
+	return sysfs_emit(buf, "%*pbl\n", cpumask_pr_args(&pmu_cpu));
 }
 
 static struct device_attribute l2x0_pmu_cpumask_attr =
@@ -507,7 +507,7 @@ static __init int l2x0_pmu_init(void)
 	if (!l2x0_base)
 		return 0;
 
-	l2x0_pmu = kzalloc(sizeof(*l2x0_pmu), GFP_KERNEL);
+	l2x0_pmu = kzalloc_obj(*l2x0_pmu);
 	if (!l2x0_pmu) {
 		pr_warn("Unable to allocate L2x0 PMU\n");
 		return -ENOMEM;
@@ -539,8 +539,7 @@ static __init int l2x0_pmu_init(void)
 	 * at higher frequencies.
 	 */
 	l2x0_pmu_poll_period = ms_to_ktime(1000);
-	hrtimer_init(&l2x0_pmu_hrtimer, CLOCK_MONOTONIC, HRTIMER_MODE_REL);
-	l2x0_pmu_hrtimer.function = l2x0_pmu_poll;
+	hrtimer_setup(&l2x0_pmu_hrtimer, l2x0_pmu_poll, CLOCK_MONOTONIC, HRTIMER_MODE_REL);
 
 	cpumask_set_cpu(0, &pmu_cpu);
 	ret = cpuhp_setup_state_nocalls(CPUHP_AP_PERF_ARM_L2X0_ONLINE,

@@ -8,6 +8,7 @@
 #include <linux/bpf.h>
 #include <bpf/bpf_helpers.h>
 #include "bpf_misc.h"
+#include "bpf_compiler.h"
 
 #define FUNCTION_NAME_LEN 64
 #define FILE_NAME_LEN 128
@@ -84,9 +85,11 @@ static void *get_thread_state(void *tls_base, PidData *pidData)
 	return thread_state;
 }
 
-static __always_inline bool get_frame_data(void *frame_ptr, PidData *pidData,
-					   FrameData *frame, Symbol *symbol)
+__weak bool __get_frame_data(long frame_ptr_, PidData *pidData __arg_nonnull,
+			     FrameData *frame __arg_nonnull, Symbol *symbol __arg_nonnull)
 {
+	void *frame_ptr = (void *)frame_ptr_;
+
 	// read data from PyFrameObject
 	bpf_probe_read_user(&frame->f_back,
 			    sizeof(frame->f_back),
@@ -116,6 +119,12 @@ static __always_inline bool get_frame_data(void *frame_ptr, PidData *pidData,
 					frame->co_name +
 					pidData->offsets.String_data);
 	return true;
+}
+
+static __always_inline bool get_frame_data(void *frame_ptr, PidData *pidData,
+					   FrameData *frame, Symbol *symbol)
+{
+	return __get_frame_data((long)frame_ptr, pidData, frame, symbol);
 }
 
 struct {
@@ -298,11 +307,11 @@ int __on_event(struct bpf_raw_tracepoint_args *ctx)
 #if defined(USE_ITER)
 /* no for loop, no unrolling */
 #elif defined(NO_UNROLL)
-#pragma clang loop unroll(disable)
+	__pragma_loop_no_unroll
 #elif defined(UNROLL_COUNT)
-#pragma clang loop unroll_count(UNROLL_COUNT)
+	__pragma_loop_unroll_count(UNROLL_COUNT)
 #else
-#pragma clang loop unroll(full)
+	__pragma_loop_unroll_full
 #endif /* NO_UNROLL */
 		/* Unwind python stack */
 #ifdef USE_ITER

@@ -151,7 +151,7 @@ struct reg_8 {
 static const struct regmap_config imx274_regmap_config = {
 	.reg_bits = 16,
 	.val_bits = 8,
-	.cache_type = REGCACHE_RBTREE,
+	.cache_type = REGCACHE_MAPLE,
 };
 
 /*
@@ -182,7 +182,7 @@ struct imx274_mode {
 };
 
 /*
- * imx274 test pattern related structure
+ * imx274 test pattern related enum
  */
 enum {
 	TEST_PATTERN_DISABLED = 0,
@@ -533,7 +533,7 @@ static const struct imx274_mode imx274_modes[] = {
 /*
  * struct imx274_ctrls - imx274 ctrl structure
  * @handler: V4L2 ctrl handler structure
- * @exposure: Pointer to expsure ctrl structure
+ * @exposure: Pointer to exposure ctrl structure
  * @gain: Pointer to gain ctrl structure
  * @vflip: Pointer to vflip ctrl structure
  * @test_pattern: Pointer to test pattern ctrl structure
@@ -547,7 +547,7 @@ struct imx274_ctrls {
 };
 
 /*
- * struct stim274 - imx274 device structure
+ * struct stimx274 - imx274 device structure
  * @sd: V4L2 subdevice structure
  * @pad: Media pad structure
  * @client: Pointer to I2C client
@@ -587,15 +587,12 @@ struct stimx274 {
 	    ? rounddown((dim), (step))			\
 	    : rounddown((dim) + (step) / 2, (step))))
 
-/*
- * Function declaration
- */
 static int imx274_set_gain(struct stimx274 *priv, struct v4l2_ctrl *ctrl);
 static int imx274_set_exposure(struct stimx274 *priv, int val);
 static int imx274_set_vflip(struct stimx274 *priv, int val);
 static int imx274_set_test_pattern(struct stimx274 *priv, int val);
-static int imx274_set_frame_interval(struct stimx274 *priv,
-				     struct v4l2_fract frame_interval);
+static int __imx274_set_frame_interval(struct stimx274 *priv,
+				       struct v4l2_fract frame_interval);
 
 static inline void msleep_range(unsigned int delay_base)
 {
@@ -640,9 +637,9 @@ static int imx274_write_table(struct stimx274 *priv, const struct reg_8 table[])
 
 	for (next = table;; next++) {
 		if ((next->addr != range_start + range_count) ||
-		    (next->addr == IMX274_TABLE_END) ||
-		    (next->addr == IMX274_TABLE_WAIT_MS) ||
-		    (range_count == max_range_vals)) {
+		    next->addr == IMX274_TABLE_END ||
+		    next->addr == IMX274_TABLE_WAIT_MS ||
+		    range_count == max_range_vals) {
 			if (range_count == 1)
 				err = regmap_write(regmap,
 						   range_start, range_vals[0]);
@@ -650,8 +647,6 @@ static int imx274_write_table(struct stimx274 *priv, const struct reg_8 table[])
 				err = regmap_bulk_write(regmap, range_start,
 							&range_vals[0],
 							range_count);
-			else
-				err = 0;
 
 			if (err)
 				return err;
@@ -826,6 +821,8 @@ static int imx274_start_stream(struct stimx274 *priv)
  * if rst = 0, keep it in reset;
  * if rst = 1, bring it out of reset.
  *
+ * Note: Misinterpretation of reset assertion - do not re-use this code.
+ * XCLR pin is using incorrect (for reset signal) logical level.
  */
 static void imx274_reset(struct stimx274 *priv, int rst)
 {
@@ -895,14 +892,6 @@ static int imx274_regulators_get(struct device *dev, struct stimx274 *imx274)
 					imx274->supplies);
 }
 
-/**
- * imx274_s_ctrl - This is used to set the imx274 V4L2 controls
- * @ctrl: V4L2 control to be set
- *
- * This function is used to set the V4L2 controls for the imx274 sensor.
- *
- * Return: 0 on success, errors otherwise
- */
 static int imx274_s_ctrl(struct v4l2_ctrl *ctrl)
 {
 	struct v4l2_subdev *sd = ctrl_to_sd(ctrl);
@@ -1018,8 +1007,8 @@ static int __imx274_change_compose(struct stimx274 *imx274,
 	int best_goodness = INT_MIN;
 
 	if (which == V4L2_SUBDEV_FORMAT_TRY) {
-		cur_crop = &sd_state->pads->try_crop;
-		tgt_fmt = &sd_state->pads->try_fmt;
+		cur_crop = v4l2_subdev_state_get_crop(sd_state, 0);
+		tgt_fmt = v4l2_subdev_state_get_format(sd_state, 0);
 	} else {
 		cur_crop = &imx274->crop;
 		tgt_fmt = &imx274->format;
@@ -1057,16 +1046,6 @@ static int __imx274_change_compose(struct stimx274 *imx274,
 	return 0;
 }
 
-/**
- * imx274_get_fmt - Get the pad format
- * @sd: Pointer to V4L2 Sub device structure
- * @sd_state: Pointer to sub device state structure
- * @fmt: Pointer to pad level media bus format
- *
- * This function is used to get the pad format information.
- *
- * Return: 0 on success
- */
 static int imx274_get_fmt(struct v4l2_subdev *sd,
 			  struct v4l2_subdev_state *sd_state,
 			  struct v4l2_subdev_format *fmt)
@@ -1079,16 +1058,6 @@ static int imx274_get_fmt(struct v4l2_subdev *sd,
 	return 0;
 }
 
-/**
- * imx274_set_fmt - This is used to set the pad format
- * @sd: Pointer to V4L2 Sub device structure
- * @sd_state: Pointer to sub device state information structure
- * @format: Pointer to pad level media bus format
- *
- * This function is used to set the pad format.
- *
- * Return: 0 on success
- */
 static int imx274_set_fmt(struct v4l2_subdev *sd,
 			  struct v4l2_subdev_state *sd_state,
 			  struct v4l2_subdev_format *format)
@@ -1112,7 +1081,7 @@ static int imx274_set_fmt(struct v4l2_subdev *sd,
 	 */
 	fmt->field = V4L2_FIELD_NONE;
 	if (format->which == V4L2_SUBDEV_FORMAT_TRY)
-		sd_state->pads->try_fmt = *fmt;
+		*v4l2_subdev_state_get_format(sd_state, 0) = *fmt;
 	else
 		imx274->format = *fmt;
 
@@ -1143,8 +1112,8 @@ static int imx274_get_selection(struct v4l2_subdev *sd,
 	}
 
 	if (sel->which == V4L2_SUBDEV_FORMAT_TRY) {
-		src_crop = &sd_state->pads->try_crop;
-		src_fmt = &sd_state->pads->try_fmt;
+		src_crop = v4l2_subdev_state_get_crop(sd_state, 0);
+		src_fmt = v4l2_subdev_state_get_format(sd_state, 0);
 	} else {
 		src_crop = &imx274->crop;
 		src_fmt = &imx274->format;
@@ -1215,7 +1184,7 @@ static int imx274_set_selection_crop(struct stimx274 *imx274,
 	sel->r = new_crop;
 
 	if (sel->which == V4L2_SUBDEV_FORMAT_TRY)
-		tgt_crop = &sd_state->pads->try_crop;
+		tgt_crop = v4l2_subdev_state_get_crop(sd_state, 0);
 	else
 		tgt_crop = &imx274->crop;
 
@@ -1327,19 +1296,18 @@ static int imx274_apply_trimming(struct stimx274 *imx274)
 	return err;
 }
 
-/**
- * imx274_g_frame_interval - Get the frame interval
- * @sd: Pointer to V4L2 Sub device structure
- * @fi: Pointer to V4l2 Sub device frame interval structure
- *
- * This function is used to get the frame interval.
- *
- * Return: 0 on success
- */
-static int imx274_g_frame_interval(struct v4l2_subdev *sd,
-				   struct v4l2_subdev_frame_interval *fi)
+static int imx274_get_frame_interval(struct v4l2_subdev *sd,
+				     struct v4l2_subdev_state *sd_state,
+				     struct v4l2_subdev_frame_interval *fi)
 {
 	struct stimx274 *imx274 = to_imx274(sd);
+
+	/*
+	 * FIXME: Implement support for V4L2_SUBDEV_FORMAT_TRY, using the V4L2
+	 * subdev active state API.
+	 */
+	if (fi->which != V4L2_SUBDEV_FORMAT_ACTIVE)
+		return -EINVAL;
 
 	fi->interval = imx274->frame_interval;
 	dev_dbg(&imx274->client->dev, "%s frame rate = %d / %d\n",
@@ -1349,29 +1317,28 @@ static int imx274_g_frame_interval(struct v4l2_subdev *sd,
 	return 0;
 }
 
-/**
- * imx274_s_frame_interval - Set the frame interval
- * @sd: Pointer to V4L2 Sub device structure
- * @fi: Pointer to V4l2 Sub device frame interval structure
- *
- * This function is used to set the frame intervavl.
- *
- * Return: 0 on success
- */
-static int imx274_s_frame_interval(struct v4l2_subdev *sd,
-				   struct v4l2_subdev_frame_interval *fi)
+static int imx274_set_frame_interval(struct v4l2_subdev *sd,
+				     struct v4l2_subdev_state *sd_state,
+				     struct v4l2_subdev_frame_interval *fi)
 {
 	struct stimx274 *imx274 = to_imx274(sd);
 	struct v4l2_ctrl *ctrl = imx274->ctrls.exposure;
 	int min, max, def;
 	int ret;
 
+	/*
+	 * FIXME: Implement support for V4L2_SUBDEV_FORMAT_TRY, using the V4L2
+	 * subdev active state API.
+	 */
+	if (fi->which != V4L2_SUBDEV_FORMAT_ACTIVE)
+		return -EINVAL;
+
 	ret = pm_runtime_resume_and_get(&imx274->client->dev);
 	if (ret < 0)
 		return ret;
 
 	mutex_lock(&imx274->lock);
-	ret = imx274_set_frame_interval(imx274, fi->interval);
+	ret = __imx274_set_frame_interval(imx274, fi->interval);
 
 	if (!ret) {
 		fi->interval = imx274->frame_interval;
@@ -1423,16 +1390,6 @@ static void imx274_load_default(struct stimx274 *priv)
 	priv->ctrls.test_pattern->val = TEST_PATTERN_DISABLED;
 }
 
-/**
- * imx274_s_stream - It is used to start/stop the streaming.
- * @sd: V4L2 Sub device
- * @on: Flag (True / False)
- *
- * This function controls the start or stop of streaming for the
- * imx274 sensor.
- *
- * Return: 0 on success, errors otherwise
- */
 static int imx274_s_stream(struct v4l2_subdev *sd, int on)
 {
 	struct stimx274 *imx274 = to_imx274(sd);
@@ -1466,8 +1423,8 @@ static int imx274_s_stream(struct v4l2_subdev *sd, int on)
 		 * are changed.
 		 * gain is not affected.
 		 */
-		ret = imx274_set_frame_interval(imx274,
-						imx274->frame_interval);
+		ret = __imx274_set_frame_interval(imx274,
+						  imx274->frame_interval);
 		if (ret)
 			goto fail;
 
@@ -1830,7 +1787,7 @@ fail:
 }
 
 /*
- * imx274_set_frame_interval - Function called when setting frame interval
+ * __imx274_set_frame_interval - Function called when setting frame interval
  * @priv: Pointer to device structure
  * @frame_interval: Variable for frame interval
  *
@@ -1839,8 +1796,8 @@ fail:
  *
  * Return: 0 on success
  */
-static int imx274_set_frame_interval(struct stimx274 *priv,
-				     struct v4l2_fract frame_interval)
+static int __imx274_set_frame_interval(struct stimx274 *priv,
+				       struct v4l2_fract frame_interval)
 {
 	int err;
 	u32 frame_length, req_frame_rate;
@@ -1927,11 +1884,11 @@ static const struct v4l2_subdev_pad_ops imx274_pad_ops = {
 	.set_fmt = imx274_set_fmt,
 	.get_selection = imx274_get_selection,
 	.set_selection = imx274_set_selection,
+	.get_frame_interval = imx274_get_frame_interval,
+	.set_frame_interval = imx274_set_frame_interval,
 };
 
 static const struct v4l2_subdev_video_ops imx274_video_ops = {
-	.g_frame_interval = imx274_g_frame_interval,
-	.s_frame_interval = imx274_s_frame_interval,
 	.s_stream = imx274_s_stream,
 };
 
@@ -1951,7 +1908,7 @@ static const struct of_device_id imx274_of_id_table[] = {
 MODULE_DEVICE_TABLE(of, imx274_of_id_table);
 
 static const struct i2c_device_id imx274_id[] = {
-	{ "IMX274", 0 },
+	{ .name = "IMX274" },
 	{ }
 };
 MODULE_DEVICE_TABLE(i2c, imx274_id);
@@ -1998,7 +1955,6 @@ static int imx274_probe(struct i2c_client *client)
 	struct device *dev = &client->dev;
 	int ret;
 
-	/* initialize imx274 */
 	imx274 = devm_kzalloc(dev, sizeof(*imx274), GFP_KERNEL);
 	if (!imx274)
 		return -ENOMEM;
@@ -2034,8 +1990,7 @@ static int imx274_probe(struct i2c_client *client)
 	/* initialize regmap */
 	imx274->regmap = devm_regmap_init_i2c(client, &imx274_regmap_config);
 	if (IS_ERR(imx274->regmap)) {
-		dev_err(dev,
-			"regmap init failed: %ld\n", PTR_ERR(imx274->regmap));
+		dev_err(dev, "regmap init failed: %pe\n", imx274->regmap);
 		ret = -ENODEV;
 		goto err_regmap;
 	}
@@ -2164,7 +2119,7 @@ static const struct dev_pm_ops imx274_pm_ops = {
 
 static struct i2c_driver imx274_i2c_driver = {
 	.driver = {
-		.name	= DRIVER_NAME,
+		.name = DRIVER_NAME,
 		.pm = &imx274_pm_ops,
 		.of_match_table	= imx274_of_id_table,
 	},

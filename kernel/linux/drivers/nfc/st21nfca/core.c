@@ -351,10 +351,10 @@ static int st21nfca_hci_start_poll(struct nfc_hci_dev *hdev,
 			if (r < 0)
 				return r;
 		} else {
-			hdev->gb = nfc_get_local_general_bytes(hdev->ndev,
-							       &hdev->gb_len);
-
-			if (hdev->gb == NULL || hdev->gb_len == 0) {
+			nfc_get_local_general_bytes(hdev->ndev, hdev->gb,
+						    sizeof(hdev->gb),
+						    &hdev->gb_len);
+			if (hdev->gb_len == 0) {
 				im_protocols &= ~NFC_PROTO_NFC_DEP_MASK;
 				tm_protocols &= ~NFC_PROTO_NFC_DEP_MASK;
 			}
@@ -577,9 +577,7 @@ static int st21nfca_get_iso15693_inventory(struct nfc_hci_dev *hdev,
 	if (r < 0)
 		goto exit;
 
-	skb_pull(inventory_skb, 2);
-
-	if (inventory_skb->len == 0 ||
+	if (!skb_pull(inventory_skb, 2) || inventory_skb->len < 2 ||
 	    inventory_skb->len > NFC_ISO15693_UID_MAXSIZE) {
 		r = -EPROTO;
 		goto exit;
@@ -844,7 +842,7 @@ static void st21nfca_hci_cmd_received(struct nfc_hci_dev *hdev, u8 pipe, u8 cmd,
 			info->se_info.count_pipes++;
 
 		if (info->se_info.count_pipes == info->se_info.expected_pipes) {
-			del_timer_sync(&info->se_info.se_active_timer);
+			timer_delete_sync(&info->se_info.se_active_timer);
 			info->se_info.se_active = false;
 			info->se_info.count_pipes = 0;
 			complete(&info->se_info.req_completion);
@@ -864,7 +862,7 @@ static int st21nfca_admin_event_received(struct nfc_hci_dev *hdev, u8 event,
 	case ST21NFCA_EVT_HOT_PLUG:
 		if (info->se_info.se_active) {
 			if (!ST21NFCA_EVT_HOT_PLUG_IS_INHIBITED(skb)) {
-				del_timer_sync(&info->se_info.se_active_timer);
+				timer_delete_sync(&info->se_info.se_active_timer);
 				info->se_info.se_active = false;
 				complete(&info->se_info.req_completion);
 			} else {
@@ -946,7 +944,7 @@ int st21nfca_hci_probe(void *phy_id, const struct nfc_phy_ops *phy_ops,
 	struct nfc_hci_init_data init_data;
 	unsigned long quirks = 0;
 
-	info = kzalloc(sizeof(struct st21nfca_hci_info), GFP_KERNEL);
+	info = kzalloc_obj(struct st21nfca_hci_info);
 	if (!info)
 		return -ENOMEM;
 

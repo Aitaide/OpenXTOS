@@ -36,7 +36,7 @@ static struct sk_buff *rdma_build_skb(struct net_device *netdev,
 	uh->source =
 		htons(rdma_flow_label_to_udp_sport(ah_attr->grh.flow_label));
 	uh->dest = htons(ROCE_V2_UDP_DPORT);
-	uh->len = htons(sizeof(struct udphdr));
+	udp_set_len_short(uh, sizeof(struct udphdr));
 
 	if (is_ipv4) {
 		skb_push(skb, sizeof(struct iphdr));
@@ -93,8 +93,7 @@ static struct net_device *rdma_get_xmit_slave_udp(struct ib_device *device,
 	slave = netdev_get_xmit_slave(master, skb,
 				      !!(device->lag_flags &
 					 RDMA_LAG_FLAGS_HASH_ALL_SLAVES));
-	if (slave)
-		dev_hold(slave);
+	dev_hold(slave);
 	rcu_read_unlock();
 	kfree_skb(skb);
 	return slave;
@@ -102,8 +101,7 @@ static struct net_device *rdma_get_xmit_slave_udp(struct ib_device *device,
 
 void rdma_lag_put_ah_roce_slave(struct net_device *xmit_slave)
 {
-	if (xmit_slave)
-		dev_put(xmit_slave);
+	dev_put(xmit_slave);
 }
 
 struct net_device *rdma_lag_get_ah_roce_slave(struct ib_device *device,

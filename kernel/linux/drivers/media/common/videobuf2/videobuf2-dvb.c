@@ -19,6 +19,7 @@
 /* ------------------------------------------------------------------ */
 
 MODULE_AUTHOR("Gerd Knorr <kraxel@bytesex.org> [SuSE Labs]");
+MODULE_DESCRIPTION("Videobuf2 helper library for simple DVB cards");
 MODULE_LICENSE("GPL");
 
 /* ------------------------------------------------------------------ */
@@ -298,7 +299,7 @@ struct vb2_dvb_frontend *vb2_dvb_alloc_frontend(
 {
 	struct vb2_dvb_frontend *fe;
 
-	fe = kzalloc(sizeof(struct vb2_dvb_frontend), GFP_KERNEL);
+	fe = kzalloc_obj(struct vb2_dvb_frontend);
 	if (fe == NULL)
 		return NULL;
 

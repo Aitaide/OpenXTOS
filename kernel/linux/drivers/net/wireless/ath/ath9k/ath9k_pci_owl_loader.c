@@ -18,7 +18,6 @@
 #include <linux/pci.h>
 #include <linux/delay.h>
 #include <linux/platform_device.h>
-#include <linux/ath9k_platform.h>
 #include <linux/nvmem-consumer.h>
 #include <linux/workqueue.h>
 
@@ -65,7 +64,7 @@ static int ath9k_pci_fixup(struct pci_dev *pdev, const u16 *cal_data,
 
 	dev_info(&pdev->dev, "fixup device configuration\n");
 
-	mem = pcim_iomap(pdev, 0, 0);
+	mem = pci_iomap(pdev, 0, 0);
 	if (!mem) {
 		dev_err(&pdev->dev, "ioremap error\n");
 		return -EINVAL;
@@ -103,7 +102,7 @@ static int ath9k_pci_fixup(struct pci_dev *pdev, const u16 *cal_data,
 	pci_write_config_word(pdev, PCI_COMMAND, cmd);
 
 	pci_write_config_dword(pdev, PCI_BASE_ADDRESS_0, bar0);
-	pcim_iounmap(pdev, mem);
+	pci_iounmap(pdev, mem);
 
 	pci_disable_device(pdev);
 
@@ -125,7 +124,7 @@ static void owl_rescan(struct pci_dev *pdev)
 
 static void owl_fw_cb(const struct firmware *fw, void *context)
 {
-	struct owl_ctx *ctx = (struct owl_ctx *)context;
+	struct owl_ctx *ctx = context;
 
 	complete(&ctx->eeprom_load);
 
@@ -136,24 +135,6 @@ static void owl_fw_cb(const struct firmware *fw, void *context)
 		dev_err(&ctx->pdev->dev, "no eeprom data received.\n");
 	}
 	release_firmware(fw);
-}
-
-static const char *owl_get_eeprom_name(struct pci_dev *pdev)
-{
-	struct device *dev = &pdev->dev;
-	char *eeprom_name;
-
-	dev_dbg(dev, "using auto-generated eeprom filename\n");
-
-	eeprom_name = devm_kzalloc(dev, EEPROM_FILENAME_LEN, GFP_KERNEL);
-	if (!eeprom_name)
-		return NULL;
-
-	/* this should match the pattern used in ath9k/init.c */
-	scnprintf(eeprom_name, EEPROM_FILENAME_LEN, "ath9k-eeprom-pci-%s.bin",
-		  dev_name(dev));
-
-	return eeprom_name;
 }
 
 static void owl_nvmem_work(struct work_struct *work)
@@ -196,14 +177,13 @@ static int owl_nvmem_probe(struct owl_ctx *ctx)
 static int owl_probe(struct pci_dev *pdev,
 		     const struct pci_device_id *id)
 {
+	char eeprom_name[EEPROM_FILENAME_LEN];
+	struct device *dev = &pdev->dev;
 	struct owl_ctx *ctx;
-	const char *eeprom_name;
 	int err = 0;
 
-	if (pcim_enable_device(pdev))
+	if (pci_enable_device(pdev))
 		return -EIO;
-
-	pcim_pin_device(pdev);
 
 	ctx = devm_kzalloc(&pdev->dev, sizeof(*ctx), GFP_KERNEL);
 	if (!ctx)
@@ -218,11 +198,11 @@ static int owl_probe(struct pci_dev *pdev,
 	if (err <= 0)
 		return err;
 
-	eeprom_name = owl_get_eeprom_name(pdev);
-	if (!eeprom_name) {
-		dev_err(&pdev->dev, "no eeprom filename found.\n");
-		return -ENODEV;
-	}
+	dev_dbg(dev, "using auto-generated eeprom filename\n");
+
+	/* this should match the pattern used in ath9k/init.c */
+	scnprintf(eeprom_name, sizeof(eeprom_name), "ath9k-eeprom-pci-%s.bin",
+		  dev_name(dev));
 
 	err = request_firmware_nowait(THIS_MODULE, true, eeprom_name,
 				      &pdev->dev, GFP_KERNEL, ctx, owl_fw_cb);

@@ -4,7 +4,7 @@
 
 .. include:: ../disclaimer-zh_TW.rst
 
-:Original: :ref:`Documentation/process/magic-number.rst <magicnumbers>`
+:Original: :ref:`Documentation/staging/magic-number.rst <magicnumbers>`
 
 如果想評論或更新本文的內容，請直接發信到LKML。如果你使用英文交流有困難的話，也可
 以向中文版維護者求助。如果本翻譯更新不及時或者翻譯存在問題，請聯繫中文版維護者::
@@ -12,7 +12,7 @@
         中文版維護者： 賈威威 Jia Wei Wei <harryxiyou@gmail.com>
         中文版翻譯者： 賈威威 Jia Wei Wei <harryxiyou@gmail.com>
         中文版校譯者： 賈威威 Jia Wei Wei <harryxiyou@gmail.com>
-                      胡皓文 Hu Haowen <src.res.211@gmail.com>
+                      胡皓文 Hu Haowen <2023002089@link.tyut.edu.cn>
 
 Linux 魔術數
 ============
@@ -64,11 +64,8 @@ PG_MAGIC              'P'              pg_{read,write}_hdr      ``include/linux/
 APM_BIOS_MAGIC        0x4101           apm_user                 ``arch/x86/kernel/apm_32.c``
 FASYNC_MAGIC          0x4601           fasync_struct            ``include/linux/fs.h``
 SLIP_MAGIC            0x5302           slip                     ``drivers/net/slip.h``
-BAYCOM_MAGIC          0x19730510       baycom_state             ``drivers/net/baycom_epp.c``
-HDLCDRV_MAGIC         0x5ac6e778       hdlcdrv_state            ``include/linux/hdlcdrv.h``
 KV_MAGIC              0x5f4b565f       kernel_vars_s            ``arch/mips/include/asm/sn/klkernvars.h``
 CODA_MAGIC            0xC0DAC0DA       coda_file_info           ``fs/coda/coda_fs_i.h``
-YAM_MAGIC             0xF10A7654       yam_port                 ``drivers/net/hamradio/yam.c``
 CCB_MAGIC             0xf2691ad2       ccb                      ``drivers/scsi/ncr53c8xx.c``
 QUEUE_MAGIC_FREE      0xf7e1c9a3       queue_entry              ``drivers/scsi/arm/queue.c``
 QUEUE_MAGIC_USED      0xf7e1cc33       queue_entry              ``drivers/scsi/arm/queue.c``

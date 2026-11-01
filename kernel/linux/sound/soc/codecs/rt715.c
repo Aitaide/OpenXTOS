@@ -20,8 +20,6 @@
 #include <linux/slab.h>
 #include <linux/platform_device.h>
 #include <linux/regulator/consumer.h>
-#include <linux/of.h>
-#include <linux/of_device.h>
 #include <sound/core.h>
 #include <sound/pcm.h>
 #include <sound/pcm_params.h>
@@ -42,8 +40,8 @@ static int rt715_index_write(struct regmap *regmap, unsigned int reg,
 
 	ret = regmap_write(regmap, addr, value);
 	if (ret < 0) {
-		pr_err("Failed to set private value: %08x <= %04x %d\n", ret,
-			addr, value);
+		pr_err("%s: Failed to set private value: %08x <= %04x %d\n",
+		       __func__, addr, value, ret);
 	}
 
 	return ret;
@@ -57,8 +55,8 @@ static int rt715_index_write_nid(struct regmap *regmap,
 
 	ret = regmap_write(regmap, addr, value);
 	if (ret < 0)
-		pr_err("Failed to set private value: %06x <= %04x ret=%d\n",
-			addr, value, ret);
+		pr_err("%s: Failed to set private value: %06x <= %04x ret=%d\n",
+		       __func__, addr, value, ret);
 
 	return ret;
 }
@@ -72,8 +70,8 @@ static int rt715_index_read_nid(struct regmap *regmap,
 	*value = 0;
 	ret = regmap_read(regmap, addr, value);
 	if (ret < 0)
-		pr_err("Failed to get private value: %06x => %04x ret=%d\n",
-			addr, *value, ret);
+		pr_err("%s: Failed to get private value: %06x => %04x ret=%d\n",
+		       __func__, addr, *value, ret);
 
 	return ret;
 }
@@ -127,8 +125,7 @@ static int rt715_set_amp_gain_put(struct snd_kcontrol *kcontrol,
 					struct snd_ctl_elem_value *ucontrol)
 {
 	struct snd_soc_component *component = snd_kcontrol_chip(kcontrol);
-	struct snd_soc_dapm_context *dapm =
-		snd_soc_component_get_dapm(component);
+	struct snd_soc_dapm_context *dapm = snd_soc_component_to_dapm(component);
 	struct soc_mixer_control *mc =
 		(struct soc_mixer_control *)kcontrol->private_value;
 	struct rt715_priv *rt715 = snd_soc_component_get_drvdata(component);
@@ -154,7 +151,7 @@ static int rt715_set_amp_gain_put(struct snd_kcontrol *kcontrol,
 
 	rt715_get_gain(rt715, addr_h, addr_l, val_h, &read_rl, &read_ll);
 
-	if (dapm->bias_level <= SND_SOC_BIAS_STANDBY)
+	if (snd_soc_dapm_get_bias_level(dapm) <= SND_SOC_BIAS_STANDBY)
 		regmap_write(rt715->regmap,
 				RT715_SET_AUDIO_POWER_STATE, AC_PWRST_D0);
 
@@ -208,7 +205,7 @@ static int rt715_set_amp_gain_put(struct snd_kcontrol *kcontrol,
 	}
 
 	/* D0:power on state, D3: power saving mode */
-	if (dapm->bias_level <= SND_SOC_BIAS_STANDBY)
+	if (snd_soc_dapm_get_bias_level(dapm) <= SND_SOC_BIAS_STANDBY)
 		regmap_write(rt715->regmap,
 				RT715_SET_AUDIO_POWER_STATE, AC_PWRST_D3);
 	return k_vol_changed;
@@ -252,8 +249,7 @@ static int rt715_set_main_switch_put(struct snd_kcontrol *kcontrol,
 					struct snd_ctl_elem_value *ucontrol)
 {
 	struct snd_soc_component *component = snd_kcontrol_chip(kcontrol);
-	struct snd_soc_dapm_context *dapm =
-		snd_soc_component_get_dapm(component);
+	struct snd_soc_dapm_context *dapm = snd_soc_component_to_dapm(component);
 	struct rt715_priv *rt715 = snd_soc_component_get_drvdata(component);
 	static const unsigned int capture_reg_H[] = {
 		RT715_SET_GAIN_MIC_ADC_H, RT715_SET_GAIN_LINE_ADC_H,
@@ -276,7 +272,7 @@ static int rt715_set_main_switch_put(struct snd_kcontrol *kcontrol,
 		addr_l = capture_reg_L[j];
 		rt715_get_gain(rt715, addr_h, addr_l, val_h, &read_rl, &read_ll);
 
-		if (dapm->bias_level <= SND_SOC_BIAS_STANDBY)
+		if (snd_soc_dapm_get_bias_level(dapm) <= SND_SOC_BIAS_STANDBY)
 			regmap_write(rt715->regmap,
 					RT715_SET_AUDIO_POWER_STATE, AC_PWRST_D0);
 
@@ -324,7 +320,7 @@ static int rt715_set_main_switch_put(struct snd_kcontrol *kcontrol,
 	}
 
 	/* D0:power on state, D3: power saving mode */
-	if (dapm->bias_level <= SND_SOC_BIAS_STANDBY)
+	if (snd_soc_dapm_get_bias_level(dapm) <= SND_SOC_BIAS_STANDBY)
 		regmap_write(rt715->regmap,
 				RT715_SET_AUDIO_POWER_STATE, AC_PWRST_D3);
 	return k_changed;
@@ -360,8 +356,7 @@ static int rt715_set_main_vol_put(struct snd_kcontrol *kcontrol,
 					struct snd_ctl_elem_value *ucontrol)
 {
 	struct snd_soc_component *component = snd_kcontrol_chip(kcontrol);
-	struct snd_soc_dapm_context *dapm =
-		snd_soc_component_get_dapm(component);
+	struct snd_soc_dapm_context *dapm = snd_soc_component_to_dapm(component);
 	struct rt715_priv *rt715 = snd_soc_component_get_drvdata(component);
 	static const unsigned int capture_reg_H[] = {
 		RT715_SET_GAIN_MIC_ADC_H, RT715_SET_GAIN_LINE_ADC_H,
@@ -383,7 +378,7 @@ static int rt715_set_main_vol_put(struct snd_kcontrol *kcontrol,
 		addr_l = capture_reg_L[j];
 		rt715_get_gain(rt715, addr_h, addr_l, val_h, &read_rl, &read_ll);
 
-		if (dapm->bias_level <= SND_SOC_BIAS_STANDBY)
+		if (snd_soc_dapm_get_bias_level(dapm) <= SND_SOC_BIAS_STANDBY)
 			regmap_write(rt715->regmap,
 					RT715_SET_AUDIO_POWER_STATE, AC_PWRST_D0);
 
@@ -433,7 +428,7 @@ static int rt715_set_main_vol_put(struct snd_kcontrol *kcontrol,
 	}
 
 	/* D0:power on state, D3: power saving mode */
-	if (dapm->bias_level <= SND_SOC_BIAS_STANDBY)
+	if (snd_soc_dapm_get_bias_level(dapm) <= SND_SOC_BIAS_STANDBY)
 		regmap_write(rt715->regmap,
 				RT715_SET_AUDIO_POWER_STATE, AC_PWRST_D3);
 	return k_changed;
@@ -487,14 +482,6 @@ static int rt715_vol_info(struct snd_kcontrol *kcontrol,
 	uinfo->value.integer.max = 0x3f;
 	return 0;
 }
-
-#define SOC_DOUBLE_R_EXT(xname, reg_left, reg_right, xshift, xmax, xinvert,\
-	 xhandler_get, xhandler_put) \
-{	.iface = SNDRV_CTL_ELEM_IFACE_MIXER, .name = (xname), \
-	.info = snd_soc_info_volsw, \
-	.get = xhandler_get, .put = xhandler_put, \
-	.private_value = SOC_DOUBLE_R_VALUE(reg_left, reg_right, xshift, \
-					    xmax, xinvert) }
 
 #define RT715_MAIN_SWITCH_EXT(xname, xhandler_get, xhandler_put) \
 {	.iface = SNDRV_CTL_ELEM_IFACE_MIXER, .name = (xname), \
@@ -556,8 +543,7 @@ static const struct snd_kcontrol_new rt715_snd_controls[] = {
 static int rt715_mux_get(struct snd_kcontrol *kcontrol,
 			struct snd_ctl_elem_value *ucontrol)
 {
-	struct snd_soc_component *component =
-		snd_soc_dapm_kcontrol_component(kcontrol);
+	struct snd_soc_component *component = snd_soc_dapm_kcontrol_to_component(kcontrol);
 	struct rt715_priv *rt715 = snd_soc_component_get_drvdata(component);
 	struct soc_enum *e = (struct soc_enum *)kcontrol->private_value;
 	unsigned int reg, val;
@@ -587,10 +573,8 @@ static int rt715_mux_get(struct snd_kcontrol *kcontrol,
 static int rt715_mux_put(struct snd_kcontrol *kcontrol,
 			struct snd_ctl_elem_value *ucontrol)
 {
-	struct snd_soc_component *component =
-		snd_soc_dapm_kcontrol_component(kcontrol);
-	struct snd_soc_dapm_context *dapm =
-				snd_soc_dapm_kcontrol_dapm(kcontrol);
+	struct snd_soc_component *component = snd_soc_dapm_kcontrol_to_component(kcontrol);
+	struct snd_soc_dapm_context *dapm = snd_soc_dapm_kcontrol_to_dapm(kcontrol);
 	struct rt715_priv *rt715 = snd_soc_component_get_drvdata(component);
 	struct soc_enum *e = (struct soc_enum *)kcontrol->private_value;
 	unsigned int *item = ucontrol->value.enumerated.item;
@@ -762,13 +746,12 @@ static const struct snd_soc_dapm_route rt715_audio_map[] = {
 static int rt715_set_bias_level(struct snd_soc_component *component,
 				enum snd_soc_bias_level level)
 {
-	struct snd_soc_dapm_context *dapm =
-		snd_soc_component_get_dapm(component);
+	struct snd_soc_dapm_context *dapm = snd_soc_component_to_dapm(component);
 	struct rt715_priv *rt715 = snd_soc_component_get_drvdata(component);
 
 	switch (level) {
 	case SND_SOC_BIAS_PREPARE:
-		if (dapm->bias_level == SND_SOC_BIAS_STANDBY) {
+		if (snd_soc_dapm_get_bias_level(dapm) == SND_SOC_BIAS_STANDBY) {
 			regmap_write(rt715->regmap,
 						RT715_SET_AUDIO_POWER_STATE,
 						AC_PWRST_D0);
@@ -785,7 +768,7 @@ static int rt715_set_bias_level(struct snd_soc_component *component,
 	default:
 		break;
 	}
-	dapm->bias_level = level;
+
 	return 0;
 }
 
@@ -864,14 +847,14 @@ static int rt715_pcm_hw_params(struct snd_pcm_substream *substream,
 		rt715_index_write(rt715->regmap, RT715_SDW_INPUT_SEL, 0xa000);
 		break;
 	default:
-		dev_err(component->dev, "Invalid DAI id %d\n", dai->id);
+		dev_err(component->dev, "%s: Invalid DAI id %d\n", __func__, dai->id);
 		return -EINVAL;
 	}
 
 	retval = sdw_stream_add_slave(rt715->slave, &stream_config,
 					&port_config, 1, sdw_stream);
 	if (retval) {
-		dev_err(dai->dev, "Unable to configure port\n");
+		dev_err(dai->dev, "%s: Unable to configure port\n", __func__);
 		return retval;
 	}
 
@@ -885,8 +868,8 @@ static int rt715_pcm_hw_params(struct snd_pcm_substream *substream,
 		val |= 0x0 << 8;
 		break;
 	default:
-		dev_err(component->dev, "Unsupported sample rate %d\n",
-			params_rate(params));
+		dev_err(component->dev, "%s: Unsupported sample rate %d\n",
+			__func__, params_rate(params));
 		return -EINVAL;
 	}
 
@@ -894,8 +877,8 @@ static int rt715_pcm_hw_params(struct snd_pcm_substream *substream,
 		/* bit 3:0 Number of Channel */
 		val |= (params_channels(params) - 1);
 	} else {
-		dev_err(component->dev, "Unsupported channels %d\n",
-			params_channels(params));
+		dev_err(component->dev, "%s: Unsupported channels %d\n",
+			__func__, params_channels(params));
 		return -EINVAL;
 	}
 
@@ -1139,7 +1122,6 @@ int rt715_io_init(struct device *dev, struct sdw_slave *slave)
 	/* Mark Slave initialization complete */
 	rt715->hw_init = true;
 
-	pm_runtime_mark_last_busy(&slave->dev);
 	pm_runtime_put_autosuspend(&slave->dev);
 
 	return 0;

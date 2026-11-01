@@ -108,6 +108,14 @@ enum mxs_i2c_devtype {
  * @cmd_complete: completion object for transaction wait
  * @cmd_err: error code for last transaction
  * @adapter: i2c subsystem adapter node
+ * @timing0: I2C TIMING0 register value
+ * @timing1: I2C TIMING1 register value
+ * @timing2: I2C TIMING2 register value
+ * @dmach: DMA channel
+ * @pio_data: PIO data for DMA
+ * @addr_data: address data for DMA
+ * @sg_io: scatterlist for I/O
+ * @dma_read: flag indicating DMA read
  */
 struct mxs_i2c_dev {
 	struct device *dev;
@@ -687,7 +695,7 @@ static irqreturn_t mxs_i2c_isr(int this_irq, void *dev_id)
 }
 
 static const struct i2c_algorithm mxs_i2c_algo = {
-	.master_xfer = mxs_i2c_xfer,
+	.xfer = mxs_i2c_xfer,
 	.functionality = mxs_i2c_func,
 };
 
@@ -831,7 +839,7 @@ static int mxs_i2c_probe(struct platform_device *pdev)
 	}
 
 	/* Setup the DMA */
-	i2c->dmach = dma_request_chan(dev, "rx-tx");
+	i2c->dmach = devm_dma_request_chan(dev, "rx-tx");
 	if (IS_ERR(i2c->dmach)) {
 		return dev_err_probe(dev, PTR_ERR(i2c->dmach),
 				     "Failed to request dma\n");
@@ -869,9 +877,6 @@ static void mxs_i2c_remove(struct platform_device *pdev)
 
 	i2c_del_adapter(&i2c->adapter);
 
-	if (i2c->dmach)
-		dma_release_channel(i2c->dmach);
-
 	writel(MXS_I2C_CTRL0_SFTRST, i2c->regs + MXS_I2C_CTRL0_SET);
 }
 
@@ -881,7 +886,7 @@ static struct platform_driver mxs_i2c_driver = {
 		   .of_match_table = mxs_i2c_dt_ids,
 		   },
 	.probe = mxs_i2c_probe,
-	.remove_new = mxs_i2c_remove,
+	.remove = mxs_i2c_remove,
 };
 
 static int __init mxs_i2c_init(void)

@@ -9,16 +9,15 @@
 #include "ctree.h"
 #include "volumes.h"
 #include "zoned.h"
-#include "rcu-string.h"
 #include "disk-io.h"
 #include "block-group.h"
-#include "transaction.h"
 #include "dev-replace.h"
 #include "space-info.h"
-#include "super.h"
 #include "fs.h"
 #include "accessors.h"
 #include "bio.h"
+#include "transaction.h"
+#include "sysfs.h"
 
 /* Maximum number of zones to report per blkdev_report_zones() call */
 #define BTRFS_REPORT_NR_ZONES   4096
@@ -38,11 +37,14 @@
 #define BTRFS_SB_LOG_FIRST_OFFSET	(512ULL * SZ_1G)
 #define BTRFS_SB_LOG_SECOND_OFFSET	(4096ULL * SZ_1G)
 
-#define BTRFS_SB_LOG_FIRST_SHIFT	const_ilog2(BTRFS_SB_LOG_FIRST_OFFSET)
-#define BTRFS_SB_LOG_SECOND_SHIFT	const_ilog2(BTRFS_SB_LOG_SECOND_OFFSET)
+#define BTRFS_SB_LOG_FIRST_SHIFT	ilog2(BTRFS_SB_LOG_FIRST_OFFSET)
+#define BTRFS_SB_LOG_SECOND_SHIFT	ilog2(BTRFS_SB_LOG_SECOND_OFFSET)
 
 /* Number of superblock log zones */
 #define BTRFS_NR_SB_LOG_ZONES 2
+
+/* Default number of max active zones when the device has no limits. */
+#define BTRFS_DEFAULT_MAX_ACTIVE_ZONES	128
 
 /*
  * Minimum of active zones we need:
@@ -89,10 +91,10 @@ static int sb_write_pointer(struct block_device *bdev, struct blk_zone *zones,
 	bool empty[BTRFS_NR_SB_LOG_ZONES];
 	bool full[BTRFS_NR_SB_LOG_ZONES];
 	sector_t sector;
-	int i;
 
-	for (i = 0; i < BTRFS_NR_SB_LOG_ZONES; i++) {
-		ASSERT(zones[i].type != BLK_ZONE_TYPE_CONVENTIONAL);
+	for (int i = 0; i < BTRFS_NR_SB_LOG_ZONES; i++) {
+		ASSERT(zones[i].type != BLK_ZONE_TYPE_CONVENTIONAL,
+		       "zones[%d].type=%d", i, zones[i].type);
 		empty[i] = (zones[i].cond == BLK_ZONE_COND_EMPTY);
 		full[i] = sb_zone_is_full(&zones[i]);
 	}
@@ -120,18 +122,19 @@ static int sb_write_pointer(struct block_device *bdev, struct blk_zone *zones,
 		return -ENOENT;
 	} else if (full[0] && full[1]) {
 		/* Compare two super blocks */
-		struct address_space *mapping = bdev->bd_inode->i_mapping;
+		struct address_space *mapping = bdev->bd_mapping;
 		struct page *page[BTRFS_NR_SB_LOG_ZONES];
 		struct btrfs_super_block *super[BTRFS_NR_SB_LOG_ZONES];
-		int i;
 
-		for (i = 0; i < BTRFS_NR_SB_LOG_ZONES; i++) {
+		for (int i = 0; i < BTRFS_NR_SB_LOG_ZONES; i++) {
 			u64 zone_end = (zones[i].start + zones[i].capacity) << SECTOR_SHIFT;
 			u64 bytenr = ALIGN_DOWN(zone_end, BTRFS_SUPER_INFO_SIZE) -
 						BTRFS_SUPER_INFO_SIZE;
 
+			filemap_invalidate_lock_shared(mapping);
 			page[i] = read_cache_page_gfp(mapping,
 					bytenr >> PAGE_SHIFT, GFP_NOFS);
+			filemap_invalidate_unlock_shared(mapping);
 			if (IS_ERR(page[i])) {
 				if (i == 1)
 					btrfs_release_disk_super(super[0]);
@@ -146,7 +149,7 @@ static int sb_write_pointer(struct block_device *bdev, struct blk_zone *zones,
 		else
 			sector = zones[0].start;
 
-		for (i = 0; i < BTRFS_NR_SB_LOG_ZONES; i++)
+		for (int i = 0; i < BTRFS_NR_SB_LOG_ZONES; i++)
 			btrfs_release_disk_super(super[i]);
 	} else if (!full[0] && (empty[1] || full[1])) {
 		sector = zones[0].wp;
@@ -166,14 +169,14 @@ static inline u32 sb_zone_number(int shift, int mirror)
 {
 	u64 zone = U64_MAX;
 
-	ASSERT(mirror < BTRFS_SUPER_MIRROR_MAX);
+	ASSERT(mirror < BTRFS_SUPER_MIRROR_MAX, "mirror=%d", mirror);
 	switch (mirror) {
 	case 0: zone = 0; break;
 	case 1: zone = 1ULL << (BTRFS_SB_LOG_FIRST_SHIFT - shift); break;
 	case 2: zone = 1ULL << (BTRFS_SB_LOG_SECOND_SHIFT - shift); break;
 	}
 
-	ASSERT(zone <= U32_MAX);
+	ASSERT(zone <= U32_MAX, "zone=%llu", zone);
 
 	return (u32)zone;
 }
@@ -240,7 +243,8 @@ static int btrfs_get_dev_zones(struct btrfs_device *device, u64 pos,
 		unsigned int i;
 		u32 zno;
 
-		ASSERT(IS_ALIGNED(pos, zinfo->zone_size));
+		ASSERT(IS_ALIGNED(pos, zinfo->zone_size),
+		       "pos=%llu zinfo->zone_size=%llu", pos, zinfo->zone_size);
 		zno = pos >> zinfo->zone_size_shift;
 		/*
 		 * We cannot report zones beyond the zone end. So, it is OK to
@@ -264,17 +268,17 @@ static int btrfs_get_dev_zones(struct btrfs_device *device, u64 pos,
 		}
 	}
 
-	ret = blkdev_report_zones(device->bdev, pos >> SECTOR_SHIFT, *nr_zones,
-				  copy_zone_info_cb, zones);
+	ret = blkdev_report_zones_cached(device->bdev, pos >> SECTOR_SHIFT,
+					 *nr_zones, copy_zone_info_cb, zones);
 	if (ret < 0) {
-		btrfs_err_in_rcu(device->fs_info,
+		btrfs_err(device->fs_info,
 				 "zoned: failed to read zone %llu on %s (devid %llu)",
-				 pos, rcu_str_deref(device->name),
+				 pos, rcu_dereference(device->name),
 				 device->devid);
 		return ret;
 	}
 	*nr_zones = ret;
-	if (!ret)
+	if (unlikely(!ret))
 		return -EIO;
 
 	/* Populate cache */
@@ -291,7 +295,7 @@ static int btrfs_get_dev_zones(struct btrfs_device *device, u64 pos,
 /* The emulated zone size is determined from the size of device extent */
 static int calculate_emulated_zone_size(struct btrfs_fs_info *fs_info)
 {
-	struct btrfs_path *path;
+	BTRFS_PATH_AUTO_FREE(path);
 	struct btrfs_root *root = fs_info->dev_root;
 	struct btrfs_key key;
 	struct extent_buffer *leaf;
@@ -308,28 +312,21 @@ static int calculate_emulated_zone_size(struct btrfs_fs_info *fs_info)
 
 	ret = btrfs_search_slot(NULL, root, &key, path, 0, 0);
 	if (ret < 0)
-		goto out;
+		return ret;
 
 	if (path->slots[0] >= btrfs_header_nritems(path->nodes[0])) {
 		ret = btrfs_next_leaf(root, path);
 		if (ret < 0)
-			goto out;
+			return ret;
 		/* No dev extents at all? Not good */
-		if (ret > 0) {
-			ret = -EUCLEAN;
-			goto out;
-		}
+		if (unlikely(ret > 0))
+			return -EUCLEAN;
 	}
 
 	leaf = path->nodes[0];
 	dext = btrfs_item_ptr(leaf, path->slots[0], struct btrfs_dev_extent);
 	fs_info->zone_size = btrfs_dev_extent_length(leaf, dext);
-	ret = 0;
-
-out:
-	btrfs_free_path(path);
-
-	return ret;
+	return 0;
 }
 
 int btrfs_get_dev_zone_info_all_devices(struct btrfs_fs_info *fs_info)
@@ -342,7 +339,10 @@ int btrfs_get_dev_zone_info_all_devices(struct btrfs_fs_info *fs_info)
 	if (!btrfs_fs_incompat(fs_info, ZONED))
 		return 0;
 
-	mutex_lock(&fs_devices->device_list_mutex);
+	/*
+	 * No need to take the device_list mutex here, we're still in the mount
+	 * path and devices cannot be added to or removed from the list yet.
+	 */
 	list_for_each_entry(device, &fs_devices->devices, dev_list) {
 		/* We can skip reading of zone info for missing devices */
 		if (!device->bdev)
@@ -352,9 +352,30 @@ int btrfs_get_dev_zone_info_all_devices(struct btrfs_fs_info *fs_info)
 		if (ret)
 			break;
 	}
-	mutex_unlock(&fs_devices->device_list_mutex);
 
 	return ret;
+}
+
+static int btrfs_get_max_active_zones(struct btrfs_device *device,
+				      struct btrfs_zoned_device_info *zone_info)
+{
+	struct block_device *bdev = device->bdev;
+	int max_active_zones;
+
+	if (unlikely(zone_info->nr_zones < BTRFS_MIN_ACTIVE_ZONES)) {
+		btrfs_err(device->fs_info, "zoned: not enough zones to mount filesystem: %u < %d",
+			  zone_info->nr_zones, BTRFS_MIN_ACTIVE_ZONES);
+		return -EINVAL;
+	}
+
+	max_active_zones = min_not_zero(bdev_max_active_zones(bdev),
+					bdev_max_open_zones(bdev));
+	if (max_active_zones == 0)
+		max_active_zones = min(zone_info->nr_zones / 4,
+				       BTRFS_DEFAULT_MAX_ACTIVE_ZONES);
+
+	zone_info->max_active_zones = max(max_active_zones, BTRFS_MIN_ACTIVE_ZONES);
+	return 0;
 }
 
 int btrfs_get_dev_zone_info(struct btrfs_device *device, bool populate_cache)
@@ -362,7 +383,6 @@ int btrfs_get_dev_zone_info(struct btrfs_device *device, bool populate_cache)
 	struct btrfs_fs_info *fs_info = device->fs_info;
 	struct btrfs_zoned_device_info *zone_info = NULL;
 	struct block_device *bdev = device->bdev;
-	unsigned int max_active_zones;
 	unsigned int nactive;
 	sector_t nr_sectors;
 	sector_t sector = 0;
@@ -382,7 +402,7 @@ int btrfs_get_dev_zone_info(struct btrfs_device *device, bool populate_cache)
 	if (device->zone_info)
 		return 0;
 
-	zone_info = kzalloc(sizeof(*zone_info), GFP_KERNEL);
+	zone_info = kzalloc_obj(*zone_info);
 	if (!zone_info)
 		return -ENOMEM;
 
@@ -406,16 +426,16 @@ int btrfs_get_dev_zone_info(struct btrfs_device *device, bool populate_cache)
 
 	/* We reject devices with a zone size larger than 8GB */
 	if (zone_info->zone_size > BTRFS_MAX_ZONE_SIZE) {
-		btrfs_err_in_rcu(fs_info,
+		btrfs_err(fs_info,
 		"zoned: %s: zone size %llu larger than supported maximum %llu",
-				 rcu_str_deref(device->name),
+				 rcu_dereference(device->name),
 				 zone_info->zone_size, BTRFS_MAX_ZONE_SIZE);
 		ret = -EINVAL;
 		goto out;
 	} else if (zone_info->zone_size < BTRFS_MIN_ZONE_SIZE) {
-		btrfs_err_in_rcu(fs_info,
+		btrfs_err(fs_info,
 		"zoned: %s: zone size %llu smaller than supported minimum %u",
-				 rcu_str_deref(device->name),
+				 rcu_dereference(device->name),
 				 zone_info->zone_size, BTRFS_MIN_ZONE_SIZE);
 		ret = -EINVAL;
 		goto out;
@@ -427,16 +447,9 @@ int btrfs_get_dev_zone_info(struct btrfs_device *device, bool populate_cache)
 	if (!IS_ALIGNED(nr_sectors, zone_sectors))
 		zone_info->nr_zones++;
 
-	max_active_zones = bdev_max_active_zones(bdev);
-	if (max_active_zones && max_active_zones < BTRFS_MIN_ACTIVE_ZONES) {
-		btrfs_err_in_rcu(fs_info,
-"zoned: %s: max active zones %u is too small, need at least %u active zones",
-				 rcu_str_deref(device->name), max_active_zones,
-				 BTRFS_MIN_ACTIVE_ZONES);
-		ret = -EINVAL;
+	ret = btrfs_get_max_active_zones(device, zone_info);
+	if (ret)
 		goto out;
-	}
-	zone_info->max_active_zones = max_active_zones;
 
 	zone_info->seq_zones = bitmap_zalloc(zone_info->nr_zones, GFP_KERNEL);
 	if (!zone_info->seq_zones) {
@@ -456,7 +469,7 @@ int btrfs_get_dev_zone_info(struct btrfs_device *device, bool populate_cache)
 		goto out;
 	}
 
-	zones = kvcalloc(BTRFS_REPORT_NR_ZONES, sizeof(struct blk_zone), GFP_KERNEL);
+	zones = kvzalloc_objs(struct blk_zone, BTRFS_REPORT_NR_ZONES);
 	if (!zones) {
 		ret = -ENOMEM;
 		goto out;
@@ -471,9 +484,9 @@ int btrfs_get_dev_zone_info(struct btrfs_device *device, bool populate_cache)
 		zone_info->zone_cache = vcalloc(zone_info->nr_zones,
 						sizeof(struct blk_zone));
 		if (!zone_info->zone_cache) {
-			btrfs_err_in_rcu(device->fs_info,
+			btrfs_err(device->fs_info,
 				"zoned: failed to allocate zone cache for %s",
-				rcu_str_deref(device->name));
+				rcu_dereference(device->name));
 			ret = -ENOMEM;
 			goto out;
 		}
@@ -498,6 +511,7 @@ int btrfs_get_dev_zone_info(struct btrfs_device *device, bool populate_cache)
 			case BLK_ZONE_COND_IMP_OPEN:
 			case BLK_ZONE_COND_EXP_OPEN:
 			case BLK_ZONE_COND_CLOSED:
+			case BLK_ZONE_COND_ACTIVE:
 				__set_bit(nreported, zone_info->active_zones);
 				nactive++;
 				break;
@@ -507,26 +521,35 @@ int btrfs_get_dev_zone_info(struct btrfs_device *device, bool populate_cache)
 		sector = zones[nr_zones - 1].start + zones[nr_zones - 1].len;
 	}
 
-	if (nreported != zone_info->nr_zones) {
-		btrfs_err_in_rcu(device->fs_info,
+	if (unlikely(nreported != zone_info->nr_zones)) {
+		btrfs_err(device->fs_info,
 				 "inconsistent number of zones on %s (%u/%u)",
-				 rcu_str_deref(device->name), nreported,
+				 rcu_dereference(device->name), nreported,
 				 zone_info->nr_zones);
 		ret = -EIO;
 		goto out;
 	}
 
-	if (max_active_zones) {
-		if (nactive > max_active_zones) {
-			btrfs_err_in_rcu(device->fs_info,
-			"zoned: %u active zones on %s exceeds max_active_zones %u",
-					 nactive, rcu_str_deref(device->name),
-					 max_active_zones);
+	if (unlikely(nactive > zone_info->max_active_zones)) {
+		if (bdev_max_active_zones(bdev) > 0) {
+			btrfs_err(device->fs_info,
+					"zoned: %u active zones on %s exceeds max_active_zones %u",
+					nactive, rcu_dereference(device->name),
+					zone_info->max_active_zones);
 			ret = -EIO;
 			goto out;
 		}
+
+		/*
+		 * This is for backward compatibility with old filesystems that
+		 * have a lot of active zones because the device doesn't report
+		 * a maximum number of zones and we previously didn't care for
+		 * the limit.
+		 */
+		zone_info->max_active_zones = 0;
+	} else {
 		atomic_set(&zone_info->active_zones_left,
-			   max_active_zones - nactive);
+				zone_info->max_active_zones - nactive);
 		set_bit(BTRFS_FS_ACTIVE_ZONE_TRACKING, &fs_info->flags);
 	}
 
@@ -548,8 +571,8 @@ int btrfs_get_dev_zone_info(struct btrfs_device *device, bool populate_cache)
 		if (ret)
 			goto out;
 
-		if (nr_zones != BTRFS_NR_SB_LOG_ZONES) {
-			btrfs_err_in_rcu(device->fs_info,
+		if (unlikely(nr_zones != BTRFS_NR_SB_LOG_ZONES)) {
+			btrfs_err(device->fs_info,
 	"zoned: failed to read super block log zone info at devid %llu zone %u",
 					 device->devid, sb_zone);
 			ret = -EUCLEAN;
@@ -566,8 +589,8 @@ int btrfs_get_dev_zone_info(struct btrfs_device *device, bool populate_cache)
 
 		ret = sb_write_pointer(device->bdev,
 				       &zone_info->sb_zones[sb_pos], &sb_wp);
-		if (ret != -ENOENT && ret) {
-			btrfs_err_in_rcu(device->fs_info,
+		if (unlikely(ret != -ENOENT && ret)) {
+			btrfs_err(device->fs_info,
 			"zoned: super block log zone corrupted devid %llu zone %u",
 					 device->devid, sb_zone);
 			ret = -EUCLEAN;
@@ -578,40 +601,24 @@ int btrfs_get_dev_zone_info(struct btrfs_device *device, bool populate_cache)
 
 	kvfree(zones);
 
-	switch (bdev_zoned_model(bdev)) {
-	case BLK_ZONED_HM:
+	if (bdev_is_zoned(bdev)) {
 		model = "host-managed zoned";
 		emulated = "";
-		break;
-	case BLK_ZONED_HA:
-		model = "host-aware zoned";
-		emulated = "";
-		break;
-	case BLK_ZONED_NONE:
+	} else {
 		model = "regular";
 		emulated = "emulated ";
-		break;
-	default:
-		/* Just in case */
-		btrfs_err_in_rcu(fs_info, "zoned: unsupported model %d on %s",
-				 bdev_zoned_model(bdev),
-				 rcu_str_deref(device->name));
-		ret = -EOPNOTSUPP;
-		goto out_free_zone_info;
 	}
 
-	btrfs_info_in_rcu(fs_info,
+	btrfs_info(fs_info,
 		"%s block device %s, %u %szones of %llu bytes",
-		model, rcu_str_deref(device->name), zone_info->nr_zones,
+		model, rcu_dereference(device->name), zone_info->nr_zones,
 		emulated, zone_info->zone_size);
 
 	return 0;
 
 out:
 	kvfree(zones);
-out_free_zone_info:
 	btrfs_destroy_dev_zone_info(device);
-
 	return ret;
 }
 
@@ -670,8 +677,7 @@ out:
 	return NULL;
 }
 
-int btrfs_get_dev_zone(struct btrfs_device *device, u64 pos,
-		       struct blk_zone *zone)
+static int btrfs_get_dev_zone(struct btrfs_device *device, u64 pos, struct blk_zone *zone)
 {
 	unsigned int nr_zones = 1;
 	int ret;
@@ -688,8 +694,7 @@ static int btrfs_check_for_zoned_device(struct btrfs_fs_info *fs_info)
 	struct btrfs_device *device;
 
 	list_for_each_entry(device, &fs_info->fs_devices->devices, dev_list) {
-		if (device->bdev &&
-		    bdev_zoned_model(device->bdev) == BLK_ZONED_HM) {
+		if (device->bdev && bdev_is_zoned(device->bdev)) {
 			btrfs_err(fs_info,
 				"zoned: mode not enabled but zoned device found: %pg",
 				device->bdev);
@@ -736,11 +741,14 @@ int btrfs_check_zoned_mode(struct btrfs_fs_info *fs_info)
 		 * zoned mode. In this case, we don't have a valid max zone
 		 * append size.
 		 */
-		if (bdev_is_zoned(device->bdev)) {
-			blk_stack_limits(lim,
-					 &bdev_get_queue(device->bdev)->limits,
-					 0);
-		}
+		if (bdev_is_zoned(device->bdev))
+			blk_stack_limits(lim, bdev_limits(device->bdev), 0);
+	}
+
+	ret = blk_validate_limits(lim);
+	if (ret) {
+		btrfs_err(fs_info, "zoned: failed to validate queue limits");
+		return ret;
 	}
 
 	/*
@@ -774,14 +782,15 @@ int btrfs_check_zoned_mode(struct btrfs_fs_info *fs_info)
 		     (u64)lim->max_segments << PAGE_SHIFT),
 		fs_info->sectorsize);
 	fs_info->fs_devices->chunk_alloc_policy = BTRFS_CHUNK_ALLOC_ZONED;
-	if (fs_info->max_zone_append_size < fs_info->max_extent_size)
-		fs_info->max_extent_size = fs_info->max_zone_append_size;
+
+	fs_info->max_extent_size = min_not_zero(fs_info->max_extent_size,
+						fs_info->max_zone_append_size);
 
 	/*
 	 * Check mount options here, because we might change fs_info->zoned
 	 * from fs_info->zone_size.
 	 */
-	ret = btrfs_check_mountopts_zoned(fs_info);
+	ret = btrfs_check_mountopts_zoned(fs_info, &fs_info->mount_opt);
 	if (ret)
 		return ret;
 
@@ -789,7 +798,8 @@ int btrfs_check_zoned_mode(struct btrfs_fs_info *fs_info)
 	return 0;
 }
 
-int btrfs_check_mountopts_zoned(struct btrfs_fs_info *info)
+int btrfs_check_mountopts_zoned(const struct btrfs_fs_info *info,
+				unsigned long long *mount_opt)
 {
 	if (!btrfs_is_zoned(info))
 		return 0;
@@ -798,18 +808,21 @@ int btrfs_check_mountopts_zoned(struct btrfs_fs_info *info)
 	 * Space cache writing is not COWed. Disable that to avoid write errors
 	 * in sequential zones.
 	 */
-	if (btrfs_test_opt(info, SPACE_CACHE)) {
+	if (btrfs_raw_test_opt(*mount_opt, SPACE_CACHE)) {
 		btrfs_err(info, "zoned: space cache v1 is not supported");
 		return -EINVAL;
 	}
 
-	if (btrfs_test_opt(info, NODATACOW)) {
+	if (btrfs_raw_test_opt(*mount_opt, NODATACOW)) {
 		btrfs_err(info, "zoned: NODATACOW not supported");
 		return -EINVAL;
 	}
 
-	btrfs_clear_and_info(info, DISCARD_ASYNC,
-			"zoned: async discard ignored and disabled for zoned mode");
+	if (btrfs_raw_test_opt(*mount_opt, DISCARD_ASYNC)) {
+		btrfs_info(info,
+			   "zoned: async discard ignored and disabled for zoned mode");
+		btrfs_clear_opt(*mount_opt, DISCARD_ASYNC);
+	}
 
 	return 0;
 }
@@ -838,11 +851,14 @@ static int sb_log_location(struct block_device *bdev, struct blk_zone *zones,
 			reset = &zones[1];
 
 		if (reset && reset->cond != BLK_ZONE_COND_EMPTY) {
+			unsigned int nofs_flags;
+
 			ASSERT(sb_zone_is_full(reset));
 
+			nofs_flags = memalloc_nofs_save();
 			ret = blkdev_zone_mgmt(bdev, REQ_OP_ZONE_RESET,
-					       reset->start, reset->len,
-					       GFP_NOFS);
+					       reset->start, reset->len);
+			memalloc_nofs_restore(nofs_flags);
 			if (ret)
 				return ret;
 
@@ -901,12 +917,12 @@ int btrfs_sb_log_location_bdev(struct block_device *bdev, int mirror, int rw,
 	if (sb_zone + 1 >= nr_zones)
 		return -ENOENT;
 
-	ret = blkdev_report_zones(bdev, zone_start_sector(sb_zone, bdev),
-				  BTRFS_NR_SB_LOG_ZONES, copy_zone_info_cb,
-				  zones);
+	ret = blkdev_report_zones_cached(bdev, zone_start_sector(sb_zone, bdev),
+					 BTRFS_NR_SB_LOG_ZONES,
+					 copy_zone_info_cb, zones);
 	if (ret < 0)
 		return ret;
-	if (ret != BTRFS_NR_SB_LOG_ZONES)
+	if (unlikely(ret != BTRFS_NR_SB_LOG_ZONES))
 		return -EIO;
 
 	return sb_log_location(bdev, zones, rw, bytenr_ret);
@@ -988,11 +1004,14 @@ int btrfs_advance_sb_log(struct btrfs_device *device, int mirror)
 			 * explicit ZONE_FINISH is not necessary.
 			 */
 			if (zone->wp != zone->start + zone->capacity) {
+				unsigned int nofs_flags;
 				int ret;
 
+				nofs_flags = memalloc_nofs_save();
 				ret = blkdev_zone_mgmt(device->bdev,
 						REQ_OP_ZONE_FINISH, zone->start,
-						zone->len, GFP_NOFS);
+						zone->len);
+				memalloc_nofs_restore(nofs_flags);
 				if (ret)
 					return ret;
 			}
@@ -1004,17 +1023,19 @@ int btrfs_advance_sb_log(struct btrfs_device *device, int mirror)
 	}
 
 	/* All the zones are FULL. Should not reach here. */
-	ASSERT(0);
+	DEBUG_WARN("unexpected state, all zones full");
 	return -EIO;
 }
 
 int btrfs_reset_sb_log_zones(struct block_device *bdev, int mirror)
 {
+	unsigned int nofs_flags;
 	sector_t zone_sectors;
 	sector_t nr_sectors;
 	u8 zone_sectors_shift;
 	u32 sb_zone;
 	u32 nr_zones;
+	int ret;
 
 	zone_sectors = bdev_zone_sectors(bdev);
 	zone_sectors_shift = ilog2(zone_sectors);
@@ -1025,9 +1046,12 @@ int btrfs_reset_sb_log_zones(struct block_device *bdev, int mirror)
 	if (sb_zone + 1 >= nr_zones)
 		return -ENOENT;
 
-	return blkdev_zone_mgmt(bdev, REQ_OP_ZONE_RESET,
-				zone_start_sector(sb_zone, bdev),
-				zone_sectors * BTRFS_NR_SB_LOG_ZONES, GFP_NOFS);
+	nofs_flags = memalloc_nofs_save();
+	ret = blkdev_zone_mgmt(bdev, REQ_OP_ZONE_RESET,
+			       zone_start_sector(sb_zone, bdev),
+			       zone_sectors * BTRFS_NR_SB_LOG_ZONES);
+	memalloc_nofs_restore(nofs_flags);
+	return ret;
 }
 
 /*
@@ -1052,8 +1076,10 @@ u64 btrfs_find_allocatable_zones(struct btrfs_device *device, u64 hole_start,
 	bool have_sb;
 	int i;
 
-	ASSERT(IS_ALIGNED(hole_start, zinfo->zone_size));
-	ASSERT(IS_ALIGNED(num_bytes, zinfo->zone_size));
+	ASSERT(IS_ALIGNED(hole_start, zinfo->zone_size),
+	       "hole_start=%llu zinfo->zone_size=%llu", hole_start, zinfo->zone_size);
+	ASSERT(IS_ALIGNED(num_bytes, zinfo->zone_size),
+	       "num_bytes=%llu zinfo->zone_size=%llu", num_bytes, zinfo->zone_size);
 
 	while (pos < hole_end) {
 		begin = pos >> shift;
@@ -1138,12 +1164,14 @@ static void btrfs_dev_clear_active_zone(struct btrfs_device *device, u64 pos)
 int btrfs_reset_device_zone(struct btrfs_device *device, u64 physical,
 			    u64 length, u64 *bytes)
 {
+	unsigned int nofs_flags;
 	int ret;
 
 	*bytes = 0;
+	nofs_flags = memalloc_nofs_save();
 	ret = blkdev_zone_mgmt(device->bdev, REQ_OP_ZONE_RESET,
-			       physical >> SECTOR_SHIFT, length >> SECTOR_SHIFT,
-			       GFP_NOFS);
+			       physical >> SECTOR_SHIFT, length >> SECTOR_SHIFT);
+	memalloc_nofs_restore(nofs_flags);
 	if (ret)
 		return ret;
 
@@ -1167,8 +1195,10 @@ int btrfs_ensure_empty_zones(struct btrfs_device *device, u64 start, u64 size)
 	u64 pos;
 	int ret;
 
-	ASSERT(IS_ALIGNED(start, zinfo->zone_size));
-	ASSERT(IS_ALIGNED(size, zinfo->zone_size));
+	ASSERT(IS_ALIGNED(start, zinfo->zone_size),
+	       "start=%llu, zinfo->zone_size=%llu", start, zinfo->zone_size);
+	ASSERT(IS_ALIGNED(size, zinfo->zone_size),
+	       "size=%llu, zinfo->zone_size=%llu", size, zinfo->zone_size);
 
 	if (begin + nbits > zinfo->nr_zones)
 		return -ERANGE;
@@ -1190,10 +1220,10 @@ int btrfs_ensure_empty_zones(struct btrfs_device *device, u64 start, u64 size)
 			continue;
 
 		/* Free regions should be empty */
-		btrfs_warn_in_rcu(
+		btrfs_warn(
 			device->fs_info,
 		"zoned: resetting device %s (devid %llu) zone %llu for allocation",
-			rcu_str_deref(device->name), device->devid, pos >> shift);
+			rcu_dereference(device->name), device->devid, pos >> shift);
 		WARN_ON_ONCE(1);
 
 		ret = btrfs_reset_device_zone(device, pos, zinfo->zone_size,
@@ -1216,9 +1246,10 @@ static int calculate_alloc_pointer(struct btrfs_block_group *cache,
 {
 	struct btrfs_fs_info *fs_info = cache->fs_info;
 	struct btrfs_root *root;
-	struct btrfs_path *path;
+	BTRFS_PATH_AUTO_FREE(path);
 	struct btrfs_key key;
 	struct btrfs_key found_key;
+	const u64 bg_end = btrfs_block_group_end(cache);
 	int ret;
 	u64 length;
 
@@ -1241,17 +1272,24 @@ static int calculate_alloc_pointer(struct btrfs_block_group *cache,
 	if (!path)
 		return -ENOMEM;
 
-	key.objectid = cache->start + cache->length;
+	key.objectid = bg_end;
 	key.type = 0;
 	key.offset = 0;
 
 	root = btrfs_extent_root(fs_info, key.objectid);
+	if (unlikely(!root)) {
+		btrfs_err(fs_info,
+			  "missing extent root for extent at bytenr %llu",
+			  key.objectid);
+		return -EUCLEAN;
+	}
+
 	ret = btrfs_search_slot(NULL, root, &key, path, 0, 0);
 	/* We should not find the exact match */
-	if (!ret)
+	if (unlikely(!ret))
 		ret = -EUCLEAN;
 	if (ret < 0)
-		goto out;
+		return ret;
 
 	ret = btrfs_previous_extent_item(root, path, cache->start);
 	if (ret) {
@@ -1259,7 +1297,7 @@ static int calculate_alloc_pointer(struct btrfs_block_group *cache,
 			ret = 0;
 			*offset_ret = 0;
 		}
-		goto out;
+		return ret;
 	}
 
 	btrfs_item_key_to_cpu(path->nodes[0], &found_key, path->slots[0]);
@@ -1269,34 +1307,611 @@ static int calculate_alloc_pointer(struct btrfs_block_group *cache,
 	else
 		length = fs_info->nodesize;
 
-	if (!(found_key.objectid >= cache->start &&
-	       found_key.objectid + length <= cache->start + cache->length)) {
-		ret = -EUCLEAN;
-		goto out;
+	if (unlikely(!(found_key.objectid >= cache->start &&
+		       found_key.objectid + length <= bg_end))) {
+		return -EUCLEAN;
 	}
 	*offset_ret = found_key.objectid + length - cache->start;
-	ret = 0;
+	return 0;
+}
 
-out:
-	btrfs_free_path(path);
+struct zone_info {
+	u64 physical;
+	u64 capacity;
+	u64 alloc_offset;
+};
+
+static int btrfs_load_zone_info(struct btrfs_fs_info *fs_info, int zone_idx,
+				struct zone_info *info, unsigned long *active,
+				struct btrfs_chunk_map *map, bool new)
+{
+	struct btrfs_dev_replace *dev_replace = &fs_info->dev_replace;
+	struct btrfs_device *device;
+	bool dev_replace_is_ongoing = false;
+	unsigned int nofs_flag;
+	struct blk_zone zone;
+	int ret;
+
+	info->physical = map->stripes[zone_idx].physical;
+
+	down_read(&dev_replace->rwsem);
+	device = map->stripes[zone_idx].dev;
+
+	if (!device->bdev) {
+		up_read(&dev_replace->rwsem);
+		info->alloc_offset = WP_MISSING_DEV;
+		return 0;
+	}
+
+	/* Consider a zone as active if we can allow any number of active zones. */
+	if (!device->zone_info->max_active_zones)
+		__set_bit(zone_idx, active);
+
+	if (!btrfs_dev_is_sequential(device, info->physical)) {
+		up_read(&dev_replace->rwsem);
+		info->alloc_offset = WP_CONVENTIONAL;
+		info->capacity = device->zone_info->zone_size;
+		return 0;
+	}
+
+	ASSERT(!new || btrfs_dev_is_empty_zone(device, info->physical));
+
+	/* This zone will be used for allocation, so mark this zone non-empty. */
+	btrfs_dev_clear_zone_empty(device, info->physical);
+
+	dev_replace_is_ongoing = btrfs_dev_replace_is_ongoing(dev_replace);
+	if (dev_replace_is_ongoing && dev_replace->tgtdev != NULL)
+		btrfs_dev_clear_zone_empty(dev_replace->tgtdev, info->physical);
+
+	/*
+	 * The group is mapped to a sequential zone. Get the zone write pointer
+	 * to determine the allocation offset within the zone.
+	 */
+	WARN_ON(!IS_ALIGNED(info->physical, fs_info->zone_size));
+
+	if (new) {
+		sector_t capacity;
+
+		capacity = bdev_zone_capacity(device->bdev, info->physical >> SECTOR_SHIFT);
+		up_read(&dev_replace->rwsem);
+		info->alloc_offset = 0;
+		info->capacity = capacity << SECTOR_SHIFT;
+
+		return 0;
+	}
+
+	nofs_flag = memalloc_nofs_save();
+	ret = btrfs_get_dev_zone(device, info->physical, &zone);
+	memalloc_nofs_restore(nofs_flag);
+	if (ret) {
+		up_read(&dev_replace->rwsem);
+		if (ret != -EIO && ret != -EOPNOTSUPP)
+			return ret;
+		info->alloc_offset = WP_MISSING_DEV;
+		return 0;
+	}
+
+	if (unlikely(zone.type == BLK_ZONE_TYPE_CONVENTIONAL)) {
+		btrfs_err(fs_info,
+		"zoned: unexpected conventional zone %llu on device %s (devid %llu)",
+			zone.start << SECTOR_SHIFT, rcu_dereference(device->name),
+			device->devid);
+		up_read(&dev_replace->rwsem);
+		return -EIO;
+	}
+
+	info->capacity = (zone.capacity << SECTOR_SHIFT);
+
+	switch (zone.cond) {
+	case BLK_ZONE_COND_OFFLINE:
+	case BLK_ZONE_COND_READONLY:
+		btrfs_err(fs_info,
+		"zoned: offline/readonly zone %llu on device %s (devid %llu)",
+			  (info->physical >> device->zone_info->zone_size_shift),
+			  rcu_dereference(device->name), device->devid);
+		info->alloc_offset = WP_MISSING_DEV;
+		break;
+	case BLK_ZONE_COND_EMPTY:
+		info->alloc_offset = 0;
+		break;
+	case BLK_ZONE_COND_FULL:
+		info->alloc_offset = info->capacity;
+		break;
+	default:
+		/* Partially used zone. */
+		info->alloc_offset = ((zone.wp - zone.start) << SECTOR_SHIFT);
+		__set_bit(zone_idx, active);
+		break;
+	}
+
+	up_read(&dev_replace->rwsem);
+
+	return 0;
+}
+
+static int btrfs_load_block_group_single(struct btrfs_block_group *bg,
+					 struct zone_info *info,
+					 unsigned long *active)
+{
+	if (unlikely(info->alloc_offset == WP_MISSING_DEV)) {
+		btrfs_err(bg->fs_info,
+			"zoned: cannot recover write pointer for zone %llu",
+			info->physical);
+		return -EIO;
+	}
+
+	bg->alloc_offset = info->alloc_offset;
+	bg->zone_capacity = info->capacity;
+	if (test_bit(0, active))
+		set_bit(BLOCK_GROUP_FLAG_ZONE_IS_ACTIVE, &bg->runtime_flags);
+	return 0;
+}
+
+static int btrfs_load_block_group_dup(struct btrfs_block_group *bg,
+				      struct btrfs_chunk_map *map,
+				      struct zone_info *zone_info,
+				      unsigned long *active,
+				      u64 last_alloc)
+{
+	struct btrfs_fs_info *fs_info = bg->fs_info;
+
+	if ((map->type & BTRFS_BLOCK_GROUP_DATA) && !fs_info->stripe_root) {
+		btrfs_err(fs_info, "zoned: data DUP profile needs raid-stripe-tree");
+		return -EINVAL;
+	}
+
+	bg->zone_capacity = min_not_zero(zone_info[0].capacity, zone_info[1].capacity);
+
+	if (unlikely(zone_info[0].alloc_offset == WP_MISSING_DEV)) {
+		btrfs_err(fs_info,
+			  "zoned: cannot recover write pointer for zone %llu",
+			  zone_info[0].physical);
+		return -EIO;
+	}
+	if (unlikely(zone_info[1].alloc_offset == WP_MISSING_DEV)) {
+		btrfs_err(fs_info,
+			  "zoned: cannot recover write pointer for zone %llu",
+			  zone_info[1].physical);
+		return -EIO;
+	}
+
+	/*
+	 * When the last extent is removed, last_alloc can be smaller than the other write
+	 * pointer. In that case, last_alloc should be moved to the corresponding write
+	 * pointer position.
+	 */
+	for (int i = 0; i < map->num_stripes; i++) {
+		if (zone_info[i].alloc_offset == WP_CONVENTIONAL)
+			continue;
+		if (last_alloc <= zone_info[i].alloc_offset) {
+			last_alloc = zone_info[i].alloc_offset;
+			break;
+		}
+	}
+
+	if (zone_info[0].alloc_offset == WP_CONVENTIONAL)
+		zone_info[0].alloc_offset = last_alloc;
+
+	if (zone_info[1].alloc_offset == WP_CONVENTIONAL)
+		zone_info[1].alloc_offset = last_alloc;
+
+	if (unlikely(zone_info[0].alloc_offset != zone_info[1].alloc_offset)) {
+		btrfs_err(fs_info,
+			  "zoned: write pointer offset mismatch of zones in DUP profile");
+		return -EIO;
+	}
+
+	if (test_bit(0, active) != test_bit(1, active)) {
+		if (unlikely(!btrfs_zone_activate(bg)))
+			return -EIO;
+	} else if (test_bit(0, active)) {
+		set_bit(BLOCK_GROUP_FLAG_ZONE_IS_ACTIVE, &bg->runtime_flags);
+	}
+
+	bg->alloc_offset = zone_info[0].alloc_offset;
+	return 0;
+}
+
+static int btrfs_load_block_group_raid1(struct btrfs_block_group *bg,
+					struct btrfs_chunk_map *map,
+					struct zone_info *zone_info,
+					unsigned long *active,
+					u64 last_alloc)
+{
+	struct btrfs_fs_info *fs_info = bg->fs_info;
+	int i;
+
+	if ((map->type & BTRFS_BLOCK_GROUP_DATA) && !fs_info->stripe_root) {
+		btrfs_err(fs_info, "zoned: data %s needs raid-stripe-tree",
+			  btrfs_bg_type_to_raid_name(map->type));
+		return -EINVAL;
+	}
+
+	/* In case a device is missing we have a cap of 0, so don't use it. */
+	bg->zone_capacity = min_not_zero(zone_info[0].capacity, zone_info[1].capacity);
+
+	/*
+	 * When the last extent is removed, last_alloc can be smaller than the other write
+	 * pointer. In that case, last_alloc should be moved to the corresponding write
+	 * pointer position.
+	 */
+	for (i = 0; i < map->num_stripes; i++) {
+		if (zone_info[i].alloc_offset == WP_MISSING_DEV ||
+		    zone_info[i].alloc_offset == WP_CONVENTIONAL)
+			continue;
+		if (last_alloc <= zone_info[i].alloc_offset) {
+			last_alloc = zone_info[i].alloc_offset;
+			break;
+		}
+	}
+
+	for (i = 0; i < map->num_stripes; i++) {
+		if (zone_info[i].alloc_offset == WP_MISSING_DEV)
+			continue;
+
+		if (zone_info[i].alloc_offset == WP_CONVENTIONAL)
+			zone_info[i].alloc_offset = last_alloc;
+
+		if (unlikely((zone_info[0].alloc_offset != zone_info[i].alloc_offset) &&
+			     !btrfs_test_opt(fs_info, DEGRADED))) {
+			btrfs_err(fs_info,
+			"zoned: write pointer offset mismatch of zones in %s profile",
+				  btrfs_bg_type_to_raid_name(map->type));
+			return -EIO;
+		}
+		if (test_bit(0, active) != test_bit(i, active)) {
+			if (unlikely(!btrfs_test_opt(fs_info, DEGRADED) &&
+				     !btrfs_zone_activate(bg))) {
+				return -EIO;
+			}
+		} else {
+			if (test_bit(0, active))
+				set_bit(BLOCK_GROUP_FLAG_ZONE_IS_ACTIVE, &bg->runtime_flags);
+		}
+	}
+
+	if (zone_info[0].alloc_offset != WP_MISSING_DEV)
+		bg->alloc_offset = zone_info[0].alloc_offset;
+	else
+		bg->alloc_offset = zone_info[i - 1].alloc_offset;
+
+	return 0;
+}
+
+static int btrfs_load_block_group_raid0(struct btrfs_block_group *bg,
+					struct btrfs_chunk_map *map,
+					struct zone_info *zone_info,
+					unsigned long *active,
+					u64 last_alloc)
+{
+	struct btrfs_fs_info *fs_info = bg->fs_info;
+	u64 stripe_nr = 0, stripe_offset = 0;
+	u64 prev_offset = 0;
+	u32 stripe_index = 0;
+	bool has_partial = false, has_conventional = false;
+
+	if ((map->type & BTRFS_BLOCK_GROUP_DATA) && !fs_info->stripe_root) {
+		btrfs_err(fs_info, "zoned: data %s needs raid-stripe-tree",
+			  btrfs_bg_type_to_raid_name(map->type));
+		return -EINVAL;
+	}
+
+	/*
+	 * When the last extent is removed, last_alloc can be smaller than the other write
+	 * pointer. In that case, last_alloc should be moved to the corresponding write
+	 * pointer position.
+	 */
+	for (int i = 0; i < map->num_stripes; i++) {
+		u64 alloc;
+
+		if (zone_info[i].alloc_offset == WP_MISSING_DEV ||
+		    zone_info[i].alloc_offset == WP_CONVENTIONAL)
+			continue;
+
+		stripe_nr = zone_info[i].alloc_offset >> BTRFS_STRIPE_LEN_SHIFT;
+		stripe_offset = zone_info[i].alloc_offset & BTRFS_STRIPE_LEN_MASK;
+		if (stripe_offset == 0 && stripe_nr > 0) {
+			stripe_nr--;
+			stripe_offset = BTRFS_STRIPE_LEN;
+		}
+		alloc = ((stripe_nr * map->num_stripes + i) << BTRFS_STRIPE_LEN_SHIFT) +
+			stripe_offset;
+		last_alloc = max(last_alloc, alloc);
+
+		/* Partially written stripe found. It should be last. */
+		if (zone_info[i].alloc_offset & BTRFS_STRIPE_LEN_MASK)
+			break;
+	}
+	stripe_nr = 0;
+	stripe_offset = 0;
+
+	if (last_alloc) {
+		u32 factor = map->num_stripes;
+
+		stripe_nr = last_alloc >> BTRFS_STRIPE_LEN_SHIFT;
+		stripe_offset = last_alloc & BTRFS_STRIPE_LEN_MASK;
+		stripe_nr = div_u64_rem(stripe_nr, factor, &stripe_index);
+	}
+
+	for (int i = 0; i < map->num_stripes; i++) {
+		if (zone_info[i].alloc_offset == WP_MISSING_DEV)
+			continue;
+
+		if (zone_info[i].alloc_offset == WP_CONVENTIONAL) {
+			has_conventional = true;
+			zone_info[i].alloc_offset = btrfs_stripe_nr_to_offset(stripe_nr);
+
+			if (stripe_index > i)
+				zone_info[i].alloc_offset += BTRFS_STRIPE_LEN;
+			else if (stripe_index == i)
+				zone_info[i].alloc_offset += stripe_offset;
+		}
+
+		/* Verification */
+		if (i != 0) {
+			if (unlikely(prev_offset < zone_info[i].alloc_offset)) {
+				btrfs_err(fs_info,
+				"zoned: stripe position disorder found in block group %llu",
+					  bg->start);
+				return -EIO;
+			}
+
+			if (unlikely(has_partial &&
+				     (zone_info[i].alloc_offset & BTRFS_STRIPE_LEN_MASK))) {
+				btrfs_err(fs_info,
+				"zoned: multiple partial written stripe found in block group %llu",
+					  bg->start);
+				return -EIO;
+			}
+		}
+		prev_offset = zone_info[i].alloc_offset;
+
+		if ((zone_info[i].alloc_offset & BTRFS_STRIPE_LEN_MASK) != 0)
+			has_partial = true;
+
+		if (test_bit(0, active) != test_bit(i, active)) {
+			if (unlikely(!btrfs_zone_activate(bg)))
+				return -EIO;
+		} else {
+			if (test_bit(0, active))
+				set_bit(BLOCK_GROUP_FLAG_ZONE_IS_ACTIVE, &bg->runtime_flags);
+		}
+		bg->zone_capacity += zone_info[i].capacity;
+		bg->alloc_offset += zone_info[i].alloc_offset;
+	}
+
+	/* Check if all devices stay in the same stripe row. */
+	if (unlikely(zone_info[0].alloc_offset -
+		     zone_info[map->num_stripes - 1].alloc_offset > BTRFS_STRIPE_LEN)) {
+		btrfs_err(fs_info, "zoned: stripe gap too large in block group %llu", bg->start);
+		return -EIO;
+	}
+
+	if (unlikely(has_conventional && bg->alloc_offset < last_alloc)) {
+		btrfs_err(fs_info, "zoned: allocated extent stays beyond write pointers %llu %llu",
+			  bg->alloc_offset, last_alloc);
+		return -EIO;
+	}
+
+	return 0;
+}
+
+static int btrfs_load_block_group_raid10(struct btrfs_block_group *bg,
+					 struct btrfs_chunk_map *map,
+					 struct zone_info *zone_info,
+					 unsigned long *active,
+					 u64 last_alloc)
+{
+	struct btrfs_fs_info *fs_info = bg->fs_info;
+	u64 AUTO_KFREE(raid0_allocs);
+	u64 stripe_nr = 0, stripe_offset = 0;
+	u32 stripe_index = 0;
+	bool has_partial = false, has_conventional = false;
+	u64 prev_offset = 0;
+
+	if ((map->type & BTRFS_BLOCK_GROUP_DATA) && !fs_info->stripe_root) {
+		btrfs_err(fs_info, "zoned: data %s needs raid-stripe-tree",
+			  btrfs_bg_type_to_raid_name(map->type));
+		return -EINVAL;
+	}
+
+	raid0_allocs = kzalloc_objs(*raid0_allocs, map->num_stripes / map->sub_stripes, GFP_NOFS);
+	if (!raid0_allocs)
+		return -ENOMEM;
+
+	/*
+	 * When the last extent is removed, last_alloc can be smaller than the other write
+	 * pointer. In that case, last_alloc should be moved to the corresponding write
+	 * pointer position.
+	 */
+	for (int i = 0; i < map->num_stripes; i += map->sub_stripes) {
+		u64 alloc = zone_info[i].alloc_offset;
+
+		for (int j = 1; j < map->sub_stripes; j++) {
+			int idx = i + j;
+
+			if (zone_info[idx].alloc_offset == WP_MISSING_DEV ||
+			    zone_info[idx].alloc_offset == WP_CONVENTIONAL)
+				continue;
+			if (alloc == WP_MISSING_DEV || alloc == WP_CONVENTIONAL) {
+				alloc = zone_info[idx].alloc_offset;
+			} else if (unlikely(zone_info[idx].alloc_offset != alloc)) {
+				btrfs_err(fs_info,
+				"zoned: write pointer mismatch found in block group %llu",
+					  bg->start);
+				return -EIO;
+			}
+		}
+
+		raid0_allocs[i / map->sub_stripes] = alloc;
+		if (alloc == WP_CONVENTIONAL)
+			continue;
+		if (unlikely(alloc == WP_MISSING_DEV)) {
+			btrfs_err(fs_info,
+			"zoned: cannot recover write pointer of block group %llu due to missing device",
+				  bg->start);
+			return -EIO;
+		}
+
+		stripe_nr = alloc >> BTRFS_STRIPE_LEN_SHIFT;
+		stripe_offset = alloc & BTRFS_STRIPE_LEN_MASK;
+		if (stripe_offset == 0 && stripe_nr > 0) {
+			stripe_nr--;
+			stripe_offset = BTRFS_STRIPE_LEN;
+		}
+
+		alloc = ((stripe_nr * (map->num_stripes / map->sub_stripes) +
+			  (i / map->sub_stripes)) <<
+			 BTRFS_STRIPE_LEN_SHIFT) + stripe_offset;
+		last_alloc = max(last_alloc, alloc);
+	}
+	stripe_nr = 0;
+	stripe_offset = 0;
+
+	if (last_alloc) {
+		u32 factor = map->num_stripes / map->sub_stripes;
+
+		stripe_nr = last_alloc >> BTRFS_STRIPE_LEN_SHIFT;
+		stripe_offset = last_alloc & BTRFS_STRIPE_LEN_MASK;
+		stripe_nr = div_u64_rem(stripe_nr, factor, &stripe_index);
+	}
+
+	for (int i = 0; i < map->num_stripes; i++) {
+		int idx = i / map->sub_stripes;
+
+		if (raid0_allocs[idx] == WP_CONVENTIONAL) {
+			has_conventional = true;
+			raid0_allocs[idx] = btrfs_stripe_nr_to_offset(stripe_nr);
+
+			if (stripe_index > idx)
+				raid0_allocs[idx] += BTRFS_STRIPE_LEN;
+			else if (stripe_index == idx)
+				raid0_allocs[idx] += stripe_offset;
+		}
+
+		if ((i % map->sub_stripes) == 0) {
+			/* Verification */
+			if (i != 0) {
+				if (unlikely(prev_offset < raid0_allocs[idx])) {
+					btrfs_err(fs_info,
+					"zoned: stripe position disorder found in block group %llu",
+						  bg->start);
+					return -EIO;
+				}
+
+				if (unlikely(has_partial &&
+					     (raid0_allocs[idx] & BTRFS_STRIPE_LEN_MASK))) {
+					btrfs_err(fs_info,
+					"zoned: multiple partial written stripe found in block group %llu",
+						  bg->start);
+					return -EIO;
+				}
+			}
+			prev_offset = raid0_allocs[idx];
+
+			if ((raid0_allocs[idx] & BTRFS_STRIPE_LEN_MASK) != 0)
+				has_partial = true;
+		}
+
+		if (zone_info[i].alloc_offset == WP_MISSING_DEV ||
+		    zone_info[i].alloc_offset == WP_CONVENTIONAL)
+			zone_info[i].alloc_offset = raid0_allocs[idx];
+
+		if (test_bit(0, active) != test_bit(i, active)) {
+			if (unlikely(!btrfs_zone_activate(bg)))
+				return -EIO;
+		} else if (test_bit(0, active)) {
+			set_bit(BLOCK_GROUP_FLAG_ZONE_IS_ACTIVE, &bg->runtime_flags);
+		}
+
+		if ((i % map->sub_stripes) == 0) {
+			bg->zone_capacity += zone_info[i].capacity;
+			bg->alloc_offset += zone_info[i].alloc_offset;
+		}
+	}
+
+	/* Check if all devices stay in the same stripe row. */
+	if (unlikely(zone_info[0].alloc_offset -
+		     zone_info[map->num_stripes - 1].alloc_offset > BTRFS_STRIPE_LEN)) {
+		btrfs_err(fs_info, "zoned: stripe gap too large in block group %llu",
+			  bg->start);
+		return -EIO;
+	}
+
+	if (unlikely(has_conventional && bg->alloc_offset < last_alloc)) {
+		btrfs_err(fs_info, "zoned: allocated extent stays beyond write pointers %llu %llu",
+			  bg->alloc_offset, last_alloc);
+		return -EIO;
+	}
+
+	return 0;
+}
+
+EXPORT_FOR_TESTS
+int btrfs_load_block_group_by_raid_type(struct btrfs_block_group *bg,
+					struct btrfs_chunk_map *map,
+					struct zone_info *zone_info,
+					unsigned long *active, u64 last_alloc)
+{
+	struct btrfs_fs_info *fs_info = bg->fs_info;
+	u64 profile;
+	int ret;
+
+	profile = map->type & BTRFS_BLOCK_GROUP_PROFILE_MASK;
+	switch (profile) {
+	case 0: /* single */
+		ret = btrfs_load_block_group_single(bg, &zone_info[0], active);
+		break;
+	case BTRFS_BLOCK_GROUP_DUP:
+		ret = btrfs_load_block_group_dup(bg, map, zone_info, active, last_alloc);
+		break;
+	case BTRFS_BLOCK_GROUP_RAID1:
+	case BTRFS_BLOCK_GROUP_RAID1C3:
+	case BTRFS_BLOCK_GROUP_RAID1C4:
+		ret = btrfs_load_block_group_raid1(bg, map, zone_info, active, last_alloc);
+		break;
+	case BTRFS_BLOCK_GROUP_RAID0:
+		ret = btrfs_load_block_group_raid0(bg, map, zone_info, active, last_alloc);
+		break;
+	case BTRFS_BLOCK_GROUP_RAID10:
+		ret = btrfs_load_block_group_raid10(bg, map, zone_info, active, last_alloc);
+		break;
+	case BTRFS_BLOCK_GROUP_RAID5:
+	case BTRFS_BLOCK_GROUP_RAID6:
+	default:
+		btrfs_err(fs_info, "zoned: profile %s not yet supported",
+			  btrfs_bg_type_to_raid_name(map->type));
+		return -EINVAL;
+	}
+
+	if (ret == -EIO && profile != 0 && profile != BTRFS_BLOCK_GROUP_RAID0 &&
+	    profile != BTRFS_BLOCK_GROUP_RAID10) {
+		/*
+		 * Detected broken write pointer.  Make this block group
+		 * unallocatable by setting the allocation pointer at the end of
+		 * allocatable region. Relocating this block group will fix the
+		 * mismatch.
+		 *
+		 * Currently, we cannot handle RAID0 or RAID10 case like this
+		 * because we don't have a proper zone_capacity value. But,
+		 * reading from this block group won't work anyway by a missing
+		 * stripe.
+		 */
+		bg->alloc_offset = bg->zone_capacity;
+	}
+
 	return ret;
 }
 
 int btrfs_load_block_group_zone_info(struct btrfs_block_group *cache, bool new)
 {
 	struct btrfs_fs_info *fs_info = cache->fs_info;
-	struct extent_map_tree *em_tree = &fs_info->mapping_tree;
-	struct extent_map *em;
-	struct map_lookup *map;
-	struct btrfs_device *device;
+	struct btrfs_chunk_map *map;
 	u64 logical = cache->start;
 	u64 length = cache->length;
+	struct zone_info AUTO_KFREE(zone_info);
 	int ret;
 	int i;
-	unsigned int nofs_flag;
-	u64 *alloc_offsets = NULL;
-	u64 *caps = NULL;
-	u64 *physical = NULL;
 	unsigned long *active = NULL;
 	u64 last_alloc = 0;
 	u32 num_sequential = 0, num_conventional = 0;
@@ -1305,43 +1920,21 @@ int btrfs_load_block_group_zone_info(struct btrfs_block_group *cache, bool new)
 		return 0;
 
 	/* Sanity check */
-	if (!IS_ALIGNED(length, fs_info->zone_size)) {
+	if (unlikely(!IS_ALIGNED(length, fs_info->zone_size))) {
 		btrfs_err(fs_info,
 		"zoned: block group %llu len %llu unaligned to zone size %llu",
 			  logical, length, fs_info->zone_size);
 		return -EIO;
 	}
 
-	/* Get the chunk mapping */
-	read_lock(&em_tree->lock);
-	em = lookup_extent_mapping(em_tree, logical, length);
-	read_unlock(&em_tree->lock);
-
-	if (!em)
+	map = btrfs_find_chunk_map(fs_info, logical, length);
+	if (!map)
 		return -EINVAL;
 
-	map = em->map_lookup;
+	cache->physical_map = map;
 
-	cache->physical_map = kmemdup(map, map_lookup_size(map->num_stripes), GFP_NOFS);
-	if (!cache->physical_map) {
-		ret = -ENOMEM;
-		goto out;
-	}
-
-	alloc_offsets = kcalloc(map->num_stripes, sizeof(*alloc_offsets), GFP_NOFS);
-	if (!alloc_offsets) {
-		ret = -ENOMEM;
-		goto out;
-	}
-
-	caps = kcalloc(map->num_stripes, sizeof(*caps), GFP_NOFS);
-	if (!caps) {
-		ret = -ENOMEM;
-		goto out;
-	}
-
-	physical = kcalloc(map->num_stripes, sizeof(*physical), GFP_NOFS);
-	if (!physical) {
+	zone_info = kzalloc_objs(*zone_info, map->num_stripes, GFP_NOFS);
+	if (!zone_info) {
 		ret = -ENOMEM;
 		goto out;
 	}
@@ -1353,106 +1946,20 @@ int btrfs_load_block_group_zone_info(struct btrfs_block_group *cache, bool new)
 	}
 
 	for (i = 0; i < map->num_stripes; i++) {
-		bool is_sequential;
-		struct blk_zone zone;
-		struct btrfs_dev_replace *dev_replace = &fs_info->dev_replace;
-		int dev_replace_is_ongoing = 0;
+		ret = btrfs_load_zone_info(fs_info, i, &zone_info[i], active, map, new);
+		if (ret)
+			goto out;
 
-		device = map->stripes[i].dev;
-		physical[i] = map->stripes[i].physical;
-
-		if (device->bdev == NULL) {
-			alloc_offsets[i] = WP_MISSING_DEV;
-			continue;
-		}
-
-		is_sequential = btrfs_dev_is_sequential(device, physical[i]);
-		if (is_sequential)
-			num_sequential++;
-		else
+		if (zone_info[i].alloc_offset == WP_CONVENTIONAL)
 			num_conventional++;
-
-		/*
-		 * Consider a zone as active if we can allow any number of
-		 * active zones.
-		 */
-		if (!device->zone_info->max_active_zones)
-			__set_bit(i, active);
-
-		if (!is_sequential) {
-			alloc_offsets[i] = WP_CONVENTIONAL;
-			continue;
-		}
-
-		/*
-		 * This zone will be used for allocation, so mark this zone
-		 * non-empty.
-		 */
-		btrfs_dev_clear_zone_empty(device, physical[i]);
-
-		down_read(&dev_replace->rwsem);
-		dev_replace_is_ongoing = btrfs_dev_replace_is_ongoing(dev_replace);
-		if (dev_replace_is_ongoing && dev_replace->tgtdev != NULL)
-			btrfs_dev_clear_zone_empty(dev_replace->tgtdev, physical[i]);
-		up_read(&dev_replace->rwsem);
-
-		/*
-		 * The group is mapped to a sequential zone. Get the zone write
-		 * pointer to determine the allocation offset within the zone.
-		 */
-		WARN_ON(!IS_ALIGNED(physical[i], fs_info->zone_size));
-		nofs_flag = memalloc_nofs_save();
-		ret = btrfs_get_dev_zone(device, physical[i], &zone);
-		memalloc_nofs_restore(nofs_flag);
-		if (ret == -EIO || ret == -EOPNOTSUPP) {
-			ret = 0;
-			alloc_offsets[i] = WP_MISSING_DEV;
-			continue;
-		} else if (ret) {
-			goto out;
-		}
-
-		if (zone.type == BLK_ZONE_TYPE_CONVENTIONAL) {
-			btrfs_err_in_rcu(fs_info,
-	"zoned: unexpected conventional zone %llu on device %s (devid %llu)",
-				zone.start << SECTOR_SHIFT,
-				rcu_str_deref(device->name), device->devid);
-			ret = -EIO;
-			goto out;
-		}
-
-		caps[i] = (zone.capacity << SECTOR_SHIFT);
-
-		switch (zone.cond) {
-		case BLK_ZONE_COND_OFFLINE:
-		case BLK_ZONE_COND_READONLY:
-			btrfs_err(fs_info,
-		"zoned: offline/readonly zone %llu on device %s (devid %llu)",
-				  physical[i] >> device->zone_info->zone_size_shift,
-				  rcu_str_deref(device->name), device->devid);
-			alloc_offsets[i] = WP_MISSING_DEV;
-			break;
-		case BLK_ZONE_COND_EMPTY:
-			alloc_offsets[i] = 0;
-			break;
-		case BLK_ZONE_COND_FULL:
-			alloc_offsets[i] = caps[i];
-			break;
-		default:
-			/* Partially used zone */
-			alloc_offsets[i] =
-					((zone.wp - zone.start) << SECTOR_SHIFT);
-			__set_bit(i, active);
-			break;
-		}
+		else
+			num_sequential++;
 	}
 
 	if (num_sequential > 0)
 		set_bit(BLOCK_GROUP_FLAG_SEQUENTIAL_ZONE, &cache->runtime_flags);
 
 	if (num_conventional > 0) {
-		/* Zone capacity is always zone size in emulation */
-		cache->zone_capacity = cache->length;
 		ret = calculate_alloc_pointer(cache, &last_alloc, new);
 		if (ret) {
 			btrfs_err(fs_info,
@@ -1461,86 +1968,25 @@ int btrfs_load_block_group_zone_info(struct btrfs_block_group *cache, bool new)
 			goto out;
 		} else if (map->num_stripes == num_conventional) {
 			cache->alloc_offset = last_alloc;
+			cache->zone_capacity = cache->length;
 			set_bit(BLOCK_GROUP_FLAG_ZONE_IS_ACTIVE, &cache->runtime_flags);
 			goto out;
 		}
 	}
 
-	switch (map->type & BTRFS_BLOCK_GROUP_PROFILE_MASK) {
-	case 0: /* single */
-		if (alloc_offsets[0] == WP_MISSING_DEV) {
-			btrfs_err(fs_info,
-			"zoned: cannot recover write pointer for zone %llu",
-				physical[0]);
-			ret = -EIO;
-			goto out;
-		}
-		cache->alloc_offset = alloc_offsets[0];
-		cache->zone_capacity = caps[0];
-		if (test_bit(0, active))
-			set_bit(BLOCK_GROUP_FLAG_ZONE_IS_ACTIVE, &cache->runtime_flags);
-		break;
-	case BTRFS_BLOCK_GROUP_DUP:
-		if (map->type & BTRFS_BLOCK_GROUP_DATA) {
-			btrfs_err(fs_info, "zoned: profile DUP not yet supported on data bg");
-			ret = -EINVAL;
-			goto out;
-		}
-		if (alloc_offsets[0] == WP_MISSING_DEV) {
-			btrfs_err(fs_info,
-			"zoned: cannot recover write pointer for zone %llu",
-				physical[0]);
-			ret = -EIO;
-			goto out;
-		}
-		if (alloc_offsets[1] == WP_MISSING_DEV) {
-			btrfs_err(fs_info,
-			"zoned: cannot recover write pointer for zone %llu",
-				physical[1]);
-			ret = -EIO;
-			goto out;
-		}
-		if (alloc_offsets[0] != alloc_offsets[1]) {
-			btrfs_err(fs_info,
-			"zoned: write pointer offset mismatch of zones in DUP profile");
-			ret = -EIO;
-			goto out;
-		}
-		if (test_bit(0, active) != test_bit(1, active)) {
-			if (!btrfs_zone_activate(cache)) {
-				ret = -EIO;
-				goto out;
-			}
-		} else {
-			if (test_bit(0, active))
-				set_bit(BLOCK_GROUP_FLAG_ZONE_IS_ACTIVE,
-					&cache->runtime_flags);
-		}
-		cache->alloc_offset = alloc_offsets[0];
-		cache->zone_capacity = min(caps[0], caps[1]);
-		break;
-	case BTRFS_BLOCK_GROUP_RAID1:
-	case BTRFS_BLOCK_GROUP_RAID0:
-	case BTRFS_BLOCK_GROUP_RAID10:
-	case BTRFS_BLOCK_GROUP_RAID5:
-	case BTRFS_BLOCK_GROUP_RAID6:
-		/* non-single profiles are not supported yet */
-	default:
-		btrfs_err(fs_info, "zoned: profile %s not yet supported",
-			  btrfs_bg_type_to_raid_name(map->type));
-		ret = -EINVAL;
-		goto out;
-	}
+	ret = btrfs_load_block_group_by_raid_type(cache, map, zone_info, active, last_alloc);
 
 out:
-	if (cache->alloc_offset > fs_info->zone_size) {
-		btrfs_err(fs_info,
-			"zoned: invalid write pointer %llu in block group %llu",
-			cache->alloc_offset, cache->start);
-		ret = -EIO;
+	/* Reject non SINGLE data profiles without RST */
+	if ((map->type & BTRFS_BLOCK_GROUP_DATA) &&
+	    (map->type & BTRFS_BLOCK_GROUP_PROFILE_MASK) &&
+	    !fs_info->stripe_root) {
+		btrfs_err(fs_info, "zoned: data %s needs raid-stripe-tree",
+			  btrfs_bg_type_to_raid_name(map->type));
+		ret = -EINVAL;
 	}
 
-	if (cache->alloc_offset > cache->zone_capacity) {
+	if (unlikely(cache->alloc_offset > cache->zone_capacity)) {
 		btrfs_err(fs_info,
 "zoned: invalid write pointer %llu (larger than zone capacity %llu) in block group %llu",
 			  cache->alloc_offset, cache->zone_capacity,
@@ -1566,14 +2012,10 @@ out:
 			spin_unlock(&fs_info->zone_active_bgs_lock);
 		}
 	} else {
-		kfree(cache->physical_map);
+		btrfs_free_chunk_map(cache->physical_map);
 		cache->physical_map = NULL;
 	}
 	bitmap_free(active);
-	kfree(physical);
-	kfree(caps);
-	kfree(alloc_offsets);
-	free_extent_map(em);
 
 	return ret;
 }
@@ -1596,41 +2038,25 @@ void btrfs_calc_zone_unusable(struct btrfs_block_group *cache)
 	cache->zone_unusable = unusable;
 }
 
-void btrfs_redirty_list_add(struct btrfs_transaction *trans,
-			    struct extent_buffer *eb)
-{
-	if (!btrfs_is_zoned(eb->fs_info) ||
-	    btrfs_header_flag(eb, BTRFS_HEADER_FLAG_WRITTEN))
-		return;
-
-	ASSERT(!test_bit(EXTENT_BUFFER_DIRTY, &eb->bflags));
-
-	memzero_extent_buffer(eb, 0, eb->len);
-	set_bit(EXTENT_BUFFER_NO_CHECK, &eb->bflags);
-	set_extent_buffer_dirty(eb);
-	set_extent_bit(&trans->dirty_pages, eb->start, eb->start + eb->len - 1,
-			EXTENT_DIRTY | EXTENT_NOWAIT, NULL);
-}
-
 bool btrfs_use_zone_append(struct btrfs_bio *bbio)
 {
 	u64 start = (bbio->bio.bi_iter.bi_sector << SECTOR_SHIFT);
 	struct btrfs_inode *inode = bbio->inode;
-	struct btrfs_fs_info *fs_info = bbio->fs_info;
+	struct btrfs_fs_info *fs_info = inode->root->fs_info;
 	struct btrfs_block_group *cache;
 	bool ret = false;
 
 	if (!btrfs_is_zoned(fs_info))
 		return false;
 
-	if (!inode || !is_data_inode(&inode->vfs_inode))
+	if (!is_data_inode(inode))
 		return false;
 
 	if (btrfs_op(&bbio->bio) != BTRFS_MAP_WRITE)
 		return false;
 
 	/*
-	 * Using REQ_OP_ZONE_APPNED for relocation can break assumptions on the
+	 * Using REQ_OP_ZONE_APPEND for relocation can break assumptions on the
 	 * extent layout the relocation code has.
 	 * Furthermore we have set aside own block-group from which only the
 	 * relocation "process" can allocate and make sure only one process at a
@@ -1665,16 +2091,18 @@ void btrfs_record_physical_zoned(struct btrfs_bio *bbio)
 static void btrfs_rewrite_logical_zoned(struct btrfs_ordered_extent *ordered,
 					u64 logical)
 {
-	struct extent_map_tree *em_tree = &BTRFS_I(ordered->inode)->extent_tree;
+	struct extent_map_tree *em_tree = &ordered->inode->extent_tree;
 	struct extent_map *em;
 
 	ordered->disk_bytenr = logical;
 
 	write_lock(&em_tree->lock);
-	em = search_extent_mapping(em_tree, ordered->file_offset,
-				   ordered->num_bytes);
-	em->block_start = logical;
-	free_extent_map(em);
+	em = btrfs_search_extent_mapping(em_tree, ordered->file_offset,
+					 ordered->num_bytes);
+	/* The em should be a new COW extent, thus it should not have an offset. */
+	ASSERT(em->offset == 0, "em->offset=%llu", em->offset);
+	em->disk_bytenr = logical;
+	btrfs_free_extent_map(em);
 	write_unlock(&em_tree->lock);
 }
 
@@ -1684,8 +2112,8 @@ static bool btrfs_zoned_split_ordered(struct btrfs_ordered_extent *ordered,
 	struct btrfs_ordered_extent *new;
 
 	if (!test_bit(BTRFS_ORDERED_NOCOW, &ordered->flags) &&
-	    split_extent_map(BTRFS_I(ordered->inode), ordered->file_offset,
-			     ordered->num_bytes, len, logical))
+	    btrfs_split_extent_map(ordered->inode, ordered->file_offset,
+				   ordered->num_bytes, len, logical))
 		return false;
 
 	new = btrfs_split_ordered_extent(ordered, len);
@@ -1698,7 +2126,7 @@ static bool btrfs_zoned_split_ordered(struct btrfs_ordered_extent *ordered,
 
 void btrfs_finish_ordered_zoned(struct btrfs_ordered_extent *ordered)
 {
-	struct btrfs_inode *inode = BTRFS_I(ordered->inode);
+	struct btrfs_inode *inode = ordered->inode;
 	struct btrfs_fs_info *fs_info = inode->root->fs_info;
 	struct btrfs_ordered_sum *sum;
 	u64 logical, len;
@@ -1710,9 +2138,18 @@ void btrfs_finish_ordered_zoned(struct btrfs_ordered_extent *ordered)
 	if (test_bit(BTRFS_ORDERED_PREALLOC, &ordered->flags))
 		return;
 
-	ASSERT(!list_empty(&ordered->list));
-	/* The ordered->list can be empty in the above pre-alloc case. */
-	sum = list_first_entry(&ordered->list, struct btrfs_ordered_sum, list);
+	/*
+	 * A fully truncated ordered extent wrote no data and so has
+	 * no zone append result to record.
+	 */
+	if (test_bit(BTRFS_ORDERED_TRUNCATED, &ordered->flags) &&
+	    ordered->truncated_len == 0) {
+		ASSERT(list_empty(&ordered->csum_list));
+		return;
+	}
+
+	ASSERT(!list_empty(&ordered->csum_list));
+	sum = list_first_entry(&ordered->csum_list, struct btrfs_ordered_sum, list);
 	logical = sum->logical;
 	len = sum->len;
 
@@ -1723,7 +2160,7 @@ void btrfs_finish_ordered_zoned(struct btrfs_ordered_extent *ordered)
 			continue;
 		}
 		if (!btrfs_zoned_split_ordered(ordered, logical, len)) {
-			set_bit(BTRFS_ORDERED_IOERR, &ordered->flags);
+			btrfs_mark_ordered_extent_error(ordered);
 			btrfs_err(fs_info, "failed to split ordered extent");
 			goto out;
 		}
@@ -1742,8 +2179,8 @@ out:
 	 * here so that we don't attempt to log the csums later.
 	 */
 	if ((inode->flags & BTRFS_INODE_NODATASUM) ||
-	    test_bit(BTRFS_FS_STATE_NO_CSUMS, &fs_info->fs_state)) {
-		while ((sum = list_first_entry_or_null(&ordered->list,
+	    test_bit(BTRFS_FS_STATE_NO_DATA_CSUMS, &fs_info->fs_state)) {
+		while ((sum = list_first_entry_or_null(&ordered->csum_list,
 						       typeof(*sum), list))) {
 			list_del(&sum->list);
 			kfree(sum);
@@ -1763,7 +2200,11 @@ static bool check_bg_is_active(struct btrfs_eb_write_context *ctx,
 
 	if (fs_info->treelog_bg == block_group->start) {
 		if (!btrfs_zone_activate(block_group)) {
-			int ret_fin = btrfs_zone_finish_one_bg(fs_info);
+			int ret_fin;
+
+			btrfs_zoned_meta_io_unlock(fs_info);
+			ret_fin = btrfs_zone_finish_one_bg(fs_info);
+			btrfs_zoned_meta_io_lock(fs_info);
 
 			if (ret_fin != 1 || !btrfs_zone_activate(block_group))
 				return false;
@@ -1827,7 +2268,7 @@ int btrfs_check_meta_write_pointer(struct btrfs_fs_info *fs_info,
 
 	if (block_group) {
 		if (block_group->start > eb->start ||
-		    block_group->start + block_group->length <= eb->start) {
+		    btrfs_block_group_end(block_group) <= eb->start) {
 			btrfs_put_block_group(block_group);
 			block_group = NULL;
 			ctx->zoned_bg = NULL;
@@ -1862,7 +2303,7 @@ int btrfs_check_meta_write_pointer(struct btrfs_fs_info *fs_info,
 	if (block_group->meta_write_pointer > eb->start)
 		return -EBUSY;
 
-	/* If for_sync, this hole will be filled with trasnsaction commit. */
+	/* If for_sync, this hole will be filled with transaction commit. */
 	if (wbc->sync_mode == WB_SYNC_ALL && !wbc->for_sync)
 		return -EAGAIN;
 	return -EBUSY;
@@ -1887,8 +2328,8 @@ static int read_zone_info(struct btrfs_fs_info *fs_info, u64 logical,
 	int i, ret;
 
 	ret = btrfs_map_block(fs_info, BTRFS_MAP_GET_READ_MIRRORS, logical,
-			      &mapped_length, &bioc, NULL, NULL, 1);
-	if (ret || !bioc || mapped_length < PAGE_SIZE) {
+			      &mapped_length, &bioc, NULL, NULL);
+	if (unlikely(ret || !bioc || mapped_length < PAGE_SIZE)) {
 		ret = -EIO;
 		goto out_put_bioc;
 	}
@@ -1946,7 +2387,7 @@ int btrfs_sync_zone_write_pointer(struct btrfs_device *tgt_dev, u64 logical,
 	if (physical_pos == wp)
 		return 0;
 
-	if (physical_pos > wp)
+	if (unlikely(physical_pos > wp))
 		return -EUCLEAN;
 
 	length = wp - physical_pos;
@@ -1963,7 +2404,7 @@ int btrfs_sync_zone_write_pointer(struct btrfs_device *tgt_dev, u64 logical,
 bool btrfs_zone_activate(struct btrfs_block_group *block_group)
 {
 	struct btrfs_fs_info *fs_info = block_group->fs_info;
-	struct map_lookup *map;
+	struct btrfs_chunk_map *map;
 	struct btrfs_device *device;
 	u64 physical;
 	const bool is_data = (block_group->flags & BTRFS_BLOCK_GROUP_DATA);
@@ -1973,21 +2414,29 @@ bool btrfs_zone_activate(struct btrfs_block_group *block_group)
 	if (!btrfs_is_zoned(block_group->fs_info))
 		return true;
 
+	if (unlikely(btrfs_is_testing(fs_info)))
+		return true;
+
 	map = block_group->physical_map;
 
+	spin_lock(&fs_info->zone_active_bgs_lock);
 	spin_lock(&block_group->lock);
 	if (test_bit(BLOCK_GROUP_FLAG_ZONE_IS_ACTIVE, &block_group->runtime_flags)) {
 		ret = true;
 		goto out_unlock;
 	}
 
-	/* No space left */
-	if (btrfs_zoned_bg_is_full(block_group)) {
-		ret = false;
-		goto out_unlock;
+	if (block_group->flags & BTRFS_BLOCK_GROUP_DATA) {
+		/* The caller should check if the block group is full. */
+		if (WARN_ON_ONCE(btrfs_zoned_bg_is_full(block_group))) {
+			ret = false;
+			goto out_unlock;
+		}
+	} else {
+		/* Since it is already written, it should have been active. */
+		WARN_ON_ONCE(block_group->meta_write_pointer != block_group->start);
 	}
 
-	spin_lock(&fs_info->zone_active_bgs_lock);
 	for (i = 0; i < map->num_stripes; i++) {
 		struct btrfs_zoned_device_info *zinfo;
 		int reserved = 0;
@@ -1995,6 +2444,9 @@ bool btrfs_zone_activate(struct btrfs_block_group *block_group)
 		device = map->stripes[i].dev;
 		physical = map->stripes[i].physical;
 		zinfo = device->zone_info;
+
+		if (!device->bdev)
+			continue;
 
 		if (zinfo->max_active_zones == 0)
 			continue;
@@ -2007,20 +2459,17 @@ bool btrfs_zone_activate(struct btrfs_block_group *block_group)
 		 */
 		if (atomic_read(&zinfo->active_zones_left) <= reserved) {
 			ret = false;
-			spin_unlock(&fs_info->zone_active_bgs_lock);
 			goto out_unlock;
 		}
 
 		if (!btrfs_dev_set_active_zone(device, physical)) {
 			/* Cannot activate the zone */
 			ret = false;
-			spin_unlock(&fs_info->zone_active_bgs_lock);
 			goto out_unlock;
 		}
 		if (!is_data)
 			zinfo->reserved_active_zones--;
 	}
-	spin_unlock(&fs_info->zone_active_bgs_lock);
 
 	/* Successfully activated all the zones */
 	set_bit(BLOCK_GROUP_FLAG_ZONE_IS_ACTIVE, &block_group->runtime_flags);
@@ -2028,8 +2477,6 @@ bool btrfs_zone_activate(struct btrfs_block_group *block_group)
 
 	/* For the active block group list */
 	btrfs_get_block_group(block_group);
-
-	spin_lock(&fs_info->zone_active_bgs_lock);
 	list_add_tail(&block_group->active_bg_list, &fs_info->zone_active_bgs);
 	spin_unlock(&fs_info->zone_active_bgs_lock);
 
@@ -2037,34 +2484,23 @@ bool btrfs_zone_activate(struct btrfs_block_group *block_group)
 
 out_unlock:
 	spin_unlock(&block_group->lock);
+	spin_unlock(&fs_info->zone_active_bgs_lock);
 	return ret;
 }
 
 static void wait_eb_writebacks(struct btrfs_block_group *block_group)
 {
 	struct btrfs_fs_info *fs_info = block_group->fs_info;
-	const u64 end = block_group->start + block_group->length;
-	struct radix_tree_iter iter;
+	const u64 end = btrfs_block_group_end(block_group);
 	struct extent_buffer *eb;
-	void __rcu **slot;
+	unsigned long index, start = (block_group->start >> fs_info->nodesize_bits);
 
 	rcu_read_lock();
-	radix_tree_for_each_slot(slot, &fs_info->buffer_radix, &iter,
-				 block_group->start >> fs_info->sectorsize_bits) {
-		eb = radix_tree_deref_slot(slot);
-		if (!eb)
-			continue;
-		if (radix_tree_deref_retry(eb)) {
-			slot = radix_tree_iter_retry(&iter);
-			continue;
-		}
-
+	xa_for_each_start(&fs_info->buffer_tree, index, eb, start) {
 		if (eb->start < block_group->start)
 			continue;
 		if (eb->start >= end)
 			break;
-
-		slot = radix_tree_iter_resume(slot, &iter);
 		rcu_read_unlock();
 		wait_on_extent_buffer_writeback(eb);
 		rcu_read_lock();
@@ -2072,12 +2508,47 @@ static void wait_eb_writebacks(struct btrfs_block_group *block_group)
 	rcu_read_unlock();
 }
 
+static int call_zone_finish(struct btrfs_block_group *block_group,
+			    struct btrfs_io_stripe *stripe)
+{
+	struct btrfs_device *device = stripe->dev;
+	const u64 physical = stripe->physical;
+	struct btrfs_zoned_device_info *zinfo = device->zone_info;
+	int ret;
+
+	if (!device->bdev)
+		return 0;
+
+	if (zinfo->max_active_zones == 0)
+		return 0;
+
+	if (btrfs_dev_is_sequential(device, physical)) {
+		unsigned int nofs_flags;
+
+		nofs_flags = memalloc_nofs_save();
+		ret = blkdev_zone_mgmt(device->bdev, REQ_OP_ZONE_FINISH,
+				       physical >> SECTOR_SHIFT,
+				       zinfo->zone_size >> SECTOR_SHIFT);
+		memalloc_nofs_restore(nofs_flags);
+
+		if (ret)
+			return ret;
+	}
+
+	if (!(block_group->flags & BTRFS_BLOCK_GROUP_DATA))
+		zinfo->reserved_active_zones++;
+	btrfs_dev_clear_active_zone(device, physical);
+
+	return 0;
+}
+
 static int do_zone_finish(struct btrfs_block_group *block_group, bool fully_written)
 {
 	struct btrfs_fs_info *fs_info = block_group->fs_info;
-	struct map_lookup *map;
+	struct btrfs_chunk_map *map;
 	const bool is_metadata = (block_group->flags &
 			(BTRFS_BLOCK_GROUP_METADATA | BTRFS_BLOCK_GROUP_SYSTEM));
+	struct btrfs_dev_replace *dev_replace = &fs_info->dev_replace;
 	int ret = 0;
 	int i;
 
@@ -2115,8 +2586,7 @@ static int do_zone_finish(struct btrfs_block_group *block_group, bool fully_writ
 		/* Ensure all writes in this block group finish */
 		btrfs_wait_block_group_reservations(block_group);
 		/* No need to wait for NOCOW writers. Zoned mode does not allow that */
-		btrfs_wait_ordered_roots(fs_info, U64_MAX, block_group->start,
-					 block_group->length);
+		btrfs_wait_ordered_roots(fs_info, U64_MAX, block_group);
 		/* Wait for extent buffers to be written. */
 		if (is_metadata)
 			wait_eb_writebacks(block_group);
@@ -2153,29 +2623,16 @@ static int do_zone_finish(struct btrfs_block_group *block_group, bool fully_writ
 	btrfs_clear_data_reloc_bg(block_group);
 	spin_unlock(&block_group->lock);
 
+	down_read(&dev_replace->rwsem);
 	map = block_group->physical_map;
 	for (i = 0; i < map->num_stripes; i++) {
-		struct btrfs_device *device = map->stripes[i].dev;
-		const u64 physical = map->stripes[i].physical;
-		struct btrfs_zoned_device_info *zinfo = device->zone_info;
-
-		if (zinfo->max_active_zones == 0)
-			continue;
-
-		ret = blkdev_zone_mgmt(device->bdev, REQ_OP_ZONE_FINISH,
-				       physical >> SECTOR_SHIFT,
-				       zinfo->zone_size >> SECTOR_SHIFT,
-				       GFP_NOFS);
-
+		ret = call_zone_finish(block_group, &map->stripes[i]);
 		if (ret)
-			return ret;
-
-		if (!(block_group->flags & BTRFS_BLOCK_GROUP_DATA))
-			zinfo->reserved_active_zones++;
-		btrfs_dev_clear_active_zone(device, physical);
+			break;
 	}
+	up_read(&dev_replace->rwsem);
 
-	if (!fully_written)
+	if (!ret && !fully_written)
 		btrfs_dec_block_group_ro(block_group);
 
 	spin_lock(&fs_info->zone_active_bgs_lock);
@@ -2188,7 +2645,7 @@ static int do_zone_finish(struct btrfs_block_group *block_group, bool fully_writ
 
 	clear_and_wake_up_bit(BTRFS_FS_NEED_ZONE_FINISH, &fs_info->flags);
 
-	return 0;
+	return ret;
 }
 
 int btrfs_zone_finish(struct btrfs_block_group *block_group)
@@ -2207,6 +2664,9 @@ bool btrfs_can_activate_zone(struct btrfs_fs_devices *fs_devices, u64 flags)
 
 	if (!btrfs_is_zoned(fs_info))
 		return true;
+
+	if (test_bit(BTRFS_FS_NEED_ZONE_FINISH, &fs_info->flags))
+		return false;
 
 	/* Check if there is a device with active zones left */
 	mutex_lock(&fs_info->chunk_mutex);
@@ -2228,6 +2688,11 @@ bool btrfs_can_activate_zone(struct btrfs_fs_devices *fs_devices, u64 flags)
 
 		switch (flags & BTRFS_BLOCK_GROUP_PROFILE_MASK) {
 		case 0: /* single */
+		case BTRFS_BLOCK_GROUP_RAID0:
+		case BTRFS_BLOCK_GROUP_RAID1:
+		case BTRFS_BLOCK_GROUP_RAID1C3:
+		case BTRFS_BLOCK_GROUP_RAID1C4:
+		case BTRFS_BLOCK_GROUP_RAID10:
 			ret = (atomic_read(&zinfo->active_zones_left) >= (1 + reserved));
 			break;
 		case BTRFS_BLOCK_GROUP_DUP:
@@ -2246,16 +2711,18 @@ bool btrfs_can_activate_zone(struct btrfs_fs_devices *fs_devices, u64 flags)
 	return ret;
 }
 
-void btrfs_zone_finish_endio(struct btrfs_fs_info *fs_info, u64 logical, u64 length)
+int btrfs_zone_finish_endio(struct btrfs_fs_info *fs_info, u64 logical, u64 length)
 {
 	struct btrfs_block_group *block_group;
 	u64 min_alloc_bytes;
+	int ret = 0;
 
 	if (!btrfs_is_zoned(fs_info))
-		return;
+		return 0;
 
 	block_group = btrfs_lookup_block_group(fs_info, logical);
-	ASSERT(block_group);
+	if (WARN_ON_ONCE(!block_group))
+		return -ENOENT;
 
 	/* No MIXED_BG on zoned btrfs. */
 	if (block_group->flags & BTRFS_BLOCK_GROUP_DATA)
@@ -2268,20 +2735,25 @@ void btrfs_zone_finish_endio(struct btrfs_fs_info *fs_info, u64 logical, u64 len
 	    block_group->start + block_group->zone_capacity)
 		goto out;
 
-	do_zone_finish(block_group, true);
+	ret = do_zone_finish(block_group, true);
 
 out:
 	btrfs_put_block_group(block_group);
+	return ret;
 }
 
 static void btrfs_zone_finish_endio_workfn(struct work_struct *work)
 {
+	int ret;
 	struct btrfs_block_group *bg =
 		container_of(work, struct btrfs_block_group, zone_finish_work);
 
 	wait_on_extent_buffer_writeback(bg->last_eb);
 	free_extent_buffer(bg->last_eb);
-	btrfs_zone_finish_endio(bg->fs_info, bg->start, bg->length);
+	ret = do_zone_finish(bg, true);
+	if (ret)
+		btrfs_handle_fs_error(bg->fs_info, ret,
+				      "Failed to finish block-group's zone");
 	btrfs_put_block_group(bg);
 }
 
@@ -2300,10 +2772,10 @@ void btrfs_schedule_zone_finish_bg(struct btrfs_block_group *bg,
 
 	/* For the work */
 	btrfs_get_block_group(bg);
-	atomic_inc(&eb->refs);
+	refcount_inc(&eb->refs);
 	bg->last_eb = eb;
 	INIT_WORK(&bg->zone_finish_work, btrfs_zone_finish_endio_workfn);
-	queue_work(system_unbound_wq, &bg->zone_finish_work);
+	queue_work(system_dfl_wq, &bg->zone_finish_work);
 }
 
 void btrfs_clear_data_reloc_bg(struct btrfs_block_group *bg)
@@ -2314,6 +2786,97 @@ void btrfs_clear_data_reloc_bg(struct btrfs_block_group *bg)
 	if (fs_info->data_reloc_bg == bg->start)
 		fs_info->data_reloc_bg = 0;
 	spin_unlock(&fs_info->relocation_bg_lock);
+}
+
+void btrfs_zoned_reserve_data_reloc_bg(struct btrfs_fs_info *fs_info)
+{
+	struct btrfs_space_info *data_sinfo = fs_info->data_sinfo;
+	struct btrfs_space_info *space_info = data_sinfo;
+	struct btrfs_trans_handle *trans;
+	struct btrfs_block_group *bg;
+	struct list_head *bg_list;
+	u64 alloc_flags;
+	bool did_chunk_alloc = false;
+	int index;
+	int ret;
+
+	if (!btrfs_is_zoned(fs_info))
+		return;
+
+	if (fs_info->data_reloc_bg)
+		return;
+
+	if (sb_rdonly(fs_info->sb))
+		return;
+
+	alloc_flags = btrfs_get_alloc_profile(fs_info, space_info->flags);
+	index = btrfs_bg_flags_to_raid_index(alloc_flags);
+
+again:
+	bg_list = &space_info->block_groups[index];
+	list_for_each_entry(bg, bg_list, list) {
+
+		if (bg->alloc_offset != 0)
+			continue;
+
+		if (space_info == data_sinfo) {
+			/* Migrate the block group to the data relocation space_info. */
+			struct btrfs_space_info *reloc_sinfo = data_sinfo->sub_group[0];
+			int factor;
+
+			ASSERT(reloc_sinfo->subgroup_id == BTRFS_SUB_GROUP_DATA_RELOC,
+			       "reloc_sinfo->subgroup_id=%d", reloc_sinfo->subgroup_id);
+			factor = btrfs_bg_type_to_factor(bg->flags);
+
+			down_write(&space_info->groups_sem);
+			list_del_init(&bg->list);
+			up_write(&space_info->groups_sem);
+
+			spin_lock(&space_info->lock);
+			space_info->total_bytes -= bg->length;
+			space_info->disk_total -= bg->length * factor;
+			space_info->disk_total -= bg->zone_unusable;
+			/* There is no allocation ever happened. */
+			ASSERT(bg->used == 0, "bg->used=%llu", bg->used);
+			/* No super block in a block group on the zoned setup. */
+			ASSERT(bg->bytes_super == 0, "bg->bytes_super=%llu", bg->bytes_super);
+			spin_unlock(&space_info->lock);
+
+			bg->space_info = reloc_sinfo;
+			if (reloc_sinfo->block_group_kobjs[index] == NULL)
+				btrfs_sysfs_add_block_group_type(bg);
+
+			btrfs_add_bg_to_space_info(fs_info, bg);
+		}
+
+		fs_info->data_reloc_bg = bg->start;
+		set_bit(BLOCK_GROUP_FLAG_ZONED_DATA_RELOC, &bg->runtime_flags);
+		btrfs_zone_activate(bg);
+
+		return;
+	}
+
+	if (did_chunk_alloc)
+		return;
+
+	trans = btrfs_join_transaction(fs_info->tree_root);
+	if (IS_ERR(trans))
+		return;
+
+	/* Allocate new BG in the data relocation space_info. */
+	space_info = data_sinfo->sub_group[0];
+	ASSERT(space_info->subgroup_id == BTRFS_SUB_GROUP_DATA_RELOC,
+	       "space_info->subgroup_id=%d", space_info->subgroup_id);
+	ret = btrfs_chunk_alloc(trans, space_info, alloc_flags, CHUNK_ALLOC_FORCE);
+	btrfs_end_transaction(trans);
+	if (ret == 1) {
+		/*
+		 * We allocated a new block group in the data relocation space_info. We
+		 * can take that one.
+		 */
+		did_chunk_alloc = true;
+		goto again;
+	}
 }
 
 void btrfs_free_zone_cache(struct btrfs_fs_info *fs_info)
@@ -2334,12 +2897,12 @@ void btrfs_free_zone_cache(struct btrfs_fs_info *fs_info)
 	mutex_unlock(&fs_devices->device_list_mutex);
 }
 
-bool btrfs_zoned_should_reclaim(struct btrfs_fs_info *fs_info)
+bool btrfs_zoned_should_reclaim(const struct btrfs_fs_info *fs_info)
 {
 	struct btrfs_fs_devices *fs_devices = fs_info->fs_devices;
 	struct btrfs_device *device;
+	u64 total = btrfs_super_total_bytes(fs_info->super_copy);
 	u64 used = 0;
-	u64 total = 0;
 	u64 factor;
 
 	ASSERT(btrfs_is_zoned(fs_info));
@@ -2352,7 +2915,6 @@ bool btrfs_zoned_should_reclaim(struct btrfs_fs_info *fs_info)
 		if (!device->bdev)
 			continue;
 
-		total += device->disk_total_bytes;
 		used += device->bytes_used;
 	}
 	mutex_unlock(&fs_devices->device_list_mutex);
@@ -2406,7 +2968,7 @@ int btrfs_zone_finish_one_bg(struct btrfs_fs_info *fs_info)
 
 		spin_lock(&block_group->lock);
 		if (block_group->reserved || block_group->alloc_offset == 0 ||
-		    (block_group->flags & BTRFS_BLOCK_GROUP_SYSTEM) ||
+		    !(block_group->flags & BTRFS_BLOCK_GROUP_DATA) ||
 		    test_bit(BLOCK_GROUP_FLAG_ZONED_DATA_RELOC, &block_group->runtime_flags)) {
 			spin_unlock(&block_group->lock);
 			continue;
@@ -2433,10 +2995,9 @@ int btrfs_zone_finish_one_bg(struct btrfs_fs_info *fs_info)
 	return ret < 0 ? ret : 1;
 }
 
-int btrfs_zoned_activate_one_bg(struct btrfs_fs_info *fs_info,
-				struct btrfs_space_info *space_info,
-				bool do_finish)
+int btrfs_zoned_activate_one_bg(struct btrfs_space_info *space_info, bool do_finish)
 {
+	struct btrfs_fs_info *fs_info = space_info->fs_info;
 	struct btrfs_block_group *bg;
 	int index;
 
@@ -2524,7 +3085,7 @@ void btrfs_check_active_zone_reservation(struct btrfs_fs_info *fs_info)
 	/* Release reservation for currently active block groups. */
 	spin_lock(&fs_info->zone_active_bgs_lock);
 	list_for_each_entry(block_group, &fs_info->zone_active_bgs, active_bg_list) {
-		struct map_lookup *map = block_group->physical_map;
+		struct btrfs_chunk_map *map = block_group->physical_map;
 
 		if (!(block_group->flags &
 		      (BTRFS_BLOCK_GROUP_METADATA | BTRFS_BLOCK_GROUP_SYSTEM)))
@@ -2532,6 +3093,197 @@ void btrfs_check_active_zone_reservation(struct btrfs_fs_info *fs_info)
 
 		for (int i = 0; i < map->num_stripes; i++)
 			map->stripes[i].dev->zone_info->reserved_active_zones--;
+	}
+	spin_unlock(&fs_info->zone_active_bgs_lock);
+}
+
+/*
+ * Reset the zones of unused block groups from @space_info->bytes_zone_unusable.
+ *
+ * @space_info:	the space to work on
+ * @num_bytes:	targeting reclaim bytes
+ *
+ * This one resets the zones of a block group, so we can reuse the region
+ * without removing the block group. On the other hand, btrfs_delete_unused_bgs()
+ * just removes a block group and frees up the underlying zones. So, we still
+ * need to allocate a new block group to reuse the zones.
+ *
+ * Resetting is faster than deleting/recreating a block group. It is similar
+ * to freeing the logical space on the regular mode. However, we cannot change
+ * the block group's profile with this operation.
+ */
+int btrfs_reset_unused_block_groups(struct btrfs_space_info *space_info, u64 num_bytes)
+{
+	struct btrfs_fs_info *fs_info = space_info->fs_info;
+	const sector_t zone_size_sectors = fs_info->zone_size >> SECTOR_SHIFT;
+
+	if (!btrfs_is_zoned(fs_info))
+		return 0;
+
+	while (num_bytes > 0) {
+		struct btrfs_chunk_map *map;
+		struct btrfs_block_group *bg = NULL;
+		bool found = false;
+		u64 reclaimed = 0;
+
+		/*
+		 * Here, we choose a fully zone_unusable block group. It's
+		 * technically possible to reset a partly zone_unusable block
+		 * group, which still has some free space left. However,
+		 * handling that needs to cope with the allocation side, which
+		 * makes the logic more complex. So, let's handle the easy case
+		 * for now.
+		 */
+		spin_lock(&fs_info->unused_bgs_lock);
+		list_for_each_entry(bg, &fs_info->unused_bgs, bg_list) {
+			if ((bg->flags & BTRFS_BLOCK_GROUP_TYPE_MASK) != space_info->flags)
+				continue;
+
+			/*
+			 * Use trylock to avoid locking order violation. In
+			 * btrfs_reclaim_bgs_work(), the lock order is
+			 * &bg->lock -> &fs_info->unused_bgs_lock. We skip a
+			 * block group if we cannot take its lock.
+			 */
+			if (!spin_trylock(&bg->lock))
+				continue;
+			if (btrfs_is_block_group_used(bg) || bg->zone_unusable < bg->length) {
+				spin_unlock(&bg->lock);
+				continue;
+			}
+			spin_unlock(&bg->lock);
+			found = true;
+			break;
+		}
+		if (!found) {
+			spin_unlock(&fs_info->unused_bgs_lock);
+			return 0;
+		}
+
+		list_del_init(&bg->bg_list);
+		btrfs_put_block_group(bg);
+		spin_unlock(&fs_info->unused_bgs_lock);
+
+		/*
+		 * Since the block group is fully zone_unusable and we cannot
+		 * allocate from this block group anymore, we don't need to set
+		 * this block group read-only.
+		 */
+
+		down_read(&fs_info->dev_replace.rwsem);
+		map = bg->physical_map;
+		for (int i = 0; i < map->num_stripes; i++) {
+			struct btrfs_io_stripe *stripe = &map->stripes[i];
+			unsigned int nofs_flags;
+			int ret;
+
+			nofs_flags = memalloc_nofs_save();
+			ret = blkdev_zone_mgmt(stripe->dev->bdev, REQ_OP_ZONE_RESET,
+					       stripe->physical >> SECTOR_SHIFT,
+					       zone_size_sectors);
+			memalloc_nofs_restore(nofs_flags);
+
+			if (ret) {
+				up_read(&fs_info->dev_replace.rwsem);
+				return ret;
+			}
+		}
+		up_read(&fs_info->dev_replace.rwsem);
+
+		spin_lock(&space_info->lock);
+		spin_lock(&bg->lock);
+		ASSERT(!btrfs_is_block_group_used(bg));
+		if (bg->ro) {
+			spin_unlock(&bg->lock);
+			spin_unlock(&space_info->lock);
+			continue;
+		}
+
+		reclaimed = bg->alloc_offset;
+		bg->zone_unusable = bg->length - bg->zone_capacity;
+		bg->alloc_offset = 0;
+		/*
+		 * The zone was just reset to empty, so alloc_offset went back to
+		 * the start of the zone. For metadata/system block groups the
+		 * write pointer must follow it back to the start of the zone;
+		 * otherwise it stays stale at the previous (finished) zone end,
+		 * and metadata written into the reused zone would sit behind the
+		 * write pointer, could never be written out in sequential order,
+		 * and would be stranded (pinning its folio) until unmount.
+		 */
+		if (bg->flags & (BTRFS_BLOCK_GROUP_METADATA | BTRFS_BLOCK_GROUP_SYSTEM))
+			bg->meta_write_pointer = bg->start;
+		/*
+		 * This holds because we currently reset fully used then freed
+		 * block group.
+		 */
+		ASSERT(reclaimed == bg->zone_capacity,
+		       "reclaimed=%llu bg->zone_capacity=%llu", reclaimed, bg->zone_capacity);
+		bg->free_space_ctl->free_space += reclaimed;
+		space_info->bytes_zone_unusable -= reclaimed;
+		spin_unlock(&bg->lock);
+		btrfs_return_free_space(space_info, reclaimed);
+		spin_unlock(&space_info->lock);
+
+		if (num_bytes <= reclaimed)
+			break;
+		num_bytes -= reclaimed;
+	}
+
+	return 0;
+}
+
+void btrfs_show_zoned_stats(struct btrfs_fs_info *fs_info, struct seq_file *seq)
+{
+	struct btrfs_block_group *bg;
+	u64 data_reloc_bg;
+	u64 treelog_bg;
+
+	seq_puts(seq, "\n  zoned statistics:\n");
+
+	spin_lock(&fs_info->zone_active_bgs_lock);
+	seq_printf(seq, "\tactive block-groups: %zu\n",
+			     list_count_nodes(&fs_info->zone_active_bgs));
+	spin_unlock(&fs_info->zone_active_bgs_lock);
+
+	spin_lock(&fs_info->unused_bgs_lock);
+	seq_printf(seq, "\t  reclaimable: %zu\n",
+			     list_count_nodes(&fs_info->reclaim_bgs));
+	seq_printf(seq, "\t  unused: %zu\n", list_count_nodes(&fs_info->unused_bgs));
+	spin_unlock(&fs_info->unused_bgs_lock);
+
+	seq_printf(seq,"\t  need reclaim: %s\n",
+		   str_true_false(btrfs_zoned_should_reclaim(fs_info)));
+
+	data_reloc_bg = data_race(fs_info->data_reloc_bg);
+	if (data_reloc_bg)
+		seq_printf(seq, "\tdata relocation block-group: %llu\n",
+			   data_reloc_bg);
+	treelog_bg = data_race(fs_info->treelog_bg);
+	if (treelog_bg)
+		seq_printf(seq, "\ttree-log block-group: %llu\n", treelog_bg);
+
+	spin_lock(&fs_info->zone_active_bgs_lock);
+	seq_puts(seq, "\tactive zones:\n");
+	list_for_each_entry(bg, &fs_info->zone_active_bgs, active_bg_list) {
+		u64 start;
+		u64 alloc_offset;
+		u64 used;
+		u64 reserved;
+		u64 zone_unusable;
+		const char *typestr = btrfs_space_info_type_str(bg->space_info);
+
+		spin_lock(&bg->lock);
+		start = bg->start;
+		alloc_offset = bg->alloc_offset;
+		used = bg->used;
+		reserved = bg->reserved;
+		zone_unusable = bg->zone_unusable;
+		spin_unlock(&bg->lock);
+
+		seq_printf(seq,
+			   "\t  start: %llu, wp: %llu used: %llu, reserved: %llu, unusable: %llu (%s)\n",
+			   start, alloc_offset, used, reserved, zone_unusable, typestr);
 	}
 	spin_unlock(&fs_info->zone_active_bgs_lock);
 }

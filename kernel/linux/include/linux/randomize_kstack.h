@@ -6,10 +6,10 @@
 #include <linux/kernel.h>
 #include <linux/jump_label.h>
 #include <linux/percpu-defs.h>
+#include <linux/prandom.h>
 
 DECLARE_STATIC_KEY_MAYBE(CONFIG_RANDOMIZE_KSTACK_OFFSET_DEFAULT,
 			 randomize_kstack_offset);
-DECLARE_PER_CPU(u32, kstack_offset);
 
 /*
  * Do not use this anywhere else in the kernel. This is used here because
@@ -32,27 +32,45 @@ DECLARE_PER_CPU(u32, kstack_offset);
 #endif
 
 /*
- * Use, at most, 10 bits of entropy. We explicitly cap this to keep the
- * "VLA" from being unbounded (see above). 10 bits leaves enough room for
- * per-arch offset masks to reduce entropy (by removing higher bits, since
- * high entropy may overly constrain usable stack space), and for
- * compiler/arch-specific stack alignment to remove the lower bits.
+ * Use, at most, 6 bits of entropy (on 64-bit; 8 on 32-bit). This cap is
+ * to keep the "VLA" from being unbounded (see above). Additionally clear
+ * the bottom 4 bits (on 64-bit systems, 2 for 32-bit), since stack
+ * alignment will always be at least word size. This makes the compiler
+ * code gen better when it is applying the actual per-arch alignment to
+ * the final offset. The resulting randomness is reasonable without overly
+ * constraining usable stack space.
  */
-#define KSTACK_OFFSET_MAX(x)	((x) & 0x3FF)
+#ifdef CONFIG_64BIT
+#define KSTACK_OFFSET_MAX(x)	((x) & 0b1111110000)
+#else
+#define KSTACK_OFFSET_MAX(x)	((x) & 0b1111111100)
+#endif
+
+DECLARE_PER_CPU(struct rnd_state, kstack_rnd_state);
+
+static __always_inline u32 get_kstack_offset(void)
+{
+	struct rnd_state *state;
+	u32 rnd;
+
+	state = &get_cpu_var(kstack_rnd_state);
+	rnd = prandom_u32_state(state);
+	put_cpu_var(kstack_rnd_state);
+
+	return rnd;
+}
 
 /**
- * add_random_kstack_offset - Increase stack utilization by previously
- *			      chosen random offset
+ * add_random_kstack_offset - Increase stack utilization by a random offset.
  *
- * This should be used in the syscall entry path when interrupts and
- * preempt are disabled, and after user registers have been stored to
- * the stack. For testing the resulting entropy, please see:
- * tools/testing/selftests/lkdtm/stack-entropy.sh
+ * This should be used in the syscall entry path after user registers have been
+ * stored to the stack. Preemption may be enabled. For testing the resulting
+ * entropy, please see: tools/testing/selftests/lkdtm/stack-entropy.sh
  */
 #define add_random_kstack_offset() do {					\
 	if (static_branch_maybe(CONFIG_RANDOMIZE_KSTACK_OFFSET_DEFAULT,	\
 				&randomize_kstack_offset)) {		\
-		u32 offset = raw_cpu_read(kstack_offset);		\
+		u32 offset = get_kstack_offset();			\
 		u8 *ptr = __kstack_alloca(KSTACK_OFFSET_MAX(offset));	\
 		/* Keep allocation even after "ptr" loses scope. */	\
 		asm volatile("" :: "r"(ptr) : "memory");		\
@@ -60,33 +78,26 @@ DECLARE_PER_CPU(u32, kstack_offset);
 } while (0)
 
 /**
- * choose_random_kstack_offset - Choose the random offset for the next
- *				 add_random_kstack_offset()
+ * add_random_kstack_offset_irqsoff - Increase stack utilization by a random offset.
  *
- * This should only be used during syscall exit when interrupts and
- * preempt are disabled. This position in the syscall flow is done to
- * frustrate attacks from userspace attempting to learn the next offset:
- * - Maximize the timing uncertainty visible from userspace: if the
- *   offset is chosen at syscall entry, userspace has much more control
- *   over the timing between choosing offsets. "How long will we be in
- *   kernel mode?" tends to be more difficult to predict than "how long
- *   will we be in user mode?"
- * - Reduce the lifetime of the new offset sitting in memory during
- *   kernel mode execution. Exposure of "thread-local" memory content
- *   (e.g. current, percpu, etc) tends to be easier than arbitrary
- *   location memory exposure.
+ * This should be used in the syscall entry path after user registers have been
+ * stored to the stack. Interrupts must be still disabled.
  */
-#define choose_random_kstack_offset(rand) do {				\
-	if (static_branch_maybe(CONFIG_RANDOMIZE_KSTACK_OFFSET_DEFAULT,	\
-				&randomize_kstack_offset)) {		\
-		u32 offset = raw_cpu_read(kstack_offset);		\
-		offset ^= (rand);					\
-		raw_cpu_write(kstack_offset, offset);			\
-	}								\
+#define add_random_kstack_offset_irqsoff()					\
+do {										\
+	lockdep_assert_irqs_disabled();						\
+	if (static_branch_maybe(CONFIG_RANDOMIZE_KSTACK_OFFSET_DEFAULT,		\
+				&randomize_kstack_offset)) {			\
+		u32 offset = prandom_u32_state(raw_cpu_ptr(&kstack_rnd_state));	\
+		u8 *ptr = __kstack_alloca(KSTACK_OFFSET_MAX(offset));		\
+		/* Keep allocation even after "ptr" loses scope. */		\
+		asm volatile("" :: "r"(ptr) : "memory");			\
+	}									\
 } while (0)
+
 #else /* CONFIG_RANDOMIZE_KSTACK_OFFSET */
 #define add_random_kstack_offset()		do { } while (0)
-#define choose_random_kstack_offset(rand)	do { } while (0)
+#define add_random_kstack_offset_irqsoff()	do { } while (0)
 #endif /* CONFIG_RANDOMIZE_KSTACK_OFFSET */
 
 #endif

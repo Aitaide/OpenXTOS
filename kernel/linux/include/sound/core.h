@@ -75,6 +75,27 @@ struct snd_device {
 
 #define snd_device(n) list_entry(n, struct snd_device, list)
 
+/*
+ * A simple reference counter with a wait queue;
+ * typically used for usage counts, and you can synchronize at finishing
+ * via snd_refcount_sync(), which is woken up when the refcount reaches to
+ * zero again.
+ */
+struct snd_refcount {
+	atomic_t count;
+	wait_queue_head_t waiter;
+};
+
+void snd_refcount_init(struct snd_refcount *ref);
+
+static inline void snd_refcount_get(struct snd_refcount *ref)
+{
+	atomic_inc(&ref->count);
+}
+
+void snd_refcount_put(struct snd_refcount *ref);
+void snd_refcount_sync(struct snd_refcount *ref);
+
 /* main structure for soundcard */
 
 struct snd_card {
@@ -87,8 +108,8 @@ struct snd_card {
 	char longname[80];		/* name of this soundcard */
 	char irq_descr[32];		/* Interrupt description */
 	char mixername[80];		/* mixer name */
-	char components[128];		/* card components delimited with
-								space */
+	char *components;		/* card components, space-delimited */
+	unsigned int components_alloc_size;	/* current allocation size of components */
 	struct module *module;		/* top-level module */
 
 	void *private_data;		/* private data for soundcard */
@@ -99,7 +120,7 @@ struct snd_card {
 	struct device *ctl_dev;		/* control device */
 	unsigned int last_numid;	/* last used numeric ID */
 	struct rw_semaphore controls_rwsem;	/* controls lock (list and values) */
-	rwlock_t ctl_files_rwlock;	/* ctl_files list lock */
+	rwlock_t controls_rwlock;	/* lock for lookup and ctl_files list */
 	int controls_count;		/* count of all controls */
 	size_t user_ctl_alloc_size;	// current memory allocation by user controls.
 	struct list_head controls;	/* all controls for this card */
@@ -133,18 +154,22 @@ struct snd_card {
 #ifdef CONFIG_SND_DEBUG
 	struct dentry *debugfs_root;    /* debugfs root for card */
 #endif
+#ifdef CONFIG_SND_CTL_DEBUG
+	struct snd_ctl_elem_value *value_buf; /* buffer for kctl->put() verification */
+#endif
 
 #ifdef CONFIG_PM
 	unsigned int power_state;	/* power state */
-	atomic_t power_ref;
 	wait_queue_head_t power_sleep;
-	wait_queue_head_t power_ref_sleep;
+	struct snd_refcount power_ref;
 #endif
 
 #if IS_ENABLED(CONFIG_SND_MIXER_OSS)
 	struct snd_mixer_oss *mixer_oss;
 	int mixer_oss_change_count;
 #endif
+
+	unsigned char private_data_area[] __aligned(__alignof__(unsigned long long));
 };
 
 #define dev_to_snd_card(p)	container_of(p, struct snd_card, card_dev)
@@ -171,7 +196,7 @@ static inline void snd_power_change_state(struct snd_card *card, unsigned int st
  */
 static inline void snd_power_ref(struct snd_card *card)
 {
-	atomic_inc(&card->power_ref);
+	snd_refcount_get(&card->power_ref);
 }
 
 /**
@@ -180,8 +205,7 @@ static inline void snd_power_ref(struct snd_card *card)
  */
 static inline void snd_power_unref(struct snd_card *card)
 {
-	if (atomic_dec_and_test(&card->power_ref))
-		wake_up(&card->power_ref_sleep);
+	snd_refcount_put(&card->power_ref);
 }
 
 /**
@@ -193,7 +217,7 @@ static inline void snd_power_unref(struct snd_card *card)
  */
 static inline void snd_power_sync_ref(struct snd_card *card)
 {
-	wait_event(card->power_ref_sleep, !atomic_read(&card->power_ref));
+	snd_refcount_sync(&card->power_ref);
 }
 
 /* init.c */
@@ -314,6 +338,17 @@ static inline void snd_card_unref(struct snd_card *card)
 	put_device(&card->card_dev);
 }
 
+DEFINE_FREE(snd_card_unref, struct snd_card *, if (_T) snd_card_unref(_T))
+
+/*
+ * For automatic error handling at probe time, assign the card like:
+ *	struct snd_card *card __free(snd_card_free) = NULL;
+ * then create and process as usual.
+ * But, don't forget to clear to NULL at successful return for avoiding
+ * the unexpected cleanup!
+ */
+DEFINE_FREE(snd_card_free, struct snd_card *, if (_T) snd_card_free(_T))
+
 #define snd_card_set_dev(card, devptr) ((card)->dev = (devptr))
 
 /* device.c */
@@ -326,7 +361,6 @@ void snd_device_disconnect(struct snd_card *card, void *device_data);
 void snd_device_disconnect_all(struct snd_card *card);
 void snd_device_free(struct snd_card *card, void *device_data);
 void snd_device_free_all(struct snd_card *card);
-int snd_device_get_state(struct snd_card *card, void *device_data);
 
 /* isadma.c */
 
@@ -345,45 +379,7 @@ void release_and_free_resource(struct resource *res);
 
 /* --- */
 
-/* sound printk debug levels */
-enum {
-	SND_PR_ALWAYS,
-	SND_PR_DEBUG,
-	SND_PR_VERBOSE,
-};
-
-#if defined(CONFIG_SND_DEBUG) || defined(CONFIG_SND_VERBOSE_PRINTK)
-__printf(4, 5)
-void __snd_printk(unsigned int level, const char *file, int line,
-		  const char *format, ...);
-#else
-#define __snd_printk(level, file, line, format, ...) \
-	printk(format, ##__VA_ARGS__)
-#endif
-
-/**
- * snd_printk - printk wrapper
- * @fmt: format string
- *
- * Works like printk() but prints the file and the line of the caller
- * when configured with CONFIG_SND_VERBOSE_PRINTK.
- */
-#define snd_printk(fmt, ...) \
-	__snd_printk(0, __FILE__, __LINE__, fmt, ##__VA_ARGS__)
-
 #ifdef CONFIG_SND_DEBUG
-/**
- * snd_printd - debug printk
- * @fmt: format string
- *
- * Works like snd_printk() for debugging purposes.
- * Ignored when CONFIG_SND_DEBUG is not set.
- */
-#define snd_printd(fmt, ...) \
-	__snd_printk(1, __FILE__, __LINE__, fmt, ##__VA_ARGS__)
-#define _snd_printd(level, fmt, ...) \
-	__snd_printk(level, __FILE__, __LINE__, fmt, ##__VA_ARGS__)
-
 /**
  * snd_BUG - give a BUG warning message and stack trace
  *
@@ -391,12 +387,6 @@ void __snd_printk(unsigned int level, const char *file, int line,
  * Ignored when CONFIG_SND_DEBUG is not set.
  */
 #define snd_BUG()		WARN(1, "BUG?\n")
-
-/**
- * snd_printd_ratelimit - Suppress high rates of output when
- * 			  CONFIG_SND_DEBUG is enabled.
- */
-#define snd_printd_ratelimit() printk_ratelimit()
 
 /**
  * snd_BUG_ON - debugging check macro
@@ -409,11 +399,6 @@ void __snd_printk(unsigned int level, const char *file, int line,
 
 #else /* !CONFIG_SND_DEBUG */
 
-__printf(1, 2)
-static inline void snd_printd(const char *format, ...) {}
-__printf(2, 3)
-static inline void _snd_printd(int level, const char *format, ...) {}
-
 #define snd_BUG()			do { } while (0)
 
 #define snd_BUG_ON(condition) ({ \
@@ -421,25 +406,7 @@ static inline void _snd_printd(int level, const char *format, ...) {}
 	unlikely(__ret_warn_on); \
 })
 
-static inline bool snd_printd_ratelimit(void) { return false; }
-
 #endif /* CONFIG_SND_DEBUG */
-
-#ifdef CONFIG_SND_DEBUG_VERBOSE
-/**
- * snd_printdd - debug printk
- * @format: format string
- *
- * Works like snd_printk() for debugging purposes.
- * Ignored when CONFIG_SND_DEBUG_VERBOSE is not set.
- */
-#define snd_printdd(format, ...) \
-	__snd_printk(2, __FILE__, __LINE__, format, ##__VA_ARGS__)
-#else
-__printf(1, 2)
-static inline void snd_printdd(const char *format, ...) {}
-#endif
-
 
 #define SNDRV_OSS_VERSION         ((3<<16)|(8<<8)|(1<<4)|(0))	/* 3.8.1a */
 

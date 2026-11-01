@@ -638,6 +638,12 @@ static const struct of_device_id sh_pfc_of_table[] = {
 		.data = &r8a779g0_pinmux_info,
 	},
 #endif
+#ifdef CONFIG_PINCTRL_PFC_R8A779H0
+	{
+		.compatible = "renesas,pfc-r8a779h0",
+		.data = &r8a779h0_pinmux_info,
+	},
+#endif
 #ifdef CONFIG_PINCTRL_PFC_SH73A0
 	{
 		.compatible = "renesas,pfc-sh73a0",
@@ -731,10 +737,12 @@ static int sh_pfc_resume_noirq(struct device *dev)
 		sh_pfc_walk_regs(pfc, sh_pfc_restore_reg);
 	return 0;
 }
+#define pm_psci_sleep_ptr(_ptr)	pm_sleep_ptr(_ptr)
 #else
 static int sh_pfc_suspend_init(struct sh_pfc *pfc) { return 0; }
 static int sh_pfc_suspend_noirq(struct device *dev) { return 0; }
 static int sh_pfc_resume_noirq(struct device *dev) { return 0; }
+#define pm_psci_sleep_ptr(_ptr)	PTR_IF(false, (_ptr))
 #endif	/* CONFIG_ARM_PSCI_FW */
 
 static DEFINE_NOIRQ_DEV_PM_OPS(sh_pfc_pm, sh_pfc_suspend_noirq, sh_pfc_resume_noirq);
@@ -907,9 +915,11 @@ static void __init sh_pfc_check_cfg_reg(const char *drvname,
 		sh_pfc_err("reg 0x%x: var_field_width declares %u instead of %u bits\n",
 			   cfg_reg->reg, rw, cfg_reg->reg_width);
 
-	if (n != cfg_reg->nr_enum_ids)
+	if (n != cfg_reg->nr_enum_ids) {
 		sh_pfc_err("reg 0x%x: enum_ids[] has %u instead of %u values\n",
 			   cfg_reg->reg, cfg_reg->nr_enum_ids, n);
+		n = cfg_reg->nr_enum_ids;
+	}
 
 check_enum_ids:
 	sh_pfc_check_reg_enums(drvname, cfg_reg->reg, cfg_reg->enum_ids, n);
@@ -1263,8 +1273,7 @@ static void __init sh_pfc_check_driver(const struct platform_driver *pdrv)
 	    !of_find_matching_node(NULL, pdrv->driver.of_match_table))
 		return;
 
-	sh_pfc_regs = kcalloc(SH_PFC_MAX_REGS, sizeof(*sh_pfc_regs),
-			      GFP_KERNEL);
+	sh_pfc_regs = kzalloc_objs(*sh_pfc_regs, SH_PFC_MAX_REGS);
 	if (!sh_pfc_regs)
 		return;
 
@@ -1371,40 +1380,40 @@ static int sh_pfc_probe(struct platform_device *pdev)
 
 static const struct platform_device_id sh_pfc_id_table[] = {
 #ifdef CONFIG_PINCTRL_PFC_SH7203
-	{ "pfc-sh7203", (kernel_ulong_t)&sh7203_pinmux_info },
+	{ .name = "pfc-sh7203", .driver_data = (kernel_ulong_t)&sh7203_pinmux_info },
 #endif
 #ifdef CONFIG_PINCTRL_PFC_SH7264
-	{ "pfc-sh7264", (kernel_ulong_t)&sh7264_pinmux_info },
+	{ .name = "pfc-sh7264", .driver_data = (kernel_ulong_t)&sh7264_pinmux_info },
 #endif
 #ifdef CONFIG_PINCTRL_PFC_SH7269
-	{ "pfc-sh7269", (kernel_ulong_t)&sh7269_pinmux_info },
+	{ .name = "pfc-sh7269", .driver_data = (kernel_ulong_t)&sh7269_pinmux_info },
 #endif
 #ifdef CONFIG_PINCTRL_PFC_SH7720
-	{ "pfc-sh7720", (kernel_ulong_t)&sh7720_pinmux_info },
+	{ .name = "pfc-sh7720", .driver_data = (kernel_ulong_t)&sh7720_pinmux_info },
 #endif
 #ifdef CONFIG_PINCTRL_PFC_SH7722
-	{ "pfc-sh7722", (kernel_ulong_t)&sh7722_pinmux_info },
+	{ .name = "pfc-sh7722", .driver_data = (kernel_ulong_t)&sh7722_pinmux_info },
 #endif
 #ifdef CONFIG_PINCTRL_PFC_SH7723
-	{ "pfc-sh7723", (kernel_ulong_t)&sh7723_pinmux_info },
+	{ .name = "pfc-sh7723", .driver_data = (kernel_ulong_t)&sh7723_pinmux_info },
 #endif
 #ifdef CONFIG_PINCTRL_PFC_SH7724
-	{ "pfc-sh7724", (kernel_ulong_t)&sh7724_pinmux_info },
+	{ .name = "pfc-sh7724", .driver_data = (kernel_ulong_t)&sh7724_pinmux_info },
 #endif
 #ifdef CONFIG_PINCTRL_PFC_SH7734
-	{ "pfc-sh7734", (kernel_ulong_t)&sh7734_pinmux_info },
+	{ .name = "pfc-sh7734", .driver_data = (kernel_ulong_t)&sh7734_pinmux_info },
 #endif
 #ifdef CONFIG_PINCTRL_PFC_SH7757
-	{ "pfc-sh7757", (kernel_ulong_t)&sh7757_pinmux_info },
+	{ .name = "pfc-sh7757", .driver_data = (kernel_ulong_t)&sh7757_pinmux_info },
 #endif
 #ifdef CONFIG_PINCTRL_PFC_SH7785
-	{ "pfc-sh7785", (kernel_ulong_t)&sh7785_pinmux_info },
+	{ .name = "pfc-sh7785", .driver_data = (kernel_ulong_t)&sh7785_pinmux_info },
 #endif
 #ifdef CONFIG_PINCTRL_PFC_SH7786
-	{ "pfc-sh7786", (kernel_ulong_t)&sh7786_pinmux_info },
+	{ .name = "pfc-sh7786", .driver_data = (kernel_ulong_t)&sh7786_pinmux_info },
 #endif
 #ifdef CONFIG_PINCTRL_PFC_SHX3
-	{ "pfc-shx3", (kernel_ulong_t)&shx3_pinmux_info },
+	{ .name = "pfc-shx3", .driver_data = (kernel_ulong_t)&shx3_pinmux_info },
 #endif
 	{ /* sentinel */ }
 };
@@ -1415,7 +1424,7 @@ static struct platform_driver sh_pfc_driver = {
 	.driver		= {
 		.name	= DRV_NAME,
 		.of_match_table = of_match_ptr(sh_pfc_of_table),
-		.pm	= pm_sleep_ptr(&sh_pfc_pm),
+		.pm	= pm_psci_sleep_ptr(&sh_pfc_pm),
 	},
 };
 

@@ -20,7 +20,6 @@
 #include <linux/delay.h>
 #include <linux/kthread.h>
 #include <linux/module.h>
-#include <linux/mod_devicetable.h>
 #include <linux/mutex.h>
 #include <linux/i2c.h>
 #include <linux/iio/iio.h>
@@ -114,6 +113,7 @@ struct sgp_data {
 };
 
 struct sgp_device {
+	unsigned long product_id;
 	const struct iio_chan_spec *channels;
 	int num_channels;
 };
@@ -182,10 +182,12 @@ static const struct iio_chan_spec sgpc3_channels[] = {
 
 static const struct sgp_device sgp_devices[] = {
 	[SGP30] = {
+		.product_id = SGP30,
 		.channels = sgp30_channels,
 		.num_channels = ARRAY_SIZE(sgp30_channels),
 	},
 	[SGPC3] = {
+		.product_id = SGPC3,
 		.channels = sgpc3_channels,
 		.num_channels = ARRAY_SIZE(sgpc3_channels),
 	},
@@ -491,28 +493,26 @@ static const struct iio_info sgp_info = {
 };
 
 static const struct of_device_id sgp_dt_ids[] = {
-	{ .compatible = "sensirion,sgp30", .data = (void *)SGP30 },
-	{ .compatible = "sensirion,sgpc3", .data = (void *)SGPC3 },
+	{ .compatible = "sensirion,sgp30", .data = &sgp_devices[SGP30] },
+	{ .compatible = "sensirion,sgpc3", .data = &sgp_devices[SGPC3] },
 	{ }
 };
+MODULE_DEVICE_TABLE(of, sgp_dt_ids);
 
 static int sgp_probe(struct i2c_client *client)
 {
 	const struct i2c_device_id *id = i2c_client_get_device_id(client);
+	const struct sgp_device *match_data;
 	struct device *dev = &client->dev;
 	struct iio_dev *indio_dev;
 	struct sgp_data *data;
-	unsigned long product_id;
 	int ret;
 
 	indio_dev = devm_iio_device_alloc(dev, sizeof(*data));
 	if (!indio_dev)
 		return -ENOMEM;
 
-	if (dev_fwnode(dev))
-		product_id = (unsigned long)device_get_match_data(dev);
-	else
-		product_id = id->driver_data;
+	match_data = i2c_get_match_data(client);
 
 	data = iio_priv(indio_dev);
 	i2c_set_clientdata(client, indio_dev);
@@ -528,15 +528,15 @@ static int sgp_probe(struct i2c_client *client)
 
 	data->feature_set = be16_to_cpu(data->buffer.raw_words[0].value);
 
-	ret = sgp_check_compat(data, product_id);
+	ret = sgp_check_compat(data, match_data->product_id);
 	if (ret)
 		return ret;
 
 	indio_dev->info = &sgp_info;
 	indio_dev->name = id->name;
 	indio_dev->modes = INDIO_DIRECT_MODE;
-	indio_dev->channels = sgp_devices[product_id].channels;
-	indio_dev->num_channels = sgp_devices[product_id].num_channels;
+	indio_dev->channels = match_data->channels;
+	indio_dev->num_channels = match_data->num_channels;
 
 	sgp_init(data);
 
@@ -548,6 +548,9 @@ static int sgp_probe(struct i2c_client *client)
 
 	data->iaq_thread = kthread_run(sgp_iaq_threadfn, data,
 				       "%s-iaq", data->client->name);
+	if (IS_ERR(data->iaq_thread))
+		return dev_err_probe(dev, PTR_ERR(data->iaq_thread),
+				     "failed to start IAQ thread\n");
 
 	return 0;
 }
@@ -562,13 +565,11 @@ static void sgp_remove(struct i2c_client *client)
 }
 
 static const struct i2c_device_id sgp_id[] = {
-	{ "sgp30", SGP30 },
-	{ "sgpc3", SGPC3 },
+	{ .name = "sgp30", .driver_data = (kernel_ulong_t)&sgp_devices[SGP30] },
+	{ .name = "sgpc3", .driver_data = (kernel_ulong_t)&sgp_devices[SGPC3] },
 	{ }
 };
-
 MODULE_DEVICE_TABLE(i2c, sgp_id);
-MODULE_DEVICE_TABLE(of, sgp_dt_ids);
 
 static struct i2c_driver sgp_driver = {
 	.driver = {

@@ -1,9 +1,10 @@
-// SPDX-License-Identifier: ISC
+// SPDX-License-Identifier: BSD-3-Clause-Clear
 /* Copyright (C) 2020 MediaTek Inc. */
 
 #include <linux/firmware.h>
 #include "mt76_connac2_mac.h"
 #include "mt76_connac_mcu.h"
+#include "mt792x_regs.h"
 
 int mt76_connac_mcu_start_firmware(struct mt76_dev *dev, u32 addr, u32 option)
 {
@@ -65,8 +66,10 @@ int mt76_connac_mcu_init_download(struct mt76_dev *dev, u32 addr, u32 len,
 	int cmd;
 
 	if ((!is_connac_v1(dev) && addr == MCU_PATCH_ADDRESS) ||
-	    (is_mt7921(dev) && addr == 0x900000) ||
-	    (is_mt7996(dev) && addr == 0x900000))
+	    (is_connac2(dev) && addr == 0x900000) ||
+	    ((is_mt7925(dev) || is_mt7927(dev)) && (addr == 0x900000 || addr == 0xe0002800)) ||
+	    (is_mt7928(dev) && (addr == 0x900000 || addr == 0xe0002000)) ||
+	    (is_mt799x(dev) && addr == 0x900000))
 		cmd = MCU_CMD(PATCH_START_REQ);
 	else
 		cmd = MCU_CMD(TARGET_ADDRESS_LEN_REQ);
@@ -74,6 +77,48 @@ int mt76_connac_mcu_init_download(struct mt76_dev *dev, u32 addr, u32 len,
 	return mt76_mcu_send_msg(dev, cmd, &req, sizeof(req), true);
 }
 EXPORT_SYMBOL_GPL(mt76_connac_mcu_init_download);
+
+int mt76_connac_cb_mcu_patch_sem_ctrl(struct mt76_dev *dev, bool get)
+{
+	u8 op = get ? PATCH_SEM_GET : PATCH_SEM_RELEASE;
+	struct {
+		u8 op;
+		u8 reserved[3];
+	} req = {
+		.op = op,
+	};
+
+	return mt76_mcu_send_msg(dev, MCU_CMD(CB_PATCH_SEM_CONTROL),
+				 &req, sizeof(req), true);
+}
+EXPORT_SYMBOL_GPL(mt76_connac_cb_mcu_patch_sem_ctrl);
+
+int mt76_connac_cb_mcu_start_patch(struct mt76_dev *dev)
+{
+	struct {
+		__le32 reserved;
+	} req = {
+		.reserved = 0,
+	};
+
+	return mt76_mcu_send_msg(dev, MCU_CMD(CB_PATCH_FINISH_REQ),
+				 &req, sizeof(req), true);
+}
+EXPORT_SYMBOL_GPL(mt76_connac_cb_mcu_start_patch);
+
+int mt76_connac_cb_mcu_init_download(struct mt76_dev *dev, u32 len)
+{
+	struct {
+		__le32 addr;
+		__le32 len;
+	} req = {
+		.addr = 0, /* addr is meaningless for cbmcu fwdl */
+		.len = cpu_to_le32(len),
+	};
+
+	return mt76_mcu_send_msg(dev, MCU_CMD(CB_PATCH_START_REQ), &req, sizeof(req), true);
+}
+EXPORT_SYMBOL_GPL(mt76_connac_cb_mcu_init_download);
 
 int mt76_connac_mcu_set_channel_domain(struct mt76_phy *phy)
 {
@@ -187,7 +232,7 @@ EXPORT_SYMBOL_GPL(mt76_connac_mcu_set_mac_enable);
 
 int mt76_connac_mcu_set_vif_ps(struct mt76_dev *dev, struct ieee80211_vif *vif)
 {
-	struct mt76_vif *mvif = (struct mt76_vif *)vif->drv_priv;
+	struct mt76_vif_link *mvif = (struct mt76_vif_link *)vif->drv_priv;
 	struct {
 		u8 bss_idx;
 		u8 ps_state; /* 0: device awake
@@ -230,7 +275,7 @@ EXPORT_SYMBOL_GPL(mt76_connac_mcu_set_rts_thresh);
 void mt76_connac_mcu_beacon_loss_iter(void *priv, u8 *mac,
 				      struct ieee80211_vif *vif)
 {
-	struct mt76_vif *mvif = (struct mt76_vif *)vif->drv_priv;
+	struct mt76_vif_link *mvif = (struct mt76_vif_link *)vif->drv_priv;
 	struct mt76_connac_beacon_loss_event *event = priv;
 
 	if (mvif->idx != event->bss_idx)
@@ -255,7 +300,7 @@ mt76_connac_mcu_add_nested_tlv(struct sk_buff *skb, int tag, int len,
 	};
 	u16 ntlv;
 
-	ptlv = skb_put(skb, len);
+	ptlv = skb_put_zero(skb, len);
 	memcpy(ptlv, &tlv, sizeof(tlv));
 
 	ntlv = le16_to_cpu(ntlv_hdr->tlv_num);
@@ -271,7 +316,7 @@ mt76_connac_mcu_add_nested_tlv(struct sk_buff *skb, int tag, int len,
 EXPORT_SYMBOL_GPL(mt76_connac_mcu_add_nested_tlv);
 
 struct sk_buff *
-__mt76_connac_mcu_alloc_sta_req(struct mt76_dev *dev, struct mt76_vif *mvif,
+__mt76_connac_mcu_alloc_sta_req(struct mt76_dev *dev, struct mt76_vif_link *mvif,
 				struct mt76_wcid *wcid, int len)
 {
 	struct sta_req_hdr hdr = {
@@ -281,9 +326,12 @@ __mt76_connac_mcu_alloc_sta_req(struct mt76_dev *dev, struct mt76_vif *mvif,
 	};
 	struct sk_buff *skb;
 
+	if (wcid && !wcid->sta && !wcid->sta_disabled)
+		hdr.muar_idx = 0xe;
+
 	mt76_connac_mcu_get_wlan_idx(dev, wcid, &hdr.wlan_idx_lo,
 				     &hdr.wlan_idx_hi);
-	skb = mt76_mcu_msg_alloc(dev, NULL, len);
+	skb = __mt76_mcu_msg_alloc(dev, NULL, len, len, GFP_ATOMIC);
 	if (!skb)
 		return ERR_PTR(-ENOMEM);
 
@@ -324,7 +372,7 @@ EXPORT_SYMBOL_GPL(mt76_connac_mcu_alloc_wtbl_req);
 void mt76_connac_mcu_bss_omac_tlv(struct sk_buff *skb,
 				  struct ieee80211_vif *vif)
 {
-	struct mt76_vif *mvif = (struct mt76_vif *)vif->drv_priv;
+	struct mt76_vif_link *mvif = (struct mt76_vif_link *)vif->drv_priv;
 	u8 omac_idx = mvif->omac_idx;
 	struct bss_info_omac *omac;
 	struct tlv *tlv;
@@ -364,10 +412,11 @@ void mt76_connac_mcu_bss_omac_tlv(struct sk_buff *skb,
 EXPORT_SYMBOL_GPL(mt76_connac_mcu_bss_omac_tlv);
 
 void mt76_connac_mcu_sta_basic_tlv(struct mt76_dev *dev, struct sk_buff *skb,
-				   struct ieee80211_vif *vif,
-				   struct ieee80211_sta *sta,
-				   bool enable, bool newly)
+				   struct ieee80211_bss_conf *link_conf,
+				   struct ieee80211_link_sta *link_sta,
+				   int conn_state, bool newly)
 {
+	struct ieee80211_vif *vif = link_conf->vif;
 	struct sta_rec_basic *basic;
 	struct tlv *tlv;
 	int conn_type;
@@ -377,32 +426,35 @@ void mt76_connac_mcu_sta_basic_tlv(struct mt76_dev *dev, struct sk_buff *skb,
 	basic = (struct sta_rec_basic *)tlv;
 	basic->extra_info = cpu_to_le16(EXTRA_INFO_VER);
 
-	if (enable) {
-		if (newly)
-			basic->extra_info |= cpu_to_le16(EXTRA_INFO_NEW);
-		basic->conn_state = CONN_STATE_PORT_SECURE;
-	} else {
-		basic->conn_state = CONN_STATE_DISCONNECT;
-	}
+	if (newly && conn_state != CONN_STATE_DISCONNECT)
+		basic->extra_info |= cpu_to_le16(EXTRA_INFO_NEW);
+	basic->conn_state = conn_state;
 
-	if (!sta) {
+	if (!link_sta) {
 		basic->conn_type = cpu_to_le32(CONNECTION_INFRA_BC);
-		eth_broadcast_addr(basic->peer_addr);
+
+		if (vif->type == NL80211_IFTYPE_STATION &&
+		    !is_zero_ether_addr(link_conf->bssid)) {
+			memcpy(basic->peer_addr, link_conf->bssid, ETH_ALEN);
+			basic->aid = cpu_to_le16(vif->cfg.aid);
+		} else {
+			eth_broadcast_addr(basic->peer_addr);
+		}
 		return;
 	}
 
 	switch (vif->type) {
 	case NL80211_IFTYPE_MESH_POINT:
 	case NL80211_IFTYPE_AP:
-		if (vif->p2p && !is_mt7921(dev))
+		if (vif->p2p && !is_connac2(dev))
 			conn_type = CONNECTION_P2P_GC;
 		else
 			conn_type = CONNECTION_INFRA_STA;
 		basic->conn_type = cpu_to_le32(conn_type);
-		basic->aid = cpu_to_le16(sta->aid);
+		basic->aid = cpu_to_le16(link_sta->sta->aid);
 		break;
 	case NL80211_IFTYPE_STATION:
-		if (vif->p2p && !is_mt7921(dev))
+		if (vif->p2p && !is_connac2(dev))
 			conn_type = CONNECTION_P2P_GO;
 		else
 			conn_type = CONNECTION_INFRA_AP;
@@ -411,15 +463,19 @@ void mt76_connac_mcu_sta_basic_tlv(struct mt76_dev *dev, struct sk_buff *skb,
 		break;
 	case NL80211_IFTYPE_ADHOC:
 		basic->conn_type = cpu_to_le32(CONNECTION_IBSS_ADHOC);
-		basic->aid = cpu_to_le16(sta->aid);
+		basic->aid = cpu_to_le16(link_sta->sta->aid);
+		break;
+	case NL80211_IFTYPE_NAN:
+	case NL80211_IFTYPE_NAN_DATA:
+		basic->conn_type = cpu_to_le32(CONNECTION_NAN);
 		break;
 	default:
 		WARN_ON(1);
 		break;
 	}
 
-	memcpy(basic->peer_addr, sta->addr, ETH_ALEN);
-	basic->qos = sta->wme;
+	memcpy(basic->peer_addr, link_sta->addr, ETH_ALEN);
+	basic->qos = link_sta->sta->wme;
 }
 EXPORT_SYMBOL_GPL(mt76_connac_mcu_sta_basic_tlv);
 
@@ -482,6 +538,11 @@ void mt76_connac_mcu_wtbl_hdr_trans_tlv(struct sk_buff *skb,
 		htr->to_ds = true;
 		htr->from_ds = true;
 	}
+
+	if (test_bit(MT_WCID_FLAG_TDLS_PEER, &wcid->flags)) {
+		htr->to_ds = false;
+		htr->from_ds = false;
+	}
 }
 EXPORT_SYMBOL_GPL(mt76_connac_mcu_wtbl_hdr_trans_tlv);
 
@@ -489,7 +550,7 @@ int mt76_connac_mcu_sta_update_hdr_trans(struct mt76_dev *dev,
 					 struct ieee80211_vif *vif,
 					 struct mt76_wcid *wcid, int cmd)
 {
-	struct mt76_vif *mvif = (struct mt76_vif *)vif->drv_priv;
+	struct mt76_vif_link *mvif = (struct mt76_vif_link *)vif->drv_priv;
 	struct wtbl_req_hdr *wtbl_hdr;
 	struct tlv *sta_wtbl;
 	struct sk_buff *skb;
@@ -537,7 +598,7 @@ void mt76_connac_mcu_wtbl_generic_tlv(struct mt76_dev *dev,
 				      struct ieee80211_sta *sta,
 				      void *sta_wtbl, void *wtbl_tlv)
 {
-	struct mt76_vif *mvif = (struct mt76_vif *)vif->drv_priv;
+	struct mt76_vif_link *mvif = (struct mt76_vif_link *)vif->drv_priv;
 	struct wtbl_generic *generic;
 	struct wtbl_rx *rx;
 	struct wtbl_spe *spe;
@@ -739,13 +800,13 @@ mt76_connac_mcu_sta_he_tlv(struct sk_buff *skb, struct ieee80211_sta *sta)
 		HE_PHY(CAP3_DCM_MAX_CONST_RX_MASK, elem->phy_cap_info[3]);
 	he->dcm_rx_max_nss =
 		HE_PHY(CAP3_DCM_MAX_RX_NSS_2, elem->phy_cap_info[3]);
-	he->dcm_rx_max_nss =
+	he->dcm_max_ru =
 		HE_PHY(CAP8_DCM_MAX_RU_MASK, elem->phy_cap_info[8]);
 
 	he->pkt_ext = 2;
 }
 
-static void
+void
 mt76_connac_mcu_sta_he_tlv_v2(struct sk_buff *skb, struct ieee80211_sta *sta)
 {
 	struct ieee80211_sta_he_cap *he_cap = &sta->deflink.he_cap;
@@ -777,20 +838,24 @@ mt76_connac_mcu_sta_he_tlv_v2(struct sk_buff *skb, struct ieee80211_sta *sta)
 
 	he->pkt_ext = IEEE80211_HE_PHY_CAP9_NOMINAL_PKT_PADDING_16US;
 }
+EXPORT_SYMBOL_GPL(mt76_connac_mcu_sta_he_tlv_v2);
 
-static u8
+u8
 mt76_connac_get_phy_mode_v2(struct mt76_phy *mphy, struct ieee80211_vif *vif,
-			    enum nl80211_band band, struct ieee80211_sta *sta)
+			    enum nl80211_band band,
+			    struct ieee80211_link_sta *link_sta)
 {
 	struct ieee80211_sta_ht_cap *ht_cap;
 	struct ieee80211_sta_vht_cap *vht_cap;
 	const struct ieee80211_sta_he_cap *he_cap;
+	const struct ieee80211_sta_eht_cap *eht_cap;
 	u8 mode = 0;
 
-	if (sta) {
-		ht_cap = &sta->deflink.ht_cap;
-		vht_cap = &sta->deflink.vht_cap;
-		he_cap = &sta->deflink.he_cap;
+	if (link_sta) {
+		ht_cap = &link_sta->ht_cap;
+		vht_cap = &link_sta->vht_cap;
+		he_cap = &link_sta->he_cap;
+		eht_cap = &link_sta->eht_cap;
 	} else {
 		struct ieee80211_supported_band *sband;
 
@@ -798,6 +863,7 @@ mt76_connac_get_phy_mode_v2(struct mt76_phy *mphy, struct ieee80211_vif *vif,
 		ht_cap = &sband->ht_cap;
 		vht_cap = &sband->vht_cap;
 		he_cap = ieee80211_get_he_iftype_cap(sband, vif->type);
+		eht_cap = ieee80211_get_eht_iftype_cap(sband, vif->type);
 	}
 
 	if (band == NL80211_BAND_2GHZ) {
@@ -808,6 +874,9 @@ mt76_connac_get_phy_mode_v2(struct mt76_phy *mphy, struct ieee80211_vif *vif,
 
 		if (he_cap && he_cap->has_he)
 			mode |= PHY_TYPE_BIT_HE;
+
+		if (eht_cap && eht_cap->has_eht)
+			mode |= PHY_TYPE_BIT_BE;
 	} else if (band == NL80211_BAND_5GHZ || band == NL80211_BAND_6GHZ) {
 		mode |= PHY_TYPE_BIT_OFDM;
 
@@ -819,17 +888,23 @@ mt76_connac_get_phy_mode_v2(struct mt76_phy *mphy, struct ieee80211_vif *vif,
 
 		if (he_cap && he_cap->has_he)
 			mode |= PHY_TYPE_BIT_HE;
+
+		if (eht_cap && eht_cap->has_eht)
+			mode |= PHY_TYPE_BIT_BE;
 	}
 
 	return mode;
 }
+EXPORT_SYMBOL_GPL(mt76_connac_get_phy_mode_v2);
 
 void mt76_connac_mcu_sta_tlv(struct mt76_phy *mphy, struct sk_buff *skb,
 			     struct ieee80211_sta *sta,
 			     struct ieee80211_vif *vif,
 			     u8 rcpi, u8 sta_state)
 {
-	struct cfg80211_chan_def *chandef = &mphy->chandef;
+	struct mt76_vif_link *mvif = (struct mt76_vif_link *)vif->drv_priv;
+	struct cfg80211_chan_def *chandef = mvif->ctx ?
+					    &mvif->ctx->def : &mphy->chandef;
 	enum nl80211_band band = chandef->chan->band;
 	struct mt76_dev *dev = mphy->dev;
 	struct sta_rec_ra_info *ra_info;
@@ -852,7 +927,7 @@ void mt76_connac_mcu_sta_tlv(struct mt76_phy *mphy, struct sk_buff *skb,
 		struct sta_rec_vht *vht;
 		int len;
 
-		len = is_mt7921(dev) ? sizeof(*vht) : sizeof(*vht) - 4;
+		len = is_connac2(dev) ? sizeof(*vht) : sizeof(*vht) - 4;
 		tlv = mt76_connac_mcu_add_tlv(skb, STA_REC_VHT, len);
 		vht = (struct sta_rec_vht *)tlv;
 		vht->vht_cap = cpu_to_le32(sta->deflink.vht_cap.cap);
@@ -863,7 +938,7 @@ void mt76_connac_mcu_sta_tlv(struct mt76_phy *mphy, struct sk_buff *skb,
 	/* starec uapsd */
 	mt76_connac_mcu_sta_uapsd(skb, vif, sta);
 
-	if (!is_mt7921(dev))
+	if (!is_connac2(dev))
 		return;
 
 	if (sta->deflink.ht_cap.ht_supported || sta->deflink.he_cap.has_he)
@@ -886,7 +961,8 @@ void mt76_connac_mcu_sta_tlv(struct mt76_phy *mphy, struct sk_buff *skb,
 
 	tlv = mt76_connac_mcu_add_tlv(skb, STA_REC_PHY, sizeof(*phy));
 	phy = (struct sta_rec_phy *)tlv;
-	phy->phy_type = mt76_connac_get_phy_mode_v2(mphy, vif, band, sta);
+	phy->phy_type = mt76_connac_get_phy_mode_v2(mphy, vif, band,
+						    &sta->deflink);
 	phy->basic_rate = cpu_to_le16((u16)vif->bss_conf.basic_rates);
 	phy->rcpi = rcpi;
 	phy->ampdu = FIELD_PREP(IEEE80211_HT_AMPDU_PARM_FACTOR,
@@ -1018,19 +1094,28 @@ EXPORT_SYMBOL_GPL(mt76_connac_mcu_wtbl_ht_tlv);
 int mt76_connac_mcu_sta_cmd(struct mt76_phy *phy,
 			    struct mt76_sta_cmd_info *info)
 {
-	struct mt76_vif *mvif = (struct mt76_vif *)info->vif->drv_priv;
+	struct mt76_vif_link *mvif = (struct mt76_vif_link *)info->vif->drv_priv;
+	struct ieee80211_link_sta *link_sta;
 	struct mt76_dev *dev = phy->dev;
 	struct wtbl_req_hdr *wtbl_hdr;
 	struct tlv *sta_wtbl;
 	struct sk_buff *skb;
+	int conn_state;
+
+	if (!info->link_conf)
+		info->link_conf = &info->vif->bss_conf;
 
 	skb = mt76_connac_mcu_alloc_sta_req(dev, mvif, info->wcid);
 	if (IS_ERR(skb))
 		return PTR_ERR(skb);
 
+	conn_state = info->enable ? CONN_STATE_PORT_SECURE :
+				    CONN_STATE_DISCONNECT;
+	link_sta = info->sta ? &info->sta->deflink : NULL;
 	if (info->sta || !info->offload_fw)
-		mt76_connac_mcu_sta_basic_tlv(dev, skb, info->vif, info->sta,
-					      info->enable, info->newly);
+		mt76_connac_mcu_sta_basic_tlv(dev, skb, info->link_conf,
+					      link_sta, conn_state,
+					      info->newly);
 	if (info->sta && info->enable)
 		mt76_connac_mcu_sta_tlv(phy, skb, info->sta,
 					info->vif, info->rcpi,
@@ -1107,11 +1192,11 @@ void mt76_connac_mcu_wtbl_ba_tlv(struct mt76_dev *dev, struct sk_buff *skb,
 EXPORT_SYMBOL_GPL(mt76_connac_mcu_wtbl_ba_tlv);
 
 int mt76_connac_mcu_uni_add_dev(struct mt76_phy *phy,
-				struct ieee80211_vif *vif,
+				struct ieee80211_bss_conf *bss_conf,
+				struct mt76_vif_link *mvif,
 				struct mt76_wcid *wcid,
 				bool enable)
 {
-	struct mt76_vif *mvif = (struct mt76_vif *)vif->drv_priv;
 	struct mt76_dev *dev = phy->dev;
 	struct {
 		struct {
@@ -1123,7 +1208,7 @@ int mt76_connac_mcu_uni_add_dev(struct mt76_phy *phy,
 			__le16 tag;
 			__le16 len;
 			u8 active;
-			u8 pad;
+			u8 link_idx; /* not link_id */
 			u8 omac_addr[ETH_ALEN];
 		} __packed tlv;
 	} dev_req = {
@@ -1135,6 +1220,7 @@ int mt76_connac_mcu_uni_add_dev(struct mt76_phy *phy,
 			.tag = cpu_to_le16(DEV_INFO_ACTIVE),
 			.len = cpu_to_le16(sizeof(struct req_tlv)),
 			.active = enable,
+			.link_idx = mvif->link_idx,
 		},
 	};
 	struct {
@@ -1157,12 +1243,13 @@ int mt76_connac_mcu_uni_add_dev(struct mt76_phy *phy,
 			.bmc_tx_wlan_idx = cpu_to_le16(wcid->idx),
 			.sta_idx = cpu_to_le16(wcid->idx),
 			.conn_state = 1,
+			.link_idx = mvif->link_idx,
 		},
 	};
 	int err, idx, cmd, len;
 	void *data;
 
-	switch (vif->type) {
+	switch (bss_conf->vif->type) {
 	case NL80211_IFTYPE_MESH_POINT:
 	case NL80211_IFTYPE_MONITOR:
 	case NL80211_IFTYPE_AP:
@@ -1171,8 +1258,16 @@ int mt76_connac_mcu_uni_add_dev(struct mt76_phy *phy,
 	case NL80211_IFTYPE_STATION:
 		basic_req.basic.conn_type = cpu_to_le32(CONNECTION_INFRA_STA);
 		break;
+	case NL80211_IFTYPE_P2P_DEVICE:
+		basic_req.basic.conn_type = cpu_to_le32(CONNECTION_P2P_GO);
+		break;
 	case NL80211_IFTYPE_ADHOC:
 		basic_req.basic.conn_type = cpu_to_le32(CONNECTION_IBSS_ADHOC);
+		break;
+	case NL80211_IFTYPE_NAN:
+	case NL80211_IFTYPE_NAN_DATA:
+		basic_req.basic.conn_type = cpu_to_le32(CONNECTION_NAN);
+		basic_req.basic.conn_state = !enable;
 		break;
 	default:
 		WARN_ON(1);
@@ -1182,13 +1277,16 @@ int mt76_connac_mcu_uni_add_dev(struct mt76_phy *phy,
 	idx = mvif->omac_idx > EXT_BSSID_START ? HW_BSSID_0 : mvif->omac_idx;
 	basic_req.basic.hw_bss_idx = idx;
 
-	memcpy(dev_req.tlv.omac_addr, vif->addr, ETH_ALEN);
+	memcpy(dev_req.tlv.omac_addr, bss_conf->addr, ETH_ALEN);
 
 	cmd = enable ? MCU_UNI_CMD(DEV_INFO_UPDATE) : MCU_UNI_CMD(BSS_INFO_UPDATE);
 	data = enable ? (void *)&dev_req : (void *)&basic_req;
 	len = enable ? sizeof(dev_req) : sizeof(basic_req);
 
 	err = mt76_mcu_send_msg(dev, cmd, data, len, true);
+	if (err && cmd == MCU_UNI_CMD(BSS_INFO_UPDATE))
+		err = mt76_connac_mcu_bss_deact_err(dev, err, enable);
+
 	if (err < 0)
 		return err;
 
@@ -1196,7 +1294,11 @@ int mt76_connac_mcu_uni_add_dev(struct mt76_phy *phy,
 	data = enable ? (void *)&basic_req : (void *)&dev_req;
 	len = enable ? sizeof(basic_req) : sizeof(dev_req);
 
-	return mt76_mcu_send_msg(dev, cmd, data, len, true);
+	err = mt76_mcu_send_msg(dev, cmd, data, len, true);
+	if (err && cmd == MCU_UNI_CMD(BSS_INFO_UPDATE))
+		err = mt76_connac_mcu_bss_deact_err(dev, err, enable);
+
+	return err;
 }
 EXPORT_SYMBOL_GPL(mt76_connac_mcu_uni_add_dev);
 
@@ -1232,7 +1334,7 @@ int mt76_connac_mcu_sta_wed_update(struct mt76_dev *dev, struct sk_buff *skb)
 }
 EXPORT_SYMBOL_GPL(mt76_connac_mcu_sta_wed_update);
 
-int mt76_connac_mcu_sta_ba(struct mt76_dev *dev, struct mt76_vif *mvif,
+int mt76_connac_mcu_sta_ba(struct mt76_dev *dev, struct mt76_vif_link *mvif,
 			   struct ieee80211_ampdu_params *params,
 			   int cmd, bool enable, bool tx)
 {
@@ -1258,8 +1360,10 @@ int mt76_connac_mcu_sta_ba(struct mt76_dev *dev, struct mt76_vif *mvif,
 				    wtbl_hdr);
 
 	ret = mt76_connac_mcu_sta_wed_update(dev, skb);
-	if (ret)
+	if (ret) {
+		dev_kfree_skb(skb);
 		return ret;
+	}
 
 	ret = mt76_mcu_skb_send_msg(dev, skb, cmd, true);
 	if (ret)
@@ -1272,15 +1376,18 @@ int mt76_connac_mcu_sta_ba(struct mt76_dev *dev, struct mt76_vif *mvif,
 	mt76_connac_mcu_sta_ba_tlv(skb, params, enable, tx);
 
 	ret = mt76_connac_mcu_sta_wed_update(dev, skb);
-	if (ret)
+	if (ret) {
+		dev_kfree_skb(skb);
 		return ret;
+	}
 
 	return mt76_mcu_skb_send_msg(dev, skb, cmd, true);
 }
 EXPORT_SYMBOL_GPL(mt76_connac_mcu_sta_ba);
 
 u8 mt76_connac_get_phy_mode(struct mt76_phy *phy, struct ieee80211_vif *vif,
-			    enum nl80211_band band, struct ieee80211_sta *sta)
+			    enum nl80211_band band,
+			    struct ieee80211_link_sta *link_sta)
 {
 	struct mt76_dev *dev = phy->dev;
 	const struct ieee80211_sta_he_cap *he_cap;
@@ -1291,10 +1398,10 @@ u8 mt76_connac_get_phy_mode(struct mt76_phy *phy, struct ieee80211_vif *vif,
 	if (is_connac_v1(dev))
 		return 0x38;
 
-	if (sta) {
-		ht_cap = &sta->deflink.ht_cap;
-		vht_cap = &sta->deflink.vht_cap;
-		he_cap = &sta->deflink.he_cap;
+	if (link_sta) {
+		ht_cap = &link_sta->ht_cap;
+		vht_cap = &link_sta->vht_cap;
+		he_cap = &link_sta->he_cap;
 	} else {
 		struct ieee80211_supported_band *sband;
 
@@ -1332,7 +1439,7 @@ u8 mt76_connac_get_phy_mode(struct mt76_phy *phy, struct ieee80211_vif *vif,
 }
 EXPORT_SYMBOL_GPL(mt76_connac_get_phy_mode);
 
-u8 mt76_connac_get_phy_mode_ext(struct mt76_phy *phy, struct ieee80211_vif *vif,
+u8 mt76_connac_get_phy_mode_ext(struct mt76_phy *phy, struct ieee80211_bss_conf *conf,
 				enum nl80211_band band)
 {
 	const struct ieee80211_sta_eht_cap *eht_cap;
@@ -1343,9 +1450,9 @@ u8 mt76_connac_get_phy_mode_ext(struct mt76_phy *phy, struct ieee80211_vif *vif,
 		mode |= PHY_MODE_AX_6G;
 
 	sband = phy->hw->wiphy->bands[band];
-	eht_cap = ieee80211_get_eht_iftype_cap(sband, vif->type);
+	eht_cap = ieee80211_get_eht_iftype_cap(sband, conf->vif->type);
 
-	if (!eht_cap || !eht_cap->has_eht)
+	if (!eht_cap || !eht_cap->has_eht || !conf->eht_support)
 		return mode;
 
 	switch (band) {
@@ -1369,7 +1476,10 @@ EXPORT_SYMBOL_GPL(mt76_connac_get_phy_mode_ext);
 const struct ieee80211_sta_he_cap *
 mt76_connac_get_he_phy_cap(struct mt76_phy *phy, struct ieee80211_vif *vif)
 {
-	enum nl80211_band band = phy->chandef.chan->band;
+	struct mt76_vif_link *mvif = (struct mt76_vif_link *)vif->drv_priv;
+	struct cfg80211_chan_def *chandef = mvif->ctx ?
+					    &mvif->ctx->def : &phy->chandef;
+	enum nl80211_band band = chandef->chan->band;
 	struct ieee80211_supported_band *sband;
 
 	sband = phy->hw->wiphy->bands[band];
@@ -1400,6 +1510,8 @@ mt76_connac_mcu_uni_bss_he_tlv(struct mt76_phy *phy, struct ieee80211_vif *vif,
 	struct bss_info_uni_he *he;
 
 	cap = mt76_connac_get_he_phy_cap(phy, vif);
+	if (!cap)
+		return;
 
 	he = (struct bss_info_uni_he *)tlv;
 	he->he_pe_duration = vif->bss_conf.htc_trig_based_pkt_ext;
@@ -1415,7 +1527,7 @@ mt76_connac_mcu_uni_bss_he_tlv(struct mt76_phy *phy, struct ieee80211_vif *vif,
 	he->max_nss_mcs[CMD_HE_MCS_BW8080] = cap->he_mcs_nss_supp.tx_mcs_80p80;
 }
 
-int mt76_connac_mcu_uni_set_chctx(struct mt76_phy *phy, struct mt76_vif *mvif,
+int mt76_connac_mcu_uni_set_chctx(struct mt76_phy *phy, struct mt76_vif_link *mvif,
 				  struct ieee80211_chanctx_conf *ctx)
 {
 	struct cfg80211_chan_def *chandef = ctx ? &ctx->def : &phy->chandef;
@@ -1503,7 +1615,7 @@ int mt76_connac_mcu_uni_add_bss(struct mt76_phy *phy,
 				bool enable,
 				struct ieee80211_chanctx_conf *ctx)
 {
-	struct mt76_vif *mvif = (struct mt76_vif *)vif->drv_priv;
+	struct mt76_vif_link *mvif = (struct mt76_vif_link *)vif->drv_priv;
 	struct cfg80211_chan_def *chandef = ctx ? &ctx->def : &phy->chandef;
 	enum nl80211_band band = chandef->chan->band;
 	struct mt76_dev *mdev = phy->dev;
@@ -1567,6 +1679,11 @@ int mt76_connac_mcu_uni_add_bss(struct mt76_phy *phy,
 	case NL80211_IFTYPE_ADHOC:
 		basic_req.basic.conn_type = cpu_to_le32(CONNECTION_IBSS_ADHOC);
 		break;
+	case NL80211_IFTYPE_NAN:
+	case NL80211_IFTYPE_NAN_DATA:
+		basic_req.basic.conn_type = cpu_to_le32(CONNECTION_NAN);
+		basic_req.basic.active = enable;
+		break;
 	default:
 		WARN_ON(1);
 		break;
@@ -1621,15 +1738,78 @@ int mt76_connac_mcu_uni_add_bss(struct mt76_phy *phy,
 			return err;
 	}
 
+	if (enable && vif->bss_conf.bssid_indicator) {
+		struct {
+			struct {
+				u8 bss_idx;
+				u8 pad[3];
+			} __packed hdr;
+			struct bss_info_uni_mbssid mbssid;
+		} mbssid_req = {
+			.hdr = {
+				.bss_idx = mvif->idx,
+			},
+			.mbssid = {
+				.tag = cpu_to_le16(UNI_BSS_INFO_11V_MBSSID),
+				.len = cpu_to_le16(sizeof(struct bss_info_uni_mbssid)),
+				.max_indicator = vif->bss_conf.bssid_indicator,
+				.mbss_idx =  vif->bss_conf.bssid_index,
+			},
+		};
+
+		err = mt76_mcu_send_msg(mdev, MCU_UNI_CMD(BSS_INFO_UPDATE),
+					&mbssid_req, sizeof(mbssid_req), true);
+		if (err < 0)
+			return err;
+	}
+
 	return mt76_connac_mcu_uni_set_chctx(phy, mvif, ctx);
 }
 EXPORT_SYMBOL_GPL(mt76_connac_mcu_uni_add_bss);
+
+void mt76_connac_mcu_build_rnr_scan_param(struct mt76_dev *mdev,
+					  struct cfg80211_scan_request *sreq)
+{
+	struct ieee80211_channel **scan_list = sreq->channels;
+	int i, bssid_index = 0;
+
+	/* clear 6G active Scan BSSID table */
+	memset(&mdev->rnr, 0, sizeof(mdev->rnr));
+
+	for (i = 0; i < sreq->n_6ghz_params; i++) {
+		u8 ch_idx = sreq->scan_6ghz_params[i].channel_idx;
+		int k = 0;
+
+		/* Remove the duplicated BSSID */
+		for (k = 0; k < bssid_index; k++) {
+			if (!memcmp(&mdev->rnr.bssid[k],
+				    sreq->scan_6ghz_params[i].bssid,
+				    ETH_ALEN))
+				break;
+		}
+
+		if (k == bssid_index &&
+		    bssid_index < MT76_RNR_SCAN_MAX_BSSIDS) {
+			memcpy(&mdev->rnr.bssid[bssid_index++],
+			       sreq->scan_6ghz_params[i].bssid, ETH_ALEN);
+			mdev->rnr.channel[k] = scan_list[ch_idx]->hw_value;
+		}
+	}
+
+	mdev->rnr.bssid_num = bssid_index;
+
+	if (sreq->flags & NL80211_SCAN_FLAG_RANDOM_ADDR) {
+		memcpy(mdev->rnr.random_mac, sreq->mac_addr, ETH_ALEN);
+		mdev->rnr.sreq_flag = sreq->flags;
+	}
+}
+EXPORT_SYMBOL_GPL(mt76_connac_mcu_build_rnr_scan_param);
 
 #define MT76_CONNAC_SCAN_CHANNEL_TIME		60
 int mt76_connac_mcu_hw_scan(struct mt76_phy *phy, struct ieee80211_vif *vif,
 			    struct ieee80211_scan_request *scan_req)
 {
-	struct mt76_vif *mvif = (struct mt76_vif *)vif->drv_priv;
+	struct mt76_vif_link *mvif = (struct mt76_vif_link *)vif->drv_priv;
 	struct cfg80211_scan_request *sreq = &scan_req->req;
 	int n_ssids = 0, err, i, duration;
 	int ext_channels_num = max_t(int, sreq->n_channels - 32, 0);
@@ -1649,7 +1829,7 @@ int mt76_connac_mcu_hw_scan(struct mt76_phy *phy, struct ieee80211_vif *vif,
 	set_bit(MT76_HW_SCANNING, &phy->state);
 	mvif->scan_seq_num = (mvif->scan_seq_num + 1) & 0x7f;
 
-	req = (struct mt76_connac_hw_scan_req *)skb_put(skb, sizeof(*req));
+	req = (struct mt76_connac_hw_scan_req *)skb_put_zero(skb, sizeof(*req));
 
 	req->seq_num = mvif->scan_seq_num | mvif->band_idx << 7;
 	req->bss_idx = mvif->idx;
@@ -1661,8 +1841,8 @@ int mt76_connac_mcu_hw_scan(struct mt76_phy *phy, struct ieee80211_vif *vif,
 		if (!sreq->ssids[i].ssid_len)
 			continue;
 
-		req->ssids[i].ssid_len = cpu_to_le32(sreq->ssids[i].ssid_len);
-		memcpy(req->ssids[i].ssid, sreq->ssids[i].ssid,
+		req->ssids[n_ssids].ssid_len = cpu_to_le32(sreq->ssids[i].ssid_len);
+		memcpy(req->ssids[n_ssids].ssid, sreq->ssids[i].ssid,
 		       sreq->ssids[i].ssid_len);
 		n_ssids++;
 	}
@@ -1670,7 +1850,7 @@ int mt76_connac_mcu_hw_scan(struct mt76_phy *phy, struct ieee80211_vif *vif,
 	req->ssid_type_ext = n_ssids ? BIT(0) : 0;
 	req->ssids_num = n_ssids;
 
-	duration = is_mt7921(phy->dev) ? 0 : MT76_CONNAC_SCAN_CHANNEL_TIME;
+	duration = is_connac2(phy->dev) ? 0 : MT76_CONNAC_SCAN_CHANNEL_TIME;
 	/* increase channel time for passive scan */
 	if (!sreq->n_ssids)
 		duration *= 2;
@@ -1713,7 +1893,7 @@ int mt76_connac_mcu_hw_scan(struct mt76_phy *phy, struct ieee80211_vif *vif,
 		req->ies_len = cpu_to_le16(sreq->ie_len);
 	}
 
-	if (is_mt7921(phy->dev))
+	if (is_connac2(phy->dev))
 		req->scan_func |= SCAN_FUNC_SPLIT_SCAN;
 
 	memcpy(req->bssid, sreq->bssid, ETH_ALEN);
@@ -1735,7 +1915,7 @@ EXPORT_SYMBOL_GPL(mt76_connac_mcu_hw_scan);
 int mt76_connac_mcu_cancel_hw_scan(struct mt76_phy *phy,
 				   struct ieee80211_vif *vif)
 {
-	struct mt76_vif *mvif = (struct mt76_vif *)vif->drv_priv;
+	struct mt76_vif_link *mvif = (struct mt76_vif_link *)vif->drv_priv;
 	struct {
 		u8 seq_num;
 		u8 is_ext_channel;
@@ -1761,7 +1941,7 @@ int mt76_connac_mcu_sched_scan_req(struct mt76_phy *phy,
 				   struct ieee80211_vif *vif,
 				   struct cfg80211_sched_scan_request *sreq)
 {
-	struct mt76_vif *mvif = (struct mt76_vif *)vif->drv_priv;
+	struct mt76_vif_link *mvif = (struct mt76_vif_link *)vif->drv_priv;
 	struct ieee80211_channel **scan_list = sreq->channels;
 	struct mt76_connac_mcu_scan_channel *chan;
 	struct mt76_connac_sched_scan_req *req;
@@ -1777,7 +1957,7 @@ int mt76_connac_mcu_sched_scan_req(struct mt76_phy *phy,
 
 	mvif->scan_seq_num = (mvif->scan_seq_num + 1) & 0x7f;
 
-	req = (struct mt76_connac_sched_scan_req *)skb_put(skb, sizeof(*req));
+	req = (struct mt76_connac_sched_scan_req *)skb_put_zero(skb, sizeof(*req));
 	req->version = 1;
 	req->seq_num = mvif->scan_seq_num | mvif->band_idx << 7;
 
@@ -1789,7 +1969,7 @@ int mt76_connac_mcu_sched_scan_req(struct mt76_phy *phy,
 		get_random_mask_addr(addr, sreq->mac_addr,
 				     sreq->mac_addr_mask);
 	}
-	if (is_mt7921(phy->dev)) {
+	if (is_connac2(phy->dev)) {
 		req->mt7921.bss_idx = mvif->idx;
 		req->mt7921.delay = cpu_to_le32(sreq->delay);
 	}
@@ -1870,7 +2050,7 @@ int mt76_connac_mcu_chip_config(struct mt76_dev *dev)
 		.resp_type = 0,
 	};
 
-	memcpy(req.data, "assert", 7);
+	strscpy(req.data, "assert");
 
 	return mt76_mcu_send_msg(dev, MCU_CE_CMD(CHIP_CONFIG),
 				 &req, sizeof(req), false);
@@ -1924,132 +2104,12 @@ void mt76_connac_mcu_coredump_event(struct mt76_dev *dev, struct sk_buff *skb,
 }
 EXPORT_SYMBOL_GPL(mt76_connac_mcu_coredump_event);
 
-static void mt76_connac_mcu_parse_tx_resource(struct mt76_dev *dev,
-					      struct sk_buff *skb)
-{
-	struct mt76_sdio *sdio = &dev->sdio;
-	struct mt76_connac_tx_resource {
-		__le32 version;
-		__le32 pse_data_quota;
-		__le32 pse_mcu_quota;
-		__le32 ple_data_quota;
-		__le32 ple_mcu_quota;
-		__le16 pse_page_size;
-		__le16 ple_page_size;
-		u8 pp_padding;
-		u8 pad[3];
-	} __packed * tx_res;
-
-	tx_res = (struct mt76_connac_tx_resource *)skb->data;
-	sdio->sched.pse_data_quota = le32_to_cpu(tx_res->pse_data_quota);
-	sdio->sched.pse_mcu_quota = le32_to_cpu(tx_res->pse_mcu_quota);
-	sdio->sched.ple_data_quota = le32_to_cpu(tx_res->ple_data_quota);
-	sdio->sched.pse_page_size = le16_to_cpu(tx_res->pse_page_size);
-	sdio->sched.deficit = tx_res->pp_padding;
-}
-
-static void mt76_connac_mcu_parse_phy_cap(struct mt76_dev *dev,
-					  struct sk_buff *skb)
-{
-	struct mt76_connac_phy_cap {
-		u8 ht;
-		u8 vht;
-		u8 _5g;
-		u8 max_bw;
-		u8 nss;
-		u8 dbdc;
-		u8 tx_ldpc;
-		u8 rx_ldpc;
-		u8 tx_stbc;
-		u8 rx_stbc;
-		u8 hw_path;
-		u8 he;
-	} __packed * cap;
-
-	enum {
-		WF0_24G,
-		WF0_5G
-	};
-
-	cap = (struct mt76_connac_phy_cap *)skb->data;
-
-	dev->phy.antenna_mask = BIT(cap->nss) - 1;
-	dev->phy.chainmask = dev->phy.antenna_mask;
-	dev->phy.cap.has_2ghz = cap->hw_path & BIT(WF0_24G);
-	dev->phy.cap.has_5ghz = cap->hw_path & BIT(WF0_5G);
-}
-
-int mt76_connac_mcu_get_nic_capability(struct mt76_phy *phy)
-{
-	struct mt76_connac_cap_hdr {
-		__le16 n_element;
-		u8 rsv[2];
-	} __packed * hdr;
-	struct sk_buff *skb;
-	int ret, i;
-
-	ret = mt76_mcu_send_and_get_msg(phy->dev, MCU_CE_CMD(GET_NIC_CAPAB),
-					NULL, 0, true, &skb);
-	if (ret)
-		return ret;
-
-	hdr = (struct mt76_connac_cap_hdr *)skb->data;
-	if (skb->len < sizeof(*hdr)) {
-		ret = -EINVAL;
-		goto out;
-	}
-
-	skb_pull(skb, sizeof(*hdr));
-
-	for (i = 0; i < le16_to_cpu(hdr->n_element); i++) {
-		struct tlv_hdr {
-			__le32 type;
-			__le32 len;
-		} __packed * tlv = (struct tlv_hdr *)skb->data;
-		int len;
-
-		if (skb->len < sizeof(*tlv))
-			break;
-
-		skb_pull(skb, sizeof(*tlv));
-
-		len = le32_to_cpu(tlv->len);
-		if (skb->len < len)
-			break;
-
-		switch (le32_to_cpu(tlv->type)) {
-		case MT_NIC_CAP_6G:
-			phy->cap.has_6ghz = skb->data[0];
-			break;
-		case MT_NIC_CAP_MAC_ADDR:
-			memcpy(phy->macaddr, (void *)skb->data, ETH_ALEN);
-			break;
-		case MT_NIC_CAP_PHY:
-			mt76_connac_mcu_parse_phy_cap(phy->dev, skb);
-			break;
-		case MT_NIC_CAP_TX_RESOURCE:
-			if (mt76_is_sdio(phy->dev))
-				mt76_connac_mcu_parse_tx_resource(phy->dev,
-								  skb);
-			break;
-		default:
-			break;
-		}
-		skb_pull(skb, len);
-	}
-out:
-	dev_kfree_skb(skb);
-
-	return ret;
-}
-EXPORT_SYMBOL_GPL(mt76_connac_mcu_get_nic_capability);
-
 static void
 mt76_connac_mcu_build_sku(struct mt76_dev *dev, s8 *sku,
 			  struct mt76_power_limits *limits,
 			  enum nl80211_band band)
 {
-	int max_power = is_mt7921(dev) ? 127 : 63;
+	int max_power = is_connac2(dev) ? 127 : 63;
 	int i, offset = sizeof(limits->cck);
 
 	memset(sku, max_power, MT_SKU_POWER_LIMIT);
@@ -2077,7 +2137,7 @@ mt76_connac_mcu_build_sku(struct mt76_dev *dev, s8 *sku,
 		offset += 12;
 	}
 
-	if (!is_mt7921(dev))
+	if (!is_connac2(dev))
 		return;
 
 	/* he */
@@ -2087,9 +2147,9 @@ mt76_connac_mcu_build_sku(struct mt76_dev *dev, s8 *sku,
 	}
 }
 
-static s8 mt76_connac_get_ch_power(struct mt76_phy *phy,
-				   struct ieee80211_channel *chan,
-				   s8 target_power)
+s8 mt76_connac_get_ch_power(struct mt76_phy *phy,
+			    struct ieee80211_channel *chan,
+			    s8 target_power)
 {
 	struct mt76_dev *dev = phy->dev;
 	struct ieee80211_supported_band *sband;
@@ -2126,13 +2186,14 @@ static s8 mt76_connac_get_ch_power(struct mt76_phy *phy,
 
 	return target_power;
 }
+EXPORT_SYMBOL_GPL(mt76_connac_get_ch_power);
 
 static int
 mt76_connac_mcu_rate_txpower_band(struct mt76_phy *phy,
 				  enum nl80211_band band)
 {
 	struct mt76_dev *dev = phy->dev;
-	int sku_len, batch_len = is_mt7921(dev) ? 8 : 16;
+	int sku_len, batch_len = is_connac2(dev) ? 8 : 16;
 	static const u8 chan_list_2ghz[] = {
 		1, 2,  3,  4,  5,  6,  7,
 		8, 9, 10, 11, 12, 13, 14
@@ -2144,7 +2205,7 @@ mt76_connac_mcu_rate_txpower_band(struct mt76_phy *phy,
 		112, 114, 116, 118, 120, 122, 124,
 		126, 128, 132, 134, 136, 138, 140,
 		142, 144, 149, 151, 153, 155, 157,
-		159, 161, 165
+		159, 161, 165, 169, 173, 177
 	};
 	static const u8 chan_list_6ghz[] = {
 		  1,   3,   5,   7,   9,  11,  13,
@@ -2164,12 +2225,16 @@ mt76_connac_mcu_rate_txpower_band(struct mt76_phy *phy,
 		209, 211, 213, 215, 217, 219, 221,
 		225, 227, 229, 233
 	};
-	int i, n_chan, batch_size, idx = 0, tx_power, last_ch;
+	int i, n_chan, batch_size, idx = 0, tx_power, last_ch, err = 0;
 	struct mt76_connac_sku_tlv sku_tlbv;
-	struct mt76_power_limits limits;
+	struct mt76_power_limits *limits;
 	const u8 *ch_list;
 
-	sku_len = is_mt7921(dev) ? sizeof(sku_tlbv) : sizeof(sku_tlbv) - 92;
+	limits = devm_kmalloc(dev->dev, sizeof(*limits), GFP_KERNEL);
+	if (!limits)
+		return -ENOMEM;
+
+	sku_len = is_connac2(dev) ? sizeof(sku_tlbv) : sizeof(sku_tlbv) - 92;
 	tx_power = 2 * phy->hw->conf.power_level;
 	if (!tx_power)
 		tx_power = 127;
@@ -2195,14 +2260,16 @@ mt76_connac_mcu_rate_txpower_band(struct mt76_phy *phy,
 
 	for (i = 0; i < batch_size; i++) {
 		struct mt76_connac_tx_power_limit_tlv tx_power_tlv = {};
-		int j, err, msg_len, num_ch;
+		int j, msg_len, num_ch;
 		struct sk_buff *skb;
 
-		num_ch = i == batch_size - 1 ? n_chan % batch_len : batch_len;
+		num_ch = i == batch_size - 1 ? n_chan - i * batch_len : batch_len;
 		msg_len = sizeof(tx_power_tlv) + num_ch * sizeof(sku_tlbv);
 		skb = mt76_mcu_msg_alloc(dev, NULL, msg_len);
-		if (!skb)
-			return -ENOMEM;
+		if (!skb) {
+			err = -ENOMEM;
+			goto out;
+		}
 
 		skb_reserve(skb, sizeof(tx_power_tlv));
 
@@ -2227,20 +2294,20 @@ mt76_connac_mcu_rate_txpower_band(struct mt76_phy *phy,
 				.hw_value = ch_list[idx],
 				.band = band,
 			};
-			s8 reg_power, sar_power;
+			s8 max_power;
 
-			reg_power = mt76_connac_get_ch_power(phy, &chan,
-							     tx_power);
-			sar_power = mt76_get_sar_power(phy, &chan, reg_power);
-
-			mt76_get_rate_power_limits(phy, &chan, &limits,
-						   sar_power);
+			max_power = mt76_connac_get_rate_power_limit(phy, &chan,
+								     limits);
+			if (phy->chandef.chan &&
+			    phy->chandef.chan->hw_value == ch_list[idx] &&
+			    phy->chandef.chan->band == band)
+				mt76_connac_set_txpower_cur(phy, max_power);
 
 			tx_power_tlv.last_msg = ch_list[idx] == last_ch;
 			sku_tlbv.channel = ch_list[idx];
 
 			mt76_connac_mcu_build_sku(dev, sku_tlbv.pwr_limit,
-						  &limits, band);
+						  limits, band);
 			skb_put_data(skb, &sku_tlbv, sku_len);
 		}
 		__skb_push(skb, sizeof(tx_power_tlv));
@@ -2250,10 +2317,15 @@ mt76_connac_mcu_rate_txpower_band(struct mt76_phy *phy,
 					    MCU_CE_CMD(SET_RATE_TX_POWER),
 					    false);
 		if (err < 0)
-			return err;
+			goto out;
+
+		/* read a CR to avoid PSE buffer underflow */
+		mt76_connac_mcu_reg_rr(dev, MT_PSE_BASE);
 	}
 
-	return 0;
+out:
+	devm_kfree(dev->dev, limits);
+	return err;
 }
 
 int mt76_connac_mcu_set_rate_txpower(struct mt76_phy *phy)
@@ -2284,7 +2356,7 @@ int mt76_connac_mcu_set_rate_txpower(struct mt76_phy *phy)
 EXPORT_SYMBOL_GPL(mt76_connac_mcu_set_rate_txpower);
 
 int mt76_connac_mcu_update_arp_filter(struct mt76_dev *dev,
-				      struct mt76_vif *vif,
+				      struct mt76_vif_link *vif,
 				      struct ieee80211_bss_conf *info)
 {
 	struct ieee80211_vif *mvif = container_of(info, struct ieee80211_vif,
@@ -2327,7 +2399,7 @@ EXPORT_SYMBOL_GPL(mt76_connac_mcu_update_arp_filter);
 int mt76_connac_mcu_set_p2p_oppps(struct ieee80211_hw *hw,
 				  struct ieee80211_vif *vif)
 {
-	struct mt76_vif *mvif = (struct mt76_vif *)vif->drv_priv;
+	struct mt76_vif_link *mvif = (struct mt76_vif_link *)vif->drv_priv;
 	int ct_window = vif->bss_conf.p2p_noa_attr.oppps_ctwindow;
 	struct mt76_phy *phy = hw->priv;
 	struct {
@@ -2394,7 +2466,7 @@ int mt76_connac_mcu_update_gtk_rekey(struct ieee80211_hw *hw,
 				     struct ieee80211_vif *vif,
 				     struct cfg80211_gtk_rekey_data *key)
 {
-	struct mt76_vif *mvif = (struct mt76_vif *)vif->drv_priv;
+	struct mt76_vif_link *mvif = (struct mt76_vif_link *)vif->drv_priv;
 	struct mt76_connac_gtk_rekey_tlv *gtk_tlv;
 	struct mt76_phy *phy = hw->priv;
 	struct sk_buff *skb;
@@ -2411,7 +2483,7 @@ int mt76_connac_mcu_update_gtk_rekey(struct ieee80211_hw *hw,
 		return -ENOMEM;
 
 	skb_put_data(skb, &hdr, sizeof(hdr));
-	gtk_tlv = (struct mt76_connac_gtk_rekey_tlv *)skb_put(skb,
+	gtk_tlv = (struct mt76_connac_gtk_rekey_tlv *)skb_put_zero(skb,
 							 sizeof(*gtk_tlv));
 	gtk_tlv->tag = cpu_to_le16(UNI_OFFLOAD_OFFLOAD_GTK_REKEY);
 	gtk_tlv->len = cpu_to_le16(sizeof(*gtk_tlv));
@@ -2435,7 +2507,7 @@ static int
 mt76_connac_mcu_set_arp_filter(struct mt76_dev *dev, struct ieee80211_vif *vif,
 			       bool suspend)
 {
-	struct mt76_vif *mvif = (struct mt76_vif *)vif->drv_priv;
+	struct mt76_vif_link *mvif = (struct mt76_vif_link *)vif->drv_priv;
 	struct {
 		struct {
 			u8 bss_idx;
@@ -2457,11 +2529,11 @@ mt76_connac_mcu_set_arp_filter(struct mt76_dev *dev, struct ieee80211_vif *vif,
 				 sizeof(req), true);
 }
 
-static int
+int
 mt76_connac_mcu_set_gtk_rekey(struct mt76_dev *dev, struct ieee80211_vif *vif,
 			      bool suspend)
 {
-	struct mt76_vif *mvif = (struct mt76_vif *)vif->drv_priv;
+	struct mt76_vif_link *mvif = (struct mt76_vif_link *)vif->drv_priv;
 	struct {
 		struct {
 			u8 bss_idx;
@@ -2482,14 +2554,15 @@ mt76_connac_mcu_set_gtk_rekey(struct mt76_dev *dev, struct ieee80211_vif *vif,
 	return mt76_mcu_send_msg(dev, MCU_UNI_CMD(OFFLOAD), &req,
 				 sizeof(req), true);
 }
+EXPORT_SYMBOL_GPL(mt76_connac_mcu_set_gtk_rekey);
 
-static int
+int
 mt76_connac_mcu_set_suspend_mode(struct mt76_dev *dev,
 				 struct ieee80211_vif *vif,
 				 bool enable, u8 mdtim,
 				 bool wow_suspend)
 {
-	struct mt76_vif *mvif = (struct mt76_vif *)vif->drv_priv;
+	struct mt76_vif_link *mvif = (struct mt76_vif_link *)vif->drv_priv;
 	struct {
 		struct {
 			u8 bss_idx;
@@ -2512,6 +2585,7 @@ mt76_connac_mcu_set_suspend_mode(struct mt76_dev *dev,
 	return mt76_mcu_send_msg(dev, MCU_UNI_CMD(SUSPEND), &req,
 				 sizeof(req), true);
 }
+EXPORT_SYMBOL_GPL(mt76_connac_mcu_set_suspend_mode);
 
 static int
 mt76_connac_mcu_set_wow_pattern(struct mt76_dev *dev,
@@ -2519,7 +2593,7 @@ mt76_connac_mcu_set_wow_pattern(struct mt76_dev *dev,
 				u8 index, bool enable,
 				struct cfg80211_pkt_pattern *pattern)
 {
-	struct mt76_vif *mvif = (struct mt76_vif *)vif->drv_priv;
+	struct mt76_vif_link *mvif = (struct mt76_vif_link *)vif->drv_priv;
 	struct mt76_connac_wow_pattern_tlv *ptlv;
 	struct sk_buff *skb;
 	struct req_hdr {
@@ -2534,7 +2608,7 @@ mt76_connac_mcu_set_wow_pattern(struct mt76_dev *dev,
 		return -ENOMEM;
 
 	skb_put_data(skb, &hdr, sizeof(hdr));
-	ptlv = (struct mt76_connac_wow_pattern_tlv *)skb_put(skb, sizeof(*ptlv));
+	ptlv = (struct mt76_connac_wow_pattern_tlv *)skb_put_zero(skb, sizeof(*ptlv));
 	ptlv->tag = cpu_to_le16(UNI_SUSPEND_WOW_PATTERN);
 	ptlv->len = cpu_to_le16(sizeof(*ptlv));
 	ptlv->data_len = pattern->pattern_len;
@@ -2547,11 +2621,11 @@ mt76_connac_mcu_set_wow_pattern(struct mt76_dev *dev,
 	return mt76_mcu_skb_send_msg(dev, skb, MCU_UNI_CMD(SUSPEND), true);
 }
 
-static int
+int
 mt76_connac_mcu_set_wow_ctrl(struct mt76_phy *phy, struct ieee80211_vif *vif,
 			     bool suspend, struct cfg80211_wowlan *wowlan)
 {
-	struct mt76_vif *mvif = (struct mt76_vif *)vif->drv_priv;
+	struct mt76_vif_link *mvif = (struct mt76_vif_link *)vif->drv_priv;
 	struct mt76_dev *dev = phy->dev;
 	struct {
 		struct {
@@ -2599,8 +2673,9 @@ mt76_connac_mcu_set_wow_ctrl(struct mt76_phy *phy, struct ieee80211_vif *vif,
 	return mt76_mcu_send_msg(dev, MCU_UNI_CMD(SUSPEND), &req,
 				 sizeof(req), true);
 }
+EXPORT_SYMBOL_GPL(mt76_connac_mcu_set_wow_ctrl);
 
-int mt76_connac_mcu_set_hif_suspend(struct mt76_dev *dev, bool suspend)
+int mt76_connac_mcu_set_hif_suspend(struct mt76_dev *dev, bool suspend, bool wait_resp)
 {
 	struct {
 		struct {
@@ -2614,6 +2689,7 @@ int mt76_connac_mcu_set_hif_suspend(struct mt76_dev *dev, bool suspend)
 			__le16 tag;
 			__le16 len;
 			u8 suspend;
+			u8 pad[7];
 		} __packed hif_suspend;
 	} req = {
 		.hif_suspend = {
@@ -2631,7 +2707,7 @@ int mt76_connac_mcu_set_hif_suspend(struct mt76_dev *dev, bool suspend)
 		req.hdr.hif_type = 0;
 
 	return mt76_mcu_send_msg(dev, MCU_UNI_CMD(HIF_CTRL), &req,
-				 sizeof(req), true);
+				 sizeof(req), wait_resp);
 }
 EXPORT_SYMBOL_GPL(mt76_connac_mcu_set_hif_suspend);
 
@@ -2758,7 +2834,7 @@ int mt76_connac_mcu_add_key(struct mt76_dev *dev, struct ieee80211_vif *vif,
 			    struct ieee80211_key_conf *key, int mcu_cmd,
 			    struct mt76_wcid *wcid, enum set_key_cmd cmd)
 {
-	struct mt76_vif *mvif = (struct mt76_vif *)vif->drv_priv;
+	struct mt76_vif_link *mvif = (struct mt76_vif_link *)vif->drv_priv;
 	struct sk_buff *skb;
 	int ret;
 
@@ -2767,12 +2843,16 @@ int mt76_connac_mcu_add_key(struct mt76_dev *dev, struct ieee80211_vif *vif,
 		return PTR_ERR(skb);
 
 	ret = mt76_connac_mcu_sta_key_tlv(sta_key_conf, skb, key, cmd);
-	if (ret)
+	if (ret) {
+		dev_kfree_skb(skb);
 		return ret;
+	}
 
 	ret = mt76_connac_mcu_sta_wed_update(dev, skb);
-	if (ret)
+	if (ret) {
+		dev_kfree_skb(skb);
 		return ret;
+	}
 
 	return mt76_mcu_skb_send_msg(dev, skb, mcu_cmd, true);
 }
@@ -2780,7 +2860,7 @@ EXPORT_SYMBOL_GPL(mt76_connac_mcu_add_key);
 
 /* SIFS 20us + 512 byte beacon transmitted by 1Mbps (3906us) */
 #define BCN_TX_ESTIMATE_TIME (4096 + 20)
-void mt76_connac_mcu_bss_ext_tlv(struct sk_buff *skb, struct mt76_vif *mvif)
+void mt76_connac_mcu_bss_ext_tlv(struct sk_buff *skb, struct mt76_vif_link *mvif)
 {
 	struct bss_info_ext_bss *ext;
 	int ext_bss_idx, tsf_offset;
@@ -2804,7 +2884,7 @@ int mt76_connac_mcu_bss_basic_tlv(struct sk_buff *skb,
 				  struct mt76_phy *phy, u16 wlan_idx,
 				  bool enable)
 {
-	struct mt76_vif *mvif = (struct mt76_vif *)vif->drv_priv;
+	struct mt76_vif_link *mvif = (struct mt76_vif_link *)vif->drv_priv;
 	u32 type = vif->p2p ? NETWORK_P2P : NETWORK_INFRA;
 	struct bss_info_basic *bss;
 	struct tlv *tlv;
@@ -2921,6 +3001,17 @@ int mt76_connac_mcu_restart(struct mt76_dev *dev)
 }
 EXPORT_SYMBOL_GPL(mt76_connac_mcu_restart);
 
+int mt76_connac_mcu_del_wtbl_all(struct mt76_dev *dev)
+{
+	struct wtbl_req_hdr req = {
+		.operation = WTBL_RESET_ALL,
+	};
+
+	return mt76_mcu_send_msg(dev, MCU_EXT_CMD(WTBL_UPDATE),
+				 &req, sizeof(req), true);
+}
+EXPORT_SYMBOL_GPL(mt76_connac_mcu_del_wtbl_all);
+
 int mt76_connac_mcu_rdd_cmd(struct mt76_dev *dev, int cmd, u8 index,
 			    u8 rx_sel, u8 val)
 {
@@ -2941,6 +3032,23 @@ int mt76_connac_mcu_rdd_cmd(struct mt76_dev *dev, int cmd, u8 index,
 				 sizeof(req), true);
 }
 EXPORT_SYMBOL_GPL(mt76_connac_mcu_rdd_cmd);
+
+s8 mt76_connac_get_rate_power_limit(struct mt76_phy *phy,
+				    struct ieee80211_channel *chan,
+				    struct mt76_power_limits *limits)
+{
+	s8 reg_power, sar_power;
+	int tx_power;
+
+	tx_power = 2 * phy->hw->conf.power_level;
+	if (!tx_power)
+		tx_power = 127;
+
+	reg_power = mt76_connac_get_ch_power(phy, chan, tx_power);
+	sar_power = mt76_get_sar_power(phy, chan, reg_power);
+	return mt76_get_rate_power_limits(phy, chan, limits, sar_power);
+}
+EXPORT_SYMBOL_GPL(mt76_connac_get_rate_power_limit);
 
 static int
 mt76_connac_mcu_send_ram_firmware(struct mt76_dev *dev,
@@ -2993,6 +3101,57 @@ next:
 	return mt76_connac_mcu_start_firmware(dev, override, option);
 }
 
+static int
+mt76_connac_mcu_send_phy_ram_firmware(struct mt76_dev *dev,
+				      const struct mt76_connac2_fw_trailer *hdr,
+				      const u8 *data)
+{
+	int i, offset = 0, max_len = mt76_is_sdio(dev) ? 2048 : 4096;
+	u32 override = 0, option = 0;
+
+	for (i = 0; i < hdr->n_region; i++) {
+		const struct mt76_connac2_fw_region *region;
+		u32 len, addr, mode;
+		int err;
+
+		region = (const void *)((const u8 *)hdr -
+					(hdr->n_region - i) * sizeof(*region));
+		mode = mt76_connac_mcu_gen_dl_mode(dev, region->feature_set,
+						   true);
+		len = le32_to_cpu(region->len);
+		addr = le32_to_cpu(region->addr);
+
+		if (region->feature_set & FW_FEATURE_NON_DL)
+			goto next;
+
+		if (region->feature_set & FW_FEATURE_OVERRIDE_ADDR)
+			override = addr;
+
+		err = mt76_connac_mcu_init_download(dev, addr, len, mode);
+		if (err) {
+			dev_err(dev->dev,
+				"The request to dowload PHY firmware failed.\n");
+			return err;
+		}
+
+		err = __mt76_mcu_send_firmware(dev, MCU_CMD(FW_SCATTER),
+					       data + offset, len, max_len);
+		if (err) {
+			dev_err(dev->dev, "Failed to send PHY firmware.\n");
+			return err;
+		}
+
+next:
+		offset += len;
+	}
+
+	if (override)
+		option |= FW_START_OVERRIDE;
+	option |= FW_START_WORKING_PDA_DSP;
+
+	return mt76_connac_mcu_start_firmware(dev, override, option);
+}
+
 int mt76_connac2_load_ram(struct mt76_dev *dev, const char *fw_wm,
 			  const char *fw_wa)
 {
@@ -3011,7 +3170,7 @@ int mt76_connac2_load_ram(struct mt76_dev *dev, const char *fw_wm,
 	}
 
 	hdr = (const void *)(fw->data + fw->size - sizeof(*hdr));
-	dev_info(dev->dev, "WM Firmware Version: %.10s, Build Time: %.15s\n",
+	dev_info(dev->dev, "WM Firmware Version: %.10s, Build Time: %.15s",
 		 hdr->fw_ver, hdr->build_date);
 
 	ret = mt76_connac_mcu_send_ram_firmware(dev, hdr, fw->data, false);
@@ -3040,7 +3199,7 @@ int mt76_connac2_load_ram(struct mt76_dev *dev, const char *fw_wm,
 	}
 
 	hdr = (const void *)(fw->data + fw->size - sizeof(*hdr));
-	dev_info(dev->dev, "WA Firmware Version: %.10s, Build Time: %.15s\n",
+	dev_info(dev->dev, "WA Firmware Version: %.10s, Build Time: %.15s",
 		 hdr->fw_ver, hdr->build_date);
 
 	ret = mt76_connac_mcu_send_ram_firmware(dev, hdr, fw->data, true);
@@ -3060,11 +3219,44 @@ out:
 }
 EXPORT_SYMBOL_GPL(mt76_connac2_load_ram);
 
+int mt76_connac3_load_phy_ram(struct mt76_dev *dev, const char *fw_name)
+{
+	const struct mt76_connac2_fw_trailer *hdr;
+	const struct firmware *fw;
+	int ret;
+
+	ret = request_firmware(&fw, fw_name, dev->dev);
+	if (ret)
+		return ret;
+
+	if (!fw || !fw->data || fw->size < sizeof(*hdr)) {
+		dev_err(dev->dev, "Invalid PHY firmware\n");
+		ret = -EINVAL;
+		goto out;
+	}
+
+	hdr = (const void *)(fw->data + fw->size - sizeof(*hdr));
+	dev_info(dev->dev, "PHY Firmware Version: %.10s, Build Time: %.15s\n",
+		 hdr->fw_ver, hdr->build_date);
+
+	ret = mt76_connac_mcu_send_phy_ram_firmware(dev, hdr, fw->data);
+	if (ret) {
+		dev_err(dev->dev, "Failed to start PHY firmware\n");
+		goto out;
+	}
+
+out:
+	release_firmware(fw);
+
+	return ret;
+}
+EXPORT_SYMBOL_GPL(mt76_connac3_load_phy_ram);
+
 static u32 mt76_connac2_get_data_mode(struct mt76_dev *dev, u32 info)
 {
 	u32 mode = DL_MODE_NEED_RSP;
 
-	if (!is_mt7921(dev) || info == PATCH_SEC_NOT_SUPPORT)
+	if ((!is_connac2(dev) && !is_connac3(dev)) || info == PATCH_SEC_NOT_SUPPORT)
 		return mode;
 
 	switch (FIELD_GET(PATCH_SEC_ENC_TYPE_MASK, info)) {
@@ -3116,7 +3308,7 @@ int mt76_connac2_load_patch(struct mt76_dev *dev, const char *fw_name)
 	}
 
 	hdr = (const void *)fw->data;
-	dev_info(dev->dev, "HW/SW Version: 0x%x, Build Time: %.16s\n",
+	dev_info(dev->dev, "HW/SW Version: 0x%x, Build Time: %.16s",
 		 be32_to_cpu(hdr->hw_sw_ver), hdr->build_date);
 
 	for (i = 0; i < be32_to_cpu(hdr->desc.n_region); i++) {
@@ -3172,6 +3364,128 @@ out:
 	return ret;
 }
 EXPORT_SYMBOL_GPL(mt76_connac2_load_patch);
+
+int mt76_connac3_load_cb_patch(struct mt76_dev *dev, const char *fw_name)
+{
+	const struct mt76_connac3_multi_header_v2_sec_raw_format *sect = NULL;
+	const struct mt76_connac3_multi_header_v2_raw_format *hdr = NULL;
+	int i, ret, sem, max_len = mt76_is_sdio(dev) ? 2048 : 4096;
+	const struct firmware *fw = NULL;
+	const u8 *dl;
+	u32 len;
+
+	sem = mt76_connac_cb_mcu_patch_sem_ctrl(dev, true);
+	switch (sem) {
+	case CB_PATCH_IS_DL:
+		return 0;
+	case CB_PATCH_GET_SEM_NEED_PATCH:
+		break;
+	default:
+		dev_err(dev->dev, "Failed to get cb patch semaphore %u\n", sem);
+		return -EAGAIN;
+	}
+
+	ret = request_firmware(&fw, fw_name, dev->dev);
+	if (ret)
+		goto out;
+
+	if (!fw || !fw->data || fw->size < sizeof(*hdr)) {
+		dev_err(dev->dev, "Invalid firmware\n");
+		ret = -EINVAL;
+		goto out;
+	}
+
+	hdr = (const void *)fw->data;
+	dev_info(dev->dev, "HW/SW Version: 0x%x, Pack Time: %.21s\n",
+		 le32_to_cpu(hdr->patch_ver), hdr->pack_time);
+
+	if (le32_to_cpu(hdr->sec_num) < 2) {
+		dev_err(dev->dev, "Invalid section numbers %u\n",
+			le32_to_cpu(hdr->sec_num));
+		ret = -EINVAL;
+		goto out;
+	}
+
+	sect = &hdr->sects[0];
+	/* check the fw bin basic info */
+	if (((le32_to_cpu(sect->type) & SEC_TYPE_SUBSYS_MASK)
+	    != SEC_TYPE_SUBSYS_CBMCU) ||
+	    ((le32_to_cpu(sect->type) & SEC_TYPE_SUBSYS_SEC_MASK)
+	    != SEC_TYPE_SUBSYS_SEC_IMG_SIGN)) {
+		dev_err(dev->dev, "Invalid CBMCU firmware\n");
+		ret = -EINVAL;
+		goto out;
+	}
+
+	/* download global desc + sect map + cert section */
+	len = sizeof(struct mt76_connac3_multi_header_v2_raw_format) -
+	      offsetof(struct mt76_connac3_multi_header_v2_raw_format,
+		       global_desc_head) +
+	      sizeof(struct mt76_connac3_multi_header_v2_sec_raw_format) *
+	      le32_to_cpu(hdr->sec_num) +
+	      le32_to_cpu(hdr->sects[0].size);
+	dl = &hdr->global_desc_head[0];
+
+	ret = mt76_connac_cb_mcu_init_download(dev, len);
+	if (ret) {
+		dev_err(dev->dev, "Download cb cert section request failed\n");
+		goto out;
+	}
+
+	ret = __mt76_mcu_send_firmware(dev, MCU_CMD(FW_SCATTER),
+				       dl, len, max_len);
+	if (ret) {
+		dev_err(dev->dev, "Failed to send cb patch cert section\n");
+		goto out;
+	}
+
+	ret = mt76_connac_cb_mcu_start_patch(dev);
+	if (ret) {
+		dev_err(dev->dev, "CBMCU cert check fail\n");
+		goto out;
+	}
+
+	/* download cbmcu idlm */
+	for (i = 1; i < le32_to_cpu(hdr->sec_num); i++) {
+		dl = (uint8_t *)hdr + le32_to_cpu(hdr->sects[i].offset);
+		len = le32_to_cpu(hdr->sects[i].size);
+
+		ret = mt76_connac_cb_mcu_init_download(dev, len);
+		if (ret) {
+			dev_err(dev->dev,
+				"Download cb section %u request failed\n", i);
+			goto out;
+		}
+
+		ret = __mt76_mcu_send_firmware(dev, MCU_CMD(FW_SCATTER),
+					       dl, len, max_len);
+		if (ret) {
+			dev_err(dev->dev,
+				"Failed to send cb patch section %u\n", i);
+			goto out;
+		}
+	}
+
+	ret = mt76_connac_cb_mcu_start_patch(dev);
+	if (ret)
+		dev_err(dev->dev, "Failed to start cb patch\n");
+
+out:
+	sem = mt76_connac_cb_mcu_patch_sem_ctrl(dev, false);
+	switch (sem) {
+	case CB_PATCH_REL_SEM_SUCCESS:
+		break;
+	default:
+		ret = -EAGAIN;
+		dev_err(dev->dev, "Failed to release cb patch semaphore\n");
+		break;
+	}
+
+	release_firmware(fw);
+
+	return ret;
+}
+EXPORT_SYMBOL_GPL(mt76_connac3_load_cb_patch);
 
 int mt76_connac2_mcu_fill_message(struct mt76_dev *dev, struct sk_buff *skb,
 				  int cmd, int *wait_seq)
@@ -3250,4 +3564,5 @@ exit:
 EXPORT_SYMBOL_GPL(mt76_connac2_mcu_fill_message);
 
 MODULE_AUTHOR("Lorenzo Bianconi <lorenzo@kernel.org>");
+MODULE_DESCRIPTION("MediaTek MT76x connac layer helpers");
 MODULE_LICENSE("Dual BSD/GPL");

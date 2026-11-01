@@ -1614,6 +1614,7 @@ static const struct fb_ops neofb_ops = {
 	.owner		= THIS_MODULE,
 	.fb_open	= neofb_open,
 	.fb_release	= neofb_release,
+	__FB_DEFAULT_IOMEM_OPS_RDWR,
 	.fb_check_var	= neofb_check_var,
 	.fb_set_par	= neofb_set_par,
 	.fb_setcolreg	= neofb_setcolreg,
@@ -1623,6 +1624,7 @@ static const struct fb_ops neofb_ops = {
 	.fb_fillrect	= neofb_fillrect,
 	.fb_copyarea	= neofb_copyarea,
 	.fb_imageblit	= neofb_imageblit,
+	__FB_DEFAULT_IOMEM_OPS_MMAP,
 };
 
 /* --------------------------------------------------------------------- */
@@ -1766,7 +1768,7 @@ static int neo_scan_monitor(struct fb_info *info)
 	int w;
 
 	// Eventually we will have i2c support.
-	info->monspecs.modedb = kmalloc(sizeof(struct fb_videomode), GFP_KERNEL);
+	info->monspecs.modedb = kmalloc_obj(struct fb_videomode);
 	if (!info->monspecs.modedb)
 		return -ENOMEM;
 	info->monspecs.modedb_len = 1;
@@ -2124,34 +2126,25 @@ static void neofb_remove(struct pci_dev *dev)
 }
 
 static const struct pci_device_id neofb_devices[] = {
-	{PCI_VENDOR_ID_NEOMAGIC, PCI_CHIP_NM2070,
-	 PCI_ANY_ID, PCI_ANY_ID, 0, 0, FB_ACCEL_NEOMAGIC_NM2070},
+	{ PCI_VDEVICE(NEOMAGIC, PCI_CHIP_NM2070), .driver_data = FB_ACCEL_NEOMAGIC_NM2070 },
 
-	{PCI_VENDOR_ID_NEOMAGIC, PCI_CHIP_NM2090,
-	 PCI_ANY_ID, PCI_ANY_ID, 0, 0, FB_ACCEL_NEOMAGIC_NM2090},
+	{ PCI_VDEVICE(NEOMAGIC, PCI_CHIP_NM2090), .driver_data = FB_ACCEL_NEOMAGIC_NM2090 },
 
-	{PCI_VENDOR_ID_NEOMAGIC, PCI_CHIP_NM2093,
-	 PCI_ANY_ID, PCI_ANY_ID, 0, 0, FB_ACCEL_NEOMAGIC_NM2093},
+	{ PCI_VDEVICE(NEOMAGIC, PCI_CHIP_NM2093), .driver_data = FB_ACCEL_NEOMAGIC_NM2093 },
 
-	{PCI_VENDOR_ID_NEOMAGIC, PCI_CHIP_NM2097,
-	 PCI_ANY_ID, PCI_ANY_ID, 0, 0, FB_ACCEL_NEOMAGIC_NM2097},
+	{ PCI_VDEVICE(NEOMAGIC, PCI_CHIP_NM2097), .driver_data = FB_ACCEL_NEOMAGIC_NM2097 },
 
-	{PCI_VENDOR_ID_NEOMAGIC, PCI_CHIP_NM2160,
-	 PCI_ANY_ID, PCI_ANY_ID, 0, 0, FB_ACCEL_NEOMAGIC_NM2160},
+	{ PCI_VDEVICE(NEOMAGIC, PCI_CHIP_NM2160), .driver_data = FB_ACCEL_NEOMAGIC_NM2160 },
 
-	{PCI_VENDOR_ID_NEOMAGIC, PCI_CHIP_NM2200,
-	 PCI_ANY_ID, PCI_ANY_ID, 0, 0, FB_ACCEL_NEOMAGIC_NM2200},
+	{ PCI_VDEVICE(NEOMAGIC, PCI_CHIP_NM2200), .driver_data = FB_ACCEL_NEOMAGIC_NM2200 },
 
-	{PCI_VENDOR_ID_NEOMAGIC, PCI_CHIP_NM2230,
-	 PCI_ANY_ID, PCI_ANY_ID, 0, 0, FB_ACCEL_NEOMAGIC_NM2230},
+	{ PCI_VDEVICE(NEOMAGIC, PCI_CHIP_NM2230), .driver_data = FB_ACCEL_NEOMAGIC_NM2230 },
 
-	{PCI_VENDOR_ID_NEOMAGIC, PCI_CHIP_NM2360,
-	 PCI_ANY_ID, PCI_ANY_ID, 0, 0, FB_ACCEL_NEOMAGIC_NM2360},
+	{ PCI_VDEVICE(NEOMAGIC, PCI_CHIP_NM2360), .driver_data = FB_ACCEL_NEOMAGIC_NM2360 },
 
-	{PCI_VENDOR_ID_NEOMAGIC, PCI_CHIP_NM2380,
-	 PCI_ANY_ID, PCI_ANY_ID, 0, 0, FB_ACCEL_NEOMAGIC_NM2380},
+	{ PCI_VDEVICE(NEOMAGIC, PCI_CHIP_NM2380), .driver_data = FB_ACCEL_NEOMAGIC_NM2380 },
 
-	{0, 0, 0, 0, 0, 0, 0}
+	{ }
 };
 
 MODULE_DEVICE_TABLE(pci, neofb_devices);

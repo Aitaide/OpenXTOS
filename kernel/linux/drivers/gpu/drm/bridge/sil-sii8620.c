@@ -6,9 +6,10 @@
  * Andrzej Hajda <a.hajda@samsung.com>
  */
 
-#include <asm/unaligned.h>
+#include <linux/unaligned.h>
 
 #include <drm/bridge/mhl.h>
+#include <drm/drm_atomic_state_helper.h>
 #include <drm/drm_bridge.h>
 #include <drm/drm_crtc.h>
 #include <drm/drm_edid.h>
@@ -384,7 +385,7 @@ static void sii8620_mt_msc_cmd_send(struct sii8620 *ctx,
 
 static struct sii8620_mt_msg *sii8620_mt_msg_new(struct sii8620 *ctx)
 {
-	struct sii8620_mt_msg *msg = kzalloc(sizeof(*msg), GFP_KERNEL);
+	struct sii8620_mt_msg *msg = kzalloc_obj(*msg);
 
 	if (!msg)
 		ctx->error = -ENOMEM;
@@ -2203,6 +2204,7 @@ static inline struct sii8620 *bridge_to_sii8620(struct drm_bridge *bridge)
 }
 
 static int sii8620_attach(struct drm_bridge *bridge,
+			  struct drm_encoder *encoder,
 			  enum drm_bridge_attach_flags flags)
 {
 	struct sii8620 *ctx = bridge_to_sii8620(bridge);
@@ -2220,6 +2222,7 @@ static void sii8620_detach(struct drm_bridge *bridge)
 		return;
 
 	rc_unregister_device(ctx->rc_dev);
+	rc_free_device(ctx->rc_dev);
 }
 
 static int sii8620_is_packing_required(struct sii8620 *ctx,
@@ -2278,6 +2281,9 @@ static bool sii8620_mode_fixup(struct drm_bridge *bridge,
 }
 
 static const struct drm_bridge_funcs sii8620_bridge_funcs = {
+	.atomic_create_state = drm_atomic_helper_bridge_create_state,
+	.atomic_destroy_state = drm_atomic_helper_bridge_destroy_state,
+	.atomic_duplicate_state = drm_atomic_helper_bridge_duplicate_state,
 	.attach = sii8620_attach,
 	.detach = sii8620_detach,
 	.mode_fixup = sii8620_mode_fixup,
@@ -2290,9 +2296,10 @@ static int sii8620_probe(struct i2c_client *client)
 	struct sii8620 *ctx;
 	int ret;
 
-	ctx = devm_kzalloc(dev, sizeof(*ctx), GFP_KERNEL);
-	if (!ctx)
-		return -ENOMEM;
+	ctx = devm_drm_bridge_alloc(dev, struct sii8620, bridge,
+				    &sii8620_bridge_funcs);
+	if (IS_ERR(ctx))
+		return PTR_ERR(ctx);
 
 	ctx->dev = dev;
 	mutex_init(&ctx->lock);
@@ -2335,7 +2342,6 @@ static int sii8620_probe(struct i2c_client *client)
 
 	i2c_set_clientdata(client, ctx);
 
-	ctx->bridge.funcs = &sii8620_bridge_funcs;
 	ctx->bridge.of_node = dev->of_node;
 	drm_bridge_add(&ctx->bridge);
 
@@ -2368,8 +2374,8 @@ static const struct of_device_id sii8620_dt_match[] = {
 MODULE_DEVICE_TABLE(of, sii8620_dt_match);
 
 static const struct i2c_device_id sii8620_id[] = {
-	{ "sii8620", 0 },
-	{ },
+	{ .name = "sii8620" },
+	{ }
 };
 
 MODULE_DEVICE_TABLE(i2c, sii8620_id);
@@ -2384,4 +2390,5 @@ static struct i2c_driver sii8620_driver = {
 };
 
 module_i2c_driver(sii8620_driver);
+MODULE_DESCRIPTION("Silicon Image SiI8620 HDMI/MHL bridge driver");
 MODULE_LICENSE("GPL v2");

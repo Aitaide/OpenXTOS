@@ -28,41 +28,68 @@ endef
 #   the rule that uses them - an example for that is the 'bionic'
 #   feature check. ]
 #
+# These + the ones in FEATURE_TESTS_EXTRA are included in
+# tools/build/feature/test-all.c and we try to build it all together
+# then setting all those features to '1' meaning they are all enabled.
+#
+# There are things like fortify-source that will be set to 1 because test-all
+# is built with the flags needed to test if its enabled, resulting in
+#
+#   $ rm -rf /tmp/b ; mkdir /tmp/b ; make -C tools/perf O=/tmp/b feature-dump
+#   $ grep fortify-source /tmp/b/FEATURE-DUMP
+#   feature-fortify-source=1
+#   $
+#
+#   All the others should have lines in tools/build/feature/test-all.c like:
+#
+#    #define main main_test_disassembler_init_styled
+#    # include "test-disassembler-init-styled.c"
+#    #undef main
+#
+#    #define main main_test_libzstd
+#    # include "test-libzstd.c"
+#    #undef main
+#
+#    int main(int argc, char *argv[])
+#    {
+#      main_test_disassembler_four_args();
+#      main_test_libzstd();
+#      return 0;
+#    }
+#
+#    If the sample above works, then we end up with these lines in the FEATURE-DUMP
+#    file:
+#
+#    feature-disassembler-four-args=1
+#    feature-libzstd=1
+#
 FEATURE_TESTS_BASIC :=                  \
         backtrace                       \
-        dwarf                           \
-        dwarf_getlocations              \
+        libdw                           \
         eventfd                         \
         fortify-source                  \
-        get_current_dir_name            \
         gettid				\
         glibc                           \
         libbfd                          \
-        libbfd-buildid			\
-        libcap                          \
+	libbfd-threadsafe		\
         libelf                          \
         libelf-getphdrnum               \
         libelf-gelf_getnote             \
         libelf-getshdrstrndx            \
+        libelf-zstd                     \
         libnuma                         \
         numa_num_possible_cpus          \
-        libperl                         \
         libpython                       \
         libslang                        \
-        libslang-include-subdir         \
         libtraceevent                   \
-        libtracefs                      \
-        libcrypto                       \
-        libunwind                       \
+        libcpupower                     \
         pthread-attr-setaffinity-np     \
         pthread-barrier     		\
         reallocarray                    \
         stackprotector-all              \
         timerfd                         \
-        libdw-dwarf-unwind              \
         zlib                            \
         lzma                            \
-        get_cpuid                       \
         bpf                             \
         scandirat			\
         sched_getcpu			\
@@ -72,10 +99,14 @@ FEATURE_TESTS_BASIC :=                  \
         libzstd				\
         disassembler-four-args		\
         disassembler-init-styled	\
-        file-handle
+        file-handle			\
+        libopenssl
 
 # FEATURE_TESTS_BASIC + FEATURE_TESTS_EXTRA is the complete list
 # of all feature tests
+
+LIBUNWIND_ARCHS:=aarch64 arm loongarch64 mips ppc32 ppc64 riscv s390x x86 x86_64
+
 FEATURE_TESTS_EXTRA :=                  \
          bionic                         \
          compile-32                     \
@@ -85,31 +116,22 @@ FEATURE_TESTS_EXTRA :=                  \
          gtk2                           \
          gtk2-infobar                   \
          hello                          \
-         libbabeltrace                  \
+         babeltrace2-ctf-writer         \
+         libcapstone                    \
+         libcheck                       \
          libbfd-liberty                 \
          libbfd-liberty-z               \
          libopencsd                     \
-         libunwind-x86                  \
-         libunwind-x86_64               \
-         libunwind-arm                  \
-         libunwind-aarch64              \
-         libunwind-debug-frame          \
-         libunwind-debug-frame-arm      \
-         libunwind-debug-frame-aarch64  \
-         cxx                            \
+         libperl                        \
          llvm                           \
-         llvm-version                   \
-         clang                          \
          libbpf                         \
-         libbpf-btf__load_from_kernel_by_id \
-         libbpf-bpf_prog_load           \
-         libbpf-bpf_object__next_program \
-         libbpf-bpf_object__next_map    \
-         libbpf-bpf_program__set_insns  \
-         libbpf-bpf_create_map		\
          libpfm4                        \
          libdebuginfod			\
-         clang-bpf-co-re
+         clang-bpf-co-re		\
+         bpftool-skeletons		\
+         libunwind			\
+         libunwind-debug-frame		\
+         $(foreach arch,$(LIBUNWIND_ARCHS),libunwind-$(arch) libunwind-debug-frame-$(arch))
 
 
 FEATURE_TESTS ?= $(FEATURE_TESTS_BASIC)
@@ -119,32 +141,48 @@ ifeq ($(FEATURE_TESTS),all)
 endif
 
 FEATURE_DISPLAY ?=              \
-         dwarf                  \
-         dwarf_getlocations     \
+         libdw                  \
          glibc                  \
-         libbfd                 \
-         libbfd-buildid		\
-         libcap                 \
          libelf                 \
          libnuma                \
          numa_num_possible_cpus \
-         libperl                \
          libpython              \
-         libcrypto              \
-         libunwind              \
-         libdw-dwarf-unwind     \
+         libcapstone            \
+         llvm-perf              \
          zlib                   \
          lzma                   \
-         get_cpuid              \
          bpf			\
          libaio			\
-         libzstd
+         libzstd		\
+         libopenssl		\
+         rust
 
 #
 # Declare group members of a feature to display the logical OR of the detection
 # result instead of each member result.
 #
 FEATURE_GROUP_MEMBERS-libbfd = libbfd-liberty libbfd-liberty-z
+
+#
+# Declare list of feature dependency packages that provide pkg-config files.
+#
+FEATURE_PKG_CONFIG ?=           \
+	 babeltrace2-ctf-writer \
+         libtraceevent          \
+         libtracefs
+
+feature_pkg_config = $(eval $(feature_pkg_config_code))
+define feature_pkg_config_code
+  FEATURE_CHECK_CFLAGS-$(1) := $(shell $(PKG_CONFIG) --cflags $(1) 2>/dev/null)
+  FEATURE_CHECK_LDFLAGS-$(1) := $(shell $(PKG_CONFIG) --libs $(1) 2>/dev/null)
+endef
+
+# Set FEATURE_CHECK_(C|LD)FLAGS-$(package) for packages using pkg-config.
+ifneq ($(PKG_CONFIG),)
+  $(foreach package,$(FEATURE_PKG_CONFIG),$(call feature_pkg_config,$(package)))
+endif
+
+FEATURE_CHECK_LDFLAGS-libcheck = -lcheck
 
 # Set FEATURE_CHECK_(C|LD)FLAGS-all for all FEATURE_TESTS features.
 # If in the future we need per-feature checks/flags for features not
@@ -178,7 +216,11 @@ ifeq ($(feature-all), 1)
   $(call feature_check,compile-32)
   $(call feature_check,compile-x32)
   $(call feature_check,bionic)
-  $(call feature_check,libbabeltrace)
+  $(call feature_check,babeltrace2-ctf-writer)
+  $(call feature_check,libunwind)
+  $(call feature_check,libunwind-debug-frame)
+  $(foreach arch,$(LIBUNWIND_ARCHS),$(call feature_check,libunwind-$(arch)))
+  $(foreach arch,$(LIBUNWIND_ARCHS),$(call feature_check,libunwind-debug-frame-$(arch)))
 else
   $(foreach feat,$(FEATURE_TESTS),$(call feature_check,$(feat)))
 endif
@@ -212,7 +254,7 @@ endef
 
 #
 # generates feature value assignment for name, like:
-#   $(call feature_assign,dwarf) == feature-dwarf=1
+#   $(call feature_assign,libdw) == feature-libdw=1
 #
 feature_assign = feature-$(1)=$(feature-$(1))
 
@@ -286,5 +328,7 @@ endef
 
 ifeq ($(FEATURE_DISPLAY_DEFERRED),)
   $(call feature_display_entries)
-  $(info )
+  ifeq ($(feature_display),1)
+    $(info )
+  endif
 endif

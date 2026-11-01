@@ -23,8 +23,9 @@
 #include <linux/serial.h>
 #include <linux/tty.h>
 #include <linux/tty_flip.h>
-
 #include <linux/io.h>
+
+#include <asm/txx9/generic.h>
 
 #define PASS_LIMIT	256
 
@@ -421,7 +422,7 @@ static void wait_for_xmitr(struct uart_port *up)
 		udelay(1);
 
 	/* Wait up to 1s for flow control if necessary */
-	if (up->flags & UPF_CONS_FLOW) {
+	if (uart_cons_flow_enabled(up)) {
 		tmout = 1000000;
 		while (--tmout &&
 		       (sio_in(up, TXX9_SICISR) & TXX9_SICISR_CTSS))
@@ -856,7 +857,7 @@ serial_txx9_console_write(struct console *co, const char *s, unsigned int count)
 	 *	Disable flow-control if enabled (and unnecessary)
 	 */
 	flcr = sio_in(up, TXX9_SIFLCR);
-	if (!(up->flags & UPF_CONS_FLOW) && (flcr & TXX9_SIFLCR_TES))
+	if (!uart_cons_flow_enabled(up) && (flcr & TXX9_SIFLCR_TES))
 		sio_out(up, TXX9_SIFLCR, flcr & ~TXX9_SIFLCR_TES);
 
 	uart_console_write(up, s, count, serial_txx9_console_putchar);
@@ -1052,7 +1053,7 @@ static int serial_txx9_probe(struct platform_device *dev)
 /*
  * Remove serial ports registered against a platform device.
  */
-static int serial_txx9_remove(struct platform_device *dev)
+static void serial_txx9_remove(struct platform_device *dev)
 {
 	int i;
 
@@ -1062,7 +1063,6 @@ static int serial_txx9_remove(struct platform_device *dev)
 		if (up->dev == &dev->dev)
 			serial_txx9_unregister_port(i);
 	}
-	return 0;
 }
 
 #ifdef CONFIG_PM

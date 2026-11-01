@@ -1,9 +1,12 @@
 // SPDX-License-Identifier: GPL-2.0
 
-#ifdef HAVE_PERF_REGS_SUPPORT
-
 #include "../perf_regs.h"
-#include "../../../arch/loongarch/include/uapi/asm/perf_regs.h"
+#include "../../arch/loongarch/include/perf_regs.h"
+
+uint64_t __perf_reg_mask_loongarch(bool intr __maybe_unused)
+{
+	return PERF_REGS_MASK;
+}
 
 const char *__perf_reg_name_loongarch(int id)
 {
@@ -87,5 +90,3 @@ uint64_t __perf_reg_sp_loongarch(void)
 {
 	return PERF_REG_LOONGARCH_R3;
 }
-
-#endif

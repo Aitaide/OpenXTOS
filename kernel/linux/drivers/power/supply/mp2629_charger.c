@@ -13,7 +13,6 @@
 #include <linux/interrupt.h>
 #include <linux/mfd/mp2629.h>
 #include <linux/module.h>
-#include <linux/mod_devicetable.h>
 #include <linux/platform_device.h>
 #include <linux/power_supply.h>
 #include <linux/regmap.h>
@@ -92,14 +91,6 @@ struct mp2629_prop {
 	int max;
 	int step;
 	int shift;
-};
-
-static enum power_supply_usb_type mp2629_usb_types[] = {
-	POWER_SUPPLY_USB_TYPE_SDP,
-	POWER_SUPPLY_USB_TYPE_DCP,
-	POWER_SUPPLY_USB_TYPE_CDP,
-	POWER_SUPPLY_USB_TYPE_PD_DRP,
-	POWER_SUPPLY_USB_TYPE_UNKNOWN
 };
 
 static enum power_supply_property mp2629_charger_usb_props[] = {
@@ -487,8 +478,11 @@ unlock:
 static const struct power_supply_desc mp2629_usb_desc = {
 	.name		= "mp2629_usb",
 	.type		= POWER_SUPPLY_TYPE_USB,
-	.usb_types      = mp2629_usb_types,
-	.num_usb_types  = ARRAY_SIZE(mp2629_usb_types),
+	.usb_types	= BIT(POWER_SUPPLY_USB_TYPE_SDP) |
+			  BIT(POWER_SUPPLY_USB_TYPE_CDP) |
+			  BIT(POWER_SUPPLY_USB_TYPE_DCP) |
+			  BIT(POWER_SUPPLY_USB_TYPE_PD_DRP) |
+			  BIT(POWER_SUPPLY_USB_TYPE_UNKNOWN),
 	.properties	= mp2629_charger_usb_props,
 	.num_properties	= ARRAY_SIZE(mp2629_charger_usb_props),
 	.get_property	= mp2629_charger_usb_get_prop,
@@ -636,10 +630,8 @@ static int mp2629_charger_probe(struct platform_device *pdev)
 	ret = devm_request_threaded_irq(dev, irq, NULL,	mp2629_irq_handler,
 					IRQF_ONESHOT | IRQF_TRIGGER_RISING,
 					"mp2629-charger", charger);
-	if (ret) {
-		dev_err(dev, "failed to request gpio IRQ\n");
+	if (ret)
 		return ret;
-	}
 
 	regmap_update_bits(charger->regmap, MP2629_REG_INTERRUPT,
 				GENMASK(6, 5), BIT(6) | BIT(5));
@@ -665,3 +657,4 @@ module_platform_driver(mp2629_charger_driver);
 MODULE_AUTHOR("Saravanan Sekar <sravanhome@gmail.com>");
 MODULE_DESCRIPTION("MP2629 Charger driver");
 MODULE_LICENSE("GPL");
+MODULE_IMPORT_NS("IIO_CONSUMER");

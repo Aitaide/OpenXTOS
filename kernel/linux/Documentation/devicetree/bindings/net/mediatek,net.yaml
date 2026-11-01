@@ -30,12 +30,29 @@ properties:
   reg:
     maxItems: 1
 
-  clocks: true
-  clock-names: true
+  clocks:
+    minItems: 2
+    maxItems: 24
+
+  clock-names:
+    minItems: 2
+    maxItems: 24
 
   interrupts:
     minItems: 1
-    maxItems: 4
+    maxItems: 8
+
+  interrupt-names:
+    minItems: 1
+    items:
+      - const: fe0
+      - const: fe1
+      - const: fe2
+      - const: fe3
+      - const: pdma0
+      - const: pdma1
+      - const: pdma2
+      - const: pdma3
 
   power-domains:
     maxItems: 1
@@ -48,6 +65,9 @@ properties:
       - const: fe
       - const: gmac
       - const: ppe
+
+  sram:
+    maxItems: 1
 
   mediatek,ethsys:
     $ref: /schemas/types.yaml#/definitions/phandle
@@ -68,6 +88,17 @@ properties:
       Phandle to the syscon node that handles the path from GMAC to
       PHY variants.
 
+  mediatek,pcie-mirror:
+    $ref: /schemas/types.yaml#/definitions/phandle
+    description:
+      Phandle to the mediatek pcie-mirror controller.
+
+  mediatek,pctl:
+    $ref: /schemas/types.yaml#/definitions/phandle
+    description:
+      Phandle to the syscon node that handles the ports slew rate and
+      driver current.
+
   mediatek,sgmiisys:
     $ref: /schemas/types.yaml#/definitions/phandle-array
     minItems: 1
@@ -80,7 +111,7 @@ properties:
 
   mediatek,wed:
     $ref: /schemas/types.yaml#/definitions/phandle-array
-    minItems: 2
+    minItems: 1
     maxItems: 2
     items:
       maxItems: 1
@@ -116,6 +147,11 @@ allOf:
     then:
       properties:
         interrupts:
+          minItems: 3
+          maxItems: 3
+
+        interrupt-names:
+          minItems: 3
           maxItems: 3
 
         clocks:
@@ -129,17 +165,16 @@ allOf:
             - const: gp1
             - const: gp2
 
-        mediatek,infracfg: false
+        sram: false
 
-        mediatek,pctl:
-          $ref: /schemas/types.yaml#/definitions/phandle
-          description:
-            Phandle to the syscon node that handles the ports slew rate and
-            driver current.
+        mediatek,infracfg: false
 
         mediatek,wed: false
 
         mediatek,wed-pcie: false
+    else:
+      properties:
+        mediatek,pctl: false
 
   - if:
       properties:
@@ -152,6 +187,9 @@ allOf:
         interrupts:
           maxItems: 1
 
+        interrupt-names:
+          maxItems: 1
+
         clocks:
           minItems: 2
           maxItems: 2
@@ -160,6 +198,8 @@ allOf:
           items:
             - const: ethif
             - const: fe
+
+        sram: false
 
         mediatek,infracfg: false
 
@@ -175,6 +215,11 @@ allOf:
     then:
       properties:
         interrupts:
+          minItems: 3
+          maxItems: 3
+
+        interrupt-names:
+          minItems: 3
           maxItems: 3
 
         clocks:
@@ -195,18 +240,21 @@ allOf:
             - const: sgmii_ck
             - const: eth2pll
 
+        sram: false
+
         mediatek,infracfg: false
 
         mediatek,sgmiisys:
           minItems: 1
           maxItems: 1
 
-        mediatek,pcie-mirror:
-          $ref: /schemas/types.yaml#/definitions/phandle
-          description:
-            Phandle to the mediatek pcie-mirror controller.
+        mediatek,wed:
+          minItems: 2
 
         mediatek,wed-pcie: false
+    else:
+      properties:
+        mediatek,pcie-mirror: false
 
   - if:
       properties:
@@ -216,6 +264,11 @@ allOf:
     then:
       properties:
         interrupts:
+          minItems: 3
+          maxItems: 3
+
+        interrupt-names:
+          minItems: 3
           maxItems: 3
 
         clocks:
@@ -242,6 +295,8 @@ allOf:
             - const: sgmii_ck
             - const: eth2pll
 
+        sram: false
+
         mediatek,sgmiisys:
           minItems: 2
           maxItems: 2
@@ -258,7 +313,10 @@ allOf:
     then:
       properties:
         interrupts:
-          minItems: 4
+          minItems: 8
+
+        interrupt-names:
+          minItems: 8
 
         clocks:
           minItems: 15
@@ -282,11 +340,12 @@ allOf:
             - const: netsys0
             - const: netsys1
 
-        mediatek,infracfg: false
-
         mediatek,sgmiisys:
           minItems: 2
           maxItems: 2
+
+        mediatek,wed:
+          maxItems: 1
 
   - if:
       properties:
@@ -296,7 +355,10 @@ allOf:
     then:
       properties:
         interrupts:
-          minItems: 4
+          minItems: 8
+
+        interrupt-names:
+          minItems: 8
 
         clocks:
           minItems: 15
@@ -326,6 +388,9 @@ allOf:
           minItems: 2
           maxItems: 2
 
+        mediatek,wed:
+          minItems: 2
+
   - if:
       properties:
         compatible:
@@ -334,11 +399,14 @@ allOf:
     then:
       properties:
         interrupts:
-          minItems: 4
+          minItems: 8
+
+        interrupt-names:
+          minItems: 8
 
         clocks:
-          minItems: 34
-          maxItems: 34
+          minItems: 24
+          maxItems: 24
 
         clock-names:
           items:
@@ -351,18 +419,6 @@ allOf:
             - const: ethwarp_wocpu1
             - const: ethwarp_wocpu0
             - const: esw
-            - const: netsys0
-            - const: netsys1
-            - const: sgmii_tx250m
-            - const: sgmii_rx250m
-            - const: sgmii2_tx250m
-            - const: sgmii2_rx250m
-            - const: top_usxgmii0_sel
-            - const: top_usxgmii1_sel
-            - const: top_sgm0_sel
-            - const: top_sgm1_sel
-            - const: top_xfi_phy0_xtal_sel
-            - const: top_xfi_phy1_xtal_sel
             - const: top_eth_gmii_sel
             - const: top_eth_refck_50m_sel
             - const: top_eth_sys_200m_sel
@@ -375,18 +431,25 @@ allOf:
             - const: top_netsys_sync_250m_sel
             - const: top_netsys_ppefb_250m_sel
             - const: top_netsys_warp_sel
-            - const: wocpu1
-            - const: wocpu0
             - const: xgp1
             - const: xgp2
             - const: xgp3
 
-        mediatek,sgmiisys:
+        mediatek,wed:
           minItems: 2
-          maxItems: 2
+
+  - if:
+      properties:
+        compatible:
+          contains:
+            const: ralink,rt5350-eth
+    then:
+      properties:
+        mediatek,wed:
+          minItems: 2
 
 patternProperties:
-  "^mac@[0-1]$":
+  "^mac@[0-2]$":
     type: object
     unevaluatedProperties: false
     allOf:
@@ -511,7 +574,11 @@ examples:
         interrupts = <GIC_SPI 196 IRQ_TYPE_LEVEL_HIGH>,
                      <GIC_SPI 197 IRQ_TYPE_LEVEL_HIGH>,
                      <GIC_SPI 198 IRQ_TYPE_LEVEL_HIGH>,
-                     <GIC_SPI 199 IRQ_TYPE_LEVEL_HIGH>;
+                     <GIC_SPI 199 IRQ_TYPE_LEVEL_HIGH>,
+                     <GIC_SPI 189 IRQ_TYPE_LEVEL_HIGH>,
+                     <GIC_SPI 190 IRQ_TYPE_LEVEL_HIGH>,
+                     <GIC_SPI 191 IRQ_TYPE_LEVEL_HIGH>,
+                     <GIC_SPI 192 IRQ_TYPE_LEVEL_HIGH>;
         clocks = <&ethsys CLK_ETH_FE_EN>,
                  <&ethsys CLK_ETH_GP2_EN>,
                  <&ethsys CLK_ETH_GP1_EN>,

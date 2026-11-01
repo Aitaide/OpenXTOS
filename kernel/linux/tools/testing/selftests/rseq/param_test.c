@@ -38,7 +38,7 @@ static int opt_modulo, verbose;
 static int opt_yield, opt_signal, opt_sleep,
 		opt_disable_rseq, opt_threads = 200,
 		opt_disable_mod = 0, opt_test = 's';
-
+static bool opt_rseq_legacy;
 static long long opt_reps = 5000;
 
 static __thread __attribute__((tls_model("initial-exec")))
@@ -226,8 +226,32 @@ unsigned int yield_mod_cnt, nr_abort;
 	"addi  " INJECT_ASM_REG "," INJECT_ASM_REG ", -1\n\t"	\
 	"bnez " INJECT_ASM_REG ", 222b\n\t"			\
 	"333:\n\t"
+#elif defined(__or1k__)
 
+#define RSEQ_INJECT_INPUT \
+	, [loop_cnt_1]"m"(loop_cnt[1]) \
+	, [loop_cnt_2]"m"(loop_cnt[2]) \
+	, [loop_cnt_3]"m"(loop_cnt[3]) \
+	, [loop_cnt_4]"m"(loop_cnt[4]) \
+	, [loop_cnt_5]"m"(loop_cnt[5]) \
+	, [loop_cnt_6]"m"(loop_cnt[6])
 
+#define INJECT_ASM_REG	"r31"
+
+#define RSEQ_INJECT_CLOBBER \
+	, INJECT_ASM_REG
+
+#define RSEQ_INJECT_ASM(n)					\
+	"l.lwz   " INJECT_ASM_REG ", %[loop_cnt_" #n "]\n\t"	\
+	"l.sfeqi " INJECT_ASM_REG ", 0\n\t"			\
+	"l.bf 333f\n\t"						\
+	" l.nop\n\t"						\
+	"222:\n\t"						\
+	"l.addi  " INJECT_ASM_REG "," INJECT_ASM_REG ", -1\n\t"	\
+	"l.sfeqi " INJECT_ASM_REG ", 0\n\t"			\
+	"l.bf 222f\n\t"						\
+	" l.nop\n\t"						\
+	"333:\n\t"
 #else
 #error unsupported target
 #endif
@@ -257,9 +281,12 @@ unsigned int yield_mod_cnt, nr_abort;
 	} \
 }
 
+#define rseq_no_glibc			true
+
 #else
 
 #define printf_verbose(fmt, ...)
+#define rseq_no_glibc			false
 
 #endif /* BENCHMARK */
 
@@ -288,6 +315,11 @@ bool rseq_validate_cpu_id(void)
 {
 	return rseq_mm_cid_available();
 }
+static
+bool rseq_use_cpu_index(void)
+{
+	return false;	/* Use mm_cid */
+}
 # ifdef TEST_MEMBARRIER
 /*
  * Membarrier does not currently support targeting a mm_cid, so
@@ -311,6 +343,11 @@ static
 bool rseq_validate_cpu_id(void)
 {
 	return rseq_current_cpu_raw() >= 0;
+}
+static
+bool rseq_use_cpu_index(void)
+{
+	return true;	/* Use cpu_id as index. */
 }
 # ifdef TEST_MEMBARRIER
 static
@@ -447,7 +484,7 @@ void *test_percpu_spinlock_thread(void *arg)
 	long long i, reps;
 
 	if (!opt_disable_rseq && thread_data->reg &&
-	    rseq_register_current_thread())
+	    __rseq_register_current_thread(rseq_no_glibc, opt_rseq_legacy))
 		abort();
 	reps = thread_data->reps;
 	for (i = 0; i < reps; i++) {
@@ -524,7 +561,7 @@ void *test_percpu_inc_thread(void *arg)
 	long long i, reps;
 
 	if (!opt_disable_rseq && thread_data->reg &&
-	    rseq_register_current_thread())
+	    __rseq_register_current_thread(rseq_no_glibc, opt_rseq_legacy))
 		abort();
 	reps = thread_data->reps;
 	for (i = 0; i < reps; i++) {
@@ -678,7 +715,7 @@ void *test_percpu_list_thread(void *arg)
 	long long i, reps;
 	struct percpu_list *list = (struct percpu_list *)arg;
 
-	if (!opt_disable_rseq && rseq_register_current_thread())
+	if (!opt_disable_rseq && __rseq_register_current_thread(rseq_no_glibc, opt_rseq_legacy))
 		abort();
 
 	reps = opt_reps;
@@ -715,7 +752,7 @@ void test_percpu_list(void)
 	/* Generate list entries for every usable cpu. */
 	sched_getaffinity(0, sizeof(allowed_cpus), &allowed_cpus);
 	for (i = 0; i < CPU_SETSIZE; i++) {
-		if (!CPU_ISSET(i, &allowed_cpus))
+		if (rseq_use_cpu_index() && !CPU_ISSET(i, &allowed_cpus))
 			continue;
 		for (j = 1; j <= 100; j++) {
 			struct percpu_list_node *node;
@@ -752,7 +789,7 @@ void test_percpu_list(void)
 	for (i = 0; i < CPU_SETSIZE; i++) {
 		struct percpu_list_node *node;
 
-		if (!CPU_ISSET(i, &allowed_cpus))
+		if (rseq_use_cpu_index() && !CPU_ISSET(i, &allowed_cpus))
 			continue;
 
 		while ((node = __percpu_list_pop(&list, i))) {
@@ -861,7 +898,7 @@ void *test_percpu_buffer_thread(void *arg)
 	long long i, reps;
 	struct percpu_buffer *buffer = (struct percpu_buffer *)arg;
 
-	if (!opt_disable_rseq && rseq_register_current_thread())
+	if (!opt_disable_rseq && __rseq_register_current_thread(rseq_no_glibc, opt_rseq_legacy))
 		abort();
 
 	reps = opt_reps;
@@ -902,7 +939,7 @@ void test_percpu_buffer(void)
 	/* Generate list entries for every usable cpu. */
 	sched_getaffinity(0, sizeof(allowed_cpus), &allowed_cpus);
 	for (i = 0; i < CPU_SETSIZE; i++) {
-		if (!CPU_ISSET(i, &allowed_cpus))
+		if (rseq_use_cpu_index() && !CPU_ISSET(i, &allowed_cpus))
 			continue;
 		/* Worse-case is every item in same CPU. */
 		buffer.c[i].array =
@@ -952,7 +989,7 @@ void test_percpu_buffer(void)
 	for (i = 0; i < CPU_SETSIZE; i++) {
 		struct percpu_buffer_node *node;
 
-		if (!CPU_ISSET(i, &allowed_cpus))
+		if (rseq_use_cpu_index() && !CPU_ISSET(i, &allowed_cpus))
 			continue;
 
 		while ((node = __percpu_buffer_pop(&buffer, i))) {
@@ -1071,7 +1108,7 @@ void *test_percpu_memcpy_buffer_thread(void *arg)
 	long long i, reps;
 	struct percpu_memcpy_buffer *buffer = (struct percpu_memcpy_buffer *)arg;
 
-	if (!opt_disable_rseq && rseq_register_current_thread())
+	if (!opt_disable_rseq && __rseq_register_current_thread(rseq_no_glibc, opt_rseq_legacy))
 		abort();
 
 	reps = opt_reps;
@@ -1113,7 +1150,7 @@ void test_percpu_memcpy_buffer(void)
 	/* Generate list entries for every usable cpu. */
 	sched_getaffinity(0, sizeof(allowed_cpus), &allowed_cpus);
 	for (i = 0; i < CPU_SETSIZE; i++) {
-		if (!CPU_ISSET(i, &allowed_cpus))
+		if (rseq_use_cpu_index() && !CPU_ISSET(i, &allowed_cpus))
 			continue;
 		/* Worse-case is every item in same CPU. */
 		buffer.c[i].array =
@@ -1160,7 +1197,7 @@ void test_percpu_memcpy_buffer(void)
 	for (i = 0; i < CPU_SETSIZE; i++) {
 		struct percpu_memcpy_buffer_node item;
 
-		if (!CPU_ISSET(i, &allowed_cpus))
+		if (rseq_use_cpu_index() && !CPU_ISSET(i, &allowed_cpus))
 			continue;
 
 		while (__percpu_memcpy_buffer_pop(&buffer, &item, i)) {
@@ -1224,14 +1261,14 @@ void *test_membarrier_worker_thread(void *arg)
 	const int iters = opt_reps;
 	int i;
 
-	if (rseq_register_current_thread()) {
+	if (__rseq_register_current_thread(rseq_no_glibc, opt_rseq_legacy)) {
 		fprintf(stderr, "Error: rseq_register_current_thread(...) failed(%d): %s\n",
 			errno, strerror(errno));
 		abort();
 	}
 
 	/* Wait for initialization. */
-	while (!atomic_load(&args->percpu_list_ptr)) {}
+	while (!__atomic_load_n(&args->percpu_list_ptr, __ATOMIC_ACQUIRE)) {}
 
 	for (i = 0; i < iters; ++i) {
 		int ret;
@@ -1289,7 +1326,7 @@ void *test_membarrier_manager_thread(void *arg)
 	intptr_t expect_a = 0, expect_b = 0;
 	int cpu_a = 0, cpu_b = 0;
 
-	if (rseq_register_current_thread()) {
+	if (__rseq_register_current_thread(rseq_no_glibc, opt_rseq_legacy)) {
 		fprintf(stderr, "Error: rseq_register_current_thread(...) failed(%d): %s\n",
 			errno, strerror(errno));
 		abort();
@@ -1299,22 +1336,22 @@ void *test_membarrier_manager_thread(void *arg)
 	test_membarrier_init_percpu_list(&list_a);
 	test_membarrier_init_percpu_list(&list_b);
 
-	atomic_store(&args->percpu_list_ptr, (intptr_t)&list_a);
+	__atomic_store_n(&args->percpu_list_ptr, (intptr_t)&list_a, __ATOMIC_RELEASE);
 
-	while (!atomic_load(&args->stop)) {
+	while (!__atomic_load_n(&args->stop, __ATOMIC_ACQUIRE)) {
 		/* list_a is "active". */
 		cpu_a = rand() % CPU_SETSIZE;
 		/*
 		 * As list_b is "inactive", we should never see changes
 		 * to list_b.
 		 */
-		if (expect_b != atomic_load(&list_b.c[cpu_b].head->data)) {
+		if (expect_b != __atomic_load_n(&list_b.c[cpu_b].head->data, __ATOMIC_ACQUIRE)) {
 			fprintf(stderr, "Membarrier test failed\n");
 			abort();
 		}
 
 		/* Make list_b "active". */
-		atomic_store(&args->percpu_list_ptr, (intptr_t)&list_b);
+		__atomic_store_n(&args->percpu_list_ptr, (intptr_t)&list_b, __ATOMIC_RELEASE);
 		if (rseq_membarrier_expedited(cpu_a) &&
 				errno != ENXIO /* missing CPU */) {
 			perror("sys_membarrier");
@@ -1324,27 +1361,27 @@ void *test_membarrier_manager_thread(void *arg)
 		 * Cpu A should now only modify list_b, so the values
 		 * in list_a should be stable.
 		 */
-		expect_a = atomic_load(&list_a.c[cpu_a].head->data);
+		expect_a = __atomic_load_n(&list_a.c[cpu_a].head->data, __ATOMIC_ACQUIRE);
 
 		cpu_b = rand() % CPU_SETSIZE;
 		/*
 		 * As list_a is "inactive", we should never see changes
 		 * to list_a.
 		 */
-		if (expect_a != atomic_load(&list_a.c[cpu_a].head->data)) {
+		if (expect_a != __atomic_load_n(&list_a.c[cpu_a].head->data, __ATOMIC_ACQUIRE)) {
 			fprintf(stderr, "Membarrier test failed\n");
 			abort();
 		}
 
 		/* Make list_a "active". */
-		atomic_store(&args->percpu_list_ptr, (intptr_t)&list_a);
+		__atomic_store_n(&args->percpu_list_ptr, (intptr_t)&list_a, __ATOMIC_RELEASE);
 		if (rseq_membarrier_expedited(cpu_b) &&
 				errno != ENXIO /* missing CPU*/) {
 			perror("sys_membarrier");
 			abort();
 		}
 		/* Remember a value from list_b. */
-		expect_b = atomic_load(&list_b.c[cpu_b].head->data);
+		expect_b = __atomic_load_n(&list_b.c[cpu_b].head->data, __ATOMIC_ACQUIRE);
 	}
 
 	test_membarrier_free_percpu_list(&list_a);
@@ -1401,7 +1438,7 @@ void test_membarrier(void)
 		}
 	}
 
-	atomic_store(&thread_args.stop, 1);
+	__atomic_store_n(&thread_args.stop, 1, __ATOMIC_RELEASE);
 	ret = pthread_join(manager_thread, NULL);
 	if (ret) {
 		errno = ret;
@@ -1441,6 +1478,7 @@ static void show_usage(int argc, char **argv)
 	printf("	[-D M] Disable rseq for each M threads\n");
 	printf("	[-T test] Choose test: (s)pinlock, (l)ist, (b)uffer, (m)emcpy, (i)ncrement, membarrie(r)\n");
 	printf("	[-M] Push into buffer and memcpy buffer with memory barriers.\n");
+	printf("	[-O] Test with optimized RSEQ\n");
 	printf("	[-v] Verbose output.\n");
 	printf("	[-h] Show this help.\n");
 	printf("\n");
@@ -1568,6 +1606,9 @@ int main(int argc, char **argv)
 		case 'M':
 			opt_mo = RSEQ_MO_RELEASE;
 			break;
+		case 'L':
+			opt_rseq_legacy = true;
+			break;
 		default:
 			show_usage(argc, argv);
 			goto error;
@@ -1584,7 +1625,7 @@ int main(int argc, char **argv)
 	if (set_signal_handler())
 		goto error;
 
-	if (!opt_disable_rseq && rseq_register_current_thread())
+	if (!opt_disable_rseq && __rseq_register_current_thread(rseq_no_glibc, opt_rseq_legacy))
 		goto error;
 	if (!opt_disable_rseq && !rseq_validate_cpu_id()) {
 		fprintf(stderr, "Error: cpu id getter unavailable\n");

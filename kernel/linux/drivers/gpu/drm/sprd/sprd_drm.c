@@ -5,7 +5,6 @@
 
 #include <linux/component.h>
 #include <linux/dma-mapping.h>
-#include <linux/mod_devicetable.h>
 #include <linux/module.h>
 #include <linux/mutex.h>
 #include <linux/of_graph.h>
@@ -23,7 +22,6 @@
 
 #define DRIVER_NAME	"sprd"
 #define DRIVER_DESC	"Spreadtrum SoCs' DRM Driver"
-#define DRIVER_DATE	"20200201"
 #define DRIVER_MAJOR	1
 #define DRIVER_MINOR	0
 
@@ -59,7 +57,6 @@ static struct drm_driver sprd_drm_drv = {
 
 	.name			= DRIVER_NAME,
 	.desc			= DRIVER_DESC,
-	.date			= DRIVER_DATE,
 	.major			= DRIVER_MAJOR,
 	.minor			= DRIVER_MINOR,
 };
@@ -138,10 +135,9 @@ static int sprd_drm_probe(struct platform_device *pdev)
 	return drm_of_component_probe(&pdev->dev, component_compare_of, &drm_component_ops);
 }
 
-static int sprd_drm_remove(struct platform_device *pdev)
+static void sprd_drm_remove(struct platform_device *pdev)
 {
 	component_master_del(&pdev->dev, &drm_component_ops);
-	return 0;
 }
 
 static void sprd_drm_shutdown(struct platform_device *pdev)

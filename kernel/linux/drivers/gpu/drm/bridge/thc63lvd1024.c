@@ -13,6 +13,7 @@
 #include <linux/regulator/consumer.h>
 #include <linux/slab.h>
 
+#include <drm/drm_atomic_helper.h>
 #include <drm/drm_bridge.h>
 #include <drm/drm_panel.h>
 
@@ -32,7 +33,6 @@ struct thc63_dev {
 	struct gpio_desc *oe;
 
 	struct drm_bridge bridge;
-	struct drm_bridge *next;
 
 	struct drm_bridge_timings timings;
 };
@@ -43,11 +43,12 @@ static inline struct thc63_dev *to_thc63(struct drm_bridge *bridge)
 }
 
 static int thc63_attach(struct drm_bridge *bridge,
+			struct drm_encoder *encoder,
 			enum drm_bridge_attach_flags flags)
 {
 	struct thc63_dev *thc63 = to_thc63(bridge);
 
-	return drm_bridge_attach(bridge->encoder, thc63->next, bridge, flags);
+	return drm_bridge_attach(encoder, thc63->bridge.next_bridge, bridge, flags);
 }
 
 static enum drm_mode_status thc63_mode_valid(struct drm_bridge *bridge,
@@ -81,7 +82,8 @@ static enum drm_mode_status thc63_mode_valid(struct drm_bridge *bridge,
 	return MODE_OK;
 }
 
-static void thc63_enable(struct drm_bridge *bridge)
+static void thc63_enable(struct drm_bridge *bridge,
+			 struct drm_atomic_commit *commit)
 {
 	struct thc63_dev *thc63 = to_thc63(bridge);
 	int ret;
@@ -97,7 +99,8 @@ static void thc63_enable(struct drm_bridge *bridge)
 	gpiod_set_value(thc63->oe, 1);
 }
 
-static void thc63_disable(struct drm_bridge *bridge)
+static void thc63_disable(struct drm_bridge *bridge,
+			  struct drm_atomic_commit *commit)
 {
 	struct thc63_dev *thc63 = to_thc63(bridge);
 	int ret;
@@ -112,10 +115,13 @@ static void thc63_disable(struct drm_bridge *bridge)
 }
 
 static const struct drm_bridge_funcs thc63_bridge_func = {
+	.atomic_create_state = drm_atomic_helper_bridge_create_state,
+	.atomic_destroy_state = drm_atomic_helper_bridge_destroy_state,
+	.atomic_duplicate_state = drm_atomic_helper_bridge_duplicate_state,
 	.attach	= thc63_attach,
 	.mode_valid = thc63_mode_valid,
-	.enable = thc63_enable,
-	.disable = thc63_disable,
+	.atomic_enable = thc63_enable,
+	.atomic_disable = thc63_disable,
 };
 
 static int thc63_parse_dt(struct thc63_dev *thc63)
@@ -123,32 +129,17 @@ static int thc63_parse_dt(struct thc63_dev *thc63)
 	struct device_node *endpoint;
 	struct device_node *remote;
 
-	endpoint = of_graph_get_endpoint_by_regs(thc63->dev->of_node,
-						 THC63_RGB_OUT0, -1);
-	if (!endpoint) {
-		dev_err(thc63->dev, "Missing endpoint in port@%u\n",
-			THC63_RGB_OUT0);
-		return -ENODEV;
-	}
-
-	remote = of_graph_get_remote_port_parent(endpoint);
-	of_node_put(endpoint);
+	remote = of_graph_get_remote_node(thc63->dev->of_node,
+					  THC63_RGB_OUT0, -1);
 	if (!remote) {
-		dev_err(thc63->dev, "Endpoint in port@%u unconnected\n",
+		dev_err(thc63->dev, "No remote endpoint for port@%u\n",
 			THC63_RGB_OUT0);
 		return -ENODEV;
 	}
 
-	if (!of_device_is_available(remote)) {
-		dev_err(thc63->dev, "port@%u remote endpoint is disabled\n",
-			THC63_RGB_OUT0);
-		of_node_put(remote);
-		return -ENODEV;
-	}
-
-	thc63->next = of_drm_find_bridge(remote);
+	thc63->bridge.next_bridge = of_drm_find_and_get_bridge(remote);
 	of_node_put(remote);
-	if (!thc63->next)
+	if (!thc63->bridge.next_bridge)
 		return -EPROBE_DEFER;
 
 	endpoint = of_graph_get_endpoint_by_regs(thc63->dev->of_node,
@@ -195,9 +186,10 @@ static int thc63_probe(struct platform_device *pdev)
 	struct thc63_dev *thc63;
 	int ret;
 
-	thc63 = devm_kzalloc(&pdev->dev, sizeof(*thc63), GFP_KERNEL);
-	if (!thc63)
-		return -ENOMEM;
+	thc63 = devm_drm_bridge_alloc(&pdev->dev, struct thc63_dev, bridge,
+				      &thc63_bridge_func);
+	if (IS_ERR(thc63))
+		return PTR_ERR(thc63);
 
 	thc63->dev = &pdev->dev;
 	platform_set_drvdata(pdev, thc63);
@@ -222,7 +214,6 @@ static int thc63_probe(struct platform_device *pdev)
 
 	thc63->bridge.driver_private = thc63;
 	thc63->bridge.of_node = pdev->dev.of_node;
-	thc63->bridge.funcs = &thc63_bridge_func;
 	thc63->bridge.timings = &thc63->timings;
 
 	drm_bridge_add(&thc63->bridge);
@@ -245,7 +236,7 @@ MODULE_DEVICE_TABLE(of, thc63_match);
 
 static struct platform_driver thc63_driver = {
 	.probe	= thc63_probe,
-	.remove_new = thc63_remove,
+	.remove = thc63_remove,
 	.driver	= {
 		.name		= "thc63lvd1024",
 		.of_match_table	= thc63_match,

@@ -48,7 +48,7 @@ int bcom_sram_init(struct device_node *sram_node, char *owner)
 		return -EBUSY;
 	}
 
-	bcom_sram = kmalloc(sizeof(struct bcom_sram), GFP_KERNEL);
+	bcom_sram = kmalloc_obj(struct bcom_sram);
 	if (!bcom_sram) {
 		printk(KERN_ERR "%s: bcom_sram_init: "
 			"Couldn't allocate internal state !\n", owner);
@@ -90,13 +90,8 @@ int bcom_sram_init(struct device_node *sram_node, char *owner)
 	bcom_sram->rh = rh_create(4);
 
 	/* Attach the free zones */
-#if 0
-	/* Currently disabled ... for future use only */
-	reg_addr_p = of_get_property(sram_node, "available", &psize);
-#else
 	regaddr_p = NULL;
 	psize = 0;
-#endif
 
 	if (!regaddr_p || !psize) {
 		/* Attach the whole zone */

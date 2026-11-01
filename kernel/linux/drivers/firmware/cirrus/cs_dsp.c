@@ -9,11 +9,17 @@
  *                         Cirrus Logic International Semiconductor Ltd.
  */
 
+#include <kunit/static_stub.h>
+#include <kunit/visibility.h>
+#include <linux/cleanup.h>
 #include <linux/ctype.h>
 #include <linux/debugfs.h>
 #include <linux/delay.h>
+#include <linux/math.h>
+#include <linux/minmax.h>
 #include <linux/module.h>
 #include <linux/moduleparam.h>
+#include <linux/ratelimit.h>
 #include <linux/seq_file.h>
 #include <linux/slab.h>
 #include <linux/vmalloc.h>
@@ -21,14 +27,52 @@
 #include <linux/firmware/cirrus/cs_dsp.h>
 #include <linux/firmware/cirrus/wmfw.h>
 
-#define cs_dsp_err(_dsp, fmt, ...) \
-	dev_err(_dsp->dev, "%s: " fmt, _dsp->name, ##__VA_ARGS__)
-#define cs_dsp_warn(_dsp, fmt, ...) \
-	dev_warn(_dsp->dev, "%s: " fmt, _dsp->name, ##__VA_ARGS__)
-#define cs_dsp_info(_dsp, fmt, ...) \
-	dev_info(_dsp->dev, "%s: " fmt, _dsp->name, ##__VA_ARGS__)
-#define cs_dsp_dbg(_dsp, fmt, ...) \
-	dev_dbg(_dsp->dev, "%s: " fmt, _dsp->name, ##__VA_ARGS__)
+#include "cs_dsp.h"
+
+/*
+ * When the KUnit test is running the error-case tests will cause a lot
+ * of messages. Rate-limit to prevent overflowing the kernel log buffer
+ * during KUnit test runs and allow the test to redirect this function.
+ * In normal (not KUnit) builds this collapses to only return true.
+ */
+VISIBLE_IF_KUNIT bool cs_dsp_can_emit_message(void)
+{
+	KUNIT_STATIC_STUB_REDIRECT(cs_dsp_can_emit_message);
+
+	if (IS_ENABLED(CONFIG_FW_CS_DSP_KUNIT_TEST)) {
+		static DEFINE_RATELIMIT_STATE(_rs,
+					      DEFAULT_RATELIMIT_INTERVAL,
+					      DEFAULT_RATELIMIT_BURST);
+		return __ratelimit(&_rs);
+	}
+
+	return true;
+}
+EXPORT_SYMBOL_IF_KUNIT(cs_dsp_can_emit_message);
+
+#define cs_dsp_err(_dsp, fmt, ...)						   \
+	do {									   \
+		if (cs_dsp_can_emit_message())					   \
+			dev_err(_dsp->dev, "%s: " fmt, _dsp->name, ##__VA_ARGS__); \
+	} while (false)
+
+#define cs_dsp_warn(_dsp, fmt, ...)						    \
+	do {									    \
+		if (cs_dsp_can_emit_message())					    \
+			dev_warn(_dsp->dev, "%s: " fmt, _dsp->name, ##__VA_ARGS__); \
+	} while (false)
+
+#define cs_dsp_info(_dsp, fmt, ...)						    \
+	do {									    \
+		if (cs_dsp_can_emit_message())					    \
+			dev_info(_dsp->dev, "%s: " fmt, _dsp->name, ##__VA_ARGS__); \
+	} while (false)
+
+#define cs_dsp_dbg(_dsp, fmt, ...)						   \
+	do {									   \
+		if (cs_dsp_can_emit_message())					   \
+			dev_dbg(_dsp->dev, "%s: " fmt, _dsp->name, ##__VA_ARGS__); \
+	} while (false)
 
 #define ADSP1_CONTROL_1                   0x00
 #define ADSP1_CONTROL_2                   0x02
@@ -275,6 +319,12 @@
 #define HALO_MPU_VIO_ERR_SRC_MASK           0x00007fff
 #define HALO_MPU_VIO_ERR_SRC_SHIFT                   0
 
+/*
+ * Write Sequence
+ */
+#define WSEQ_OP_MAX_WORDS	3
+#define WSEQ_END_OF_SCRIPT	0xFFFFFF
+
 struct cs_dsp_ops {
 	bool (*validate_version)(struct cs_dsp *dsp, unsigned int version);
 	unsigned int (*parse_sizes)(struct cs_dsp *dsp,
@@ -304,43 +354,10 @@ static const struct cs_dsp_ops cs_dsp_adsp2_ops[];
 static const struct cs_dsp_ops cs_dsp_halo_ops;
 static const struct cs_dsp_ops cs_dsp_halo_ao_ops;
 
-struct cs_dsp_buf {
+struct cs_dsp_alg_region_list_item {
 	struct list_head list;
-	void *buf;
+	struct cs_dsp_alg_region alg_region;
 };
-
-static struct cs_dsp_buf *cs_dsp_buf_alloc(const void *src, size_t len,
-					   struct list_head *list)
-{
-	struct cs_dsp_buf *buf = kzalloc(sizeof(*buf), GFP_KERNEL);
-
-	if (buf == NULL)
-		return NULL;
-
-	buf->buf = vmalloc(len);
-	if (!buf->buf) {
-		kfree(buf);
-		return NULL;
-	}
-	memcpy(buf->buf, src, len);
-
-	if (list)
-		list_add_tail(&buf->list, list);
-
-	return buf;
-}
-
-static void cs_dsp_buf_free(struct list_head *list)
-{
-	while (!list_empty(list)) {
-		struct cs_dsp_buf *buf = list_first_entry(list,
-							  struct cs_dsp_buf,
-							  list);
-		list_del(&buf->list);
-		vfree(buf->buf);
-		kfree(buf);
-	}
-}
 
 /**
  * cs_dsp_mem_region_name() - Return a name string for a memory type
@@ -371,23 +388,19 @@ const char *cs_dsp_mem_region_name(unsigned int type)
 		return NULL;
 	}
 }
-EXPORT_SYMBOL_NS_GPL(cs_dsp_mem_region_name, FW_CS_DSP);
+EXPORT_SYMBOL_NS_GPL(cs_dsp_mem_region_name, "FW_CS_DSP");
 
 #ifdef CONFIG_DEBUG_FS
 static void cs_dsp_debugfs_save_wmfwname(struct cs_dsp *dsp, const char *s)
 {
-	char *tmp = kasprintf(GFP_KERNEL, "%s\n", s);
-
 	kfree(dsp->wmfw_file_name);
-	dsp->wmfw_file_name = tmp;
+	dsp->wmfw_file_name = kstrdup(s, GFP_KERNEL);
 }
 
 static void cs_dsp_debugfs_save_binname(struct cs_dsp *dsp, const char *s)
 {
-	char *tmp = kasprintf(GFP_KERNEL, "%s\n", s);
-
 	kfree(dsp->bin_file_name);
-	dsp->bin_file_name = tmp;
+	dsp->bin_file_name = kstrdup(s, GFP_KERNEL);
 }
 
 static void cs_dsp_debugfs_clear(struct cs_dsp *dsp)
@@ -398,24 +411,38 @@ static void cs_dsp_debugfs_clear(struct cs_dsp *dsp)
 	dsp->bin_file_name = NULL;
 }
 
+static ssize_t cs_dsp_debugfs_string_read(struct cs_dsp *dsp,
+					  char __user *user_buf,
+					  size_t count, loff_t *ppos,
+					  const char **pstr)
+{
+	const char *str;
+	ssize_t ret = 0;
+
+	scoped_guard(mutex, &dsp->pwr_lock) {
+		if (*pstr) {
+			str = kasprintf(GFP_KERNEL, "%s\n", *pstr);
+			if (str) {
+				ret = simple_read_from_buffer(user_buf, count,
+							      ppos, str, strlen(str));
+				kfree(str);
+			} else {
+				ret = -ENOMEM;
+			}
+		}
+	}
+
+	return ret;
+}
+
 static ssize_t cs_dsp_debugfs_wmfw_read(struct file *file,
 					char __user *user_buf,
 					size_t count, loff_t *ppos)
 {
 	struct cs_dsp *dsp = file->private_data;
-	ssize_t ret;
 
-	mutex_lock(&dsp->pwr_lock);
-
-	if (!dsp->wmfw_file_name || !dsp->booted)
-		ret = 0;
-	else
-		ret = simple_read_from_buffer(user_buf, count, ppos,
-					      dsp->wmfw_file_name,
-					      strlen(dsp->wmfw_file_name));
-
-	mutex_unlock(&dsp->pwr_lock);
-	return ret;
+	return cs_dsp_debugfs_string_read(dsp, user_buf, count, ppos,
+					  &dsp->wmfw_file_name);
 }
 
 static ssize_t cs_dsp_debugfs_bin_read(struct file *file,
@@ -423,19 +450,9 @@ static ssize_t cs_dsp_debugfs_bin_read(struct file *file,
 				       size_t count, loff_t *ppos)
 {
 	struct cs_dsp *dsp = file->private_data;
-	ssize_t ret;
 
-	mutex_lock(&dsp->pwr_lock);
-
-	if (!dsp->bin_file_name || !dsp->booted)
-		ret = 0;
-	else
-		ret = simple_read_from_buffer(user_buf, count, ppos,
-					      dsp->bin_file_name,
-					      strlen(dsp->bin_file_name));
-
-	mutex_unlock(&dsp->pwr_lock);
-	return ret;
+	return cs_dsp_debugfs_string_read(dsp, user_buf, count, ppos,
+					  &dsp->bin_file_name);
 }
 
 static const struct {
@@ -467,9 +484,11 @@ static int cs_dsp_debugfs_read_controls_show(struct seq_file *s, void *ignored)
 	struct cs_dsp_coeff_ctl *ctl;
 	unsigned int reg;
 
+	guard(mutex)(&dsp->pwr_lock);
+
 	list_for_each_entry(ctl, &dsp->ctl_list, list) {
 		cs_dsp_coeff_base_reg(ctl, &reg, 0);
-		seq_printf(s, "%22.*s: %#8zx %s:%08x %#8x %s %#8x %#4x %c%c%c%c %s %s\n",
+		seq_printf(s, "%22.*s: %#8x %s:%08x %#8x %s %#8x %#4x %c%c%c%c %s %s\n",
 			   ctl->subname_len, ctl->subname, ctl->len,
 			   cs_dsp_mem_region_name(ctl->alg_region.type),
 			   ctl->offset, reg, ctl->fw_name, ctl->alg_region.alg, ctl->type,
@@ -500,6 +519,7 @@ void cs_dsp_init_debugfs(struct cs_dsp *dsp, struct dentry *debugfs_root)
 
 	debugfs_create_bool("booted", 0444, root, &dsp->booted);
 	debugfs_create_bool("running", 0444, root, &dsp->running);
+	debugfs_create_bool("hibernating", 0444, root, &dsp->hibernating);
 	debugfs_create_x32("fw_id", 0444, root, &dsp->fw_id);
 	debugfs_create_x32("fw_version", 0444, root, &dsp->fw_id_version);
 
@@ -512,7 +532,7 @@ void cs_dsp_init_debugfs(struct cs_dsp *dsp, struct dentry *debugfs_root)
 
 	dsp->debugfs_root = root;
 }
-EXPORT_SYMBOL_NS_GPL(cs_dsp_init_debugfs, FW_CS_DSP);
+EXPORT_SYMBOL_NS_GPL(cs_dsp_init_debugfs, "FW_CS_DSP");
 
 /**
  * cs_dsp_cleanup_debugfs() - Removes DSP representation from debugfs
@@ -522,19 +542,19 @@ void cs_dsp_cleanup_debugfs(struct cs_dsp *dsp)
 {
 	cs_dsp_debugfs_clear(dsp);
 	debugfs_remove_recursive(dsp->debugfs_root);
-	dsp->debugfs_root = NULL;
+	dsp->debugfs_root = ERR_PTR(-ENODEV);
 }
-EXPORT_SYMBOL_NS_GPL(cs_dsp_cleanup_debugfs, FW_CS_DSP);
+EXPORT_SYMBOL_NS_GPL(cs_dsp_cleanup_debugfs, "FW_CS_DSP");
 #else
 void cs_dsp_init_debugfs(struct cs_dsp *dsp, struct dentry *debugfs_root)
 {
 }
-EXPORT_SYMBOL_NS_GPL(cs_dsp_init_debugfs, FW_CS_DSP);
+EXPORT_SYMBOL_NS_GPL(cs_dsp_init_debugfs, "FW_CS_DSP");
 
 void cs_dsp_cleanup_debugfs(struct cs_dsp *dsp)
 {
 }
-EXPORT_SYMBOL_NS_GPL(cs_dsp_cleanup_debugfs, FW_CS_DSP);
+EXPORT_SYMBOL_NS_GPL(cs_dsp_cleanup_debugfs, "FW_CS_DSP");
 
 static inline void cs_dsp_debugfs_save_wmfwname(struct cs_dsp *dsp,
 						const char *s)
@@ -688,7 +708,7 @@ int cs_dsp_coeff_write_acked_control(struct cs_dsp_coeff_ctl *ctl, unsigned int 
 
 	lockdep_assert_held(&dsp->pwr_lock);
 
-	if (!dsp->running)
+	if (!dsp->running || dsp->hibernating)
 		return -EPERM;
 
 	ret = cs_dsp_coeff_base_reg(ctl, &reg, 0);
@@ -742,7 +762,7 @@ int cs_dsp_coeff_write_acked_control(struct cs_dsp_coeff_ctl *ctl, unsigned int 
 
 	return -ETIMEDOUT;
 }
-EXPORT_SYMBOL_NS_GPL(cs_dsp_coeff_write_acked_control, FW_CS_DSP);
+EXPORT_SYMBOL_NS_GPL(cs_dsp_coeff_write_acked_control, "FW_CS_DSP");
 
 static int cs_dsp_coeff_write_ctrl_raw(struct cs_dsp_coeff_ctl *ctl,
 				       unsigned int off, const void *buf, size_t len)
@@ -796,6 +816,9 @@ int cs_dsp_coeff_write_ctrl(struct cs_dsp_coeff_ctl *ctl,
 
 	lockdep_assert_held(&ctl->dsp->pwr_lock);
 
+	if (ctl->flags && !(ctl->flags & WMFW_CTL_FLAG_WRITEABLE))
+		return -EPERM;
+
 	if (len + off * sizeof(u32) > ctl->len)
 		return -EINVAL;
 
@@ -809,7 +832,7 @@ int cs_dsp_coeff_write_ctrl(struct cs_dsp_coeff_ctl *ctl,
 	}
 
 	ctl->set = 1;
-	if (ctl->enabled && ctl->dsp->running)
+	if (ctl->enabled && ctl->dsp->running && !ctl->dsp->hibernating)
 		ret = cs_dsp_coeff_write_ctrl_raw(ctl, off, buf, len);
 
 	if (ret < 0)
@@ -817,7 +840,34 @@ int cs_dsp_coeff_write_ctrl(struct cs_dsp_coeff_ctl *ctl,
 
 	return 1;
 }
-EXPORT_SYMBOL_NS_GPL(cs_dsp_coeff_write_ctrl, FW_CS_DSP);
+EXPORT_SYMBOL_NS_GPL(cs_dsp_coeff_write_ctrl, "FW_CS_DSP");
+
+/**
+ * cs_dsp_coeff_lock_and_write_ctrl() - Writes the given buffer to the given coefficient control
+ * @ctl: pointer to coefficient control
+ * @off: word offset at which data should be written
+ * @buf: the buffer to write to the given control
+ * @len: the length of the buffer in bytes
+ *
+ * Same as cs_dsp_coeff_write_ctrl() but takes pwr_lock.
+ *
+ * Return: A negative number on error, 1 when the control value changed and 0 when it has not.
+ */
+int cs_dsp_coeff_lock_and_write_ctrl(struct cs_dsp_coeff_ctl *ctl,
+				     unsigned int off, const void *buf, size_t len)
+{
+	struct cs_dsp *dsp = ctl->dsp;
+	int ret;
+
+	lockdep_assert_not_held(&dsp->pwr_lock);
+
+	mutex_lock(&dsp->pwr_lock);
+	ret = cs_dsp_coeff_write_ctrl(ctl, off, buf, len);
+	mutex_unlock(&dsp->pwr_lock);
+
+	return ret;
+}
+EXPORT_SYMBOL_GPL(cs_dsp_coeff_lock_and_write_ctrl);
 
 static int cs_dsp_coeff_read_ctrl_raw(struct cs_dsp_coeff_ctl *ctl,
 				      unsigned int off, void *buf, size_t len)
@@ -875,12 +925,12 @@ int cs_dsp_coeff_read_ctrl(struct cs_dsp_coeff_ctl *ctl,
 		return -EINVAL;
 
 	if (ctl->flags & WMFW_CTL_FLAG_VOLATILE) {
-		if (ctl->enabled && ctl->dsp->running)
+		if (ctl->enabled && ctl->dsp->running && !ctl->dsp->hibernating)
 			return cs_dsp_coeff_read_ctrl_raw(ctl, off, buf, len);
 		else
 			return -EPERM;
 	} else {
-		if (!ctl->flags && ctl->enabled && ctl->dsp->running)
+		if (!ctl->flags && ctl->enabled && ctl->dsp->running && !ctl->dsp->hibernating)
 			ret = cs_dsp_coeff_read_ctrl_raw(ctl, 0, ctl->cache, ctl->len);
 
 		if (buf != ctl->cache)
@@ -889,7 +939,34 @@ int cs_dsp_coeff_read_ctrl(struct cs_dsp_coeff_ctl *ctl,
 
 	return ret;
 }
-EXPORT_SYMBOL_NS_GPL(cs_dsp_coeff_read_ctrl, FW_CS_DSP);
+EXPORT_SYMBOL_NS_GPL(cs_dsp_coeff_read_ctrl, "FW_CS_DSP");
+
+/**
+ * cs_dsp_coeff_lock_and_read_ctrl() - Reads the given coefficient control into the given buffer
+ * @ctl: pointer to coefficient control
+ * @off: word offset at which data should be read
+ * @buf: the buffer to store to the given control
+ * @len: the length of the buffer in bytes
+ *
+ * Same as cs_dsp_coeff_read_ctrl() but takes pwr_lock.
+ *
+ * Return: Zero for success, a negative number on error.
+ */
+int cs_dsp_coeff_lock_and_read_ctrl(struct cs_dsp_coeff_ctl *ctl,
+				    unsigned int off, void *buf, size_t len)
+{
+	struct cs_dsp *dsp = ctl->dsp;
+	int ret;
+
+	lockdep_assert_not_held(&dsp->pwr_lock);
+
+	mutex_lock(&dsp->pwr_lock);
+	ret = cs_dsp_coeff_read_ctrl(ctl, off, buf, len);
+	mutex_unlock(&dsp->pwr_lock);
+
+	return ret;
+}
+EXPORT_SYMBOL_GPL(cs_dsp_coeff_lock_and_read_ctrl);
 
 static int cs_dsp_coeff_init_control_caches(struct cs_dsp *dsp)
 {
@@ -959,7 +1036,7 @@ static void cs_dsp_signal_event_controls(struct cs_dsp *dsp,
 
 static void cs_dsp_free_ctl_blk(struct cs_dsp_coeff_ctl *ctl)
 {
-	kfree(ctl->cache);
+	kvfree(ctl->cache);
 	kfree(ctl->subname);
 	kfree(ctl);
 }
@@ -987,13 +1064,13 @@ static int cs_dsp_create_control(struct cs_dsp *dsp,
 		}
 	}
 
-	ctl = kzalloc(sizeof(*ctl), GFP_KERNEL);
+	ctl = kzalloc_obj(*ctl);
 	if (!ctl)
 		return -ENOMEM;
 
 	ctl->fw_name = dsp->fw_name;
 	ctl->alg_region = *alg_region;
-	if (subname && dsp->fw_ver >= 2) {
+	if (subname && dsp->wmfw_ver >= 2) {
 		ctl->subname_len = subname_len;
 		ctl->subname = kasprintf(GFP_KERNEL, "%.*s", subname_len, subname);
 		if (!ctl->subname) {
@@ -1009,7 +1086,7 @@ static int cs_dsp_create_control(struct cs_dsp *dsp,
 	ctl->type = type;
 	ctl->offset = offset;
 	ctl->len = len;
-	ctl->cache = kzalloc(ctl->len, GFP_KERNEL);
+	ctl->cache = kvzalloc(ctl->len, GFP_KERNEL);
 	if (!ctl->cache) {
 		ret = -ENOMEM;
 		goto err_ctl_subname;
@@ -1027,7 +1104,7 @@ static int cs_dsp_create_control(struct cs_dsp *dsp,
 
 err_list_del:
 	list_del(&ctl->list);
-	kfree(ctl->cache);
+	kvfree(ctl->cache);
 err_ctl_subname:
 	kfree(ctl->subname);
 err_ctl:
@@ -1035,6 +1112,44 @@ err_ctl:
 
 	return ret;
 }
+
+
+/**
+ * cs_dsp_hibernate() - Disable or enable all controls for a DSP
+ * @dsp: pointer to DSP structure
+ * @hibernate: whether to set controls to cache only mode
+ *
+ * When @hibernate is true, the DSP is entering hibernation mode where the
+ * regmap is inaccessible, and all controls become cache only.
+ * When @hibernate is false, the DSP has exited hibernation mode. If the DSP
+ * is running, all controls are re-synced to the DSP.
+ *
+ */
+void cs_dsp_hibernate(struct cs_dsp *dsp, bool hibernate)
+{
+	mutex_lock(&dsp->pwr_lock);
+
+	if (!dsp->running) {
+		cs_dsp_dbg(dsp, "Cannot hibernate, DSP not running\n");
+		goto out;
+	}
+
+	if (dsp->hibernating == hibernate)
+		goto out;
+
+	cs_dsp_dbg(dsp, "Set hibernating to %d\n", hibernate);
+	dsp->hibernating = hibernate;
+
+	if (!dsp->hibernating && dsp->running) {
+		int ret = cs_dsp_coeff_sync_controls(dsp);
+
+		if (ret)
+			cs_dsp_err(dsp, "Error syncing controls: %d\n", ret);
+	}
+out:
+	mutex_unlock(&dsp->pwr_lock);
+}
+EXPORT_SYMBOL_NS_GPL(cs_dsp_hibernate, "FW_CS_DSP");
 
 struct cs_dsp_coeff_parsed_alg {
 	int id;
@@ -1053,9 +1168,16 @@ struct cs_dsp_coeff_parsed_coeff {
 	int len;
 };
 
-static int cs_dsp_coeff_parse_string(int bytes, const u8 **pos, const u8 **str)
+static int cs_dsp_coeff_parse_string(int bytes, const u8 **pos, unsigned int avail,
+				     const u8 **str)
 {
-	int length;
+	int length, total_field_len;
+
+	/* String fields are at least one __le32 */
+	if (sizeof(__le32) > avail) {
+		*pos = NULL;
+		return 0;
+	}
 
 	switch (bytes) {
 	case 1:
@@ -1068,10 +1190,16 @@ static int cs_dsp_coeff_parse_string(int bytes, const u8 **pos, const u8 **str)
 		return 0;
 	}
 
+	total_field_len = ((length + bytes) + 3) & ~0x03;
+	if ((unsigned int)total_field_len > avail) {
+		*pos = NULL;
+		return 0;
+	}
+
 	if (str)
 		*str = *pos + bytes;
 
-	*pos += ((length + bytes) + 3) & ~0x03;
+	*pos += total_field_len;
 
 	return length;
 }
@@ -1096,71 +1224,134 @@ static int cs_dsp_coeff_parse_int(int bytes, const u8 **pos)
 	return val;
 }
 
-static inline void cs_dsp_coeff_parse_alg(struct cs_dsp *dsp, const u8 **data,
-					  struct cs_dsp_coeff_parsed_alg *blk)
+static int cs_dsp_coeff_parse_alg(struct cs_dsp *dsp,
+				  const struct wmfw_region *region,
+				  struct cs_dsp_coeff_parsed_alg *blk)
 {
 	const struct wmfw_adsp_alg_data *raw;
+	unsigned int data_len = le32_to_cpu(region->len);
+	unsigned int pos;
+	const u8 *tmp;
 
-	switch (dsp->fw_ver) {
+	raw = (const struct wmfw_adsp_alg_data *)region->data;
+
+	switch (dsp->wmfw_ver) {
 	case 0:
 	case 1:
-		raw = (const struct wmfw_adsp_alg_data *)*data;
-		*data = raw->data;
+		if (sizeof(*raw) > data_len)
+			return -EOVERFLOW;
 
 		blk->id = le32_to_cpu(raw->id);
 		blk->name = raw->name;
-		blk->name_len = strlen(raw->name);
+		blk->name_len = strnlen(raw->name, ARRAY_SIZE(raw->name));
 		blk->ncoeff = le32_to_cpu(raw->ncoeff);
+
+		pos = sizeof(*raw);
 		break;
 	default:
-		blk->id = cs_dsp_coeff_parse_int(sizeof(raw->id), data);
-		blk->name_len = cs_dsp_coeff_parse_string(sizeof(u8), data,
+		if (sizeof(raw->id) > data_len)
+			return -EOVERFLOW;
+
+		tmp = region->data;
+		blk->id = cs_dsp_coeff_parse_int(sizeof(raw->id), &tmp);
+		pos = tmp - region->data;
+
+		tmp = &region->data[pos];
+		blk->name_len = cs_dsp_coeff_parse_string(sizeof(u8), &tmp, data_len - pos,
 							  &blk->name);
-		cs_dsp_coeff_parse_string(sizeof(u16), data, NULL);
-		blk->ncoeff = cs_dsp_coeff_parse_int(sizeof(raw->ncoeff), data);
+		if (!tmp)
+			return -EOVERFLOW;
+
+		pos = tmp - region->data;
+		cs_dsp_coeff_parse_string(sizeof(u16), &tmp, data_len - pos, NULL);
+		if (!tmp)
+			return -EOVERFLOW;
+
+		pos = tmp - region->data;
+		if (sizeof(raw->ncoeff) > (data_len - pos))
+			return -EOVERFLOW;
+
+		blk->ncoeff = cs_dsp_coeff_parse_int(sizeof(raw->ncoeff), &tmp);
+		pos += sizeof(raw->ncoeff);
 		break;
 	}
+
+	if ((int)blk->ncoeff < 0)
+		return -EOVERFLOW;
 
 	cs_dsp_dbg(dsp, "Algorithm ID: %#x\n", blk->id);
 	cs_dsp_dbg(dsp, "Algorithm name: %.*s\n", blk->name_len, blk->name);
 	cs_dsp_dbg(dsp, "# of coefficient descriptors: %#x\n", blk->ncoeff);
+
+	return pos;
 }
 
-static inline void cs_dsp_coeff_parse_coeff(struct cs_dsp *dsp, const u8 **data,
-					    struct cs_dsp_coeff_parsed_coeff *blk)
+static int cs_dsp_coeff_parse_coeff(struct cs_dsp *dsp,
+				    const struct wmfw_region *region,
+				    unsigned int pos,
+				    struct cs_dsp_coeff_parsed_coeff *blk)
 {
 	const struct wmfw_adsp_coeff_data *raw;
+	unsigned int data_len = le32_to_cpu(region->len);
+	unsigned int blk_len, blk_end_pos;
 	const u8 *tmp;
-	int length;
 
-	switch (dsp->fw_ver) {
+	raw = (const struct wmfw_adsp_coeff_data *)&region->data[pos];
+	if (sizeof(raw->hdr) > (data_len - pos))
+		return -EOVERFLOW;
+
+	blk_len = le32_to_cpu(raw->hdr.size);
+	if (blk_len > S32_MAX)
+		return -EOVERFLOW;
+
+	if (blk_len > (data_len - pos - sizeof(raw->hdr)))
+		return -EOVERFLOW;
+
+	blk_end_pos = pos + sizeof(raw->hdr) + blk_len;
+
+	blk->offset = le16_to_cpu(raw->hdr.offset);
+	blk->mem_type = le16_to_cpu(raw->hdr.type);
+
+	switch (dsp->wmfw_ver) {
 	case 0:
 	case 1:
-		raw = (const struct wmfw_adsp_coeff_data *)*data;
-		*data = *data + sizeof(raw->hdr) + le32_to_cpu(raw->hdr.size);
+		if (sizeof(*raw) > (data_len - pos))
+			return -EOVERFLOW;
 
-		blk->offset = le16_to_cpu(raw->hdr.offset);
-		blk->mem_type = le16_to_cpu(raw->hdr.type);
 		blk->name = raw->name;
-		blk->name_len = strlen(raw->name);
+		blk->name_len = strnlen(raw->name, ARRAY_SIZE(raw->name));
 		blk->ctl_type = le16_to_cpu(raw->ctl_type);
 		blk->flags = le16_to_cpu(raw->flags);
 		blk->len = le32_to_cpu(raw->len);
 		break;
 	default:
-		tmp = *data;
-		blk->offset = cs_dsp_coeff_parse_int(sizeof(raw->hdr.offset), &tmp);
-		blk->mem_type = cs_dsp_coeff_parse_int(sizeof(raw->hdr.type), &tmp);
-		length = cs_dsp_coeff_parse_int(sizeof(raw->hdr.size), &tmp);
-		blk->name_len = cs_dsp_coeff_parse_string(sizeof(u8), &tmp,
+		pos += sizeof(raw->hdr);
+		tmp = &region->data[pos];
+		blk->name_len = cs_dsp_coeff_parse_string(sizeof(u8), &tmp, data_len - pos,
 							  &blk->name);
-		cs_dsp_coeff_parse_string(sizeof(u8), &tmp, NULL);
-		cs_dsp_coeff_parse_string(sizeof(u16), &tmp, NULL);
-		blk->ctl_type = cs_dsp_coeff_parse_int(sizeof(raw->ctl_type), &tmp);
-		blk->flags = cs_dsp_coeff_parse_int(sizeof(raw->flags), &tmp);
-		blk->len = cs_dsp_coeff_parse_int(sizeof(raw->len), &tmp);
+		if (!tmp)
+			return -EOVERFLOW;
 
-		*data = *data + sizeof(raw->hdr) + length;
+		pos = tmp - region->data;
+		cs_dsp_coeff_parse_string(sizeof(u8), &tmp, data_len - pos, NULL);
+		if (!tmp)
+			return -EOVERFLOW;
+
+		pos = tmp - region->data;
+		cs_dsp_coeff_parse_string(sizeof(u16), &tmp, data_len - pos, NULL);
+		if (!tmp)
+			return -EOVERFLOW;
+
+		pos = tmp - region->data;
+		if (sizeof(raw->ctl_type) + sizeof(raw->flags) + sizeof(raw->len) >
+		    (data_len - pos))
+			return -EOVERFLOW;
+
+		blk->ctl_type = cs_dsp_coeff_parse_int(sizeof(raw->ctl_type), &tmp);
+		pos += sizeof(raw->ctl_type);
+		blk->flags = cs_dsp_coeff_parse_int(sizeof(raw->flags), &tmp);
+		pos += sizeof(raw->flags);
+		blk->len = cs_dsp_coeff_parse_int(sizeof(raw->len), &tmp);
 		break;
 	}
 
@@ -1170,6 +1361,8 @@ static inline void cs_dsp_coeff_parse_coeff(struct cs_dsp *dsp, const u8 **data,
 	cs_dsp_dbg(dsp, "\tCoefficient flags: %#x\n", blk->flags);
 	cs_dsp_dbg(dsp, "\tALSA control type: %#x\n", blk->ctl_type);
 	cs_dsp_dbg(dsp, "\tALSA control len: %#x\n", blk->len);
+
+	return blk_end_pos;
 }
 
 static int cs_dsp_check_coeff_flags(struct cs_dsp *dsp,
@@ -1193,12 +1386,16 @@ static int cs_dsp_parse_coeff(struct cs_dsp *dsp,
 	struct cs_dsp_alg_region alg_region = {};
 	struct cs_dsp_coeff_parsed_alg alg_blk;
 	struct cs_dsp_coeff_parsed_coeff coeff_blk;
-	const u8 *data = region->data;
-	int i, ret;
+	int i, pos, ret;
 
-	cs_dsp_coeff_parse_alg(dsp, &data, &alg_blk);
+	pos = cs_dsp_coeff_parse_alg(dsp, region, &alg_blk);
+	if (pos < 0)
+		return pos;
+
 	for (i = 0; i < alg_blk.ncoeff; i++) {
-		cs_dsp_coeff_parse_coeff(dsp, &data, &coeff_blk);
+		pos = cs_dsp_coeff_parse_coeff(dsp, region, pos, &coeff_blk);
+		if (pos < 0)
+			return pos;
 
 		switch (coeff_blk.ctl_type) {
 		case WMFW_CTL_TYPE_BYTES:
@@ -1267,6 +1464,10 @@ static unsigned int cs_dsp_adsp1_parse_sizes(struct cs_dsp *dsp,
 	const struct wmfw_adsp1_sizes *adsp1_sizes;
 
 	adsp1_sizes = (void *)&firmware->data[pos];
+	if (sizeof(*adsp1_sizes) > firmware->size - pos) {
+		cs_dsp_err(dsp, "%s: file truncated\n", file);
+		return 0;
+	}
 
 	cs_dsp_dbg(dsp, "%s: %d DM, %d PM, %d ZM\n", file,
 		   le32_to_cpu(adsp1_sizes->dm), le32_to_cpu(adsp1_sizes->pm),
@@ -1283,6 +1484,10 @@ static unsigned int cs_dsp_adsp2_parse_sizes(struct cs_dsp *dsp,
 	const struct wmfw_adsp2_sizes *adsp2_sizes;
 
 	adsp2_sizes = (void *)&firmware->data[pos];
+	if (sizeof(*adsp2_sizes) > firmware->size - pos) {
+		cs_dsp_err(dsp, "%s: file truncated\n", file);
+		return 0;
+	}
 
 	cs_dsp_dbg(dsp, "%s: %d XM, %d YM %d PM, %d ZM\n", file,
 		   le32_to_cpu(adsp2_sizes->xm), le32_to_cpu(adsp2_sizes->ym),
@@ -1322,13 +1527,13 @@ static int cs_dsp_load(struct cs_dsp *dsp, const struct firmware *firmware,
 	struct regmap *regmap = dsp->regmap;
 	unsigned int pos = 0;
 	const struct wmfw_header *header;
-	const struct wmfw_adsp1_sizes *adsp1_sizes;
 	const struct wmfw_footer *footer;
 	const struct wmfw_region *region;
 	const struct cs_dsp_region *mem;
 	const char *region_name;
-	char *text = NULL;
-	struct cs_dsp_buf *buf;
+	u8 *buf = NULL;
+	size_t buf_len = 0;
+	size_t region_len;
 	unsigned int reg;
 	int regions = 0;
 	int ret, offset, type;
@@ -1338,10 +1543,8 @@ static int cs_dsp_load(struct cs_dsp *dsp, const struct firmware *firmware,
 
 	ret = -EINVAL;
 
-	pos = sizeof(*header) + sizeof(*adsp1_sizes) + sizeof(*footer);
-	if (pos >= firmware->size) {
-		cs_dsp_err(dsp, "%s: file too short, %zu bytes\n",
-			   file, firmware->size);
+	if (sizeof(*header) >= firmware->size) {
+		ret = -EOVERFLOW;
 		goto out_fw;
 	}
 
@@ -1358,8 +1561,7 @@ static int cs_dsp_load(struct cs_dsp *dsp, const struct firmware *firmware,
 		goto out_fw;
 	}
 
-	cs_dsp_info(dsp, "Firmware version: %d\n", header->ver);
-	dsp->fw_ver = header->ver;
+	dsp->wmfw_ver = header->ver;
 
 	if (header->core != dsp->type) {
 		cs_dsp_err(dsp, "%s: invalid core %d != %d\n",
@@ -1369,44 +1571,53 @@ static int cs_dsp_load(struct cs_dsp *dsp, const struct firmware *firmware,
 
 	pos = sizeof(*header);
 	pos = dsp->ops->parse_sizes(dsp, file, pos, firmware);
+	if ((pos == 0) || (sizeof(*footer) > firmware->size - pos)) {
+		ret = -EOVERFLOW;
+		goto out_fw;
+	}
 
 	footer = (void *)&firmware->data[pos];
 	pos += sizeof(*footer);
 
 	if (le32_to_cpu(header->len) != pos) {
-		cs_dsp_err(dsp, "%s: unexpected header length %d\n",
-			   file, le32_to_cpu(header->len));
+		ret = -EOVERFLOW;
 		goto out_fw;
 	}
 
-	cs_dsp_dbg(dsp, "%s: timestamp %llu\n", file,
-		   le64_to_cpu(footer->timestamp));
+	cs_dsp_info(dsp, "%s: format %d timestamp %#llx\n", file, header->ver,
+		    le64_to_cpu(footer->timestamp));
 
-	while (pos < firmware->size &&
-	       sizeof(*region) < firmware->size - pos) {
+	while (pos < firmware->size) {
+		/* Is there enough data for a complete block header? */
+		if (sizeof(*region) > firmware->size - pos) {
+			ret = -EOVERFLOW;
+			goto out_fw;
+		}
+
 		region = (void *)&(firmware->data[pos]);
+
+		if (le32_to_cpu(region->len) > firmware->size - pos - sizeof(*region)) {
+			ret = -EOVERFLOW;
+			goto out_fw;
+		}
+
 		region_name = "Unknown";
 		reg = 0;
-		text = NULL;
 		offset = le32_to_cpu(region->offset) & 0xffffff;
 		type = be32_to_cpu(region->type) & 0xff;
 
 		switch (type) {
+		case WMFW_INFO_TEXT:
 		case WMFW_NAME_TEXT:
-			region_name = "Firmware name";
-			text = kzalloc(le32_to_cpu(region->len) + 1,
-				       GFP_KERNEL);
+			region_name = "Info/Name";
+			cs_dsp_info(dsp, "%s: %.*s\n", file,
+				    min(le32_to_cpu(region->len), 100), region->data);
 			break;
 		case WMFW_ALGORITHM_DATA:
 			region_name = "Algorithm";
 			ret = cs_dsp_parse_coeff(dsp, region);
 			if (ret != 0)
 				goto out_fw;
-			break;
-		case WMFW_INFO_TEXT:
-			region_name = "Information";
-			text = kzalloc(le32_to_cpu(region->len) + 1,
-				       GFP_KERNEL);
 			break;
 		case WMFW_ABSOLUTE:
 			region_name = "Absolute";
@@ -1441,41 +1652,30 @@ static int cs_dsp_load(struct cs_dsp *dsp, const struct firmware *firmware,
 			   regions, le32_to_cpu(region->len), offset,
 			   region_name);
 
-		if (le32_to_cpu(region->len) >
-		    firmware->size - pos - sizeof(*region)) {
-			cs_dsp_err(dsp,
-				   "%s.%d: %s region len %d bytes exceeds file length %zu\n",
-				   file, regions, region_name,
-				   le32_to_cpu(region->len), firmware->size);
-			ret = -EINVAL;
-			goto out_fw;
-		}
-
-		if (text) {
-			memcpy(text, region->data, le32_to_cpu(region->len));
-			cs_dsp_info(dsp, "%s: %s\n", file, text);
-			kfree(text);
-			text = NULL;
-		}
-
 		if (reg) {
-			buf = cs_dsp_buf_alloc(region->data,
-					       le32_to_cpu(region->len),
-					       &buf_list);
-			if (!buf) {
-				cs_dsp_err(dsp, "Out of memory\n");
-				ret = -ENOMEM;
-				goto out_fw;
+			/*
+			 * Although we expect the underlying bus does not require
+			 * physically-contiguous buffers, we pessimistically use
+			 * a temporary buffer instead of trusting that the
+			 * alignment of region->data is ok.
+			 */
+			region_len = le32_to_cpu(region->len);
+			if (region_len > buf_len) {
+				buf_len = round_up(region_len, PAGE_SIZE);
+				vfree(buf);
+				buf = vmalloc(buf_len);
+				if (!buf) {
+					ret = -ENOMEM;
+					goto out_fw;
+				}
 			}
 
-			ret = regmap_raw_write_async(regmap, reg, buf->buf,
-						     le32_to_cpu(region->len));
+			memcpy(buf, region->data, region_len);
+			ret = regmap_raw_write(regmap, reg, buf, region_len);
 			if (ret != 0) {
 				cs_dsp_err(dsp,
-					   "%s.%d: Failed to write %d bytes at %d in %s: %d\n",
-					   file, regions,
-					   le32_to_cpu(region->len), offset,
-					   region_name, ret);
+					   "%s.%d: Failed to write %zu bytes at %d in %s: %d\n",
+					   file, regions, region_len, offset, region_name, ret);
 				goto out_fw;
 			}
 		}
@@ -1484,22 +1684,18 @@ static int cs_dsp_load(struct cs_dsp *dsp, const struct firmware *firmware,
 		regions++;
 	}
 
-	ret = regmap_async_complete(regmap);
-	if (ret != 0) {
-		cs_dsp_err(dsp, "Failed to complete async write: %d\n", ret);
-		goto out_fw;
-	}
-
 	if (pos > firmware->size)
 		cs_dsp_warn(dsp, "%s.%d: %zu bytes at end of file\n",
 			    file, regions, pos - firmware->size);
 
 	cs_dsp_debugfs_save_wmfwname(dsp, file);
 
+	ret = 0;
 out_fw:
-	regmap_async_complete(regmap);
-	cs_dsp_buf_free(&buf_list);
-	kfree(text);
+	vfree(buf);
+
+	if (ret == -EOVERFLOW)
+		cs_dsp_err(dsp, "%s: file content overflows file data\n", file);
 
 	return ret;
 }
@@ -1536,7 +1732,7 @@ struct cs_dsp_coeff_ctl *cs_dsp_get_ctl(struct cs_dsp *dsp, const char *name, in
 
 	return rslt;
 }
-EXPORT_SYMBOL_NS_GPL(cs_dsp_get_ctl, FW_CS_DSP);
+EXPORT_SYMBOL_NS_GPL(cs_dsp_get_ctl, "FW_CS_DSP");
 
 static void cs_dsp_ctl_fixup_base(struct cs_dsp *dsp,
 				  const struct cs_dsp_alg_region *alg_region)
@@ -1615,52 +1811,52 @@ static void *cs_dsp_read_algs(struct cs_dsp *dsp, size_t n_algs,
 struct cs_dsp_alg_region *cs_dsp_find_alg_region(struct cs_dsp *dsp,
 						 int type, unsigned int id)
 {
-	struct cs_dsp_alg_region *alg_region;
+	struct cs_dsp_alg_region_list_item *item;
 
 	lockdep_assert_held(&dsp->pwr_lock);
 
-	list_for_each_entry(alg_region, &dsp->alg_regions, list) {
-		if (id == alg_region->alg && type == alg_region->type)
-			return alg_region;
+	list_for_each_entry(item, &dsp->alg_regions, list) {
+		if (id == item->alg_region.alg && type == item->alg_region.type)
+			return &item->alg_region;
 	}
 
 	return NULL;
 }
-EXPORT_SYMBOL_NS_GPL(cs_dsp_find_alg_region, FW_CS_DSP);
+EXPORT_SYMBOL_NS_GPL(cs_dsp_find_alg_region, "FW_CS_DSP");
 
 static struct cs_dsp_alg_region *cs_dsp_create_region(struct cs_dsp *dsp,
 						      int type, __be32 id,
 						      __be32 ver, __be32 base)
 {
-	struct cs_dsp_alg_region *alg_region;
+	struct cs_dsp_alg_region_list_item *item;
 
-	alg_region = kzalloc(sizeof(*alg_region), GFP_KERNEL);
-	if (!alg_region)
+	item = kzalloc_obj(*item);
+	if (!item)
 		return ERR_PTR(-ENOMEM);
 
-	alg_region->type = type;
-	alg_region->alg = be32_to_cpu(id);
-	alg_region->ver = be32_to_cpu(ver);
-	alg_region->base = be32_to_cpu(base);
+	item->alg_region.type = type;
+	item->alg_region.alg = be32_to_cpu(id);
+	item->alg_region.ver = be32_to_cpu(ver);
+	item->alg_region.base = be32_to_cpu(base);
 
-	list_add_tail(&alg_region->list, &dsp->alg_regions);
+	list_add_tail(&item->list, &dsp->alg_regions);
 
-	if (dsp->fw_ver > 0)
-		cs_dsp_ctl_fixup_base(dsp, alg_region);
+	if (dsp->wmfw_ver > 0)
+		cs_dsp_ctl_fixup_base(dsp, &item->alg_region);
 
-	return alg_region;
+	return &item->alg_region;
 }
 
 static void cs_dsp_free_alg_regions(struct cs_dsp *dsp)
 {
-	struct cs_dsp_alg_region *alg_region;
+	struct cs_dsp_alg_region_list_item *item;
 
 	while (!list_empty(&dsp->alg_regions)) {
-		alg_region = list_first_entry(&dsp->alg_regions,
-					      struct cs_dsp_alg_region,
-					      list);
-		list_del(&alg_region->list);
-		kfree(alg_region);
+		item = list_first_entry(&dsp->alg_regions,
+					struct cs_dsp_alg_region_list_item,
+					list);
+		list_del(&item->list);
+		kfree(item);
 	}
 }
 
@@ -1768,7 +1964,7 @@ static int cs_dsp_adsp1_setup_algs(struct cs_dsp *dsp)
 			ret = PTR_ERR(alg_region);
 			goto out;
 		}
-		if (dsp->fw_ver == 0) {
+		if (dsp->wmfw_ver == 0) {
 			if (i + 1 < n_algs) {
 				len = be32_to_cpu(adsp1_alg[i + 1].dm);
 				len -= be32_to_cpu(adsp1_alg[i].dm);
@@ -1790,7 +1986,7 @@ static int cs_dsp_adsp1_setup_algs(struct cs_dsp *dsp)
 			ret = PTR_ERR(alg_region);
 			goto out;
 		}
-		if (dsp->fw_ver == 0) {
+		if (dsp->wmfw_ver == 0) {
 			if (i + 1 < n_algs) {
 				len = be32_to_cpu(adsp1_alg[i + 1].zm);
 				len -= be32_to_cpu(adsp1_alg[i].zm);
@@ -1881,7 +2077,7 @@ static int cs_dsp_adsp2_setup_algs(struct cs_dsp *dsp)
 			ret = PTR_ERR(alg_region);
 			goto out;
 		}
-		if (dsp->fw_ver == 0) {
+		if (dsp->wmfw_ver == 0) {
 			if (i + 1 < n_algs) {
 				len = be32_to_cpu(adsp2_alg[i + 1].xm);
 				len -= be32_to_cpu(adsp2_alg[i].xm);
@@ -1903,7 +2099,7 @@ static int cs_dsp_adsp2_setup_algs(struct cs_dsp *dsp)
 			ret = PTR_ERR(alg_region);
 			goto out;
 		}
-		if (dsp->fw_ver == 0) {
+		if (dsp->wmfw_ver == 0) {
 			if (i + 1 < n_algs) {
 				len = be32_to_cpu(adsp2_alg[i + 1].ym);
 				len -= be32_to_cpu(adsp2_alg[i].ym);
@@ -1925,7 +2121,7 @@ static int cs_dsp_adsp2_setup_algs(struct cs_dsp *dsp)
 			ret = PTR_ERR(alg_region);
 			goto out;
 		}
-		if (dsp->fw_ver == 0) {
+		if (dsp->wmfw_ver == 0) {
 			if (i + 1 < n_algs) {
 				len = be32_to_cpu(adsp2_alg[i + 1].zm);
 				len -= be32_to_cpu(adsp2_alg[i].zm);
@@ -2028,9 +2224,11 @@ static int cs_dsp_load_coeff(struct cs_dsp *dsp, const struct firmware *firmware
 	const struct cs_dsp_region *mem;
 	struct cs_dsp_alg_region *alg_region;
 	const char *region_name;
-	int ret, pos, blocks, type, offset, reg, version;
-	char *text = NULL;
-	struct cs_dsp_buf *buf;
+	int ret, pos, blocks, type, version;
+	unsigned int offset, reg;
+	u8 *buf = NULL;
+	size_t buf_len = 0;
+	size_t region_len;
 
 	if (!firmware)
 		return 0;
@@ -2052,6 +2250,7 @@ static int cs_dsp_load_coeff(struct cs_dsp *dsp, const struct firmware *firmware
 	switch (be32_to_cpu(hdr->rev) & 0xff) {
 	case 1:
 	case 2:
+	case 3:
 		break;
 	default:
 		cs_dsp_err(dsp, "%s: Unsupported coefficient file format %d\n",
@@ -2060,7 +2259,8 @@ static int cs_dsp_load_coeff(struct cs_dsp *dsp, const struct firmware *firmware
 		goto out_fw;
 	}
 
-	cs_dsp_info(dsp, "%s: v%d.%d.%d\n", file,
+	cs_dsp_info(dsp, "%s (v%d): v%d.%d.%d\n", file,
+		    be32_to_cpu(hdr->rev) & 0xff,
 		    (le32_to_cpu(hdr->ver) >> 16) & 0xff,
 		    (le32_to_cpu(hdr->ver) >>  8) & 0xff,
 		    le32_to_cpu(hdr->ver) & 0xff);
@@ -2068,9 +2268,19 @@ static int cs_dsp_load_coeff(struct cs_dsp *dsp, const struct firmware *firmware
 	pos = le32_to_cpu(hdr->len);
 
 	blocks = 0;
-	while (pos < firmware->size &&
-	       sizeof(*blk) < firmware->size - pos) {
+	while (pos < firmware->size) {
+		/* Is there enough data for a complete block header? */
+		if (sizeof(*blk) > firmware->size - pos) {
+			ret = -EOVERFLOW;
+			goto out_fw;
+		}
+
 		blk = (void *)(&firmware->data[pos]);
+
+		if (le32_to_cpu(blk->len) > firmware->size - pos - sizeof(*blk)) {
+			ret = -EOVERFLOW;
+			goto out_fw;
+		}
 
 		type = le16_to_cpu(blk->type);
 		offset = le16_to_cpu(blk->offset);
@@ -2081,14 +2291,16 @@ static int cs_dsp_load_coeff(struct cs_dsp *dsp, const struct firmware *firmware
 			   (le32_to_cpu(blk->ver) >> 16) & 0xff,
 			   (le32_to_cpu(blk->ver) >>  8) & 0xff,
 			   le32_to_cpu(blk->ver) & 0xff);
-		cs_dsp_dbg(dsp, "%s.%d: %d bytes at 0x%x in %x\n",
-			   file, blocks, le32_to_cpu(blk->len), offset, type);
+		cs_dsp_dbg(dsp, "%s.%d: %d bytes off:%#x off32:%#x in %#x\n",
+			   file, blocks, le32_to_cpu(blk->len), offset,
+			   le32_to_cpu(blk->offset32), type);
 
 		reg = 0;
 		region_name = "Unknown";
 		switch (type) {
 		case (WMFW_NAME_TEXT << 8):
-			text = kzalloc(le32_to_cpu(blk->len) + 1, GFP_KERNEL);
+			cs_dsp_info(dsp, "%s: %.*s\n", dsp->fw_name,
+				    min(le32_to_cpu(blk->len), 100), blk->data);
 			break;
 		case (WMFW_INFO_TEXT << 8):
 		case (WMFW_METADATA << 8):
@@ -2114,6 +2326,13 @@ static int cs_dsp_load_coeff(struct cs_dsp *dsp, const struct firmware *firmware
 			}
 			break;
 
+		case WMFW_ADSP2_XM_LONG:
+		case WMFW_ADSP2_YM_LONG:
+		case WMFW_HALO_XM_PACKED_LONG:
+		case WMFW_HALO_YM_PACKED_LONG:
+			offset = le32_to_cpu(blk->offset32);
+			type &= 0xff; /* strip extended block type flags */
+			fallthrough;
 		case WMFW_ADSP1_DM:
 		case WMFW_ADSP1_ZM:
 		case WMFW_ADSP2_XM:
@@ -2160,39 +2379,29 @@ static int cs_dsp_load_coeff(struct cs_dsp *dsp, const struct firmware *firmware
 			break;
 		}
 
-		if (text) {
-			memcpy(text, blk->data, le32_to_cpu(blk->len));
-			cs_dsp_info(dsp, "%s: %s\n", dsp->fw_name, text);
-			kfree(text);
-			text = NULL;
-		}
-
 		if (reg) {
-			if (le32_to_cpu(blk->len) >
-			    firmware->size - pos - sizeof(*blk)) {
-				cs_dsp_err(dsp,
-					   "%s.%d: %s region len %d bytes exceeds file length %zu\n",
-					   file, blocks, region_name,
-					   le32_to_cpu(blk->len),
-					   firmware->size);
-				ret = -EINVAL;
-				goto out_fw;
+			/*
+			 * Although we expect the underlying bus does not require
+			 * physically-contiguous buffers, we pessimistically use
+			 * a temporary buffer instead of trusting that the
+			 * alignment of blk->data is ok.
+			 */
+			region_len = le32_to_cpu(blk->len);
+			if (region_len > buf_len) {
+				buf_len = round_up(region_len, PAGE_SIZE);
+				vfree(buf);
+				buf = vmalloc(buf_len);
+				if (!buf) {
+					ret = -ENOMEM;
+					goto out_fw;
+				}
 			}
 
-			buf = cs_dsp_buf_alloc(blk->data,
-					       le32_to_cpu(blk->len),
-					       &buf_list);
-			if (!buf) {
-				cs_dsp_err(dsp, "Out of memory\n");
-				ret = -ENOMEM;
-				goto out_fw;
-			}
+			memcpy(buf, blk->data, region_len);
 
-			cs_dsp_dbg(dsp, "%s.%d: Writing %d bytes at %x\n",
-				   file, blocks, le32_to_cpu(blk->len),
-				   reg);
-			ret = regmap_raw_write_async(regmap, reg, buf->buf,
-						     le32_to_cpu(blk->len));
+			cs_dsp_dbg(dsp, "%s.%d: Writing %zu bytes at %x\n",
+				   file, blocks, region_len, reg);
+			ret = regmap_raw_write(regmap, reg, buf, region_len);
 			if (ret != 0) {
 				cs_dsp_err(dsp,
 					   "%s.%d: Failed to write to %x in %s: %d\n",
@@ -2204,20 +2413,19 @@ static int cs_dsp_load_coeff(struct cs_dsp *dsp, const struct firmware *firmware
 		blocks++;
 	}
 
-	ret = regmap_async_complete(regmap);
-	if (ret != 0)
-		cs_dsp_err(dsp, "Failed to complete async write: %d\n", ret);
-
 	if (pos > firmware->size)
 		cs_dsp_warn(dsp, "%s.%d: %zu bytes at end of file\n",
 			    file, blocks, pos - firmware->size);
 
 	cs_dsp_debugfs_save_binname(dsp, file);
 
+	ret = 0;
 out_fw:
-	regmap_async_complete(regmap);
-	cs_dsp_buf_free(&buf_list);
-	kfree(text);
+	vfree(buf);
+
+	if (ret == -EOVERFLOW)
+		cs_dsp_err(dsp, "%s: file content overflows file data\n", file);
+
 	return ret;
 }
 
@@ -2233,6 +2441,9 @@ static int cs_dsp_create_name(struct cs_dsp *dsp)
 	return 0;
 }
 
+static const struct cs_dsp_client_ops cs_dsp_default_client_ops = {
+};
+
 static int cs_dsp_common_init(struct cs_dsp *dsp)
 {
 	int ret;
@@ -2245,6 +2456,14 @@ static int cs_dsp_common_init(struct cs_dsp *dsp)
 	INIT_LIST_HEAD(&dsp->ctl_list);
 
 	mutex_init(&dsp->pwr_lock);
+
+	if (!dsp->client_ops)
+		dsp->client_ops = &cs_dsp_default_client_ops;
+
+#ifdef CONFIG_DEBUG_FS
+	/* Ensure this is invalid if client never provides a debugfs root */
+	dsp->debugfs_root = ERR_PTR(-ENODEV);
+#endif
 
 	return 0;
 }
@@ -2261,7 +2480,7 @@ int cs_dsp_adsp1_init(struct cs_dsp *dsp)
 
 	return cs_dsp_common_init(dsp);
 }
-EXPORT_SYMBOL_NS_GPL(cs_dsp_adsp1_init, FW_CS_DSP);
+EXPORT_SYMBOL_NS_GPL(cs_dsp_adsp1_init, "FW_CS_DSP");
 
 /**
  * cs_dsp_adsp1_power_up() - Load and start the named firmware
@@ -2275,8 +2494,8 @@ EXPORT_SYMBOL_NS_GPL(cs_dsp_adsp1_init, FW_CS_DSP);
  * Return: Zero for success, a negative number on error.
  */
 int cs_dsp_adsp1_power_up(struct cs_dsp *dsp,
-			  const struct firmware *wmfw_firmware, char *wmfw_filename,
-			  const struct firmware *coeff_firmware, char *coeff_filename,
+			  const struct firmware *wmfw_firmware, const char *wmfw_filename,
+			  const struct firmware *coeff_firmware, const char *coeff_filename,
 			  const char *fw_name)
 {
 	unsigned int val;
@@ -2334,6 +2553,7 @@ int cs_dsp_adsp1_power_up(struct cs_dsp *dsp,
 		goto err_ena;
 
 	dsp->booted = true;
+	dsp->hibernating = false;
 
 	/* Start the core running */
 	regmap_update_bits(dsp->regmap, dsp->base + ADSP1_CONTROL_30,
@@ -2353,7 +2573,7 @@ err_mutex:
 	mutex_unlock(&dsp->pwr_lock);
 	return ret;
 }
-EXPORT_SYMBOL_NS_GPL(cs_dsp_adsp1_power_up, FW_CS_DSP);
+EXPORT_SYMBOL_NS_GPL(cs_dsp_adsp1_power_up, "FW_CS_DSP");
 
 /**
  * cs_dsp_adsp1_power_down() - Halts the DSP
@@ -2385,7 +2605,7 @@ void cs_dsp_adsp1_power_down(struct cs_dsp *dsp)
 
 	mutex_unlock(&dsp->pwr_lock);
 }
-EXPORT_SYMBOL_NS_GPL(cs_dsp_adsp1_power_down, FW_CS_DSP);
+EXPORT_SYMBOL_NS_GPL(cs_dsp_adsp1_power_down, "FW_CS_DSP");
 
 static int cs_dsp_adsp2v2_enable_core(struct cs_dsp *dsp)
 {
@@ -2418,8 +2638,8 @@ static int cs_dsp_adsp2_enable_core(struct cs_dsp *dsp)
 {
 	int ret;
 
-	ret = regmap_update_bits_async(dsp->regmap, dsp->base + ADSP2_CONTROL,
-				       ADSP2_SYS_ENA, ADSP2_SYS_ENA);
+	ret = regmap_update_bits(dsp->regmap, dsp->base + ADSP2_CONTROL,
+				 ADSP2_SYS_ENA, ADSP2_SYS_ENA);
 	if (ret != 0)
 		return ret;
 
@@ -2537,7 +2757,7 @@ int cs_dsp_set_dspclk(struct cs_dsp *dsp, unsigned int freq)
 
 	return ret;
 }
-EXPORT_SYMBOL_NS_GPL(cs_dsp_set_dspclk, FW_CS_DSP);
+EXPORT_SYMBOL_NS_GPL(cs_dsp_set_dspclk, "FW_CS_DSP");
 
 static void cs_dsp_stop_watchdog(struct cs_dsp *dsp)
 {
@@ -2569,8 +2789,8 @@ static void cs_dsp_halo_stop_watchdog(struct cs_dsp *dsp)
  * Return: Zero for success, a negative number on error.
  */
 int cs_dsp_power_up(struct cs_dsp *dsp,
-		    const struct firmware *wmfw_firmware, char *wmfw_filename,
-		    const struct firmware *coeff_firmware, char *coeff_filename,
+		    const struct firmware *wmfw_firmware, const char *wmfw_filename,
+		    const struct firmware *coeff_firmware, const char *coeff_filename,
 		    const char *fw_name)
 {
 	int ret;
@@ -2612,6 +2832,7 @@ int cs_dsp_power_up(struct cs_dsp *dsp,
 		dsp->ops->disable_core(dsp);
 
 	dsp->booted = true;
+	dsp->hibernating = false;
 
 	mutex_unlock(&dsp->pwr_lock);
 
@@ -2627,7 +2848,7 @@ err_mutex:
 
 	return ret;
 }
-EXPORT_SYMBOL_NS_GPL(cs_dsp_power_up, FW_CS_DSP);
+EXPORT_SYMBOL_NS_GPL(cs_dsp_power_up, "FW_CS_DSP");
 
 /**
  * cs_dsp_power_down() - Powers-down the DSP
@@ -2661,7 +2882,7 @@ void cs_dsp_power_down(struct cs_dsp *dsp)
 
 	cs_dsp_dbg(dsp, "Shutdown complete\n");
 }
-EXPORT_SYMBOL_NS_GPL(cs_dsp_power_down, FW_CS_DSP);
+EXPORT_SYMBOL_NS_GPL(cs_dsp_power_down, "FW_CS_DSP");
 
 static int cs_dsp_adsp2_start_core(struct cs_dsp *dsp)
 {
@@ -2747,7 +2968,7 @@ err:
 
 	return ret;
 }
-EXPORT_SYMBOL_NS_GPL(cs_dsp_run, FW_CS_DSP);
+EXPORT_SYMBOL_NS_GPL(cs_dsp_run, "FW_CS_DSP");
 
 /**
  * cs_dsp_stop() - Stops the firmware
@@ -2786,7 +3007,7 @@ void cs_dsp_stop(struct cs_dsp *dsp)
 
 	cs_dsp_dbg(dsp, "Execution stopped\n");
 }
-EXPORT_SYMBOL_NS_GPL(cs_dsp_stop, FW_CS_DSP);
+EXPORT_SYMBOL_NS_GPL(cs_dsp_stop, "FW_CS_DSP");
 
 static int cs_dsp_halo_start_core(struct cs_dsp *dsp)
 {
@@ -2848,7 +3069,7 @@ int cs_dsp_adsp2_init(struct cs_dsp *dsp)
 
 	return cs_dsp_common_init(dsp);
 }
-EXPORT_SYMBOL_NS_GPL(cs_dsp_adsp2_init, FW_CS_DSP);
+EXPORT_SYMBOL_NS_GPL(cs_dsp_adsp2_init, "FW_CS_DSP");
 
 /**
  * cs_dsp_halo_init() - Initialise a cs_dsp structure representing a HALO Core DSP
@@ -2865,7 +3086,7 @@ int cs_dsp_halo_init(struct cs_dsp *dsp)
 
 	return cs_dsp_common_init(dsp);
 }
-EXPORT_SYMBOL_NS_GPL(cs_dsp_halo_init, FW_CS_DSP);
+EXPORT_SYMBOL_NS_GPL(cs_dsp_halo_init, "FW_CS_DSP");
 
 /**
  * cs_dsp_remove() - Clean a cs_dsp before deletion
@@ -2885,7 +3106,7 @@ void cs_dsp_remove(struct cs_dsp *dsp)
 		cs_dsp_free_ctl_blk(ctl);
 	}
 }
-EXPORT_SYMBOL_NS_GPL(cs_dsp_remove, FW_CS_DSP);
+EXPORT_SYMBOL_NS_GPL(cs_dsp_remove, "FW_CS_DSP");
 
 /**
  * cs_dsp_read_raw_data_block() - Reads a block of data from DSP memory
@@ -2922,7 +3143,7 @@ int cs_dsp_read_raw_data_block(struct cs_dsp *dsp, int mem_type, unsigned int me
 
 	return 0;
 }
-EXPORT_SYMBOL_NS_GPL(cs_dsp_read_raw_data_block, FW_CS_DSP);
+EXPORT_SYMBOL_NS_GPL(cs_dsp_read_raw_data_block, "FW_CS_DSP");
 
 /**
  * cs_dsp_read_data_word() - Reads a word from DSP memory
@@ -2946,7 +3167,7 @@ int cs_dsp_read_data_word(struct cs_dsp *dsp, int mem_type, unsigned int mem_add
 
 	return 0;
 }
-EXPORT_SYMBOL_NS_GPL(cs_dsp_read_data_word, FW_CS_DSP);
+EXPORT_SYMBOL_NS_GPL(cs_dsp_read_data_word, "FW_CS_DSP");
 
 /**
  * cs_dsp_write_data_word() - Writes a word to DSP memory
@@ -2972,7 +3193,7 @@ int cs_dsp_write_data_word(struct cs_dsp *dsp, int mem_type, unsigned int mem_ad
 
 	return regmap_raw_write(dsp->regmap, reg, &val, sizeof(val));
 }
-EXPORT_SYMBOL_NS_GPL(cs_dsp_write_data_word, FW_CS_DSP);
+EXPORT_SYMBOL_NS_GPL(cs_dsp_write_data_word, "FW_CS_DSP");
 
 /**
  * cs_dsp_remove_padding() - Convert unpacked words to packed bytes
@@ -2996,7 +3217,7 @@ void cs_dsp_remove_padding(u32 *buf, int nwords)
 		*pack_out++ = (u8)(word >> 16);
 	}
 }
-EXPORT_SYMBOL_NS_GPL(cs_dsp_remove_padding, FW_CS_DSP);
+EXPORT_SYMBOL_NS_GPL(cs_dsp_remove_padding, "FW_CS_DSP");
 
 /**
  * cs_dsp_adsp2_bus_error() - Handle a DSP bus error interrupt
@@ -3066,7 +3287,7 @@ void cs_dsp_adsp2_bus_error(struct cs_dsp *dsp)
 error:
 	mutex_unlock(&dsp->pwr_lock);
 }
-EXPORT_SYMBOL_NS_GPL(cs_dsp_adsp2_bus_error, FW_CS_DSP);
+EXPORT_SYMBOL_NS_GPL(cs_dsp_adsp2_bus_error, "FW_CS_DSP");
 
 /**
  * cs_dsp_halo_bus_error() - Handle a DSP bus error interrupt
@@ -3126,7 +3347,7 @@ void cs_dsp_halo_bus_error(struct cs_dsp *dsp)
 exit_unlock:
 	mutex_unlock(&dsp->pwr_lock);
 }
-EXPORT_SYMBOL_NS_GPL(cs_dsp_halo_bus_error, FW_CS_DSP);
+EXPORT_SYMBOL_NS_GPL(cs_dsp_halo_bus_error, "FW_CS_DSP");
 
 /**
  * cs_dsp_halo_wdt_expire() - Handle DSP watchdog expiry
@@ -3146,7 +3367,7 @@ void cs_dsp_halo_wdt_expire(struct cs_dsp *dsp)
 
 	mutex_unlock(&dsp->pwr_lock);
 }
-EXPORT_SYMBOL_NS_GPL(cs_dsp_halo_wdt_expire, FW_CS_DSP);
+EXPORT_SYMBOL_NS_GPL(cs_dsp_halo_wdt_expire, "FW_CS_DSP");
 
 static const struct cs_dsp_ops cs_dsp_adsp1_ops = {
 	.validate_version = cs_dsp_validate_version,
@@ -3276,7 +3497,7 @@ int cs_dsp_chunk_write(struct cs_dsp_chunk *ch, int nbits, u32 val)
 
 	return 0;
 }
-EXPORT_SYMBOL_NS_GPL(cs_dsp_chunk_write, FW_CS_DSP);
+EXPORT_SYMBOL_NS_GPL(cs_dsp_chunk_write, "FW_CS_DSP");
 
 /**
  * cs_dsp_chunk_flush() - Pad remaining data with zero and commit to chunk
@@ -3295,7 +3516,7 @@ int cs_dsp_chunk_flush(struct cs_dsp_chunk *ch)
 
 	return cs_dsp_chunk_write(ch, CS_DSP_DATA_WORD_BITS - ch->cachebits, 0);
 }
-EXPORT_SYMBOL_NS_GPL(cs_dsp_chunk_flush, FW_CS_DSP);
+EXPORT_SYMBOL_NS_GPL(cs_dsp_chunk_flush, "FW_CS_DSP");
 
 /**
  * cs_dsp_chunk_read() - Parse data from a DSP memory chunk
@@ -3337,7 +3558,279 @@ int cs_dsp_chunk_read(struct cs_dsp_chunk *ch, int nbits)
 
 	return result;
 }
-EXPORT_SYMBOL_NS_GPL(cs_dsp_chunk_read, FW_CS_DSP);
+EXPORT_SYMBOL_NS_GPL(cs_dsp_chunk_read, "FW_CS_DSP");
+
+
+struct cs_dsp_wseq_op {
+	struct list_head list;
+	u32 address;
+	u32 data;
+	u16 offset;
+	u8 operation;
+};
+
+static void cs_dsp_wseq_clear(struct cs_dsp *dsp, struct cs_dsp_wseq *wseq)
+{
+	struct cs_dsp_wseq_op *op, *op_tmp;
+
+	list_for_each_entry_safe(op, op_tmp, &wseq->ops, list) {
+		list_del(&op->list);
+		devm_kfree(dsp->dev, op);
+	}
+}
+
+static int cs_dsp_populate_wseq(struct cs_dsp *dsp, struct cs_dsp_wseq *wseq)
+{
+	struct cs_dsp_wseq_op *op = NULL;
+	struct cs_dsp_chunk chunk;
+	u8 *words;
+	int ret;
+
+	if (!wseq->ctl) {
+		cs_dsp_err(dsp, "No control for write sequence\n");
+		return -EINVAL;
+	}
+
+	words = kzalloc(wseq->ctl->len, GFP_KERNEL);
+	if (!words)
+		return -ENOMEM;
+
+	ret = cs_dsp_coeff_read_ctrl(wseq->ctl, 0, words, wseq->ctl->len);
+	if (ret) {
+		cs_dsp_err(dsp, "Failed to read %s: %d\n", wseq->ctl->subname, ret);
+		goto err_free;
+	}
+
+	INIT_LIST_HEAD(&wseq->ops);
+
+	chunk = cs_dsp_chunk(words, wseq->ctl->len);
+
+	while (!cs_dsp_chunk_end(&chunk)) {
+		op = devm_kzalloc(dsp->dev, sizeof(*op), GFP_KERNEL);
+		if (!op) {
+			ret = -ENOMEM;
+			goto err_free;
+		}
+
+		op->offset = cs_dsp_chunk_bytes(&chunk);
+		op->operation = cs_dsp_chunk_read(&chunk, 8);
+
+		switch (op->operation) {
+		case CS_DSP_WSEQ_END:
+			op->data = WSEQ_END_OF_SCRIPT;
+			break;
+		case CS_DSP_WSEQ_UNLOCK:
+			op->data = cs_dsp_chunk_read(&chunk, 16);
+			break;
+		case CS_DSP_WSEQ_ADDR8:
+			op->address = cs_dsp_chunk_read(&chunk, 8);
+			op->data = cs_dsp_chunk_read(&chunk, 32);
+			break;
+		case CS_DSP_WSEQ_H16:
+		case CS_DSP_WSEQ_L16:
+			op->address = cs_dsp_chunk_read(&chunk, 24);
+			op->data = cs_dsp_chunk_read(&chunk, 16);
+			break;
+		case CS_DSP_WSEQ_FULL:
+			op->address = cs_dsp_chunk_read(&chunk, 32);
+			op->data = cs_dsp_chunk_read(&chunk, 32);
+			break;
+		default:
+			ret = -EINVAL;
+			cs_dsp_err(dsp, "Unsupported op: %X\n", op->operation);
+			devm_kfree(dsp->dev, op);
+			goto err_free;
+		}
+
+		list_add_tail(&op->list, &wseq->ops);
+
+		if (op->operation == CS_DSP_WSEQ_END)
+			break;
+	}
+
+	if (op && op->operation != CS_DSP_WSEQ_END) {
+		cs_dsp_err(dsp, "%s missing end terminator\n", wseq->ctl->subname);
+		ret = -ENOENT;
+	}
+
+err_free:
+	kfree(words);
+
+	return ret;
+}
+
+/**
+ * cs_dsp_wseq_init() - Initialize write sequences contained within the loaded DSP firmware
+ * @dsp: Pointer to DSP structure
+ * @wseqs: List of write sequences to initialize
+ * @num_wseqs: Number of write sequences to initialize
+ *
+ * Return: Zero for success, a negative number on error.
+ */
+int cs_dsp_wseq_init(struct cs_dsp *dsp, struct cs_dsp_wseq *wseqs, unsigned int num_wseqs)
+{
+	int i, ret;
+
+	lockdep_assert_held(&dsp->pwr_lock);
+
+	for (i = 0; i < num_wseqs; i++) {
+		ret = cs_dsp_populate_wseq(dsp, &wseqs[i]);
+		if (ret) {
+			cs_dsp_wseq_clear(dsp, &wseqs[i]);
+			return ret;
+		}
+	}
+
+	return 0;
+}
+EXPORT_SYMBOL_NS_GPL(cs_dsp_wseq_init, "FW_CS_DSP");
+
+static struct cs_dsp_wseq_op *cs_dsp_wseq_find_op(u32 addr, u8 op_code,
+						  struct list_head *wseq_ops)
+{
+	struct cs_dsp_wseq_op *op;
+
+	list_for_each_entry(op, wseq_ops, list) {
+		if (op->operation == op_code && op->address == addr)
+			return op;
+	}
+
+	return NULL;
+}
+
+/**
+ * cs_dsp_wseq_write() - Add or update an entry in a write sequence
+ * @dsp: Pointer to a DSP structure
+ * @wseq: Write sequence to write to
+ * @addr: Address of the register to be written to
+ * @data: Data to be written
+ * @op_code: The type of operation of the new entry
+ * @update: If true, searches for the first entry in the write sequence with
+ * the same address and op_code, and replaces it. If false, creates a new entry
+ * at the tail
+ *
+ * This function formats register address and value pairs into the format
+ * required for write sequence entries, and either updates or adds the
+ * new entry into the write sequence.
+ *
+ * If update is set to true and no matching entry is found, it will add a new entry.
+ *
+ * Return: Zero for success, a negative number on error.
+ */
+int cs_dsp_wseq_write(struct cs_dsp *dsp, struct cs_dsp_wseq *wseq,
+		      u32 addr, u32 data, u8 op_code, bool update)
+{
+	struct cs_dsp_wseq_op *op_end, *op_new = NULL;
+	u32 words[WSEQ_OP_MAX_WORDS];
+	struct cs_dsp_chunk chunk;
+	int new_op_size, ret;
+
+	if (update)
+		op_new = cs_dsp_wseq_find_op(addr, op_code, &wseq->ops);
+
+	/* If entry to update is not found, treat it as a new operation */
+	if (!op_new) {
+		op_end = cs_dsp_wseq_find_op(0, CS_DSP_WSEQ_END, &wseq->ops);
+		if (!op_end) {
+			cs_dsp_err(dsp, "Missing terminator for %s\n", wseq->ctl->subname);
+			return -EINVAL;
+		}
+
+		op_new = devm_kzalloc(dsp->dev, sizeof(*op_new), GFP_KERNEL);
+		if (!op_new)
+			return -ENOMEM;
+
+		op_new->operation = op_code;
+		op_new->address = addr;
+		op_new->offset = op_end->offset;
+		update = false;
+	}
+
+	op_new->data = data;
+
+	chunk = cs_dsp_chunk(words, sizeof(words));
+	cs_dsp_chunk_write(&chunk, 8, op_new->operation);
+
+	switch (op_code) {
+	case CS_DSP_WSEQ_FULL:
+		cs_dsp_chunk_write(&chunk, 32, op_new->address);
+		cs_dsp_chunk_write(&chunk, 32, op_new->data);
+		break;
+	case CS_DSP_WSEQ_L16:
+	case CS_DSP_WSEQ_H16:
+		cs_dsp_chunk_write(&chunk, 24, op_new->address);
+		cs_dsp_chunk_write(&chunk, 16, op_new->data);
+		break;
+	default:
+		ret = -EINVAL;
+		cs_dsp_err(dsp, "Operation %X not supported\n", op_code);
+		goto op_new_free;
+	}
+
+	new_op_size = cs_dsp_chunk_bytes(&chunk);
+
+	if (!update) {
+		if (wseq->ctl->len - op_end->offset < new_op_size) {
+			cs_dsp_err(dsp, "Not enough memory in %s for entry\n", wseq->ctl->subname);
+			ret = -E2BIG;
+			goto op_new_free;
+		}
+
+		op_end->offset += new_op_size;
+
+		ret = cs_dsp_coeff_write_ctrl(wseq->ctl, op_end->offset / sizeof(u32),
+					      &op_end->data, sizeof(u32));
+		if (ret)
+			goto op_new_free;
+
+		list_add_tail(&op_new->list, &op_end->list);
+	}
+
+	ret = cs_dsp_coeff_write_ctrl(wseq->ctl, op_new->offset / sizeof(u32),
+				      words, new_op_size);
+	if (ret)
+		goto op_new_free;
+
+	return 0;
+
+op_new_free:
+	devm_kfree(dsp->dev, op_new);
+
+	return ret;
+}
+EXPORT_SYMBOL_NS_GPL(cs_dsp_wseq_write, "FW_CS_DSP");
+
+/**
+ * cs_dsp_wseq_multi_write() - Add or update multiple entries in a write sequence
+ * @dsp: Pointer to a DSP structure
+ * @wseq: Write sequence to write to
+ * @reg_seq: List of address-data pairs
+ * @num_regs: Number of address-data pairs
+ * @op_code: The types of operations of the new entries
+ * @update: If true, searches for the first entry in the write sequence with
+ * the same address and op_code, and replaces it. If false, creates a new entry
+ * at the tail
+ *
+ * This function calls cs_dsp_wseq_write() for multiple address-data pairs.
+ *
+ * Return: Zero for success, a negative number on error.
+ */
+int cs_dsp_wseq_multi_write(struct cs_dsp *dsp, struct cs_dsp_wseq *wseq,
+			    const struct reg_sequence *reg_seq, int num_regs,
+			    u8 op_code, bool update)
+{
+	int i, ret;
+
+	for (i = 0; i < num_regs; i++) {
+		ret = cs_dsp_wseq_write(dsp, wseq, reg_seq[i].reg,
+					reg_seq[i].def, op_code, update);
+		if (ret)
+			return ret;
+	}
+
+	return 0;
+}
+EXPORT_SYMBOL_NS_GPL(cs_dsp_wseq_multi_write, "FW_CS_DSP");
 
 MODULE_DESCRIPTION("Cirrus Logic DSP Support");
 MODULE_AUTHOR("Simon Trimmer <simont@opensource.cirrus.com>");

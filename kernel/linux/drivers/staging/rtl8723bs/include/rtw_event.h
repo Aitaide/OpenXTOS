@@ -28,7 +28,7 @@ struct surveydone_event {
 };
 
 /*
-Used to report the link result of joinning the given bss
+Used to report the link result of joining the given bss
 
 
 join_res:
@@ -63,10 +63,6 @@ struct stadel_event {
 struct wmm_event {
 	unsigned char wmm;
 };
-
-#define GEN_EVT_CODE(event)	event ## _EVT_
-
-
 
 struct fwevent {
 	u32 parmsize;

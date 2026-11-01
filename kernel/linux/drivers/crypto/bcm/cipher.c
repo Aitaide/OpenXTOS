@@ -15,6 +15,7 @@
 #include <linux/kthread.h>
 #include <linux/rtnetlink.h>
 #include <linux/sched.h>
+#include <linux/string_choices.h>
 #include <linux/of.h>
 #include <linux/io.h>
 #include <linux/bitops.h>
@@ -140,8 +141,7 @@ spu_skcipher_rx_sg_create(struct brcm_message *mssg,
 	struct iproc_ctx_s *ctx = rctx->ctx;
 	u32 datalen;		/* Number of bytes of response data expected */
 
-	mssg->spu.dst = kcalloc(rx_frag_num, sizeof(struct scatterlist),
-				rctx->gfp);
+	mssg->spu.dst = kmalloc_objs(struct scatterlist, rx_frag_num, rctx->gfp);
 	if (!mssg->spu.dst)
 		return -ENOMEM;
 
@@ -204,8 +204,7 @@ spu_skcipher_tx_sg_create(struct brcm_message *mssg,
 	u32 datalen;		/* Number of bytes of response data expected */
 	u32 stat_len;
 
-	mssg->spu.src = kcalloc(tx_frag_num, sizeof(struct scatterlist),
-				rctx->gfp);
+	mssg->spu.src = kmalloc_objs(struct scatterlist, tx_frag_num, rctx->gfp);
 	if (unlikely(!mssg->spu.src))
 		return -ENOMEM;
 
@@ -531,8 +530,7 @@ spu_ahash_rx_sg_create(struct brcm_message *mssg,
 	struct scatterlist *sg;	/* used to build sgs in mbox message */
 	struct iproc_ctx_s *ctx = rctx->ctx;
 
-	mssg->spu.dst = kcalloc(rx_frag_num, sizeof(struct scatterlist),
-				rctx->gfp);
+	mssg->spu.dst = kmalloc_objs(struct scatterlist, rx_frag_num, rctx->gfp);
 	if (!mssg->spu.dst)
 		return -ENOMEM;
 
@@ -586,8 +584,7 @@ spu_ahash_tx_sg_create(struct brcm_message *mssg,
 	u32 datalen;		/* Number of bytes of response data expected */
 	u32 stat_len;
 
-	mssg->spu.src = kcalloc(tx_frag_num, sizeof(struct scatterlist),
-				rctx->gfp);
+	mssg->spu.src = kmalloc_objs(struct scatterlist, tx_frag_num, rctx->gfp);
 	if (!mssg->spu.src)
 		return -ENOMEM;
 
@@ -1076,8 +1073,7 @@ static int spu_aead_rx_sg_create(struct brcm_message *mssg,
 		/* have to catch gcm pad in separate buffer */
 		rx_frag_num++;
 
-	mssg->spu.dst = kcalloc(rx_frag_num, sizeof(struct scatterlist),
-				rctx->gfp);
+	mssg->spu.dst = kmalloc_objs(struct scatterlist, rx_frag_num, rctx->gfp);
 	if (!mssg->spu.dst)
 		return -ENOMEM;
 
@@ -1178,8 +1174,7 @@ static int spu_aead_tx_sg_create(struct brcm_message *mssg,
 	u32 assoc_offset = 0;
 	u32 stat_len;
 
-	mssg->spu.src = kcalloc(tx_frag_num, sizeof(struct scatterlist),
-				rctx->gfp);
+	mssg->spu.src = kmalloc_objs(struct scatterlist, tx_frag_num, rctx->gfp);
 	if (!mssg->spu.src)
 		return -ENOMEM;
 
@@ -2392,9 +2387,7 @@ static int ahash_hmac_setkey(struct crypto_ahash *ahash, const u8 *key,
 	 * outer hashing in software.
 	 */
 	if (iproc_priv.spu.spu_type == SPU_TYPE_SPUM) {
-		memcpy(ctx->ipad, ctx->authkey, ctx->authkeylen);
-		memset(ctx->ipad + ctx->authkeylen, 0,
-		       blocksize - ctx->authkeylen);
+		memcpy_and_pad(ctx->ipad, blocksize, ctx->authkey, ctx->authkeylen, 0);
 		ctx->authkeylen = 0;
 		unsafe_memcpy(ctx->opad, ctx->ipad, blocksize,
 			      "fortified memcpy causes -Wrestrict warning");
@@ -2415,6 +2408,7 @@ static int ahash_hmac_setkey(struct crypto_ahash *ahash, const u8 *key,
 
 static int ahash_hmac_init(struct ahash_request *req)
 {
+	int ret;
 	struct iproc_reqctx_s *rctx = ahash_request_ctx(req);
 	struct crypto_ahash *tfm = crypto_ahash_reqtfm(req);
 	struct iproc_ctx_s *ctx = crypto_ahash_ctx(tfm);
@@ -2424,7 +2418,9 @@ static int ahash_hmac_init(struct ahash_request *req)
 	flow_log("ahash_hmac_init()\n");
 
 	/* init the context as a hash */
-	ahash_init(req);
+	ret = ahash_init(req);
+	if (ret)
+		return ret;
 
 	if (!spu_no_incr_hash(ctx)) {
 		/* SPU-M can do incr hashing but needs sw for outer HMAC */
@@ -2684,7 +2680,7 @@ static int aead_enqueue(struct aead_request *req, bool is_encrypt)
 	flow_log("  iv_ctr_len:%u\n", rctx->iv_ctr_len);
 	flow_dump("  iv: ", req->iv, rctx->iv_ctr_len);
 	flow_log("  authkeylen:%u\n", ctx->authkeylen);
-	flow_log("  is_esp: %s\n", ctx->is_esp ? "yes" : "no");
+	flow_log("  is_esp: %s\n", str_yes_no(ctx->is_esp));
 
 	if (ctx->max_payload == SPU_MAX_PAYLOAD_INF)
 		flow_log("  max_payload infinite");
@@ -3517,25 +3513,6 @@ static struct iproc_alg_s driver_algs[] = {
 	{
 	 .type = CRYPTO_ALG_TYPE_SKCIPHER,
 	 .alg.skcipher = {
-			.base.cra_name = "ofb(des)",
-			.base.cra_driver_name = "ofb-des-iproc",
-			.base.cra_blocksize = DES_BLOCK_SIZE,
-			.min_keysize = DES_KEY_SIZE,
-			.max_keysize = DES_KEY_SIZE,
-			.ivsize = DES_BLOCK_SIZE,
-			},
-	 .cipher_info = {
-			 .alg = CIPHER_ALG_DES,
-			 .mode = CIPHER_MODE_OFB,
-			 },
-	 .auth_info = {
-		       .alg = HASH_ALG_NONE,
-		       .mode = HASH_MODE_NONE,
-		       },
-	 },
-	{
-	 .type = CRYPTO_ALG_TYPE_SKCIPHER,
-	 .alg.skcipher = {
 			.base.cra_name = "cbc(des)",
 			.base.cra_driver_name = "cbc-des-iproc",
 			.base.cra_blocksize = DES_BLOCK_SIZE,
@@ -3574,25 +3551,6 @@ static struct iproc_alg_s driver_algs[] = {
 	{
 	 .type = CRYPTO_ALG_TYPE_SKCIPHER,
 	 .alg.skcipher = {
-			.base.cra_name = "ofb(des3_ede)",
-			.base.cra_driver_name = "ofb-des3-iproc",
-			.base.cra_blocksize = DES3_EDE_BLOCK_SIZE,
-			.min_keysize = DES3_EDE_KEY_SIZE,
-			.max_keysize = DES3_EDE_KEY_SIZE,
-			.ivsize = DES3_EDE_BLOCK_SIZE,
-			},
-	 .cipher_info = {
-			 .alg = CIPHER_ALG_3DES,
-			 .mode = CIPHER_MODE_OFB,
-			 },
-	 .auth_info = {
-		       .alg = HASH_ALG_NONE,
-		       .mode = HASH_MODE_NONE,
-		       },
-	 },
-	{
-	 .type = CRYPTO_ALG_TYPE_SKCIPHER,
-	 .alg.skcipher = {
 			.base.cra_name = "cbc(des3_ede)",
 			.base.cra_driver_name = "cbc-des3-iproc",
 			.base.cra_blocksize = DES3_EDE_BLOCK_SIZE,
@@ -3622,25 +3580,6 @@ static struct iproc_alg_s driver_algs[] = {
 	 .cipher_info = {
 			 .alg = CIPHER_ALG_3DES,
 			 .mode = CIPHER_MODE_ECB,
-			 },
-	 .auth_info = {
-		       .alg = HASH_ALG_NONE,
-		       .mode = HASH_MODE_NONE,
-		       },
-	 },
-	{
-	 .type = CRYPTO_ALG_TYPE_SKCIPHER,
-	 .alg.skcipher = {
-			.base.cra_name = "ofb(aes)",
-			.base.cra_driver_name = "ofb-aes-iproc",
-			.base.cra_blocksize = AES_BLOCK_SIZE,
-			.min_keysize = AES_MIN_KEY_SIZE,
-			.max_keysize = AES_MAX_KEY_SIZE,
-			.ivsize = AES_BLOCK_SIZE,
-			},
-	 .cipher_info = {
-			 .alg = CIPHER_ALG_AES,
-			 .mode = CIPHER_MODE_OFB,
 			 },
 	 .auth_info = {
 		       .alg = HASH_ALG_NONE,
@@ -4713,7 +4652,7 @@ failure:
 	return err;
 }
 
-static int bcm_spu_remove(struct platform_device *pdev)
+static void bcm_spu_remove(struct platform_device *pdev)
 {
 	int i;
 	struct device *dev = &pdev->dev;
@@ -4751,16 +4690,15 @@ static int bcm_spu_remove(struct platform_device *pdev)
 	}
 	spu_free_debugfs();
 	spu_mb_release(pdev);
-	return 0;
 }
 
 /* ===== Kernel Module API ===== */
 
 static struct platform_driver bcm_spu_pdriver = {
 	.driver = {
-		   .name = "brcm-spu-crypto",
-		   .of_match_table = of_match_ptr(bcm_spu_dt_ids),
-		   },
+		.name = "brcm-spu-crypto",
+		.of_match_table = bcm_spu_dt_ids,
+	},
 	.probe = bcm_spu_probe,
 	.remove = bcm_spu_remove,
 };

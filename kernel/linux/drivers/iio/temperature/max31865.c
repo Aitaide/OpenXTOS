@@ -12,13 +12,12 @@
 #include <linux/delay.h>
 #include <linux/err.h>
 #include <linux/init.h>
-#include <linux/mod_devicetable.h>
 #include <linux/module.h>
 #include <linux/iio/iio.h>
 #include <linux/iio/sysfs.h>
 #include <linux/property.h>
 #include <linux/spi/spi.h>
-#include <asm/unaligned.h>
+#include <linux/unaligned.h>
 
 /*
  * The MSB of the register value determines whether the following byte will
@@ -325,7 +324,7 @@ static int max31865_probe(struct spi_device *spi)
 }
 
 static const struct spi_device_id max31865_id[] = {
-	{ "max31865", 0 },
+	{ .name = "max31865" },
 	{ }
 };
 MODULE_DEVICE_TABLE(spi, max31865_id);

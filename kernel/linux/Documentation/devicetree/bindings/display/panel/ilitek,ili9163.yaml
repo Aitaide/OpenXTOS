@@ -24,17 +24,15 @@ properties:
           - newhaven,1.8-128160EF
       - const: ilitek,ili9163
 
+  reg:
+    maxItems: 1
+
   spi-max-frequency:
     maximum: 32000000
 
   dc-gpios:
     maxItems: 1
     description: Display data/command selection (D/CX)
-
-  backlight: true
-  reg: true
-  reset-gpios: true
-  rotation: true
 
 required:
   - compatible
@@ -48,10 +46,6 @@ examples:
   - |
     #include <dt-bindings/gpio/gpio.h>
 
-    backlight: backlight {
-            compatible = "gpio-backlight";
-            gpios = <&gpio 22 GPIO_ACTIVE_HIGH>;
-    };
     spi {
             #address-cells = <1>;
             #size-cells = <0>;

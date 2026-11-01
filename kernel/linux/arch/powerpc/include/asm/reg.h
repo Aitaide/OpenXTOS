@@ -18,7 +18,7 @@
 #include <asm/feature-fixups.h>
 
 /* Pickup Book E specific registers. */
-#ifdef CONFIG_BOOKE_OR_40x
+#ifdef CONFIG_BOOKE
 #include <asm/reg_booke.h>
 #endif
 
@@ -60,7 +60,7 @@
 #define MSR_RI_LG	1		/* Recoverable Exception */
 #define MSR_LE_LG	0 		/* Little Endian */
 
-#ifdef __ASSEMBLY__
+#ifdef __ASSEMBLER__
 #define __MASK(X)	(1<<(X))
 #else
 #define __MASK(X)	(1UL<<(X))
@@ -233,13 +233,9 @@
 
 /* Special Purpose Registers (SPRNs)*/
 
-#ifdef CONFIG_40x
-#define SPRN_PID	0x3B1	/* Process ID */
-#else
 #define SPRN_PID	0x030	/* Process ID */
 #ifdef CONFIG_BOOKE
 #define SPRN_PID0	SPRN_PID/* Process ID Register 0 */
-#endif
 #endif
 
 #define SPRN_CTR	0x009	/* Count Register */
@@ -496,11 +492,12 @@
  * determine both the compatibility level which we want to emulate and the
  * compatibility level which the host is capable of emulating.
  */
+#define   PCR_ARCH_31   0x20		/* Architecture 3.1 */
 #define   PCR_ARCH_300	0x10		/* Architecture 3.00 */
 #define   PCR_ARCH_207	0x8		/* Architecture 2.07 */
 #define   PCR_ARCH_206	0x4		/* Architecture 2.06 */
 #define   PCR_ARCH_205	0x2		/* Architecture 2.05 */
-#define   PCR_LOW_BITS	(PCR_ARCH_207 | PCR_ARCH_206 | PCR_ARCH_205 | PCR_ARCH_300)
+#define   PCR_LOW_BITS	(PCR_ARCH_207 | PCR_ARCH_206 | PCR_ARCH_205 | PCR_ARCH_300 | PCR_ARCH_31)
 #define   PCR_MASK	~(PCR_HIGH_BITS | PCR_LOW_BITS)	/* PCR Reserved Bits */
 #define	SPRN_HEIR	0x153	/* Hypervisor Emulated Instruction Register */
 #define SPRN_TLBINDEXR	0x154	/* P7 TLB control register */
@@ -527,7 +524,7 @@
 #define SPRN_TSCR	0x399	/* Thread Switch Control Register */
 
 #define SPRN_DEC	0x016		/* Decrement Register */
-#define SPRN_PIT	0x3DB		/* Programmable Interval Timer (40x/BOOKE) */
+#define SPRN_PIT	0x3DB		/* Programmable Interval Timer (BOOKE) */
 
 #define SPRN_DER	0x095		/* Debug Enable Register */
 #define DER_RSTE	0x40000000	/* Reset Interrupt */
@@ -615,8 +612,10 @@
 #define HID1_ABE	(1<<10)		/* 7450 Address Broadcast Enable */
 #define HID1_PS		(1<<16)		/* 750FX PLL selection */
 #endif
-#define SPRN_HID2	0x3F8		/* Hardware Implementation Register 2 */
+#define SPRN_HID2_750FX	0x3F8		/* IBM 750FX HID2 Register */
 #define SPRN_HID2_GEKKO	0x398		/* Gekko HID2 Register */
+#define SPRN_HID2_G2_LE	0x3F3		/* G2_LE HID2 Register */
+#define  HID2_G2_LE_HBE	(1<<18)		/* High BAT Enable (G2_LE) */
 #define SPRN_IABR	0x3F2	/* Instruction Address Breakpoint Register */
 #define SPRN_IABR2	0x3FA		/* 83xx */
 #define SPRN_IBCR	0x135		/* 83xx Insn Breakpoint Control Reg */
@@ -1114,15 +1113,6 @@
  *	- SPRG2 indicator that we are in RTAS
  *	- SPRG4 (603 only) pseudo TLB LRU data
  *
- * 32-bit 40x:
- *	- SPRG0 scratch for exception vectors
- *	- SPRG1 scratch for exception vectors
- *	- SPRG2 scratch for exception vectors
- *	- SPRG4 scratch for exception vectors (not 403)
- *	- SPRG5 scratch for exception vectors (not 403)
- *	- SPRG6 scratch for exception vectors (not 403)
- *	- SPRG7 scratch for exception vectors (not 403)
- *
  * 32-bit 440 and FSL BookE:
  *	- SPRG0 scratch for exception vectors
  *	- SPRG1 scratch for exception vectors (*)
@@ -1212,16 +1202,6 @@
 #define SPRN_SPRG_SCRATCH1	SPRN_SPRG1
 #define SPRN_SPRG_SCRATCH2	SPRN_SPRG2
 #define SPRN_SPRG_603_LRU	SPRN_SPRG4
-#endif
-
-#ifdef CONFIG_40x
-#define SPRN_SPRG_SCRATCH0	SPRN_SPRG0
-#define SPRN_SPRG_SCRATCH1	SPRN_SPRG1
-#define SPRN_SPRG_SCRATCH2	SPRN_SPRG2
-#define SPRN_SPRG_SCRATCH3	SPRN_SPRG4
-#define SPRN_SPRG_SCRATCH4	SPRN_SPRG5
-#define SPRN_SPRG_SCRATCH5	SPRN_SPRG6
-#define SPRN_SPRG_SCRATCH6	SPRN_SPRG7
 #endif
 
 #ifdef CONFIG_BOOKE
@@ -1361,8 +1341,11 @@
 #define PVR_POWER8E	0x004B
 #define PVR_POWER8NVL	0x004C
 #define PVR_POWER8	0x004D
+#define PVR_HX_C2000	0x0066
 #define PVR_POWER9	0x004E
 #define PVR_POWER10	0x0080
+#define PVR_POWER11	0x0082
+#define PVR_POWER12	0x0083
 #define PVR_BE		0x0070
 #define PVR_PA6T	0x0090
 
@@ -1374,9 +1357,23 @@
 #define PVR_ARCH_207	0x0f000004
 #define PVR_ARCH_300	0x0f000005
 #define PVR_ARCH_31	0x0f000006
+#define PVR_ARCH_31_P11	0x0f000007
+#define PVR_ARCH_32	0x0f000008
+
+/*
+ * Kernel-internal sentinel for invalid processor compatibility modes.
+ * PAPR specifies that the first byte of a valid logical PVR value is
+ * 0x0f. So 0xffffffff lies permanently outside the PAPR-defined range
+ * and is safe to repurpose. KVM stores it in vcpu->arch.arch_compat
+ * when userspace requests an unsupported compatibility mode (e.g.,
+ * Power11 PVR on a Power11 host booted in Power10 compat).
+ * kvmppc_sanity_check() detects this and prevents the vCPU from
+ * running with an unsupported arch_compat.
+ */
+#define PVR_ARCH_INVALID	0xffffffff
 
 /* Macros for setting and retrieving special purpose registers */
-#ifndef __ASSEMBLY__
+#ifndef __ASSEMBLER__
 
 #if defined(CONFIG_PPC64) || defined(__CHECKER__)
 typedef struct {
@@ -1418,6 +1415,7 @@ static inline void mtmsr_isync(unsigned long val)
 				     : "r" ((unsigned long)(v)) \
 				     : "memory")
 #define wrtspr(rn)	asm volatile("mtspr " __stringify(rn) ",2" : : : "memory")
+#define wrtspr_sync(rn)	asm volatile("mtspr " __stringify(rn) ",2; sync" : : : "memory")
 
 static inline void wrtee(unsigned long val)
 {
@@ -1468,6 +1466,6 @@ extern void scom970_write(unsigned int address, unsigned long value);
 struct pt_regs;
 
 extern void ppc_save_regs(struct pt_regs *regs);
-#endif /* __ASSEMBLY__ */
+#endif /* __ASSEMBLER__ */
 #endif /* __KERNEL__ */
 #endif /* _ASM_POWERPC_REG_H */

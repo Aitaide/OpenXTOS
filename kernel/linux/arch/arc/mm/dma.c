@@ -90,8 +90,7 @@ void arch_sync_dma_for_cpu(phys_addr_t paddr, size_t size,
 /*
  * Plug in direct dma map ops.
  */
-void arch_setup_dma_ops(struct device *dev, u64 dma_base, u64 size,
-			const struct iommu_ops *iommu, bool coherent)
+void arch_setup_dma_ops(struct device *dev, bool coherent)
 {
 	/*
 	 * IOC hardware snoops all DMA traffic keeping the caches consistent
@@ -99,8 +98,8 @@ void arch_setup_dma_ops(struct device *dev, u64 dma_base, u64 size,
 	 * DMA buffers.
 	 */
 	if (is_isa_arcv2() && ioc_enable && coherent)
-		dev->dma_coherent = true;
+		dev_set_dma_coherent(dev);
 
 	dev_info(dev, "use %scoherent DMA ops\n",
-		 dev->dma_coherent ? "" : "non");
+		 dev_dma_coherent(dev) ? "" : "non");
 }

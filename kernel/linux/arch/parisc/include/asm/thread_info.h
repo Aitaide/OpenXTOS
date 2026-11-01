@@ -2,7 +2,7 @@
 #ifndef _ASM_PARISC_THREAD_INFO_H
 #define _ASM_PARISC_THREAD_INFO_H
 
-#ifndef __ASSEMBLY__
+#ifndef __ASSEMBLER__
 #include <asm/processor.h>
 #include <asm/special_insns.h>
 
@@ -20,11 +20,11 @@ struct thread_info {
 	.preempt_count	= INIT_PREEMPT_COUNT,	\
 }
 
-#endif /* !__ASSEMBLY */
+#endif /* !__ASSEMBLER__ */
 
 /* thread information allocation */
 
-#ifdef CONFIG_IRQSTACKS
+#if defined(CONFIG_IRQSTACKS) && !defined(CONFIG_64BIT)
 #define THREAD_SIZE_ORDER	2 /* PA-RISC requires at least 16k stack */
 #else
 #define THREAD_SIZE_ORDER	3 /* PA-RISC requires at least 32k stack */

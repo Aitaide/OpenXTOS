@@ -58,7 +58,7 @@ struct gameport_driver {
 
 	bool ignore;
 };
-#define to_gameport_driver(d)	container_of(d, struct gameport_driver, driver)
+#define to_gameport_driver(d)	container_of_const(d, struct gameport_driver, driver)
 
 int gameport_open(struct gameport *gameport, struct gameport_driver *drv, int mode);
 void gameport_close(struct gameport *gameport);
@@ -97,7 +97,7 @@ void gameport_set_phys(struct gameport *gameport, const char *fmt, ...)
 
 static inline struct gameport *gameport_allocate_port(void)
 {
-	struct gameport *gameport = kzalloc(sizeof(struct gameport), GFP_KERNEL);
+	struct gameport *gameport = kzalloc_obj(struct gameport);
 
 	return gameport;
 }

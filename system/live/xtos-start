@@ -70,11 +70,8 @@ echo "XTOS_MODULES modalias=auto-loaded count=$modloaded policy=present-hardware
 echo 'XTOS_SYSTEM_IDENTITY_BEGIN'
 "$BB" cat /etc/os-release
 "$BB" uname -a
-if [ -r /sys/kernel/realtime ]; then
-    echo "XTOS_REALTIME realtime=$("$BB" cat /sys/kernel/realtime)"
-else
-    echo 'XTOS_REALTIME realtime=unknown'
-fi
+realtime=$(/usr/bin/xtos-rt-status) || realtime=${realtime:-unknown}
+echo "XTOS_REALTIME realtime=$realtime"
 PERSIST=0
 "$BB" mountpoint -q /run/persist 2>/dev/null && PERSIST=1
 case " $(cat /proc/cmdline) " in *' xtos.persist='*) PERSIST_REQUESTED=1 ;; *) PERSIST_REQUESTED=0 ;; esac

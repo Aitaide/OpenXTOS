@@ -95,7 +95,7 @@
 /*
  * Mapping of 64-bit eBPF registers to 32-bit native MIPS registers.
  *
- * 1) Native register pairs are ordered according to CPU endiannes, following
+ * 1) Native register pairs are ordered according to CPU endianness, following
  *    the MIPS convention for passing 64-bit arguments and return values.
  * 2) The eBPF return value, arguments and callee-saved registers are mapped
  *    to their native MIPS equivalents.
@@ -1111,7 +1111,7 @@ static void emit_jmp_i64(struct jit_context *ctx,
 			emit(ctx, xor, tmp, lo(dst), tmp);
 		}
 		if (imm < 0) { /* Compare sign extension */
-			emit(ctx, addu, MIPS_R_T9, hi(dst), 1);
+			emit(ctx, addiu, MIPS_R_T9, hi(dst), 1);
 			emit(ctx, or, tmp, tmp, MIPS_R_T9);
 		} else {       /* Compare zero extension */
 			emit(ctx, or, tmp, tmp, hi(dst));

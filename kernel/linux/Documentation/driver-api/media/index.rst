@@ -20,17 +20,13 @@ Documentation/userspace-api/media/index.rst
   - for the userspace APIs used on media devices.
 
 
-.. only:: html
-
-   .. class:: toc-title
-
-        Table of Contents
-
 .. toctree::
+    :caption: Table of Contents
     :maxdepth: 5
     :numbered:
 
     maintainer-entry-profile
+    media-committers
 
     v4l2-core
     dtv-core

@@ -1,8 +1,7 @@
-/* SPDX-License-Identifier: GPL-2.0-only
- *
- * Copyright (c) 2019-2021, The Linux Foundation. All rights reserved.
- * Copyright (c) 2021-2023 Qualcomm Innovation Center, Inc. All rights reserved.
- */
+/* SPDX-License-Identifier: GPL-2.0-only */
+
+/* Copyright (c) 2019-2021, The Linux Foundation. All rights reserved. */
+/* Copyright (c) Qualcomm Technologies, Inc. and/or its subsidiaries. */
 
 #ifndef _QAIC_H_
 #define _QAIC_H_
@@ -21,12 +20,48 @@
 
 #define QAIC_DBC_BASE		SZ_128K
 #define QAIC_DBC_SIZE		SZ_4K
+#define QAIC_SSR_DBC_SENTINEL	U32_MAX /* No ongoing SSR sentinel */
 
 #define QAIC_NO_PARTITION	-1
 
 #define QAIC_DBC_OFF(i)		((i) * QAIC_DBC_SIZE + QAIC_DBC_BASE)
 
 #define to_qaic_bo(obj) container_of(obj, struct qaic_bo, base)
+#define to_qaic_drm_device(dev) container_of(dev, struct qaic_drm_device, drm)
+#define to_drm(qddev) (&(qddev)->drm)
+#define to_accel_kdev(qddev) (to_drm(qddev)->accel->kdev) /* Return Linux device of accel node */
+#define to_qaic_device(dev) (to_qaic_drm_device((dev))->qdev)
+
+enum aic_families {
+	FAMILY_AIC100,
+	FAMILY_AIC200,
+	FAMILY_MAX,
+};
+
+enum __packed dev_states {
+	/* Device is offline or will be very soon */
+	QAIC_OFFLINE,
+	/* Device is booting, not clear if it's in a usable state */
+	QAIC_BOOT,
+	/* Device is fully operational */
+	QAIC_ONLINE,
+};
+
+enum dbc_states {
+	/* DBC is free and can be activated */
+	DBC_STATE_IDLE,
+	/* DBC is activated and a workload is running on device */
+	DBC_STATE_ASSIGNED,
+	/* Sub-system associated with this workload has crashed and it will shutdown soon */
+	DBC_STATE_BEFORE_SHUTDOWN,
+	/* Sub-system associated with this workload has crashed and it has shutdown */
+	DBC_STATE_AFTER_SHUTDOWN,
+	/* Sub-system associated with this workload is shutdown and it will be powered up soon */
+	DBC_STATE_BEFORE_POWER_UP,
+	/* Sub-system associated with this workload is now powered up */
+	DBC_STATE_AFTER_POWER_UP,
+	DBC_STATE_MAX,
+};
 
 extern bool datapath_polling;
 
@@ -78,6 +113,8 @@ struct dma_bridge_chan {
 	 * response queue's head and tail pointer of this DBC.
 	 */
 	void __iomem		*dbc_base;
+	/* Synchronizes access to Request queue's head and tail pointer */
+	struct mutex		req_lock;
 	/* Head of list where each node is a memory handle queued in request queue */
 	struct list_head	xfer_list;
 	/* Synchronizes DBC readers during cleanup */
@@ -93,6 +130,8 @@ struct dma_bridge_chan {
 	unsigned int		irq;
 	/* Polling work item to simulate interrupts */
 	struct work_struct	poll_work;
+	/* Represents various states of this DBC from enum dbc_states */
+	unsigned int		state;
 };
 
 struct qaic_device {
@@ -100,10 +139,10 @@ struct qaic_device {
 	struct pci_dev		*pdev;
 	/* Req. ID of request that will be queued next in MHI control device */
 	u32			next_seq_num;
-	/* Base address of bar 0 */
-	void __iomem		*bar_0;
-	/* Base address of bar 2 */
-	void __iomem		*bar_2;
+	/* Base address of the MHI bar */
+	void __iomem		*bar_mhi;
+	/* Base address of the DBCs bar */
+	void __iomem		*bar_dbc;
 	/* Controller structure for MHI devices */
 	struct mhi_controller	*mhi_cntrl;
 	/* MHI control channel device */
@@ -112,14 +151,14 @@ struct qaic_device {
 	struct list_head	cntl_xfer_list;
 	/* Synchronizes MHI control device transactions and its xfer list */
 	struct mutex		cntl_mutex;
-	/* Array of DBC struct of this device */
-	struct dma_bridge_chan	*dbc;
 	/* Work queue for tasks related to MHI control device */
 	struct workqueue_struct	*cntl_wq;
 	/* Synchronizes all the users of device during cleanup */
 	struct srcu_struct	dev_lock;
-	/* true: Device under reset; false: Device not under reset */
-	bool			in_reset;
+	/* Track the state of the device during resets */
+	enum dev_states		dev_state;
+	/* true: single MSI is used to operate device */
+	bool			single_msi;
 	/*
 	 * true: A tx MHI transaction has failed and a rx buffer is still queued
 	 * in control device. Such a buffer is considered lost rx buffer
@@ -134,9 +173,43 @@ struct qaic_device {
 	u32 (*gen_crc)(void *msg);
 	/* Validate the CRC of a control message */
 	bool (*valid_crc)(void *msg);
+	/* MHI "QAIC_TIMESYNC" channel device */
+	struct mhi_device	*qts_ch;
+	/* Work queue for tasks related to MHI "QAIC_TIMESYNC" channel */
+	struct workqueue_struct	*qts_wq;
+	/* MHI "QAIC_TIMESYNC_PERIODIC" channel device */
+	struct mhi_device	*mqts_ch;
+	/* Head of list of page allocated by MHI bootlog device */
+	struct list_head        bootlog;
+	/* MHI bootlog channel device */
+	struct mhi_device       *bootlog_ch;
+	/* Work queue for tasks related to MHI bootlog device */
+	struct workqueue_struct *bootlog_wq;
+	/* Synchronizes access of pages in MHI bootlog device */
+	struct mutex            bootlog_mutex;
+	/* MHI RAS channel device */
+	struct mhi_device	*ras_ch;
+	/* Correctable error count */
+	unsigned int		ce_count;
+	/* Un-correctable error count */
+	unsigned int		ue_count;
+	/* Un-correctable non-fatal error count */
+	unsigned int		ue_nf_count;
+	/* MHI SSR channel device */
+	struct mhi_device	*ssr_ch;
+	/* Work queue for tasks related to MHI SSR device */
+	struct workqueue_struct	*ssr_wq;
+	/* Buffer to collect SSR crashdump via SSR MHI channel */
+	void			*ssr_mhi_buf;
+	/* DBC which is under SSR. Sentinel U32_MAX would mean that no SSR in progress */
+	u32			ssr_dbc;
+	/* Array of DBC struct of this device */
+	struct dma_bridge_chan	dbc[] __counted_by(num_dbc);
 };
 
 struct qaic_drm_device {
+	/* The drm device struct of this drm device */
+	struct drm_device	drm;
 	/* Pointer to the root device struct driven by this driver */
 	struct qaic_device	*qdev;
 	/*
@@ -146,20 +219,18 @@ struct qaic_drm_device {
 	 * device is the actual physical device
 	 */
 	s32			partition_id;
-	/* Pointer to the drm device struct of this drm device */
-	struct drm_device	*ddev;
 	/* Head in list of users who have opened this drm device */
 	struct list_head	users;
 	/* Synchronizes access to users list */
 	struct mutex		users_mutex;
+	/* Pointer to array of DBC sysfs attributes */
+	void			*sysfs_attrs;
 };
 
 struct qaic_bo {
 	struct drm_gem_object	base;
 	/* Scatter/gather table for allocate/imported BO */
 	struct sg_table		*sgt;
-	/* BO size requested by user. GEM object might be bigger in size. */
-	u64			size;
 	/* Head in list of slices of this BO */
 	struct list_head	slices;
 	/* Total nents, for all slices of this BO */
@@ -175,8 +246,6 @@ struct qaic_bo {
 	u32			nr_slice;
 	/* Number of slice that have been transferred by DMA engine */
 	u32			nr_slice_xfer_done;
-	/* true = BO is queued for execution, true = BO is not queued */
-	bool			queued;
 	/*
 	 * If true then user has attached slicing information to this BO by
 	 * calling DRM_IOCTL_QAIC_ATTACH_SLICE_BO ioctl.
@@ -184,8 +253,6 @@ struct qaic_bo {
 	bool			sliced;
 	/* Request ID of this BO if it is queued for execution */
 	u16			req_id;
-	/* Handle assigned to this BO */
-	u32			handle;
 	/* Wait on this for completion of DMA transfer of this BO */
 	struct completion	xfer_done;
 	/*
@@ -221,7 +288,8 @@ struct qaic_bo {
 		 */
 		u32		queue_level_before;
 	} perf_stats;
-
+	/* Synchronizes BO operations */
+	struct mutex		lock;
 };
 
 struct bo_slice {
@@ -264,9 +332,10 @@ int disable_dbc(struct qaic_device *qdev, u32 dbc_id, struct qaic_user *usr);
 void enable_dbc(struct qaic_device *qdev, u32 dbc_id, struct qaic_user *usr);
 void wakeup_dbc(struct qaic_device *qdev, u32 dbc_id);
 void release_dbc(struct qaic_device *qdev, u32 dbc_id);
+void qaic_data_get_fifo_info(struct dma_bridge_chan *dbc, u32 *head, u32 *tail);
 
 void wake_all_cntl(struct qaic_device *qdev);
-void qaic_dev_reset_clean_local_state(struct qaic_device *qdev, bool exit_reset);
+void qaic_dev_reset_clean_local_state(struct qaic_device *qdev);
 
 struct drm_gem_object *qaic_gem_prime_import(struct drm_device *dev, struct dma_buf *dma_buf);
 
@@ -277,6 +346,14 @@ int qaic_execute_bo_ioctl(struct drm_device *dev, void *data, struct drm_file *f
 int qaic_partial_execute_bo_ioctl(struct drm_device *dev, void *data, struct drm_file *file_priv);
 int qaic_wait_bo_ioctl(struct drm_device *dev, void *data, struct drm_file *file_priv);
 int qaic_perf_stats_bo_ioctl(struct drm_device *dev, void *data, struct drm_file *file_priv);
-void irq_polling_work(struct work_struct *work);
+int qaic_detach_slice_bo_ioctl(struct drm_device *dev, void *data, struct drm_file *file_priv);
+void qaic_irq_polling_work(struct work_struct *work);
+void qaic_dbc_enter_ssr(struct qaic_device *qdev, u32 dbc_id);
+void qaic_dbc_exit_ssr(struct qaic_device *qdev);
+
+/* qaic_sysfs.c */
+int qaic_sysfs_init(struct qaic_drm_device *qddev);
+void qaic_sysfs_remove(struct qaic_drm_device *qddev);
+void set_dbc_state(struct qaic_device *qdev, u32 dbc_id, unsigned int state);
 
 #endif /* _QAIC_H_ */

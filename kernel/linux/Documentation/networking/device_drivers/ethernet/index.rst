@@ -19,7 +19,6 @@ Contents:
    amd/pds_vfio_pci
    aquantia/atlantic
    chelsio/cxgb
-   cirrus/cs89x0
    dlink/dl2k
    davicom/dm9000
    dec/dmfe
@@ -28,12 +27,15 @@ Contents:
    freescale/gianfar
    google/gve
    huawei/hinic
+   huawei/hinic3
    intel/e100
    intel/e1000
    intel/e1000e
    intel/fm10k
+   intel/idpf
    intel/igb
    intel/igbvf
+   intel/ixd
    intel/ixgbe
    intel/ixgbevf
    intel/i40e
@@ -41,24 +43,22 @@ Contents:
    intel/ice
    marvell/octeontx2
    marvell/octeon_ep
+   marvell/octeon_ep_vf
    mellanox/mlx5/index
+   meta/fbnic
    microsoft/netvsc
-   neterion/s2io
+   mucse/rnpgbe
    netronome/nfp
    pensando/ionic
-   smsc/smc9
+   pensando/ionic_rdma
+   qualcomm/ppe/ppe
    stmicro/stmmac
    ti/cpsw
    ti/cpsw_switchdev
    ti/am65_nuss_cpsw_switchdev
    ti/tlan
-   toshiba/spider_net
+   ti/icssg_prueth
    wangxun/txgbe
+   wangxun/txgbevf
    wangxun/ngbe
-
-.. only::  subproject and html
-
-   Indices
-   =======
-
-   * :ref:`genindex`
+   wangxun/ngbevf

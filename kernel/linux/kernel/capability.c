@@ -38,10 +38,8 @@ __setup("no_file_caps", file_caps_disable);
 
 static void warn_legacy_capability_use(void)
 {
-	char name[sizeof(current->comm)];
-
 	pr_info_once("warning: `%s' uses 32-bit capabilities (legacy support in use)\n",
-		     get_task_comm(name, current));
+		     current->comm);
 }
 
 /*
@@ -62,10 +60,8 @@ static void warn_legacy_capability_use(void)
 
 static void warn_deprecated_v2(void)
 {
-	char name[sizeof(current->comm)];
-
 	pr_info_once("warning: `%s' uses deprecated v2 capabilities in a way that may be insecure\n",
-		     get_task_comm(name, current));
+		     current->comm);
 }
 
 /*
@@ -290,22 +286,6 @@ bool has_ns_capability(struct task_struct *t,
 }
 
 /**
- * has_capability - Does a task have a capability in init_user_ns
- * @t: The task in question
- * @cap: The capability to be tested for
- *
- * Return true if the specified task has the given superior capability
- * currently in effect to the initial user namespace, false if not.
- *
- * Note that this does not set PF_SUPERPRIV on the task.
- */
-bool has_capability(struct task_struct *t, int cap)
-{
-	return has_ns_capability(t, &init_user_ns, cap);
-}
-EXPORT_SYMBOL(has_capability);
-
-/**
  * has_ns_capability_noaudit - Does a task have a capability (unaudited)
  * in a specific user ns.
  * @t: The task in question
@@ -346,7 +326,6 @@ bool has_capability_noaudit(struct task_struct *t, int cap)
 {
 	return has_ns_capability_noaudit(t, &init_user_ns, cap);
 }
-EXPORT_SYMBOL(has_capability_noaudit);
 
 static bool ns_capable_common(struct user_namespace *ns,
 			      int cap,
@@ -436,6 +415,24 @@ bool capable(int cap)
 	return ns_capable(&init_user_ns, cap);
 }
 EXPORT_SYMBOL(capable);
+
+/**
+ * capable_noaudit - Determine if the current task has a superior
+ * capability in effect by checking the process's effective
+ * capabilities (unaudited).
+ * @cap: The capability to be tested for
+ *
+ * This is the same as capable(), except it uses CAP_OPT_NOAUDIT as to prevent
+ * issuing spurious audit messages.
+ *
+ * This sets PF_SUPERPRIV on the task if the capability is available on the
+ * assumption that it's about to be used.
+ */
+bool capable_noaudit(int cap)
+{
+	return ns_capable_noaudit(&init_user_ns, cap);
+}
+EXPORT_SYMBOL(capable_noaudit);
 #endif /* CONFIG_MULTIUSER */
 
 /**

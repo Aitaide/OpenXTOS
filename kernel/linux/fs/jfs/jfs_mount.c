@@ -172,14 +172,14 @@ int jfs_mount(struct super_block *sb)
 	}
 	jfs_info("jfs_mount: ipimap:0x%p", ipimap);
 
-	/* map further access of per fileset inodes by the fileset inode */
-	sbi->ipimap = ipimap;
-
 	/* initialize fileset inode allocation map */
 	if ((rc = diMount(ipimap))) {
 		jfs_err("jfs_mount: diMount failed w/rc = %d", rc);
 		goto err_ipimap;
 	}
+
+	/* map further access of per fileset inodes by the fileset inode */
+	sbi->ipimap = ipimap;
 
 	return rc;
 
@@ -325,13 +325,13 @@ static int chkSuper(struct super_block *sb)
 	if ((j_sb->s_flag & cpu_to_le32(JFS_BAD_SAIT)) !=
 	    cpu_to_le32(JFS_BAD_SAIT)) {
 		expected_AIM_bytesize = 2 * PSIZE;
-		AIM_bytesize = lengthPXD(&(j_sb->s_aim2)) * bsize;
+		AIM_bytesize = lengthPXD(&j_sb->s_aim2) * bsize;
 		expected_AIT_bytesize = 4 * PSIZE;
-		AIT_bytesize = lengthPXD(&(j_sb->s_ait2)) * bsize;
-		AIM_byte_addr = addressPXD(&(j_sb->s_aim2)) * bsize;
-		AIT_byte_addr = addressPXD(&(j_sb->s_ait2)) * bsize;
+		AIT_bytesize = lengthPXD(&j_sb->s_ait2) * bsize;
+		AIM_byte_addr = addressPXD(&j_sb->s_aim2) * bsize;
+		AIT_byte_addr = addressPXD(&j_sb->s_ait2) * bsize;
 		byte_addr_diff0 = AIT_byte_addr - AIM_byte_addr;
-		fsckwsp_addr = addressPXD(&(j_sb->s_fsckpxd)) * bsize;
+		fsckwsp_addr = addressPXD(&j_sb->s_fsckpxd) * bsize;
 		byte_addr_diff1 = fsckwsp_addr - AIT_byte_addr;
 		if ((AIM_bytesize != expected_AIM_bytesize) ||
 		    (AIT_bytesize != expected_AIT_bytesize) ||
@@ -378,11 +378,12 @@ static int chkSuper(struct super_block *sb)
 	sbi->nbperpage = PSIZE >> sbi->l2bsize;
 	sbi->l2nbperpage = L2PSIZE - sbi->l2bsize;
 	sbi->l2niperblk = sbi->l2bsize - L2DISIZE;
+	uuid_copy(&sbi->uuid, &j_sb->s_uuid);
+
 	if (sbi->mntflag & JFS_INLINELOG)
 		sbi->logpxd = j_sb->s_logpxd;
 	else {
 		sbi->logdev = new_decode_dev(le32_to_cpu(j_sb->s_logdev));
-		uuid_copy(&sbi->uuid, &j_sb->s_uuid);
 		uuid_copy(&sbi->loguuid, &j_sb->s_loguuid);
 	}
 	sbi->fsckpxd = j_sb->s_fsckpxd;
@@ -430,7 +431,8 @@ int updateSuper(struct super_block *sb, uint state)
 
 	if (state == FM_MOUNT) {
 		/* record log's dev_t and mount serial number */
-		j_sb->s_logdev = cpu_to_le32(new_encode_dev(sbi->log->bdev->bd_dev));
+		j_sb->s_logdev = cpu_to_le32(
+			new_encode_dev(file_bdev(sbi->log->bdev_file)->bd_dev));
 		j_sb->s_logserial = cpu_to_le32(sbi->log->serial);
 	} else if (state == FM_CLEAN) {
 		/*

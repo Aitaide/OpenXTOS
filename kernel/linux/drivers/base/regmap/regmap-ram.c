@@ -53,7 +53,8 @@ static const struct regmap_bus regmap_ram = {
 	.free_context = regmap_ram_free_context,
 };
 
-struct regmap *__regmap_init_ram(const struct regmap_config *config,
+struct regmap *__regmap_init_ram(struct device *dev,
+				 const struct regmap_config *config,
 				 struct regmap_ram_data *data,
 				 struct lock_class_key *lock_key,
 				 const char *lock_name)
@@ -65,21 +66,26 @@ struct regmap *__regmap_init_ram(const struct regmap_config *config,
 		return ERR_PTR(-EINVAL);
 	}
 
-	data->read = kcalloc(sizeof(bool), config->max_register + 1,
-			     GFP_KERNEL);
+	data->read = kzalloc_objs(bool, config->max_register + 1);
 	if (!data->read)
 		return ERR_PTR(-ENOMEM);
 
-	data->written = kcalloc(sizeof(bool), config->max_register + 1,
-				GFP_KERNEL);
-	if (!data->written)
+	data->written = kzalloc_objs(bool, config->max_register + 1);
+	if (!data->written) {
+		kfree(data->read);
 		return ERR_PTR(-ENOMEM);
+	}
 
-	map = __regmap_init(NULL, &regmap_ram, data, config,
+	map = __regmap_init(dev, &regmap_ram, data, config,
 			    lock_key, lock_name);
+	if (IS_ERR(map)) {
+		kfree(data->read);
+		kfree(data->written);
+	}
 
 	return map;
 }
 EXPORT_SYMBOL_GPL(__regmap_init_ram);
 
+MODULE_DESCRIPTION("Register map access API - Memory region");
 MODULE_LICENSE("GPL v2");

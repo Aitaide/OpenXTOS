@@ -57,9 +57,7 @@ static void update_ordered_list_value(int instance, char *attr_value)
 {
 	struct ordered_list_data *ordered_list_data = &bioscfg_drv.ordered_list_data[instance];
 
-	strscpy(ordered_list_data->current_value,
-		attr_value,
-		sizeof(ordered_list_data->current_value));
+	strscpy(ordered_list_data->current_value, attr_value);
 }
 
 ATTRIBUTE_S_COMMON_PROPERTY_SHOW(display_name, ordered_list);
@@ -100,9 +98,8 @@ int hp_alloc_ordered_list_data(void)
 {
 	bioscfg_drv.ordered_list_instances_count =
 		hp_get_instance_count(HP_WMI_BIOS_ORDERED_LIST_GUID);
-	bioscfg_drv.ordered_list_data = kcalloc(bioscfg_drv.ordered_list_instances_count,
-						sizeof(*bioscfg_drv.ordered_list_data),
-						GFP_KERNEL);
+	bioscfg_drv.ordered_list_data = kzalloc_objs(*bioscfg_drv.ordered_list_data,
+						     bioscfg_drv.ordered_list_instances_count);
 	if (!bioscfg_drv.ordered_list_data) {
 		bioscfg_drv.ordered_list_instances_count = 0;
 		return -ENOMEM;
@@ -148,7 +145,7 @@ static int hp_populate_ordered_list_elements_from_package(union acpi_object *ord
 	if (!order_obj)
 		return -EINVAL;
 
-	for (elem = 1, eloc = 1; eloc < ORD_ELEM_CNT; elem++, eloc++) {
+	for (elem = 1, eloc = 1; eloc < ORD_ELEM_CNT && elem < order_obj_count; elem++, eloc++) {
 
 		switch (order_obj[elem].type) {
 		case ACPI_TYPE_STRING:
@@ -179,13 +176,11 @@ static int hp_populate_ordered_list_elements_from_package(union acpi_object *ord
 		/* Assign appropriate element value to corresponding field*/
 		switch (eloc) {
 		case VALUE:
-			strscpy(ordered_list_data->current_value,
-				str_value, sizeof(ordered_list_data->current_value));
+			strscpy(ordered_list_data->current_value, str_value);
 			replace_char_str(ordered_list_data->current_value, COMMA_SEP, SEMICOLON_SEP);
 			break;
 		case PATH:
-			strscpy(ordered_list_data->common.path, str_value,
-				sizeof(ordered_list_data->common.path));
+			strscpy(ordered_list_data->common.path, str_value);
 			break;
 		case IS_READONLY:
 			ordered_list_data->common.is_readonly = int_value;
@@ -220,6 +215,11 @@ static int hp_populate_ordered_list_elements_from_package(union acpi_object *ord
 			size = min_t(u32, ordered_list_data->common.prerequisites_size,
 				     MAX_PREREQUISITES_SIZE);
 			for (reqs = 0; reqs < size; reqs++) {
+				if (elem + reqs >= order_obj_count) {
+					pr_err("Error elem-objects package is too small\n");
+					return -EINVAL;
+				}
+
 				ret = hp_convert_hexstr_to_str(order_obj[elem + reqs].string.pointer,
 							       order_obj[elem + reqs].string.length,
 							       &str_value, &value_len);
@@ -227,13 +227,13 @@ static int hp_populate_ordered_list_elements_from_package(union acpi_object *ord
 				if (ret)
 					continue;
 
-				strscpy(ordered_list_data->common.prerequisites[reqs],
-					str_value,
-					sizeof(ordered_list_data->common.prerequisites[reqs]));
+				strscpy(ordered_list_data->common.prerequisites[reqs], str_value);
 
 				kfree(str_value);
 				str_value = NULL;
 			}
+			if (size)
+				elem += size - 1;
 			break;
 
 		case SECURITY_LEVEL:
@@ -263,7 +263,9 @@ static int hp_populate_ordered_list_elements_from_package(union acpi_object *ord
 			 * Ordered list data is stored in hex and comma separated format
 			 * Convert the data and split it to show each element
 			 */
-			ret = hp_convert_hexstr_to_str(str_value, value_len, &tmpstr, &tmp_len);
+			ret = hp_convert_hexstr_to_str(order_obj[elem].string.pointer,
+						       order_obj[elem].string.length,
+						       &tmpstr, &tmp_len);
 			if (ret)
 				goto exit_list;
 
@@ -271,9 +273,7 @@ static int hp_populate_ordered_list_elements_from_package(union acpi_object *ord
 			part = strsep(&part_tmp, COMMA_SEP);
 
 			for (olist_elem = 0; olist_elem < MAX_ELEMENTS_SIZE && part; olist_elem++) {
-				strscpy(ordered_list_data->elements[olist_elem],
-					part,
-					sizeof(ordered_list_data->elements[olist_elem]));
+				strscpy(ordered_list_data->elements[olist_elem], part);
 				part = strsep(&part_tmp, COMMA_SEP);
 			}
 			ordered_list_data->elements_size = olist_elem;
@@ -302,10 +302,12 @@ exit_list:
  * Populate all properties of an instance under ordered_list attribute
  *
  * @order_obj: ACPI object with ordered_list data
+ * @order_obj_count: Number of elements in @order_obj
  * @instance_id: The instance to enumerate
  * @attr_name_kobj: The parent kernel object
  */
-int hp_populate_ordered_list_package_data(union acpi_object *order_obj, int instance_id,
+int hp_populate_ordered_list_package_data(union acpi_object *order_obj, int order_obj_count,
+					  int instance_id,
 					  struct kobject *attr_name_kobj)
 {
 	struct ordered_list_data *ordered_list_data = &bioscfg_drv.ordered_list_data[instance_id];
@@ -313,7 +315,7 @@ int hp_populate_ordered_list_package_data(union acpi_object *order_obj, int inst
 	ordered_list_data->attr_name_kobj = attr_name_kobj;
 
 	hp_populate_ordered_list_elements_from_package(order_obj,
-						       order_obj->package.count,
+						       order_obj_count,
 						       instance_id);
 	hp_update_attribute_permissions(ordered_list_data->common.is_readonly,
 					&ordered_list_current_val);

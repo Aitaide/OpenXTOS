@@ -28,7 +28,7 @@
 static int
 base907c_image_set(struct nv50_wndw *wndw, struct nv50_wndw_atom *asyw)
 {
-	struct nvif_push *push = wndw->wndw.push;
+	struct nvif_push *push = &wndw->wndw.push;
 	int ret;
 
 	if ((ret = PUSH_WAIT(push, 10)))
@@ -65,7 +65,7 @@ base907c_image_set(struct nv50_wndw *wndw, struct nv50_wndw_atom *asyw)
 static int
 base907c_xlut_clr(struct nv50_wndw *wndw)
 {
-	struct nvif_push *push = wndw->wndw.push;
+	struct nvif_push *push = &wndw->wndw.push;
 	int ret;
 
 	if ((ret = PUSH_WAIT(push, 6)))
@@ -84,7 +84,7 @@ base907c_xlut_clr(struct nv50_wndw *wndw)
 static int
 base907c_xlut_set(struct nv50_wndw *wndw, struct nv50_wndw_atom *asyw)
 {
-	struct nvif_push *push = wndw->wndw.push;
+	struct nvif_push *push = &wndw->wndw.push;
 	int ret;
 
 	if ((ret = PUSH_WAIT(push, 6)))
@@ -156,7 +156,7 @@ base907c_csc(struct nv50_wndw *wndw, struct nv50_wndw_atom *asyw,
 static int
 base907c_csc_clr(struct nv50_wndw *wndw)
 {
-	struct nvif_push *push = wndw->wndw.push;
+	struct nvif_push *push = &wndw->wndw.push;
 	int ret;
 
 	if ((ret = PUSH_WAIT(push, 2)))
@@ -170,7 +170,7 @@ base907c_csc_clr(struct nv50_wndw *wndw)
 static int
 base907c_csc_set(struct nv50_wndw *wndw, struct nv50_wndw_atom *asyw)
 {
-	struct nvif_push *push = wndw->wndw.push;
+	struct nvif_push *push = &wndw->wndw.push;
 	int ret;
 
 	if ((ret = PUSH_WAIT(push, 13)))
@@ -205,6 +205,7 @@ base907c = {
 	.image_set = base907c_image_set,
 	.image_clr = base507c_image_clr,
 	.update = base507c_update,
+	.blend_modes = BASE_BLEND_MODES,
 };
 
 int

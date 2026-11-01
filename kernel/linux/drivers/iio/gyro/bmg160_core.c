@@ -8,7 +8,6 @@
 #include <linux/interrupt.h>
 #include <linux/delay.h>
 #include <linux/slab.h>
-#include <linux/acpi.h>
 #include <linux/pm.h>
 #include <linux/pm_runtime.h>
 #include <linux/iio/iio.h>
@@ -21,8 +20,6 @@
 #include <linux/regmap.h>
 #include <linux/regulator/consumer.h>
 #include "bmg160.h"
-
-#define BMG160_IRQ_NAME		"bmg160_event"
 
 #define BMG160_REG_CHIP_ID		0x00
 #define BMG160_CHIP_ID_VAL		0x0F
@@ -100,7 +97,7 @@ struct bmg160_data {
 	/* Ensure naturally aligned timestamp */
 	struct {
 		s16 chans[3];
-		s64 timestamp __aligned(8);
+		aligned_s64 timestamp;
 	} scan;
 	u32 dps_range;
 	int ev_enable_state;
@@ -204,6 +201,9 @@ static int bmg160_get_filter(struct bmg160_data *data, int *val)
 			break;
 	}
 
+	if (i == ARRAY_SIZE(bmg160_samp_freq_table))
+		return -EINVAL;
+
 	*val = bmg160_samp_freq_table[i].filter;
 
 	return ret ? ret : IIO_VAL_INT;
@@ -220,6 +220,9 @@ static int bmg160_set_filter(struct bmg160_data *data, int val)
 		if (bmg160_samp_freq_table[i].filter == val)
 			break;
 	}
+
+	if (i == ARRAY_SIZE(bmg160_samp_freq_table))
+		return -EINVAL;
 
 	ret = regmap_write(data->regmap, BMG160_REG_PMU_BW,
 			   bmg160_samp_freq_table[i].bw_bits);
@@ -261,8 +264,14 @@ static int bmg160_chip_init(struct bmg160_data *data)
 	if (ret < 0)
 		return ret;
 
-	/* Wait upto 500 ms to be ready after changing mode */
-	usleep_range(500, 1000);
+	/*
+	 * Wait for the chip to be ready after switching to normal mode.
+	 * The BMG160 datasheet (BST-BMG160-DS000-07 Rev. 1.0, May 2013)
+	 * specifies a start-up / wake-up time (tsu, twusm) of 30 ms; use
+	 * BMG160_MAX_STARTUP_TIME_MS (80 ms) as a safety margin, matching
+	 * what bmg160_runtime_resume() already does.
+	 */
+	msleep(BMG160_MAX_STARTUP_TIME_MS);
 
 	/* Set Bandwidth */
 	ret = bmg160_set_bw(data, BMG160_DEF_BW);
@@ -285,8 +294,8 @@ static int bmg160_chip_init(struct bmg160_data *data)
 	data->slope_thres = val;
 
 	/* Set default interrupt mode */
-	ret = regmap_update_bits(data->regmap, BMG160_REG_INT_EN_1,
-				 BMG160_INT1_BIT_OD, 0);
+	ret = regmap_clear_bits(data->regmap, BMG160_REG_INT_EN_1,
+				BMG160_INT1_BIT_OD);
 	if (ret < 0) {
 		dev_err(dev, "Error updating bits in reg_int_en_1\n");
 		return ret;
@@ -312,10 +321,8 @@ static int bmg160_set_power_state(struct bmg160_data *data, bool on)
 
 	if (on)
 		ret = pm_runtime_get_sync(dev);
-	else {
-		pm_runtime_mark_last_busy(dev);
+	else
 		ret = pm_runtime_put_autosuspend(dev);
-	}
 
 	if (ret < 0) {
 		dev_err(dev, "Failed: bmg160_set_power_state for %d\n", on);
@@ -444,7 +451,7 @@ static int bmg160_setup_new_data_interrupt(struct bmg160_data *data,
 
 static int bmg160_get_bw(struct bmg160_data *data, int *val)
 {
-	struct device *dev = regmap_get_device(data->regmap);	
+	struct device *dev = regmap_get_device(data->regmap);
 	int i;
 	unsigned int bw_bits;
 	int ret;
@@ -749,7 +756,7 @@ static int bmg160_write_event_config(struct iio_dev *indio_dev,
 				     const struct iio_chan_spec *chan,
 				     enum iio_event_type type,
 				     enum iio_event_direction dir,
-				     int state)
+				     bool state)
 {
 	struct bmg160_data *data = iio_priv(indio_dev);
 	int ret;
@@ -1055,17 +1062,6 @@ static const struct iio_buffer_setup_ops bmg160_buffer_setup_ops = {
 	.postdisable = bmg160_buffer_postdisable,
 };
 
-static const char *bmg160_match_acpi_device(struct device *dev)
-{
-	const struct acpi_device_id *id;
-
-	id = acpi_match_device(dev->driver->acpi_match_table, dev);
-	if (!id)
-		return NULL;
-
-	return dev_name(dev);
-}
-
 int bmg160_core_probe(struct device *dev, struct regmap *regmap, int irq,
 		      const char *name)
 {
@@ -1098,9 +1094,6 @@ int bmg160_core_probe(struct device *dev, struct regmap *regmap, int irq,
 
 	mutex_init(&data->mutex);
 
-	if (ACPI_HANDLE(dev))
-		name = bmg160_match_acpi_device(dev);
-
 	indio_dev->channels = bmg160_channels;
 	indio_dev->num_channels = ARRAY_SIZE(bmg160_channels);
 	indio_dev->name = name;
@@ -1114,7 +1107,7 @@ int bmg160_core_probe(struct device *dev, struct regmap *regmap, int irq,
 						bmg160_data_rdy_trig_poll,
 						bmg160_event_handler,
 						IRQF_TRIGGER_RISING,
-						BMG160_IRQ_NAME,
+						"bmg160_event",
 						indio_dev);
 		if (ret)
 			return ret;

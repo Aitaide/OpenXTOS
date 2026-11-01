@@ -14,7 +14,7 @@
 
 /**
  * struct hfi1_netdev_rxq - Receive Queue for HFI
- * Both IPoIB and VNIC netdevices will be working on the rx abstraction.
+ * IPoIB netdevices will be working on the rx abstraction.
  * @napi: napi object
  * @rx: ptr to netdev_rx
  * @rcd:  ptr to receive context data
@@ -25,10 +25,6 @@ struct hfi1_netdev_rxq {
 	struct hfi1_ctxtdata *rcd;
 };
 
-/*
- * Number of netdev contexts used. Ensure it is less than or equal to
- * max queues supported by VNIC (HFI1_VNIC_MAX_QUEUE).
- */
 #define HFI1_MAX_NETDEV_CTXTS   8
 
 /* Number of NETDEV RSM entries */
@@ -42,14 +38,14 @@ struct hfi1_netdev_rxq {
  * @num_rx_q:	number of receive queues
  * @rmt_index:	first free index in RMT Array
  * @msix_start: first free MSI-X interrupt vector.
- * @dev_tbl:	netdev table for unique identifier VNIC and IPoIb VLANs.
+ * @dev_tbl:	netdev table for unique identifier IPoIb VLANs.
  * @enabled:	atomic counter of netdevs enabling receive queues.
  *		When 0 NAPI will be disabled.
  * @netdevs:	atomic counter of netdevs using dummy netdev.
  *		When 0 receive queues will be freed.
  */
 struct hfi1_netdev_rx {
-	struct net_device rx_napi;
+	struct net_device *rx_napi;
 	struct hfi1_devdata *dd;
 	struct hfi1_netdev_rxq *rxq;
 	int num_rx_q;

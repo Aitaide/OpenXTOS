@@ -26,6 +26,7 @@
 /* Device-tree visible constants follow */
 #define ISA_V3_0B       3000
 #define ISA_V3_1        3100
+#define ISA_V3_2        3200
 
 #define USABLE_PR               (1U << 0)
 #define USABLE_OS               (1U << 1)
@@ -89,8 +90,6 @@ static void __restore_cpu_cpufeatures(void)
 	if (init_pmu_registers)
 		init_pmu_registers();
 }
-
-static char dt_cpu_name[64];
 
 static struct cpu_spec __initdata base_cpu_spec = {
 	.cpu_name		= NULL,
@@ -458,6 +457,43 @@ static int __init feat_enable_mce_power10(struct dt_cpu_feature *f)
 	return 1;
 }
 
+static int __init feat_enable_mce_power11(struct dt_cpu_feature *f)
+{
+	cur_cpu_spec->platform = "power11";
+	cur_cpu_spec->machine_check_early = __machine_check_early_realmode_p10;
+
+	return 1;
+}
+
+static void init_pmu_power12(void)
+{
+	init_pmu_power10();
+}
+
+static int __init feat_enable_pmu_power12(struct dt_cpu_feature *f)
+{
+	hfscr_pmu_enable();
+
+	init_pmu_power12();
+	init_pmu_registers = init_pmu_power12;
+
+	cur_cpu_spec->cpu_features |= CPU_FTR_MMCRA;
+	cur_cpu_spec->cpu_user_features |= PPC_FEATURE_PSERIES_PERFMON_COMPAT;
+
+	cur_cpu_spec->num_pmcs          = 6;
+	cur_cpu_spec->pmc_type          = PPC_PMC_IBM;
+
+	return 1;
+}
+
+static int __init feat_enable_mce_power12(struct dt_cpu_feature *f)
+{
+	cur_cpu_spec->platform = "power12";
+	cur_cpu_spec->machine_check_early = __machine_check_early_realmode_p10;
+
+	return 1;
+}
+
 static int __init feat_enable_tm(struct dt_cpu_feature *f)
 {
 #ifdef CONFIG_PPC_TRANSACTIONAL_MEM
@@ -648,8 +684,12 @@ static struct dt_cpu_feature_match __initdata
 	{"pc-relative-addressing", feat_enable, 0},
 	{"machine-check-power9", feat_enable_mce_power9, 0},
 	{"machine-check-power10", feat_enable_mce_power10, 0},
+	{"machine-check-power11", feat_enable_mce_power11, 0},
+	{"machine-check-power12", feat_enable_mce_power12, 0},
 	{"performance-monitor-power9", feat_enable_pmu_power9, 0},
 	{"performance-monitor-power10", feat_enable_pmu_power10, 0},
+	{"performance-monitor-power11", feat_enable_pmu_power10, 0},
+	{"performance-monitor-power12", feat_enable_pmu_power12, 0},
 	{"event-based-branch-v3", feat_enable, 0},
 	{"random-number-generator", feat_enable, 0},
 	{"system-call-vectored", feat_disable, 0},
@@ -694,6 +734,20 @@ static void __init cpufeatures_setup_start(u32 isa)
 	if (isa >= ISA_V3_1) {
 		cur_cpu_spec->cpu_features |= CPU_FTR_ARCH_31;
 		cur_cpu_spec->cpu_user_features2 |= PPC_FEATURE2_ARCH_3_1;
+
+		/*
+		 * CPU_FTR_P11_PVR is a kernel-internal flag to identify
+		 * Power11 and later processors. While ISA v3.1 is supported
+		 * by Power10+, this flag specifically indicates Power11+
+		 * for code that needs to distinguish between P10 and P11.
+		 */
+		if (PVR_VER(mfspr(SPRN_PVR)) >= PVR_POWER11)
+			cur_cpu_spec->cpu_features |= CPU_FTR_P11_PVR;
+	}
+
+	if (isa >= ISA_V3_2) {
+		cur_cpu_spec->cpu_features |= CPU_FTR_ARCH_32;
+		cur_cpu_spec->cpu_user_features2 |= PPC_FEATURE2_ARCH_3_2;
 	}
 }
 
@@ -857,7 +911,7 @@ bool __init dt_cpu_ftrs_init(void *fdt)
 	using_dt_cpu_ftrs = false;
 
 	/* Setup and verify the FDT, if it fails we just bail */
-	if (!early_init_dt_verify(fdt))
+	if (!early_init_dt_verify(fdt, __pa(fdt)))
 		return false;
 
 	if (!of_scan_flat_dt(fdt_find_cpu_features, NULL))
@@ -1059,6 +1113,7 @@ static int __init count_cpufeatures_subnodes(unsigned long node,
 static int __init dt_cpu_ftrs_scan_callback(unsigned long node, const char
 					    *uname, int depth, void *data)
 {
+	static char dt_cpu_name[64];
 	const __be32 *prop;
 	int count, i;
 	u32 isa;
@@ -1077,12 +1132,10 @@ static int __init dt_cpu_ftrs_scan_callback(unsigned long node, const char
 	/* Count and allocate space for cpu features */
 	of_scan_flat_dt_subnodes(node, count_cpufeatures_subnodes,
 						&nr_dt_cpu_features);
-	dt_cpu_features = memblock_alloc(sizeof(struct dt_cpu_feature) * nr_dt_cpu_features, PAGE_SIZE);
-	if (!dt_cpu_features)
-		panic("%s: Failed to allocate %zu bytes align=0x%lx\n",
-		      __func__,
-		      sizeof(struct dt_cpu_feature) * nr_dt_cpu_features,
-		      PAGE_SIZE);
+	dt_cpu_features =
+		memblock_alloc_or_panic(
+			sizeof(struct dt_cpu_feature) * nr_dt_cpu_features,
+			PAGE_SIZE);
 
 	cpufeatures_setup_start(isa);
 
@@ -1098,8 +1151,8 @@ static int __init dt_cpu_ftrs_scan_callback(unsigned long node, const char
 	}
 
 	prop = of_get_flat_dt_prop(node, "display-name", NULL);
-	if (prop && strlen((char *)prop) != 0) {
-		strscpy(dt_cpu_name, (char *)prop, sizeof(dt_cpu_name));
+	if (prop && *(char *)prop != 0) {
+		strscpy(dt_cpu_name, (char *)prop);
 		cur_cpu_spec->cpu_name = dt_cpu_name;
 	}
 

@@ -10,6 +10,7 @@
 #include <linux/delay.h>
 #include <linux/device.h>
 #include <linux/dmapool.h>
+#include <linux/dma-direct.h>
 #include <linux/err.h>
 #include <linux/irqreturn.h>
 #include <linux/kernel.h>
@@ -86,7 +87,7 @@ static int hw_device_state(struct ci_hdrc *ci, u32 dma)
 		hw_write(ci, OP_ENDPTLISTADDR, ~0, dma);
 		/* interrupt, error, port change, reset, sleep/suspend */
 		hw_write(ci, OP_USBINTR, ~0,
-			     USBi_UI|USBi_UEI|USBi_PCI|USBi_URI|USBi_SLI);
+			     USBi_UI|USBi_UEI|USBi_PCI|USBi_URI);
 	} else {
 		hw_write(ci, OP_USBINTR, ~0, 0);
 	}
@@ -359,8 +360,8 @@ static int add_td_to_list(struct ci_hw_ep *hwep, struct ci_hw_req *hwreq,
 {
 	int i;
 	u32 temp;
-	struct td_node *lastnode, *node = kzalloc(sizeof(struct td_node),
-						  GFP_ATOMIC);
+	struct td_node *lastnode, *node = kzalloc_obj(struct td_node,
+						      GFP_ATOMIC);
 
 	if (node == NULL)
 		return -ENOMEM;
@@ -540,6 +541,126 @@ static int prepare_td_for_sg(struct ci_hw_ep *hwep, struct ci_hw_req *hwreq)
 	return ret;
 }
 
+/*
+ * Verify if the scatterlist is valid by iterating each sg entry.
+ * Return invalid sg entry index which is less than num_sgs.
+ */
+static int sglist_get_invalid_entry(struct device *dma_dev, u8 dir,
+			struct usb_request *req)
+{
+	int i;
+	struct scatterlist *s = req->sg;
+
+	if (req->num_sgs == 1)
+		return 1;
+
+	dir = dir ? DMA_TO_DEVICE : DMA_FROM_DEVICE;
+
+	for (i = 0; i < req->num_sgs; i++, s = sg_next(s)) {
+		/* Only small sg (generally last sg) may be bounced. If
+		 * that happens. we can't ensure the addr is page-aligned
+		 * after dma map.
+		 */
+		if (dma_kmalloc_needs_bounce(dma_dev, s->length, dir))
+			break;
+
+		/* Make sure each sg start address (except first sg) is
+		 * page-aligned and end address (except last sg) is also
+		 * page-aligned.
+		 */
+		if (i == 0) {
+			if (!IS_ALIGNED(s->offset + s->length,
+						CI_HDRC_PAGE_SIZE))
+				break;
+		} else {
+			if (s->offset)
+				break;
+			if (!sg_is_last(s) && !IS_ALIGNED(s->length,
+						CI_HDRC_PAGE_SIZE))
+				break;
+		}
+	}
+
+	return i;
+}
+
+static int sglist_do_bounce(struct ci_hw_req *hwreq, int index,
+			bool copy, unsigned int *bounced)
+{
+	void *buf;
+	int i, ret, nents, num_sgs;
+	unsigned int rest, rounded;
+	struct scatterlist *sg, *src, *dst;
+
+	nents = index + 1;
+	ret = sg_alloc_table(&hwreq->sgt, nents, GFP_KERNEL);
+	if (ret)
+		return ret;
+
+	sg = src = hwreq->req.sg;
+	num_sgs = hwreq->req.num_sgs;
+	rest = hwreq->req.length;
+	dst = hwreq->sgt.sgl;
+
+	for (i = 0; i < index; i++) {
+		memcpy(dst, src, sizeof(*src));
+		rest -= src->length;
+		src = sg_next(src);
+		dst = sg_next(dst);
+	}
+
+	/* create one bounce buffer */
+	rounded = round_up(rest, CI_HDRC_PAGE_SIZE);
+	buf = kmalloc(rounded, GFP_KERNEL);
+	if (!buf) {
+		sg_free_table(&hwreq->sgt);
+		return -ENOMEM;
+	}
+
+	sg_set_buf(dst, buf, rounded);
+
+	hwreq->req.sg = hwreq->sgt.sgl;
+	hwreq->req.num_sgs = nents;
+	hwreq->sgt.sgl = sg;
+	hwreq->sgt.nents = num_sgs;
+
+	if (copy)
+		sg_copy_to_buffer(src, num_sgs - index, buf, rest);
+
+	*bounced = rest;
+
+	return 0;
+}
+
+static void sglist_do_debounce(struct ci_hw_req *hwreq, bool copy)
+{
+	void *buf;
+	int i, nents, num_sgs;
+	struct scatterlist *sg, *src, *dst;
+
+	sg = hwreq->req.sg;
+	num_sgs = hwreq->req.num_sgs;
+	src = sg_last(sg, num_sgs);
+	buf = sg_virt(src);
+
+	if (copy) {
+		dst = hwreq->sgt.sgl;
+		for (i = 0; i < num_sgs - 1; i++)
+			dst = sg_next(dst);
+
+		nents = hwreq->sgt.nents - num_sgs + 1;
+		sg_copy_from_buffer(dst, nents, buf, sg_dma_len(src));
+	}
+
+	hwreq->req.sg = hwreq->sgt.sgl;
+	hwreq->req.num_sgs = hwreq->sgt.nents;
+	hwreq->sgt.sgl = sg;
+	hwreq->sgt.nents = num_sgs;
+
+	kfree(buf);
+	sg_free_table(&hwreq->sgt);
+}
+
 /**
  * _hardware_enqueue: configures a request at hardware level
  * @hwep:   endpoint
@@ -552,6 +673,8 @@ static int _hardware_enqueue(struct ci_hw_ep *hwep, struct ci_hw_req *hwreq)
 	struct ci_hdrc *ci = hwep->ci;
 	int ret = 0;
 	struct td_node *firstnode, *lastnode;
+	unsigned int bounced_size;
+	struct scatterlist *sg;
 
 	/* don't queue twice */
 	if (hwreq->req.status == -EALREADY)
@@ -559,10 +682,28 @@ static int _hardware_enqueue(struct ci_hw_ep *hwep, struct ci_hw_req *hwreq)
 
 	hwreq->req.status = -EALREADY;
 
+	if (hwreq->req.num_sgs && hwreq->req.length &&
+		ci->has_short_pkt_limit) {
+		ret = sglist_get_invalid_entry(ci->dev->parent, hwep->dir,
+					&hwreq->req);
+		if (ret < hwreq->req.num_sgs) {
+			ret = sglist_do_bounce(hwreq, ret, hwep->dir == TX,
+					&bounced_size);
+			if (ret)
+				return ret;
+		}
+	}
+
 	ret = usb_gadget_map_request_by_dev(ci->dev->parent,
 					    &hwreq->req, hwep->dir);
 	if (ret)
 		return ret;
+
+	if (hwreq->sgt.sgl) {
+		/* We've mapped a bigger buffer, now recover the actual size */
+		sg = sg_last(hwreq->req.sg, hwreq->req.num_sgs);
+		sg_dma_len(sg) = min(sg_dma_len(sg), bounced_size);
+	}
 
 	if (hwreq->req.num_mapped_sgs)
 		ret = prepare_td_for_sg(hwep, hwreq);
@@ -612,9 +753,16 @@ static int _hardware_enqueue(struct ci_hw_ep *hwep, struct ci_hw_req *hwreq)
 		do {
 			hw_write(ci, OP_USBCMD, USBCMD_ATDTW, USBCMD_ATDTW);
 			tmp_stat = hw_read(ci, OP_ENDPTSTAT, BIT(n));
-		} while (!hw_read(ci, OP_USBCMD, USBCMD_ATDTW));
+		} while (!hw_read(ci, OP_USBCMD, USBCMD_ATDTW) && tmp_stat);
 		hw_write(ci, OP_USBCMD, USBCMD_ATDTW, 0);
 		if (tmp_stat)
+			goto done;
+
+		/* OP_ENDPTSTAT will be clear by HW when the endpoint met
+		 * err. This dTD don't push to dQH if current dTD point is
+		 * not the last one in previous request.
+		 */
+		if (hwep->qh.ptr->curr != cpu_to_le32(prevlastnode->dma))
 			goto done;
 	}
 
@@ -676,6 +824,7 @@ static int _hardware_dequeue(struct ci_hw_ep *hwep, struct ci_hw_req *hwreq)
 	unsigned remaining_length;
 	unsigned actual = hwreq->req.length;
 	struct ci_hdrc *ci = hwep->ci;
+	bool is_isoc = hwep->type == USB_ENDPOINT_XFER_ISOC;
 
 	if (hwreq->req.status != -EALREADY)
 		return -EINVAL;
@@ -688,7 +837,8 @@ static int _hardware_dequeue(struct ci_hw_ep *hwep, struct ci_hw_req *hwreq)
 		if ((TD_STATUS_ACTIVE & tmptoken) != 0) {
 			int n = hw_ep_bit(hwep->num, hwep->dir);
 
-			if (ci->rev == CI_REVISION_24)
+			if (ci->rev == CI_REVISION_24 ||
+			    ci->rev == CI_REVISION_22 || is_isoc)
 				if (!hw_read(ci, OP_ENDPTSTAT, BIT(n)))
 					reprime_dtd(ci, hwep, node);
 			hwreq->req.status = -EALREADY;
@@ -707,11 +857,15 @@ static int _hardware_dequeue(struct ci_hw_ep *hwep, struct ci_hw_req *hwreq)
 			hwreq->req.status = -EPROTO;
 			break;
 		} else if ((TD_STATUS_TR_ERR & hwreq->req.status)) {
-			hwreq->req.status = -EILSEQ;
-			break;
+			if (is_isoc) {
+				hwreq->req.status = 0;
+			} else {
+				hwreq->req.status = -EILSEQ;
+				break;
+			}
 		}
 
-		if (remaining_length) {
+		if (remaining_length && !is_isoc) {
 			if (hwep->dir == TX) {
 				hwreq->req.status = -EPROTO;
 				break;
@@ -731,6 +885,10 @@ static int _hardware_dequeue(struct ci_hw_ep *hwep, struct ci_hw_req *hwreq)
 
 	usb_gadget_unmap_request_by_dev(hwep->ci->dev->parent,
 					&hwreq->req, hwep->dir);
+
+	/* sglist bounced */
+	if (hwreq->sgt.sgl)
+		sglist_do_debounce(hwreq, hwep->dir == RX);
 
 	hwreq->req.actual += actual;
 
@@ -772,6 +930,13 @@ __acquires(hwep->lock)
 
 		list_del_init(&hwreq->queue);
 		hwreq->req.status = -ESHUTDOWN;
+
+		/* Unmap DMA and clean up bounce buffers before giving back */
+		usb_gadget_unmap_request_by_dev(hwep->ci->dev->parent,
+					&hwreq->req, hwep->dir);
+
+		if (hwreq->sgt.sgl)
+			sglist_do_debounce(hwreq, false);
 
 		if (hwreq->req.complete != NULL) {
 			spin_unlock(hwep->lock);
@@ -876,6 +1041,7 @@ __releases(ci->lock)
 __acquires(ci->lock)
 {
 	int retval;
+	u32 intr;
 
 	spin_unlock(&ci->lock);
 	if (ci->gadget.speed != USB_SPEED_UNKNOWN)
@@ -888,6 +1054,11 @@ __acquires(ci->lock)
 	retval = hw_usb_reset(ci);
 	if (retval)
 		goto done;
+
+	/* clear SLI */
+	hw_write(ci, OP_USBSTS, USBi_SLI, USBi_SLI);
+	intr = hw_read(ci, OP_USBINTR, ~0);
+	hw_write(ci, OP_USBINTR, ~0, intr | USBi_SLI);
 
 	ci->status = usb_ep_alloc_request(&ci->ep0in->ep, GFP_ATOMIC);
 	if (ci->status == NULL)
@@ -950,6 +1121,12 @@ static int _ep_queue(struct usb_ep *ep, struct usb_request *req,
 	if (usb_endpoint_xfer_isoc(hwep->ep.desc) &&
 	    hwreq->req.length > hwep->ep.mult * hwep->ep.maxpacket) {
 		dev_err(hwep->ci->dev, "request length too big for isochronous\n");
+		return -EMSGSIZE;
+	}
+
+	if (ci->has_short_pkt_limit &&
+		hwreq->req.length > CI_MAX_REQ_SIZE) {
+		dev_err(hwep->ci->dev, "request length too big (max 16KB)\n");
 		return -EMSGSIZE;
 	}
 
@@ -1468,7 +1645,7 @@ static struct usb_request *ep_alloc_request(struct usb_ep *ep, gfp_t gfp_flags)
 	if (ep == NULL)
 		return NULL;
 
-	hwreq = kzalloc(sizeof(struct ci_hw_req), gfp_flags);
+	hwreq = kzalloc_obj(struct ci_hw_req, gfp_flags);
 	if (hwreq != NULL) {
 		INIT_LIST_HEAD(&hwreq->queue);
 		INIT_LIST_HEAD(&hwreq->tds);
@@ -1567,6 +1744,9 @@ static int ep_dequeue(struct usb_ep *ep, struct usb_request *req)
 
 	usb_gadget_unmap_request(&hwep->ci->gadget, req, hwep->dir);
 
+	if (hwreq->sgt.sgl)
+		sglist_do_debounce(hwreq, false);
+
 	req->status = -ECONNRESET;
 
 	if (hwreq->req.complete != NULL) {
@@ -1654,6 +1834,20 @@ static const struct usb_ep_ops usb_ep_ops = {
 /******************************************************************************
  * GADGET block
  *****************************************************************************/
+
+static void ci_udc_enable_vbus_irq(struct ci_hdrc *ci, bool enable)
+{
+	u32 reg = OTGSC_BSVIS;
+
+	if (!ci->is_otg)
+		return;
+
+	if (enable)
+		reg |= OTGSC_BSVIE;
+
+	/* Clear pending BSVIS and enable/disable BSVIE */
+	hw_write_otgsc(ci, OTGSC_BSVIE | OTGSC_BSVIS, reg);
+}
 
 static int ci_udc_get_frame(struct usb_gadget *_gadget)
 {
@@ -1797,6 +1991,11 @@ static int ci_udc_pullup(struct usb_gadget *_gadget, int is_on)
 		hw_write(ci, OP_USBCMD, USBCMD_RS, USBCMD_RS);
 	else
 		hw_write(ci, OP_USBCMD, USBCMD_RS, 0);
+
+	if (ci->platdata->notify_event) {
+		_gadget->connected = is_on;
+		ci->platdata->notify_event(ci, CI_HDRC_CONTROLLER_PULLUP_EVENT);
+	}
 	pm_runtime_put_sync(ci->dev);
 
 	return 0;
@@ -1844,6 +2043,8 @@ static const struct usb_gadget_ops usb_gadget_ops = {
 static int init_eps(struct ci_hdrc *ci)
 {
 	int retval = 0, i, j;
+
+	memset(ci->ci_hw_ep, 0, sizeof(ci->ci_hw_ep));
 
 	for (i = 0; i < ci->hw_ep_max/2; i++)
 		for (j = RX; j <= TX; j++) {
@@ -2056,7 +2257,7 @@ static irqreturn_t udc_irq(struct ci_hdrc *ci)
 			}
 		}
 
-		if (USBi_UI  & intr)
+		if ((USBi_UI | USBi_UEI) & intr)
 			isr_tr_complete_handler(ci);
 
 		if ((USBi_SLI & intr) && !(ci->suspended)) {
@@ -2089,6 +2290,8 @@ static int udc_start(struct ci_hdrc *ci)
 	struct device *dev = ci->dev;
 	struct usb_otg_caps *otg_caps = &ci->platdata->ci_otg_caps;
 	int retval = 0;
+
+	memset(&ci->gadget, 0, sizeof(ci->gadget));
 
 	ci->gadget.ops          = &usb_gadget_ops;
 	ci->gadget.speed        = USB_SPEED_UNKNOWN;
@@ -2128,10 +2331,15 @@ static int udc_start(struct ci_hdrc *ci)
 
 	ci->gadget.ep0 = &ci->ep0in->ep;
 
+	if (ci->platdata->pins_device)
+		pinctrl_select_state(ci->platdata->pctl,
+				     ci->platdata->pins_device);
+
 	retval = usb_add_gadget_udc(dev, &ci->gadget);
 	if (retval)
 		goto destroy_eps;
 
+	ci_udc_enable_vbus_irq(ci, true);
 	return retval;
 
 destroy_eps:
@@ -2143,48 +2351,20 @@ free_qh_pool:
 	return retval;
 }
 
-/*
- * ci_hdrc_gadget_destroy: parent remove must call this to remove UDC
- *
- * No interrupts active, the IRQ has been released
+/**
+ * udc_stop: deinitialize gadget role
+ * @ci: chipidea controller
  */
-void ci_hdrc_gadget_destroy(struct ci_hdrc *ci)
+static void udc_stop(struct ci_hdrc *ci)
 {
-	if (!ci->roles[CI_ROLE_GADGET])
-		return;
-
+	ci_udc_enable_vbus_irq(ci, false);
 	usb_del_gadget_udc(&ci->gadget);
+	ci->vbus_active = 0;
 
 	destroy_eps(ci);
 
 	dma_pool_destroy(ci->td_pool);
 	dma_pool_destroy(ci->qh_pool);
-}
-
-static int udc_id_switch_for_device(struct ci_hdrc *ci)
-{
-	if (ci->platdata->pins_device)
-		pinctrl_select_state(ci->platdata->pctl,
-				     ci->platdata->pins_device);
-
-	if (ci->is_otg)
-		/* Clear and enable BSV irq */
-		hw_write_otgsc(ci, OTGSC_BSVIS | OTGSC_BSVIE,
-					OTGSC_BSVIS | OTGSC_BSVIE);
-
-	return 0;
-}
-
-static void udc_id_switch_for_host(struct ci_hdrc *ci)
-{
-	/*
-	 * host doesn't care B_SESSION_VALID event
-	 * so clear and disable BSV irq
-	 */
-	if (ci->is_otg)
-		hw_write_otgsc(ci, OTGSC_BSVIE | OTGSC_BSVIS, OTGSC_BSVIS);
-
-	ci->vbus_active = 0;
 
 	if (ci->platdata->pins_device && ci->platdata->pins_default)
 		pinctrl_select_state(ci->platdata->pctl,
@@ -2201,16 +2381,21 @@ static void udc_suspend(struct ci_hdrc *ci)
 	 */
 	if (hw_read(ci, OP_ENDPTLISTADDR, ~0) == 0)
 		hw_write(ci, OP_ENDPTLISTADDR, ~0, ~0);
+
+	if (ci->gadget.connected &&
+	    (!ci->suspended || !device_may_wakeup(ci->dev)))
+		usb_gadget_disconnect(&ci->gadget);
 }
 
 static void udc_resume(struct ci_hdrc *ci, bool power_lost)
 {
 	if (power_lost) {
-		if (ci->is_otg)
-			hw_write_otgsc(ci, OTGSC_BSVIS | OTGSC_BSVIE,
-					OTGSC_BSVIS | OTGSC_BSVIE);
+		ci_udc_enable_vbus_irq(ci, true);
 		if (ci->vbus_active)
 			usb_gadget_vbus_disconnect(&ci->gadget);
+	} else if (ci->vbus_active && ci->driver &&
+		   !ci->gadget.connected) {
+		usb_gadget_connect(&ci->gadget);
 	}
 
 	/* Restore value 0 if it was set for power lost check */
@@ -2228,7 +2413,6 @@ static void udc_resume(struct ci_hdrc *ci, bool power_lost)
 int ci_hdrc_gadget_init(struct ci_hdrc *ci)
 {
 	struct ci_role_driver *rdrv;
-	int ret;
 
 	if (!hw_read(ci, CAP_DCCPARAMS, DCCPARAMS_DC))
 		return -ENXIO;
@@ -2237,8 +2421,8 @@ int ci_hdrc_gadget_init(struct ci_hdrc *ci)
 	if (!rdrv)
 		return -ENOMEM;
 
-	rdrv->start	= udc_id_switch_for_device;
-	rdrv->stop	= udc_id_switch_for_host;
+	rdrv->start	= udc_start;
+	rdrv->stop	= udc_stop;
 #ifdef CONFIG_PM_SLEEP
 	rdrv->suspend	= udc_suspend;
 	rdrv->resume	= udc_resume;
@@ -2246,9 +2430,22 @@ int ci_hdrc_gadget_init(struct ci_hdrc *ci)
 	rdrv->irq	= udc_irq;
 	rdrv->name	= "gadget";
 
-	ret = udc_start(ci);
-	if (!ret)
-		ci->roles[CI_ROLE_GADGET] = rdrv;
+	ci->roles[CI_ROLE_GADGET] = rdrv;
 
-	return ret;
+	/* Pull down DP for possible charger detection */
+	hw_write(ci, OP_USBCMD, USBCMD_RS, 0);
+	return 0;
+}
+
+/*
+ * ci_hdrc_gadget_destroy: parent remove must call this to remove UDC
+ *
+ * No interrupts active, the IRQ has been released
+ */
+void ci_hdrc_gadget_destroy(struct ci_hdrc *ci)
+{
+	struct device *dev = &ci->gadget.dev;
+
+	if (ci->roles[CI_ROLE_GADGET] && device_is_registered(dev))
+		udc_stop(ci);
 }

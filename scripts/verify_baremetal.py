@@ -108,14 +108,14 @@ def main():
         results.append('mounted_partition_rejected=PASS')
         guest.stop(); guest = None
         guest = Guest('bios-disk')
-        guest.command('grep -q "xtos.root=" /proc/cmdline && [ "$(cat /sys/kernel/realtime)" = 1 ] && xtos-selftest')
+        guest.command('grep -q "xtos.root=" /proc/cmdline && [ "$(/usr/bin/xtos-rt-status)" = 1 ] && xtos-selftest')
         results.append('bios_disk_modules_sdk_selftest=PASS')
         guest.command(f'xtos-install /dev/nvme0n1 {SERIAL} {SIZE} ERASE-XTOS; [ "$?" -ne 0 ]')
         results.append('non_installer_rejected=PASS')
         guest.command('echo XTOS_PERSISTENT_TEST > /root/persistence-test; sync')
         guest.stop(reboot=True); guest = None
         guest = Guest('bios-reboot')
-        guest.command('grep -qx XTOS_PERSISTENT_TEST /root/persistence-test && [ "$(cat /sys/kernel/realtime)" = 1 ] && xtos-selftest')
+        guest.command('grep -qx XTOS_PERSISTENT_TEST /root/persistence-test && [ "$(/usr/bin/xtos-rt-status)" = 1 ] && xtos-selftest')
         results.append('bios_reboot_persistence_selftest=PASS')
         guest.stop(); guest = None
         guest = Guest('uefi-disk', efi=True)
@@ -123,7 +123,7 @@ def main():
         results.append('uefi_fallback_disk_selftest=PASS')
         guest.stop(); guest = None
         guest = Guest('uefi-iso', iso=True, efi=True)
-        guest.command('grep -qw xtos.installer=1 /proc/cmdline && [ -d /sys/firmware/efi ] && [ "$(cat /sys/kernel/realtime)" = 1 ]')
+        guest.command('grep -qw xtos.installer=1 /proc/cmdline && [ -d /sys/firmware/efi ] && [ "$(/usr/bin/xtos-rt-status)" = 1 ]')
         results.append('uefi_iso_boot=PASS')
         guest.stop(); guest = None
         report = {'results': results, 'iso_sha256': hashlib.sha256(ISO.read_bytes()).hexdigest(), 'iso': str(ISO), 'disk': str(DISK), 'serial': SERIAL, 'bytes': SIZE, 'scope': 'QEMU TCG only; no physical hardware validation'}

@@ -1,4 +1,4 @@
-#!/bin/sh
+#!/bin/bash
 # SPDX-License-Identifier: GPL-2.0
 
 # Author: Taehee Yoo <ap420073@gmail.com>
@@ -73,10 +73,13 @@
 #       +------------------------+
 #==============================================================================
 
+source lib.sh
+
 readonly LISTENER=$(mktemp -u listener-XXXXXXXX)
 readonly GATEWAY=$(mktemp -u gateway-XXXXXXXX)
 readonly RELAY=$(mktemp -u relay-XXXXXXXX)
 readonly SOURCE=$(mktemp -u source-XXXXXXXX)
+readonly SMCROUTEDIR="$(mktemp -d)"
 ERR=4
 err=0
 
@@ -85,6 +88,11 @@ exit_cleanup()
 	for ns in "$@"; do
 		ip netns delete "${ns}" 2>/dev/null || true
 	done
+	if [ -f "$SMCROUTEDIR/amt.pid" ]; then
+		smcpid=$(< $SMCROUTEDIR/amt.pid)
+		kill $smcpid
+	fi
+	rm -rf $SMCROUTEDIR
 
 	exit $ERR
 }
@@ -142,6 +150,13 @@ setup_interface()
 	ip netns exec "${RELAY}" ip a a 10.0.0.2/24 dev relay_gw
 	ip netns exec "${RELAY}" ip link add amtr type amt mode relay \
 		local 10.0.0.2 dev relay_gw relay_port 2268 max_tunnels 4
+	# Count the IGMP and MLD queries that leave the relay through its own
+	# amt device; test_query_egress expects none.
+	ip netns exec "${RELAY}" tc qdisc add dev amtr clsact
+	ip netns exec "${RELAY}" tc filter add dev amtr egress pref 1 \
+		protocol ip flower ip_proto 0x2 action pass
+	ip netns exec "${RELAY}" tc filter add dev amtr egress pref 2 \
+		protocol ipv6 flower ip_proto icmpv6 type 130 action pass
 	ip netns exec "${RELAY}" ip a a 172.17.0.1/24 dev relay_src
 	ip netns exec "${RELAY}" ip a a 2001:db8:3::1/64 dev relay_src
 	ip netns exec "${SOURCE}" ip a a 172.17.0.2/24 dev src_relay
@@ -167,7 +182,7 @@ setup_iptables()
 
 setup_mcast_routing()
 {
-	ip netns exec "${RELAY}" smcrouted
+	ip netns exec "${RELAY}" smcrouted -P $SMCROUTEDIR/amt.pid
 	ip netns exec "${RELAY}" smcroutectl a relay_src \
 		172.17.0.2 239.0.0.1 amtr
 	ip netns exec "${RELAY}" smcroutectl a relay_src \
@@ -188,15 +203,21 @@ test_remote_ip()
 
 send_mcast_torture4()
 {
-	ip netns exec "${SOURCE}" bash -c \
-		'cat /dev/urandom | head -c 1G | nc -w 1 -u 239.0.0.1 4001'
+	for i in `seq 10`; do
+		ip netns exec "${SOURCE}" bash -c \
+		   'cat /dev/urandom | head -c 100M | nc -w 1 -u 239.0.0.1 4001'
+		echo -n "."
+	done
 }
 
 
 send_mcast_torture6()
 {
-	ip netns exec "${SOURCE}" bash -c \
-		'cat /dev/urandom | head -c 1G | nc -w 1 -u ff0e::5:6 6001'
+	for i in `seq 10`; do
+		ip netns exec "${SOURCE}" bash -c \
+		   'cat /dev/urandom | head -c 100M | nc -w 1 -u ff0e::5:6 6001'
+		echo -n "."
+	done
 }
 
 check_features()
@@ -210,8 +231,8 @@ check_features()
 
 test_ipv4_forward()
 {
-	RESULT4=$(ip netns exec "${LISTENER}" nc -w 1 -l -u 239.0.0.1 4000)
-	if [ "$RESULT4" == "172.17.0.2" ]; then
+	RESULT4=$(ip netns exec "${LISTENER}" timeout 15 socat - UDP4-LISTEN:4000,readbytes=128 || true)
+	if echo "$RESULT4" | grep -q "172.17.0.2"; then
 		printf "TEST: %-60s  [ OK ]\n" "IPv4 amt multicast forwarding"
 		exit 0
 	else
@@ -222,8 +243,8 @@ test_ipv4_forward()
 
 test_ipv6_forward()
 {
-	RESULT6=$(ip netns exec "${LISTENER}" nc -w 1 -l -u ff0e::5:6 6000)
-	if [ "$RESULT6" == "2001:db8:3::2" ]; then
+	RESULT6=$(ip netns exec "${LISTENER}" timeout 15 socat - UDP6-LISTEN:6000,readbytes=128 || true)
+	if echo "$RESULT6" | grep -q "2001:db8:3::2"; then
 		printf "TEST: %-60s  [ OK ]\n" "IPv6 amt multicast forwarding"
 		exit 0
 	else
@@ -232,18 +253,40 @@ test_ipv6_forward()
 	fi
 }
 
+# The relay sends its General Queries straight from the receive path, in
+# the same context that found the tunnel. A query queued on the amt device
+# instead could outlive the tunnel it was built for. The forwarding tests
+# above show that the gateway got its queries.
+test_query_egress()
+{
+	local n4 n6
+
+	n4=$(ip netns exec "${RELAY}" tc -s -j filter show dev amtr egress \
+		pref 1 | jq '[.[].options.actions[0].stats.packets // empty] | add // 0')
+	n6=$(ip netns exec "${RELAY}" tc -s -j filter show dev amtr egress \
+		pref 2 | jq '[.[].options.actions[0].stats.packets // empty] | add // 0')
+	if [ "$n4" -eq 0 ] && [ "$n6" -eq 0 ]; then
+		printf "TEST: %-60s  [ OK ]\n" "amt relay queries bypass the amt device"
+	else
+		printf "TEST: %-60s  [FAIL]\n" "amt relay queries bypass the amt device"
+		echo "IGMP queries on amtr egress: $n4, MLD queries: $n6" >&2
+		ERR=1
+	fi
+}
+
 send_mcast4()
 {
-	sleep 2
+	sleep 5
+	wait_local_port_listen ${LISTENER} 4000 udp
 	ip netns exec "${SOURCE}" bash -c \
-		'echo 172.17.0.2 | nc -w 1 -u 239.0.0.1 4000' &
+		'printf "%s %128s" 172.17.0.2 | nc -w 1 -u 239.0.0.1 4000' &
 }
 
 send_mcast6()
 {
-	sleep 2
+	wait_local_port_listen ${LISTENER} 6000 udp
 	ip netns exec "${SOURCE}" bash -c \
-		'echo 2001:db8:3::2 | nc -w 1 -u ff0e::5:6 6000' &
+		'printf "%s %128s" 2001:db8:3::2 | nc -w 1 -u ff0e::5:6 6000' &
 }
 
 check_features
@@ -272,10 +315,13 @@ wait $pid || err=$?
 if [ $err -eq 1 ]; then
 	ERR=1
 fi
+test_query_egress
+printf "TEST: %-50s" "IPv4 amt traffic forwarding torture"
 send_mcast_torture4
-printf "TEST: %-60s  [ OK ]\n" "IPv4 amt traffic forwarding torture"
+printf "  [ OK ]\n"
+printf "TEST: %-50s" "IPv6 amt traffic forwarding torture"
 send_mcast_torture6
-printf "TEST: %-60s  [ OK ]\n" "IPv6 amt traffic forwarding torture"
+printf "  [ OK ]\n"
 sleep 5
 if [ "${ERR}" -eq 1 ]; then
         echo "Some tests failed." >&2

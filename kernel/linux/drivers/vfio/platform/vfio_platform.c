@@ -85,14 +85,13 @@ static void vfio_platform_release_dev(struct vfio_device *core_vdev)
 	vfio_platform_release_common(vdev);
 }
 
-static int vfio_platform_remove(struct platform_device *pdev)
+static void vfio_platform_remove(struct platform_device *pdev)
 {
 	struct vfio_platform_device *vdev = dev_get_drvdata(&pdev->dev);
 
 	vfio_unregister_group_dev(&vdev->vdev);
 	pm_runtime_disable(vdev->device);
 	vfio_put_device(&vdev->vdev);
-	return 0;
 }
 
 static const struct vfio_device_ops vfio_platform_ops = {
@@ -102,6 +101,7 @@ static const struct vfio_device_ops vfio_platform_ops = {
 	.open_device	= vfio_platform_open_device,
 	.close_device	= vfio_platform_close_device,
 	.ioctl		= vfio_platform_ioctl,
+	.get_region_info_caps = vfio_platform_ioctl_get_region_info,
 	.read		= vfio_platform_read,
 	.write		= vfio_platform_write,
 	.mmap		= vfio_platform_mmap,

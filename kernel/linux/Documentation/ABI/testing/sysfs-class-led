@@ -22,8 +22,8 @@ Description:
 		  For additional details please refer to
 		  Documentation/leds/leds-class-multicolor.rst.
 
-		The value is between 0 and
-		/sys/class/leds/<led>/max_brightness.
+		The value is between 0 and /sys/class/leds/<led>/max_brightness
+		and is represented by as a decimal.
 
 		Writing 0 to this file clears active trigger.
 
@@ -59,15 +59,6 @@ Description:
 		brightness. Reading this file when no hw brightness change
 		event has happened will return an ENODATA error.
 
-What:		/sys/class/leds/<led>/color
-Date:		June 2023
-KernelVersion:	6.5
-Description:
-		Color of the LED.
-
-		This is a read-only file. Reading this file returns the color
-		of the LED as a string (e.g: "red", "green", "multicolor").
-
 What:		/sys/class/leds/<led>/trigger
 Date:		March 2006
 KernelVersion:	2.6.17
@@ -80,6 +71,12 @@ Description:
 		scheduler is chosen. Trigger specific parameters can appear in
 		/sys/class/leds/<led> once a given trigger is selected. For
 		their documentation see `sysfs-class-led-trigger-*`.
+
+		Writing "none" removes the trigger for this LED.
+
+		Writing "default" sets the trigger to the LED's default trigger
+		(which would often be configured in the device tree for the
+		hardware).
 
 What:		/sys/class/leds/<led>/inverted
 Date:		January 2011

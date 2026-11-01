@@ -106,6 +106,12 @@ err_clear_ctx:
  */
 static int dh_is_pubkey_valid(struct dh_ctx *ctx, MPI y)
 {
+	MPI val, q;
+	int ret;
+
+	if (!fips_enabled)
+		return 0;
+
 	if (unlikely(!ctx->p))
 		return -EINVAL;
 
@@ -125,40 +131,35 @@ static int dh_is_pubkey_valid(struct dh_ctx *ctx, MPI y)
 	 *
 	 * For the safe-prime groups q = (p - 1)/2.
 	 */
-	if (fips_enabled) {
-		MPI val, q;
-		int ret;
+	val = mpi_alloc(0);
+	if (!val)
+		return -ENOMEM;
 
-		val = mpi_alloc(0);
-		if (!val)
-			return -ENOMEM;
-
-		q = mpi_alloc(mpi_get_nlimbs(ctx->p));
-		if (!q) {
-			mpi_free(val);
-			return -ENOMEM;
-		}
-
-		/*
-		 * ->p is odd, so no need to explicitly subtract one
-		 * from it before shifting to the right.
-		 */
-		mpi_rshift(q, ctx->p, 1);
-
-		ret = mpi_powm(val, y, q, ctx->p);
-		mpi_free(q);
-		if (ret) {
-			mpi_free(val);
-			return ret;
-		}
-
-		ret = mpi_cmp_ui(val, 1);
-
+	q = mpi_alloc(mpi_get_nlimbs(ctx->p));
+	if (!q) {
 		mpi_free(val);
-
-		if (ret != 0)
-			return -EINVAL;
+		return -ENOMEM;
 	}
+
+	/*
+	 * ->p is odd, so no need to explicitly subtract one
+	 * from it before shifting to the right.
+	 */
+	ret = mpi_rshift(q, ctx->p, 1) ?:
+	      mpi_powm(val, y, q, ctx->p);
+
+	mpi_free(q);
+	if (ret) {
+		mpi_free(val);
+		return ret;
+	}
+
+	ret = mpi_cmp_ui(val, 1);
+
+	mpi_free(val);
+
+	if (ret != 0)
+		return -EINVAL;
 
 	return 0;
 }
@@ -387,13 +388,7 @@ static void *dh_safe_prime_gen_privkey(const struct dh_safe_prime *safe_prime,
 	 * 5.6.1.1.3, step 3 (and implicitly step 4): obtain N + 64
 	 * random bits and interpret them as a big endian integer.
 	 */
-	err = -EFAULT;
-	if (crypto_get_default_rng())
-		goto out_err;
-
-	err = crypto_rng_get_bytes(crypto_default_rng, (u8 *)key,
-				   oversampling_size);
-	crypto_put_default_rng();
+	err = crypto_stdrng_get_bytes(key, oversampling_size);
 	if (err)
 		goto out_err;
 
@@ -919,7 +914,7 @@ static void __exit dh_exit(void)
 	crypto_unregister_kpp(&dh);
 }
 
-subsys_initcall(dh_init);
+module_init(dh_init);
 module_exit(dh_exit);
 MODULE_ALIAS_CRYPTO("dh");
 MODULE_LICENSE("GPL");

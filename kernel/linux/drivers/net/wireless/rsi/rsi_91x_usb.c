@@ -232,17 +232,17 @@ static int rsi_usb_reg_write(struct usb_device *usbdev,
 	if (!usb_reg_buf)
 		return status;
 
-	usb_reg_buf[0] = (cpu_to_le32(value) & 0x00ff);
-	usb_reg_buf[1] = (cpu_to_le32(value) & 0xff00) >> 8;
-	usb_reg_buf[2] = (cpu_to_le32(value) & 0x00ff0000) >> 16;
-	usb_reg_buf[3] = (cpu_to_le32(value) & 0xff000000) >> 24;
+	usb_reg_buf[0] = value & 0x00ff;
+	usb_reg_buf[1] = (value & 0xff00) >> 8;
+	usb_reg_buf[2] = (value & 0x00ff0000) >> 16;
+	usb_reg_buf[3] = (value & 0xff000000) >> 24;
 
 	status = usb_control_msg(usbdev,
 				 usb_sndctrlpipe(usbdev, 0),
 				 USB_VENDOR_REGISTER_WRITE,
 				 RSI_USB_REQ_OUT,
-				 ((cpu_to_le32(reg) & 0xffff0000) >> 16),
-				 (cpu_to_le32(reg) & 0xffff),
+				 (reg & 0xffff0000) >> 16,
+				 reg & 0xffff,
 				 (void *)usb_reg_buf,
 				 len,
 				 USB_CTRL_SET_TIMEOUT);
@@ -620,7 +620,7 @@ static int rsi_init_usb_interface(struct rsi_hw *adapter,
 	struct rsi_91x_usbdev *rsi_dev;
 	int status;
 
-	rsi_dev = kzalloc(sizeof(*rsi_dev), GFP_KERNEL);
+	rsi_dev = kzalloc_obj(*rsi_dev);
 	if (!rsi_dev)
 		return -ENOMEM;
 
@@ -876,6 +876,8 @@ static void rsi_disconnect(struct usb_interface *pfunction)
 
 	if (!adapter)
 		return;
+
+	rsi_mac80211_rfkill_exit(adapter);
 
 	rsi_mac80211_detach(adapter);
 

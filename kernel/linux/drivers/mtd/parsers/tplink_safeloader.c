@@ -82,7 +82,7 @@ static int mtd_parser_tplink_safeloader_parse(struct mtd_info *mtd,
 	int idx;
 	int err;
 
-	parts = kcalloc(TPLINK_SAFELOADER_MAX_PARTS, sizeof(*parts), GFP_KERNEL);
+	parts = kzalloc_objs(*parts, TPLINK_SAFELOADER_MAX_PARTS);
 	if (!parts) {
 		err = -ENOMEM;
 		goto err_out;
@@ -116,6 +116,7 @@ static int mtd_parser_tplink_safeloader_parse(struct mtd_info *mtd,
 	return idx;
 
 err_free:
+	kfree(buf);
 	for (idx -= 1; idx >= 0; idx--)
 		kfree(parts[idx].name);
 err_free_parts:
@@ -149,4 +150,5 @@ static struct mtd_part_parser mtd_parser_tplink_safeloader = {
 };
 module_mtd_part_parser(mtd_parser_tplink_safeloader);
 
+MODULE_DESCRIPTION("TP-Link Safeloader partitions parser");
 MODULE_LICENSE("GPL");

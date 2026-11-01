@@ -1289,9 +1289,9 @@ static int rtd_auto_attach(struct comedi_device *dev,
 
 	/* 8254 Timer/Counter subdevice */
 	s = &dev->subdevices[3];
-	dev->pacer = comedi_8254_mm_init(dev->mmio + LAS0_8254_TIMER_BASE,
-					 RTD_CLOCK_BASE, I8254_IO8, 2);
-	if (!dev->pacer)
+	dev->pacer = comedi_8254_mm_alloc(dev->mmio + LAS0_8254_TIMER_BASE,
+					  RTD_CLOCK_BASE, I8254_IO8, 2);
+	if (IS_ERR(dev->pacer))
 		return -ENOMEM;
 
 	comedi_8254_subdevice_init(s, dev->pacer);
@@ -1345,9 +1345,9 @@ static int rtd520_pci_probe(struct pci_dev *dev,
 }
 
 static const struct pci_device_id rtd520_pci_table[] = {
-	{ PCI_VDEVICE(RTD, 0x7520), BOARD_DM7520 },
-	{ PCI_VDEVICE(RTD, 0x4520), BOARD_PCI4520 },
-	{ 0 }
+	{ PCI_VDEVICE(RTD, 0x7520), .driver_data = BOARD_DM7520 },
+	{ PCI_VDEVICE(RTD, 0x4520), .driver_data = BOARD_PCI4520 },
+	{ }
 };
 MODULE_DEVICE_TABLE(pci, rtd520_pci_table);
 

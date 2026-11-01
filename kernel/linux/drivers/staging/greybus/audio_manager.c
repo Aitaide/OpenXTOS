@@ -44,14 +44,14 @@ int gb_audio_manager_add(struct gb_audio_manager_module_descriptor *desc)
 	int id;
 	int err;
 
-	id = ida_simple_get(&module_id, 0, 0, GFP_KERNEL);
+	id = ida_alloc(&module_id, GFP_KERNEL);
 	if (id < 0)
 		return id;
 
 	err = gb_audio_manager_module_create(&module, manager_kset,
 					     id, desc);
 	if (err) {
-		ida_simple_remove(&module_id, id);
+		ida_free(&module_id, id);
 		return err;
 	}
 
@@ -78,7 +78,7 @@ int gb_audio_manager_remove(int id)
 	list_del(&module->list);
 	kobject_put(&module->kobj);
 	up_write(&modules_rwsem);
-	ida_simple_remove(&module_id, id);
+	ida_free(&module_id, id);
 	return 0;
 }
 EXPORT_SYMBOL_GPL(gb_audio_manager_remove);
@@ -92,7 +92,7 @@ void gb_audio_manager_remove_all(void)
 
 	list_for_each_entry_safe(module, next, &modules_list, list) {
 		list_del(&module->list);
-		ida_simple_remove(&module_id, module->id);
+		ida_free(&module_id, module->id);
 		kobject_put(&module->kobj);
 	}
 
@@ -104,18 +104,6 @@ void gb_audio_manager_remove_all(void)
 		pr_warn("Not all nodes were deleted\n");
 }
 EXPORT_SYMBOL_GPL(gb_audio_manager_remove_all);
-
-struct gb_audio_manager_module *gb_audio_manager_get_module(int id)
-{
-	struct gb_audio_manager_module *module;
-
-	down_read(&modules_rwsem);
-	module = gb_audio_manager_get_locked(id);
-	kobject_get(&module->kobj);
-	up_read(&modules_rwsem);
-	return module;
-}
-EXPORT_SYMBOL_GPL(gb_audio_manager_get_module);
 
 void gb_audio_manager_put_module(struct gb_audio_manager_module *module)
 {
@@ -182,5 +170,6 @@ static void __exit manager_exit(void)
 module_init(manager_init);
 module_exit(manager_exit);
 
+MODULE_DESCRIPTION("Greybus audio operations manager");
 MODULE_LICENSE("GPL");
 MODULE_AUTHOR("Svetlin Ankov <ankov_svetlin@projectara.com>");

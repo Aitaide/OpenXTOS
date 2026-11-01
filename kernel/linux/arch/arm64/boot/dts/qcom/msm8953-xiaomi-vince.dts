@@ -113,6 +113,7 @@
 		reg = <0x45>;
 
 		vcc-supply = <&pm8953_l10>;
+		vio-supply = <&pm8953_l5>;
 
 		#address-cells = <1>;
 		#size-cells = <0>;
@@ -168,7 +169,7 @@
 
 &pmi8950_wled {
 	qcom,current-limit-microamp = <20000>;
-	qcom,ovp-millivolt = <29600>;
+	qcom,ovp-millivolt = <29500>;
 	qcom,num-strings = <2>;
 	qcom,external-pfet;
 	qcom,cabc;
@@ -356,5 +357,6 @@
 };
 
 &usb3_dwc3 {
+	/delete-property/ usb-role-switch;
 	dr_mode = "peripheral";
 };

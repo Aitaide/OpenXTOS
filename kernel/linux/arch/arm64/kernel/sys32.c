@@ -5,17 +5,12 @@
  * Copyright (C) 2015 ARM Ltd.
  */
 
-/*
- * Needed to avoid conflicting __NR_* macros between uapi/asm/unistd.h and
- * asm/unistd32.h.
- */
-#define __COMPAT_SYSCALL_NR
-
 #include <linux/compat.h>
 #include <linux/compiler.h>
 #include <linux/syscalls.h>
 
 #include <asm/syscall.h>
+#include <asm/unistd_compat_32.h>
 
 asmlinkage long compat_sys_sigreturn(void);
 asmlinkage long compat_sys_rt_sigreturn(void);
@@ -94,7 +89,7 @@ COMPAT_SYSCALL_DEFINE4(aarch32_truncate64, const char __user *, pathname,
 COMPAT_SYSCALL_DEFINE4(aarch32_ftruncate64, unsigned int, fd, u32, __pad,
 		       arg_u32p(length))
 {
-	return ksys_ftruncate(fd, arg_u64(length));
+	return ksys_ftruncate(fd, arg_u64(length), FTRUNCATE_LFS);
 }
 
 COMPAT_SYSCALL_DEFINE5(aarch32_readahead, int, fd, u32, __pad,
@@ -122,14 +117,16 @@ COMPAT_SYSCALL_DEFINE6(aarch32_fallocate, int, fd, int, mode,
 	return ksys_fallocate(fd, mode, arg_u64(offset), arg_u64(len));
 }
 
+#define __SYSCALL_WITH_COMPAT(nr, sym, compat) __SYSCALL(nr, compat)
+
 #undef __SYSCALL
 #define __SYSCALL(nr, sym)	asmlinkage long __arm64_##sym(const struct pt_regs *);
-#include <asm/unistd32.h>
+#include <asm/syscall_table_32.h>
 
 #undef __SYSCALL
 #define __SYSCALL(nr, sym)	[nr] = __arm64_##sym,
 
-const syscall_fn_t compat_sys_call_table[__NR_compat_syscalls] = {
-	[0 ... __NR_compat_syscalls - 1] = __arm64_sys_ni_syscall,
-#include <asm/unistd32.h>
+const syscall_fn_t compat_sys_call_table[__NR_compat32_syscalls] = {
+	[0 ... __NR_compat32_syscalls - 1] = __arm64_sys_ni_syscall,
+#include <asm/syscall_table_32.h>
 };

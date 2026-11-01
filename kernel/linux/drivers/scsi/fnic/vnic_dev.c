@@ -143,6 +143,10 @@ static int vnic_dev_discover_res(struct vnic_dev *vdev,
 		vdev->res[type].vaddr = (char __iomem *)bar->vaddr + bar_offset;
 	}
 
+	pr_info("res_type_wq: %d res_type_rq: %d res_type_cq: %d res_type_intr_ctrl: %d\n",
+		vdev->res[RES_TYPE_WQ].count, vdev->res[RES_TYPE_RQ].count,
+		vdev->res[RES_TYPE_CQ].count, vdev->res[RES_TYPE_INTR_CTRL].count);
+
 	return 0;
 }
 
@@ -377,7 +381,7 @@ static int vnic_dev_cmd2(struct vnic_dev *vdev, enum vnic_devcmd_cmd cmd,
 		if (result->color == color) {
 			if (result->error) {
 				err = -(int) result->error;
-				if (err != ERR_ECMDUNKNOWN ||
+				if (err != -ERR_ECMDUNKNOWN ||
 						cmd != CMD_CAPABILITY)
 					pr_err("%s:Error %d devcmd %d\n",
 						pci_name(vdev->pdev),
@@ -418,7 +422,7 @@ static int vnic_dev_init_devcmd2(struct vnic_dev *vdev)
 	if (vdev->devcmd2)
 		return 0;
 
-	vdev->devcmd2 = kzalloc(sizeof(*vdev->devcmd2), GFP_ATOMIC);
+	vdev->devcmd2 = kzalloc_obj(*vdev->devcmd2, GFP_ATOMIC);
 	if (!vdev->devcmd2)
 		return -ENOMEM;
 
@@ -907,7 +911,7 @@ struct vnic_dev *vnic_dev_register(struct vnic_dev *vdev,
 	void *priv, struct pci_dev *pdev, struct vnic_dev_bar *bar)
 {
 	if (!vdev) {
-		vdev = kzalloc(sizeof(struct vnic_dev), GFP_KERNEL);
+		vdev = kzalloc_obj(struct vnic_dev);
 		if (!vdev)
 			return NULL;
 	}

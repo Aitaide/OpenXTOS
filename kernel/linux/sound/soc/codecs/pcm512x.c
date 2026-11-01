@@ -6,7 +6,7 @@
  *		Copyright 2014 Linaro Ltd
  */
 
-
+#include <linux/cleanup.h>
 #include <linux/init.h>
 #include <linux/module.h>
 #include <linux/clk.h>
@@ -48,6 +48,7 @@ struct pcm512x_priv {
 	int mute;
 	struct mutex mutex;
 	unsigned int bclk_ratio;
+	int force_pll_on;
 };
 
 /*
@@ -77,28 +78,10 @@ static const struct reg_default pcm512x_reg_defaults[] = {
 	{ PCM512x_POWER,             0x00 },
 	{ PCM512x_MUTE,              0x00 },
 	{ PCM512x_DSP,               0x00 },
-	{ PCM512x_PLL_REF,           0x00 },
-	{ PCM512x_DAC_REF,           0x00 },
-	{ PCM512x_DAC_ROUTING,       0x11 },
-	{ PCM512x_DSP_PROGRAM,       0x01 },
-	{ PCM512x_CLKDET,            0x00 },
-	{ PCM512x_AUTO_MUTE,         0x00 },
-	{ PCM512x_ERROR_DETECT,      0x00 },
-	{ PCM512x_DIGITAL_VOLUME_1,  0x00 },
-	{ PCM512x_DIGITAL_VOLUME_2,  0x30 },
-	{ PCM512x_DIGITAL_VOLUME_3,  0x30 },
-	{ PCM512x_DIGITAL_MUTE_1,    0x22 },
-	{ PCM512x_DIGITAL_MUTE_2,    0x00 },
-	{ PCM512x_DIGITAL_MUTE_3,    0x07 },
-	{ PCM512x_OUTPUT_AMPLITUDE,  0x00 },
-	{ PCM512x_ANALOG_GAIN_CTRL,  0x00 },
-	{ PCM512x_UNDERVOLTAGE_PROT, 0x00 },
-	{ PCM512x_ANALOG_MUTE_CTRL,  0x00 },
-	{ PCM512x_ANALOG_GAIN_BOOST, 0x00 },
-	{ PCM512x_VCOM_CTRL_1,       0x00 },
-	{ PCM512x_VCOM_CTRL_2,       0x01 },
 	{ PCM512x_BCLK_LRCLK_CFG,    0x00 },
 	{ PCM512x_MASTER_MODE,       0x7c },
+	{ PCM512x_PLL_REF,           0x00 },
+	{ PCM512x_DAC_REF,           0x00 },
 	{ PCM512x_GPIO_DACIN,        0x00 },
 	{ PCM512x_GPIO_PLLIN,        0x00 },
 	{ PCM512x_SYNCHRONIZE,       0x10 },
@@ -116,8 +99,26 @@ static const struct reg_default pcm512x_reg_defaults[] = {
 	{ PCM512x_FS_SPEED_MODE,     0x00 },
 	{ PCM512x_IDAC_1,            0x01 },
 	{ PCM512x_IDAC_2,            0x00 },
+	{ PCM512x_ERROR_DETECT,      0x00 },
 	{ PCM512x_I2S_1,             0x02 },
 	{ PCM512x_I2S_2,             0x00 },
+	{ PCM512x_DAC_ROUTING,       0x11 },
+	{ PCM512x_DSP_PROGRAM,       0x01 },
+	{ PCM512x_CLKDET,            0x00 },
+	{ PCM512x_AUTO_MUTE,         0x00 },
+	{ PCM512x_DIGITAL_VOLUME_1,  0x00 },
+	{ PCM512x_DIGITAL_VOLUME_2,  0x30 },
+	{ PCM512x_DIGITAL_VOLUME_3,  0x30 },
+	{ PCM512x_DIGITAL_MUTE_1,    0x22 },
+	{ PCM512x_DIGITAL_MUTE_2,    0x00 },
+	{ PCM512x_DIGITAL_MUTE_3,    0x07 },
+	{ PCM512x_OUTPUT_AMPLITUDE,  0x00 },
+	{ PCM512x_ANALOG_GAIN_CTRL,  0x00 },
+	{ PCM512x_UNDERVOLTAGE_PROT, 0x00 },
+	{ PCM512x_ANALOG_MUTE_CTRL,  0x00 },
+	{ PCM512x_ANALOG_GAIN_BOOST, 0x00 },
+	{ PCM512x_VCOM_CTRL_1,       0x00 },
+	{ PCM512x_VCOM_CTRL_2,       0x01 },
 };
 
 static bool pcm512x_readable(struct device *dev, unsigned int reg)
@@ -223,7 +224,7 @@ static bool pcm512x_volatile(struct device *dev, unsigned int reg)
 static int pcm512x_overclock_pll_get(struct snd_kcontrol *kcontrol,
 				     struct snd_ctl_elem_value *ucontrol)
 {
-	struct snd_soc_component *component = snd_soc_kcontrol_component(kcontrol);
+	struct snd_soc_component *component = snd_kcontrol_chip(kcontrol);
 	struct pcm512x_priv *pcm512x = snd_soc_component_get_drvdata(component);
 
 	ucontrol->value.integer.value[0] = pcm512x->overclock_pll;
@@ -233,10 +234,11 @@ static int pcm512x_overclock_pll_get(struct snd_kcontrol *kcontrol,
 static int pcm512x_overclock_pll_put(struct snd_kcontrol *kcontrol,
 				     struct snd_ctl_elem_value *ucontrol)
 {
-	struct snd_soc_component *component = snd_soc_kcontrol_component(kcontrol);
+	struct snd_soc_component *component = snd_kcontrol_chip(kcontrol);
+	struct snd_soc_dapm_context *dapm = snd_soc_component_to_dapm(component);
 	struct pcm512x_priv *pcm512x = snd_soc_component_get_drvdata(component);
 
-	switch (snd_soc_component_get_bias_level(component)) {
+	switch (snd_soc_dapm_get_bias_level(dapm)) {
 	case SND_SOC_BIAS_OFF:
 	case SND_SOC_BIAS_STANDBY:
 		break;
@@ -251,7 +253,7 @@ static int pcm512x_overclock_pll_put(struct snd_kcontrol *kcontrol,
 static int pcm512x_overclock_dsp_get(struct snd_kcontrol *kcontrol,
 				     struct snd_ctl_elem_value *ucontrol)
 {
-	struct snd_soc_component *component = snd_soc_kcontrol_component(kcontrol);
+	struct snd_soc_component *component = snd_kcontrol_chip(kcontrol);
 	struct pcm512x_priv *pcm512x = snd_soc_component_get_drvdata(component);
 
 	ucontrol->value.integer.value[0] = pcm512x->overclock_dsp;
@@ -261,10 +263,11 @@ static int pcm512x_overclock_dsp_get(struct snd_kcontrol *kcontrol,
 static int pcm512x_overclock_dsp_put(struct snd_kcontrol *kcontrol,
 				     struct snd_ctl_elem_value *ucontrol)
 {
-	struct snd_soc_component *component = snd_soc_kcontrol_component(kcontrol);
+	struct snd_soc_component *component = snd_kcontrol_chip(kcontrol);
+	struct snd_soc_dapm_context *dapm = snd_soc_component_to_dapm(component);
 	struct pcm512x_priv *pcm512x = snd_soc_component_get_drvdata(component);
 
-	switch (snd_soc_component_get_bias_level(component)) {
+	switch (snd_soc_dapm_get_bias_level(dapm)) {
 	case SND_SOC_BIAS_OFF:
 	case SND_SOC_BIAS_STANDBY:
 		break;
@@ -279,7 +282,7 @@ static int pcm512x_overclock_dsp_put(struct snd_kcontrol *kcontrol,
 static int pcm512x_overclock_dac_get(struct snd_kcontrol *kcontrol,
 				     struct snd_ctl_elem_value *ucontrol)
 {
-	struct snd_soc_component *component = snd_soc_kcontrol_component(kcontrol);
+	struct snd_soc_component *component = snd_kcontrol_chip(kcontrol);
 	struct pcm512x_priv *pcm512x = snd_soc_component_get_drvdata(component);
 
 	ucontrol->value.integer.value[0] = pcm512x->overclock_dac;
@@ -289,10 +292,11 @@ static int pcm512x_overclock_dac_get(struct snd_kcontrol *kcontrol,
 static int pcm512x_overclock_dac_put(struct snd_kcontrol *kcontrol,
 				     struct snd_ctl_elem_value *ucontrol)
 {
-	struct snd_soc_component *component = snd_soc_kcontrol_component(kcontrol);
+	struct snd_soc_component *component = snd_kcontrol_chip(kcontrol);
+	struct snd_soc_dapm_context *dapm = snd_soc_component_to_dapm(component);
 	struct pcm512x_priv *pcm512x = snd_soc_component_get_drvdata(component);
 
-	switch (snd_soc_component_get_bias_level(component)) {
+	switch (snd_soc_dapm_get_bias_level(dapm)) {
 	case SND_SOC_BIAS_OFF:
 	case SND_SOC_BIAS_STANDBY:
 		break;
@@ -392,13 +396,12 @@ static int pcm512x_update_mute(struct pcm512x_priv *pcm512x)
 static int pcm512x_digital_playback_switch_get(struct snd_kcontrol *kcontrol,
 					       struct snd_ctl_elem_value *ucontrol)
 {
-	struct snd_soc_component *component = snd_soc_kcontrol_component(kcontrol);
+	struct snd_soc_component *component = snd_kcontrol_chip(kcontrol);
 	struct pcm512x_priv *pcm512x = snd_soc_component_get_drvdata(component);
 
-	mutex_lock(&pcm512x->mutex);
+	guard(mutex)(&pcm512x->mutex);
 	ucontrol->value.integer.value[0] = !(pcm512x->mute & 0x4);
 	ucontrol->value.integer.value[1] = !(pcm512x->mute & 0x2);
-	mutex_unlock(&pcm512x->mutex);
 
 	return 0;
 }
@@ -406,11 +409,11 @@ static int pcm512x_digital_playback_switch_get(struct snd_kcontrol *kcontrol,
 static int pcm512x_digital_playback_switch_put(struct snd_kcontrol *kcontrol,
 					       struct snd_ctl_elem_value *ucontrol)
 {
-	struct snd_soc_component *component = snd_soc_kcontrol_component(kcontrol);
+	struct snd_soc_component *component = snd_kcontrol_chip(kcontrol);
 	struct pcm512x_priv *pcm512x = snd_soc_component_get_drvdata(component);
 	int ret, changed = 0;
 
-	mutex_lock(&pcm512x->mutex);
+	guard(mutex)(&pcm512x->mutex);
 
 	if ((pcm512x->mute & 0x4) == (ucontrol->value.integer.value[0] << 2)) {
 		pcm512x->mute ^= 0x4;
@@ -426,12 +429,9 @@ static int pcm512x_digital_playback_switch_put(struct snd_kcontrol *kcontrol,
 		if (ret != 0) {
 			dev_err(component->dev,
 				"Failed to update digital mute: %d\n", ret);
-			mutex_unlock(&pcm512x->mutex);
 			return ret;
 		}
 	}
-
-	mutex_unlock(&pcm512x->mutex);
 
 	return changed;
 }
@@ -629,7 +629,7 @@ static int pcm512x_dai_startup_slave(struct snd_pcm_substream *substream,
 	struct regmap *regmap = pcm512x->regmap;
 
 	if (IS_ERR(pcm512x->sclk)) {
-		dev_info(dev, "No SCLK, using BCLK: %ld\n",
+		dev_info_once(dev, "No SCLK, using BCLK: %ld\n",
 			 PTR_ERR(pcm512x->sclk));
 
 		/* Disable reporting of missing SCLK as an error */
@@ -1258,10 +1258,34 @@ static int pcm512x_hw_params(struct snd_pcm_substream *substream,
 			return ret;
 		}
 
-		ret = regmap_update_bits(pcm512x->regmap, PCM512x_PLL_EN,
-					 PCM512x_PLLE, 0);
+		if (!pcm512x->force_pll_on) {
+			ret = regmap_update_bits(pcm512x->regmap,
+						 PCM512x_PLL_EN, PCM512x_PLLE, 0);
+		} else {
+			/* provide minimum PLL config for TAS575x clocking
+			 * and leave PLL enabled
+			 */
+			ret = regmap_write(pcm512x->regmap,
+					   PCM512x_PLL_COEFF_0, 0x01);
+			if (ret != 0) {
+				dev_err(component->dev,
+					"Failed to set pll coefficient: %d\n", ret);
+				return ret;
+			}
+			ret = regmap_write(pcm512x->regmap,
+					   PCM512x_PLL_COEFF_1, 0x04);
+			if (ret != 0) {
+				dev_err(component->dev,
+					"Failed to set pll coefficient: %d\n", ret);
+				return ret;
+			}
+			ret = regmap_write(pcm512x->regmap,
+					   PCM512x_PLL_EN, 0x01);
+			dev_dbg(component->dev, "Enabling PLL for TAS575x\n");
+		}
+
 		if (ret != 0) {
-			dev_err(component->dev, "Failed to disable pll: %d\n", ret);
+			dev_err(component->dev, "Failed to set pll mode: %d\n", ret);
 			return ret;
 		}
 	}
@@ -1437,7 +1461,7 @@ static int pcm512x_mute(struct snd_soc_dai *dai, int mute, int direction)
 	int ret;
 	unsigned int mute_det;
 
-	mutex_lock(&pcm512x->mutex);
+	guard(mutex)(&pcm512x->mutex);
 
 	if (mute) {
 		pcm512x->mute |= 0x1;
@@ -1447,7 +1471,7 @@ static int pcm512x_mute(struct snd_soc_dai *dai, int mute, int direction)
 		if (ret != 0) {
 			dev_err(component->dev,
 				"Failed to set digital mute: %d\n", ret);
-			goto unlock;
+			return ret;
 		}
 
 		regmap_read_poll_timeout(pcm512x->regmap,
@@ -1460,7 +1484,7 @@ static int pcm512x_mute(struct snd_soc_dai *dai, int mute, int direction)
 		if (ret != 0) {
 			dev_err(component->dev,
 				"Failed to update digital mute: %d\n", ret);
-			goto unlock;
+			return ret;
 		}
 
 		regmap_read_poll_timeout(pcm512x->regmap,
@@ -1471,11 +1495,15 @@ static int pcm512x_mute(struct snd_soc_dai *dai, int mute, int direction)
 					 200, 10000);
 	}
 
-unlock:
-	mutex_unlock(&pcm512x->mutex);
-
 	return ret;
 }
+
+static const u64 pcm512x_selectable_formats =
+	SND_SOC_POSSIBLE_DAIFMT_I2S	|
+	SND_SOC_POSSIBLE_DAIFMT_RIGHT_J	|
+	SND_SOC_POSSIBLE_DAIFMT_LEFT_J	|
+	SND_SOC_POSSIBLE_DAIFMT_DSP_A	|
+	SND_SOC_POSSIBLE_DAIFMT_DSP_B;
 
 static const struct snd_soc_dai_ops pcm512x_dai_ops = {
 	.startup = pcm512x_dai_startup,
@@ -1483,6 +1511,8 @@ static const struct snd_soc_dai_ops pcm512x_dai_ops = {
 	.set_fmt = pcm512x_set_fmt,
 	.mute_stream = pcm512x_mute,
 	.set_bclk_ratio = pcm512x_set_bclk_ratio,
+	.auto_selectable_formats = &pcm512x_selectable_formats,
+	.num_auto_selectable_formats = 1,
 	.no_capture_mute = 1,
 };
 
@@ -1659,6 +1689,11 @@ int pcm512x_probe(struct device *dev, struct regmap *regmap)
 			ret = -EINVAL;
 			goto err_pm;
 		}
+
+		if (!strcmp(np->name, "tas5756") ||
+		    !strcmp(np->name, "tas5754"))
+			pcm512x->force_pll_on = 1;
+		dev_dbg(dev, "Device ID: %s\n", np->name);
 	}
 #endif
 
@@ -1695,7 +1730,6 @@ void pcm512x_remove(struct device *dev)
 }
 EXPORT_SYMBOL_GPL(pcm512x_remove);
 
-#ifdef CONFIG_PM
 static int pcm512x_suspend(struct device *dev)
 {
 	struct pcm512x_priv *pcm512x = dev_get_drvdata(dev);
@@ -1757,12 +1791,10 @@ static int pcm512x_resume(struct device *dev)
 
 	return 0;
 }
-#endif
 
-const struct dev_pm_ops pcm512x_pm_ops = {
-	SET_RUNTIME_PM_OPS(pcm512x_suspend, pcm512x_resume, NULL)
+EXPORT_GPL_DEV_PM_OPS(pcm512x_pm_ops) = {
+	RUNTIME_PM_OPS(pcm512x_suspend, pcm512x_resume, NULL)
 };
-EXPORT_SYMBOL_GPL(pcm512x_pm_ops);
 
 MODULE_DESCRIPTION("ASoC PCM512x codec driver");
 MODULE_AUTHOR("Mark Brown <broonie@kernel.org>");

@@ -1,7 +1,7 @@
 #!/bin/sh
 # SPDX-License-Identifier: Apache-2.0
 set -eu
-[ "$(cat /sys/kernel/realtime)" = 1 ]
+/usr/bin/xtos-rt-status >/dev/null
 zcat /proc/config.gz | grep -qx 'CONFIG_PREEMPT_RT=y'
 zcat /proc/config.gz | grep -qx 'CONFIG_XTOS_SCHED=y'
 modprobe xtos_bci_core

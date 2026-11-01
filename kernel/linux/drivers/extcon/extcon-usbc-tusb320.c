@@ -17,6 +17,7 @@
 #include <linux/usb/typec.h>
 #include <linux/usb/typec_altmode.h>
 #include <linux/usb/role.h>
+#include <linux/irq.h>
 
 #define TUSB320_REG8				0x8
 #define TUSB320_REG8_CURRENT_MODE_ADVERTISE	GENMASK(7, 6)
@@ -453,20 +454,18 @@ static int tusb320_typec_probe(struct i2c_client *client,
 	priv->port_type = priv->cap.type;
 
 	/* This goes into register 0x8 field CURRENT_MODE_ADVERTISE */
-	ret = fwnode_property_read_string(connector, "typec-power-opmode", &cap_str);
-	if (ret)
-		goto err_put;
+	if (!fwnode_property_read_string(connector, "typec-power-opmode",
+					 &cap_str)) {
+		ret = typec_find_pwr_opmode(cap_str);
+		if (ret < 0)
+			goto err_put;
+		priv->pwr_opmode = ret;
 
-	ret = typec_find_pwr_opmode(cap_str);
-	if (ret < 0)
-		goto err_put;
-
-	priv->pwr_opmode = ret;
-
-	/* Initialize the hardware with the devicetree settings. */
-	ret = tusb320_set_adv_pwr_mode(priv);
-	if (ret)
-		goto err_put;
+		/* Initialize the hardware with the devicetree settings. */
+		ret = tusb320_set_adv_pwr_mode(priv);
+		if (ret)
+			goto err_put;
+	}
 
 	priv->cap.revision		= USB_TYPEC_REV_1_1;
 	priv->cap.accessory[0]		= TYPEC_ACCESSORY_AUDIO;
@@ -515,6 +514,8 @@ static int tusb320_probe(struct i2c_client *client)
 	const void *match_data;
 	unsigned int revision;
 	int ret;
+	u32 irq_trigger_type = IRQF_TRIGGER_FALLING;
+	struct irq_data *irq_d;
 
 	priv = devm_kzalloc(&client->dev, sizeof(*priv), GFP_KERNEL);
 	if (!priv)
@@ -568,9 +569,13 @@ static int tusb320_probe(struct i2c_client *client)
 		 */
 		tusb320_state_update_handler(priv, true);
 
+	irq_d = irq_get_irq_data(client->irq);
+	if (irq_d)
+		irq_trigger_type = irqd_get_trigger_type(irq_d);
+
 	ret = devm_request_threaded_irq(priv->dev, client->irq, NULL,
 					tusb320_irq_handler,
-					IRQF_TRIGGER_FALLING | IRQF_ONESHOT,
+					IRQF_ONESHOT | irq_trigger_type,
 					client->name, priv);
 	if (ret)
 		tusb320_typec_remove(priv);

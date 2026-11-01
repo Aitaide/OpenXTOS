@@ -14,6 +14,9 @@
 #define PIPE_BUF_FLAG_LOSS	0x40	/* Message loss happened after this buffer */
 #endif
 
+#define PIPE_PREALLOC_MAX	8	/* max pages in prealloc pool */
+#define PIPE_PREALLOC_KEEP	2	/* keep at least this many after trim */
+
 /**
  *	struct pipe_buffer - a linux kernel pipe buffer
  *	@page: the page containing the data for the pipe buffer
@@ -31,24 +34,65 @@ struct pipe_buffer {
 	unsigned long private;
 };
 
+/*
+ * Really only alpha needs 32-bit fields, but
+ * might as well do it for 64-bit architectures
+ * since that's what we've historically done,
+ * and it makes 'head_tail' always be a simple
+ * 'unsigned long'.
+ */
+#ifdef CONFIG_64BIT
+typedef unsigned int pipe_index_t;
+#else
+typedef unsigned short pipe_index_t;
+#endif
+
+/**
+ *	struct pipe_index - pipe indeces
+ *	@head: The point of buffer production
+ *	@tail: The point of buffer consumption
+ *	@head_tail: unsigned long union of @head and @tail
+ */
+union pipe_index {
+	unsigned long head_tail;
+	struct {
+		pipe_index_t head;
+		pipe_index_t tail;
+	};
+};
+
+/**
+ *	struct anon_pipe_prealloc - per-pipe page preallocation pool
+ *	@pages: array of cached pages (pool)
+ *	@count: number of pages currently in the pool
+ *
+ * Each pipe keeps a small bounded pool of preallocated pages to reduce
+ * allocation overhead during writes. The pool is bounded at PIPE_PREALLOC_MAX
+ * and trimmed down to PIPE_PREALLOC_KEEP after a write completes.
+ */
+struct anon_pipe_prealloc {
+	struct page *pages[PIPE_PREALLOC_MAX];
+
+	unsigned int __data_racy count;
+};
+
 /**
  *	struct pipe_inode_info - a linux kernel pipe
  *	@mutex: mutex protecting the whole thing
  *	@rd_wait: reader wait point in case of empty pipe
  *	@wr_wait: writer wait point in case of full pipe
- *	@head: The point of buffer production
- *	@tail: The point of buffer consumption
+ *	@pipe_index: the pipe indeces
  *	@note_loss: The next read() should insert a data-lost message
  *	@max_usage: The maximum number of slots that may be used in the ring
  *	@ring_size: total number of buffers (should be a power of 2)
  *	@nr_accounted: The amount this pipe accounts for in user->pipe_bufs
- *	@tmp_page: cached released page
+ *	@prealloc: per-pipe page preallocation pool
  *	@readers: number of current readers of this pipe
  *	@writers: number of current writers of this pipe
  *	@files: number of struct file referring this pipe (protected by ->i_lock)
  *	@r_counter: reader counter
  *	@w_counter: writer counter
- *	@poll_usage: is this pipe used for epoll, which has crazy wakeups?
+ *	@pseudo_edgetrigger: has an EPOLLET consumer, enable per-write wakeups
  *	@fasync_readers: reader side fasync
  *	@fasync_writers: writer side fasync
  *	@bufs: the circular array of pipe buffers
@@ -58,21 +102,22 @@ struct pipe_buffer {
 struct pipe_inode_info {
 	struct mutex mutex;
 	wait_queue_head_t rd_wait, wr_wait;
-	unsigned int head;
-	unsigned int tail;
+
+	union pipe_index;
+
 	unsigned int max_usage;
 	unsigned int ring_size;
-#ifdef CONFIG_WATCH_QUEUE
-	bool note_loss;
-#endif
 	unsigned int nr_accounted;
 	unsigned int readers;
 	unsigned int writers;
 	unsigned int files;
 	unsigned int r_counter;
 	unsigned int w_counter;
-	bool poll_usage;
-	struct page *tmp_page;
+	bool pseudo_edgetrigger;
+#ifdef CONFIG_WATCH_QUEUE
+	bool note_loss;
+#endif
+	struct anon_pipe_prealloc prealloc;
 	struct fasync_struct *fasync_readers;
 	struct fasync_struct *fasync_writers;
 	struct pipe_buffer *bufs;
@@ -125,13 +170,19 @@ struct pipe_buf_operations {
 };
 
 /**
- * pipe_empty - Return true if the pipe is empty
- * @head: The pipe ring head pointer
- * @tail: The pipe ring tail pointer
+ * pipe_has_watch_queue - Check whether the pipe is a watch_queue,
+ * i.e. it was created with O_NOTIFICATION_PIPE
+ * @pipe: The pipe to check
+ *
+ * Return: true if pipe is a watch queue, false otherwise.
  */
-static inline bool pipe_empty(unsigned int head, unsigned int tail)
+static inline bool pipe_has_watch_queue(const struct pipe_inode_info *pipe)
 {
-	return head == tail;
+#ifdef CONFIG_WATCH_QUEUE
+	return pipe->watch_queue != NULL;
+#else
+	return false;
+#endif
 }
 
 /**
@@ -141,7 +192,17 @@ static inline bool pipe_empty(unsigned int head, unsigned int tail)
  */
 static inline unsigned int pipe_occupancy(unsigned int head, unsigned int tail)
 {
-	return head - tail;
+	return (pipe_index_t)(head - tail);
+}
+
+/**
+ * pipe_empty - Return true if the pipe is empty
+ * @head: The pipe ring head pointer
+ * @tail: The pipe ring tail pointer
+ */
+static inline bool pipe_empty(unsigned int head, unsigned int tail)
+{
+	return !pipe_occupancy(head, tail);
 }
 
 /**
@@ -154,6 +215,33 @@ static inline bool pipe_full(unsigned int head, unsigned int tail,
 			     unsigned int limit)
 {
 	return pipe_occupancy(head, tail) >= limit;
+}
+
+/**
+ * pipe_is_full - Return true if the pipe is full
+ * @pipe: the pipe
+ */
+static inline bool pipe_is_full(const struct pipe_inode_info *pipe)
+{
+	return pipe_full(pipe->head, pipe->tail, pipe->max_usage);
+}
+
+/**
+ * pipe_is_empty - Return true if the pipe is empty
+ * @pipe: the pipe
+ */
+static inline bool pipe_is_empty(const struct pipe_inode_info *pipe)
+{
+	return pipe_empty(pipe->head, pipe->tail);
+}
+
+/**
+ * pipe_buf_usage - Return how many pipe buffers are in use
+ * @pipe: the pipe
+ */
+static inline unsigned int pipe_buf_usage(const struct pipe_inode_info *pipe)
+{
+	return pipe_occupancy(pipe->head, pipe->tail);
 }
 
 /**
@@ -227,15 +315,6 @@ static inline bool pipe_buf_try_steal(struct pipe_inode_info *pipe,
 	if (!buf->ops->try_steal)
 		return false;
 	return buf->ops->try_steal(pipe, buf);
-}
-
-static inline void pipe_discard_from(struct pipe_inode_info *pipe,
-		unsigned int old_head)
-{
-	unsigned int mask = pipe->ring_size - 1;
-
-	while (pipe->head > old_head)
-		pipe_buf_release(pipe, &pipe->bufs[--pipe->head & mask]);
 }
 
 /* Differs from PIPE_BUF in that PIPE_SIZE is the length of the actual

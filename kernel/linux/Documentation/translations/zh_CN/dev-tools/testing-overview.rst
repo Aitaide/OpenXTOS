@@ -3,7 +3,7 @@
 .. include:: ../disclaimer-zh_CN.rst
 
 :Original: Documentation/dev-tools/testing-overview.rst
-:Translator: 胡皓文 Hu Haowen <src.res.211@gmail.com>
+:Translator: 胡皓文 Hu Haowen <2023002089@link.tyut.edu.cn>
 
 ============
 内核测试指南
@@ -99,6 +99,8 @@ Documentation/dev-tools/kcov.rst 是能够构建在内核之中，用于在每�
   参阅 Documentation/dev-tools/kfence.rst
 * lockdep是一个锁定正确性检测器。参阅
   Documentation/locking/lockdep-design.rst
+* 运行时确认（Runtime Verification）支持检查给定子系统的特定行为。参阅
+  Documentation/trace/rv/runtime-verification.rst。
 * 除此以外，在内核中还有一些其它的调试工具，大多数能在
   lib/Kconfig.debug 中找到。
 
@@ -152,7 +154,7 @@ Smatch和Coccinelle的强项
 Coccinelle可能是最容易写检查的。它在预处理器之前工作，所以用Coccinelle
 检查宏中的错误更容易。Coccinelle还能为你创建补丁，这是其他工具无法做到的。
 
-例如，用Coccinelle你可以从 ``kmalloc_array(x, size, GFP_KERNEL)``
+例如，用Coccinelle你可以从 ``kmalloc(x * size, GFP_KERNEL)``
 到 ``kmalloc_array(x, size, GFP_KERNEL)`` 进行大规模转换，这真的很
 有用。如果你只是创建一个Smatch警告，并试图把转换的工作推给维护者，他们会很
 恼火。你将不得不为每个警告争论是否真的可以溢出。

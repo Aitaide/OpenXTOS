@@ -18,7 +18,6 @@
 #include <linux/errno.h>
 #include <linux/export.h>
 #include <linux/ioport.h>
-#include <linux/mod_devicetable.h>
 #include <linux/module.h>
 #include <linux/regmap.h>
 #include <linux/spi/spi.h>
@@ -145,7 +144,6 @@ static int ocelot_spi_regmap_bus_read(void *context, const void *reg, size_t reg
 	struct device *dev = context;
 	struct ocelot_ddata *ddata;
 	struct spi_device *spi;
-	struct spi_message msg;
 	unsigned int index = 0;
 
 	ddata = dev_get_drvdata(dev);
@@ -166,9 +164,7 @@ static int ocelot_spi_regmap_bus_read(void *context, const void *reg, size_t reg
 	xfers[index].len = val_size;
 	index++;
 
-	spi_message_init_with_transfers(&msg, xfers, index);
-
-	return spi_sync(spi, &msg);
+	return spi_sync_transfer(spi, xfers, index);
 }
 
 static int ocelot_spi_regmap_bus_write(void *context, const void *data, size_t count)
@@ -196,7 +192,7 @@ struct regmap *ocelot_spi_init_regmap(struct device *dev, const struct resource 
 
 	return devm_regmap_init(dev, &ocelot_spi_regmap_bus, dev, &regmap_config);
 }
-EXPORT_SYMBOL_NS(ocelot_spi_init_regmap, MFD_OCELOT_SPI);
+EXPORT_SYMBOL_NS(ocelot_spi_init_regmap, "MFD_OCELOT_SPI");
 
 static int ocelot_spi_probe(struct spi_device *spi)
 {
@@ -274,7 +270,7 @@ static int ocelot_spi_probe(struct spi_device *spi)
 }
 
 static const struct spi_device_id ocelot_spi_ids[] = {
-	{ "vsc7512", 0 },
+	{ .name = "vsc7512" },
 	{ }
 };
 MODULE_DEVICE_TABLE(spi, ocelot_spi_ids);
@@ -298,4 +294,4 @@ module_spi_driver(ocelot_spi_driver);
 MODULE_DESCRIPTION("SPI Controlled Ocelot Chip Driver");
 MODULE_AUTHOR("Colin Foster <colin.foster@in-advantage.com>");
 MODULE_LICENSE("Dual MIT/GPL");
-MODULE_IMPORT_NS(MFD_OCELOT);
+MODULE_IMPORT_NS("MFD_OCELOT");

@@ -49,7 +49,6 @@ static void process_link_qual(struct adapter *padapter, union recv_frame *prfram
 	signal_stat->avg_val = signal_stat->total_val / signal_stat->total_num;
 } /*  Process_UiLinkQuality8192S */
 
-
 void rtl8723b_process_phy_info(struct adapter *padapter, void *prframe)
 {
 	union recv_frame *precvframe = prframe;
@@ -67,8 +66,4 @@ void rtl8723b_process_phy_info(struct adapter *padapter, void *prframe)
 	/*  Check EVM */
 	/*  */
 	process_link_qual(padapter,  precvframe);
-	#ifdef DBG_RX_SIGNAL_DISPLAY_RAW_DATA
-	rtw_store_phy_info(padapter, prframe);
-	#endif
-
 }

@@ -348,6 +348,7 @@ static int highbank_initialize_phys(struct device *dev, void __iomem *addr)
 			phy_nodes[phy] = phy_data.np;
 			cphy_base[phy] = of_iomap(phy_nodes[phy], 0);
 			if (cphy_base[phy] == NULL) {
+				of_node_put(phy_data.np);
 				return 0;
 			}
 			phy_count += 1;
@@ -427,7 +428,7 @@ static int ahci_highbank_hardreset(struct ata_link *link, unsigned int *class,
 
 static struct ata_port_operations ahci_highbank_ops = {
 	.inherits		= &ahci_ops,
-	.hardreset		= ahci_highbank_hardreset,
+	.reset.hardreset	= ahci_highbank_hardreset,
 	.transmit_led_message   = ecx_transmit_led_message,
 };
 
@@ -454,7 +455,7 @@ static int ahci_highbank_probe(struct platform_device *pdev)
 	struct ahci_host_priv *hpriv;
 	struct ecx_plat_data *pdata;
 	struct ata_host *host;
-	struct resource *mem;
+	void __iomem *mmio;
 	int irq;
 	int i;
 	int rc;
@@ -462,11 +463,9 @@ static int ahci_highbank_probe(struct platform_device *pdev)
 	struct ata_port_info pi = ahci_highbank_port_info;
 	const struct ata_port_info *ppi[] = { &pi, NULL };
 
-	mem = platform_get_resource(pdev, IORESOURCE_MEM, 0);
-	if (!mem) {
-		dev_err(dev, "no mmio space\n");
-		return -EINVAL;
-	}
+	mmio = devm_platform_ioremap_resource(pdev, 0);
+	if (IS_ERR(mmio))
+		return PTR_ERR(mmio);
 
 	irq = platform_get_irq(pdev, 0);
 	if (irq < 0)
@@ -487,12 +486,7 @@ static int ahci_highbank_probe(struct platform_device *pdev)
 
 	hpriv->irq = irq;
 	hpriv->flags |= (unsigned long)pi.private_data;
-
-	hpriv->mmio = devm_ioremap(dev, mem->start, resource_size(mem));
-	if (!hpriv->mmio) {
-		dev_err(dev, "can't map %pR\n", mem);
-		return -ENOMEM;
-	}
+	hpriv->mmio = mmio;
 
 	rc = highbank_initialize_phys(dev, hpriv->mmio);
 	if (rc)
@@ -536,7 +530,6 @@ static int ahci_highbank_probe(struct platform_device *pdev)
 	for (i = 0; i < host->n_ports; i++) {
 		struct ata_port *ap = host->ports[i];
 
-		ata_port_desc(ap, "mmio %pR", mem);
 		ata_port_desc(ap, "port 0x%x", 0x100 + ap->port_no * 0x80);
 
 		/* set enclosure management message type */
@@ -614,12 +607,12 @@ static SIMPLE_DEV_PM_OPS(ahci_highbank_pm_ops,
 		  ahci_highbank_suspend, ahci_highbank_resume);
 
 static struct platform_driver ahci_highbank_driver = {
-	.remove_new = ata_platform_remove_one,
-        .driver = {
-                .name = "highbank-ahci",
-                .of_match_table = ahci_of_match,
-                .pm = &ahci_highbank_pm_ops,
-        },
+	.remove = ata_platform_remove_one,
+	.driver = {
+		.name = "highbank-ahci",
+		.of_match_table = ahci_of_match,
+		.pm = &ahci_highbank_pm_ops,
+	},
 	.probe = ahci_highbank_probe,
 };
 

@@ -40,12 +40,12 @@
 #include <linux/kgdb.h>
 #include <linux/ftrace.h>
 #include <linux/kasan.h>
-#include <linux/moduleloader.h>
 #include <linux/objtool.h>
 #include <linux/vmalloc.h>
 #include <linux/pgtable.h>
 #include <linux/set_memory.h>
 #include <linux/cfi.h>
+#include <linux/execmem.h>
 
 #include <asm/text-patching.h>
 #include <asm/cacheflush.h>
@@ -137,14 +137,13 @@ NOKPROBE_SYMBOL(synthesize_relcall);
  * Returns non-zero if INSN is boostable.
  * RIP relative instructions are adjusted at copying time in 64 bits mode
  */
-int can_boost(struct insn *insn, void *addr)
+bool can_boost(struct insn *insn, void *addr)
 {
 	kprobe_opcode_t opcode;
 	insn_byte_t prefix;
-	int i;
 
 	if (search_exception_tables((unsigned long)addr))
-		return 0;	/* Page fault may occur on this address. */
+		return false;	/* Page fault may occur on this address. */
 
 	/* 2nd-byte opcode */
 	if (insn->opcode.nbytes == 2)
@@ -152,15 +151,15 @@ int can_boost(struct insn *insn, void *addr)
 				(unsigned long *)twobyte_is_boostable);
 
 	if (insn->opcode.nbytes != 1)
-		return 0;
+		return false;
 
-	for_each_insn_prefix(insn, i, prefix) {
+	for_each_insn_prefix(insn, prefix) {
 		insn_attr_t attr;
 
 		attr = inat_get_opcode_attribute(prefix);
 		/* Can't boost Address-size override prefix and CS override prefix */
 		if (prefix == 0x2e || inat_is_address_size_prefix(attr))
-			return 0;
+			return false;
 	}
 
 	opcode = insn->opcode.bytes[0];
@@ -169,24 +168,35 @@ int can_boost(struct insn *insn, void *addr)
 	case 0x62:		/* bound */
 	case 0x70 ... 0x7f:	/* Conditional jumps */
 	case 0x9a:		/* Call far */
-	case 0xc0 ... 0xc1:	/* Grp2 */
 	case 0xcc ... 0xce:	/* software exceptions */
-	case 0xd0 ... 0xd3:	/* Grp2 */
 	case 0xd6:		/* (UD) */
 	case 0xd8 ... 0xdf:	/* ESC */
 	case 0xe0 ... 0xe3:	/* LOOP*, JCXZ */
 	case 0xe8 ... 0xe9:	/* near Call, JMP */
 	case 0xeb:		/* Short JMP */
 	case 0xf0 ... 0xf4:	/* LOCK/REP, HLT */
-	case 0xf6 ... 0xf7:	/* Grp3 */
-	case 0xfe:		/* Grp4 */
 		/* ... are not boostable */
-		return 0;
+		return false;
+	case 0xc0 ... 0xc1:	/* Grp2 */
+	case 0xd0 ... 0xd3:	/* Grp2 */
+		/*
+		 * AMD uses nnn == 110 as SHL/SAL, but Intel makes it reserved.
+		 */
+		return X86_MODRM_REG(insn->modrm.bytes[0]) != 0b110;
+	case 0xf6 ... 0xf7:	/* Grp3 */
+		/* AMD uses nnn == 001 as TEST, but Intel makes it reserved. */
+		return X86_MODRM_REG(insn->modrm.bytes[0]) != 0b001;
+	case 0xfe:		/* Grp4 */
+		/* Only INC and DEC are boostable */
+		return X86_MODRM_REG(insn->modrm.bytes[0]) == 0b000 ||
+		       X86_MODRM_REG(insn->modrm.bytes[0]) == 0b001;
 	case 0xff:		/* Grp5 */
-		/* Only indirect jmp is boostable */
-		return X86_MODRM_REG(insn->modrm.bytes[0]) == 4;
+		/* Only INC, DEC, and indirect JMP are boostable */
+		return X86_MODRM_REG(insn->modrm.bytes[0]) == 0b000 ||
+		       X86_MODRM_REG(insn->modrm.bytes[0]) == 0b001 ||
+		       X86_MODRM_REG(insn->modrm.bytes[0]) == 0b100;
 	default:
-		return 1;
+		return true;
 	}
 }
 
@@ -252,21 +262,40 @@ unsigned long recover_probed_instruction(kprobe_opcode_t *buf, unsigned long add
 	return __recover_probed_insn(buf, addr);
 }
 
-/* Check if paddr is at an instruction boundary */
-static int can_probe(unsigned long paddr)
+/* Check if insn is INT or UD */
+static inline bool is_exception_insn(struct insn *insn)
+{
+	/* UD uses 0f escape */
+	if (insn->opcode.bytes[0] == 0x0f) {
+		/* UD0 / UD1 / UD2 */
+		return insn->opcode.bytes[1] == 0xff ||
+		       insn->opcode.bytes[1] == 0xb9 ||
+		       insn->opcode.bytes[1] == 0x0b;
+	}
+
+	/* INT3 / INT n / INTO / INT1 */
+	return insn->opcode.bytes[0] == 0xcc ||
+	       insn->opcode.bytes[0] == 0xcd ||
+	       insn->opcode.bytes[0] == 0xce ||
+	       insn->opcode.bytes[0] == 0xf1;
+}
+
+/*
+ * Check if paddr is at an instruction boundary and that instruction can
+ * be probed
+ */
+static bool can_probe(unsigned long paddr)
 {
 	unsigned long addr, __addr, offset = 0;
 	struct insn insn;
 	kprobe_opcode_t buf[MAX_INSN_SIZE];
 
 	if (!kallsyms_lookup_size_offset(paddr, NULL, &offset))
-		return 0;
+		return false;
 
 	/* Decode instructions */
 	addr = paddr - offset;
 	while (addr < paddr) {
-		int ret;
-
 		/*
 		 * Check if the instruction has been modified by another
 		 * kprobe, in which case we replace the breakpoint by the
@@ -277,11 +306,10 @@ static int can_probe(unsigned long paddr)
 		 */
 		__addr = recover_probed_instruction(buf, addr);
 		if (!__addr)
-			return 0;
+			return false;
 
-		ret = insn_decode_kernel(&insn, (void *)__addr);
-		if (ret < 0)
-			return 0;
+		if (insn_decode_kernel(&insn, (void *)__addr) < 0)
+			return false;
 
 #ifdef CONFIG_KGDB
 		/*
@@ -290,11 +318,27 @@ static int can_probe(unsigned long paddr)
 		 */
 		if (insn.opcode.bytes[0] == INT3_INSN_OPCODE &&
 		    kgdb_has_hit_break(addr))
-			return 0;
+			return false;
 #endif
 		addr += insn.length;
 	}
-	if (IS_ENABLED(CONFIG_CFI_CLANG)) {
+
+	/* Check if paddr is at an instruction boundary */
+	if (addr != paddr)
+		return false;
+
+	__addr = recover_probed_instruction(buf, addr);
+	if (!__addr)
+		return false;
+
+	if (insn_decode_kernel(&insn, (void *)__addr) < 0)
+		return false;
+
+	/* INT and UD are special and should not be kprobed */
+	if (is_exception_insn(&insn))
+		return false;
+
+	if (IS_ENABLED(CONFIG_CFI)) {
 		/*
 		 * The compiler generates the following instruction sequence
 		 * for indirect call checks and cfi.c decodes this;
@@ -308,13 +352,6 @@ static int can_probe(unsigned long paddr)
 		 * Also, these movl and addl are used for showing expected
 		 * type. So those must not be touched.
 		 */
-		__addr = recover_probed_instruction(buf, addr);
-		if (!__addr)
-			return 0;
-
-		if (insn_decode_kernel(&insn, (void *)__addr) < 0)
-			return 0;
-
 		if (insn.opcode.value == 0xBA)
 			offset = 12;
 		else if (insn.opcode.value == 0x3)
@@ -324,18 +361,18 @@ static int can_probe(unsigned long paddr)
 
 		/* This movl/addl is used for decoding CFI. */
 		if (is_cfi_trap(addr + offset))
-			return 0;
+			return false;
 	}
 
 out:
-	return (addr == paddr);
+	return true;
 }
 
 /* If x86 supports IBT (ENDBR) it must be skipped. */
 kprobe_opcode_t *arch_adjust_kprobe_addr(unsigned long addr, unsigned long offset,
 					 bool *on_func_entry)
 {
-	if (is_endbr(*(u32 *)addr)) {
+	if (is_endbr((u32 *)addr)) {
 		*on_func_entry = !offset || offset == 4;
 		if (*on_func_entry)
 			offset = 4;
@@ -443,24 +480,6 @@ static int prepare_singlestep(kprobe_opcode_t *buf, struct kprobe *p,
 	return len;
 }
 
-/* Make page to RO mode when allocate it */
-void *alloc_insn_page(void)
-{
-	void *page;
-
-	page = module_alloc(PAGE_SIZE);
-	if (!page)
-		return NULL;
-
-	/*
-	 * TODO: Once additional kernel code protection mechanisms are set, ensure
-	 * that the page was not maliciously altered and it is still zeroed.
-	 */
-	set_memory_rox((unsigned long)page, 1);
-
-	return page;
-}
-
 /* Kprobe x86 instruction emulation - only regs->ip or IF flag modifiers */
 
 static void kprobe_emulate_ifmodifiers(struct kprobe *p, struct pt_regs *regs)
@@ -491,10 +510,9 @@ NOKPROBE_SYMBOL(kprobe_emulate_ret);
 
 static void kprobe_emulate_call(struct kprobe *p, struct pt_regs *regs)
 {
-	unsigned long func = regs->ip - INT3_INSN_SIZE + p->ainsn.size;
+	unsigned long ip = regs->ip - INT3_INSN_SIZE + p->ainsn.size;
 
-	func += p->ainsn.rel32;
-	int3_emulate_call(regs, func);
+	int3_emulate_call(regs, ip, ip + p->ainsn.rel32);
 }
 NOKPROBE_SYMBOL(kprobe_emulate_call);
 
@@ -576,7 +594,8 @@ static void kprobe_emulate_call_indirect(struct kprobe *p, struct pt_regs *regs)
 {
 	unsigned long offs = addrmode_regoffs[p->ainsn.indirect.reg];
 
-	int3_emulate_call(regs, regs_get_register(regs, offs));
+	int3_emulate_push(regs, regs->ip - INT3_INSN_SIZE + p->ainsn.size);
+	int3_emulate_jmp(regs, regs_get_register(regs, offs));
 }
 NOKPROBE_SYMBOL(kprobe_emulate_call_indirect);
 
@@ -742,9 +761,6 @@ int arch_prepare_kprobe(struct kprobe *p)
 {
 	int ret;
 
-	if (alternatives_text_reserved(p->addr, p->addr))
-		return -EINVAL;
-
 	if (!can_probe((unsigned long)p->addr))
 		return -EILSEQ;
 
@@ -769,7 +785,7 @@ void arch_arm_kprobe(struct kprobe *p)
 	u8 int3 = INT3_INSN_OPCODE;
 
 	text_poke(p->addr, &int3, 1);
-	text_poke_sync();
+	smp_text_poke_sync_each_cpu();
 	perf_event_text_poke(p->addr, &p->opcode, 1, &int3, 1);
 }
 
@@ -779,7 +795,7 @@ void arch_disarm_kprobe(struct kprobe *p)
 
 	perf_event_text_poke(p->addr, &int3, 1, &p->opcode, 1);
 	text_poke(p->addr, &p->opcode, 1);
-	text_poke_sync();
+	smp_text_poke_sync_each_cpu();
 }
 
 void arch_remove_kprobe(struct kprobe *p)

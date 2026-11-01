@@ -29,13 +29,11 @@
 		};
 	};
 
-	pmu: pmu@ff111000 {
+	pmu: pmu {
 		compatible = "arm,cortex-a9-pmu";
 		interrupt-parent = <&intc>;
 		interrupts = <0 124 4>, <0 125 4>;
 		interrupt-affinity = <&cpu0>, <&cpu1>;
-		reg = <0xff111000 0x1000>,
-		      <0xff113000 0x1000>;
 	};
 
 	intc: interrupt-controller@ffffd000 {
@@ -80,12 +78,13 @@
 			};
 		};
 
-		base_fpga_region {
+		base_fpga_region: fpga-region {
 			#address-cells = <0x1>;
 			#size-cells = <0x1>;
 
 			compatible = "fpga-region";
 			fpga-mgr = <&fpga_mgr>;
+			ranges;
 		};
 
 		clkmgr@ffd04000 {
@@ -440,7 +439,7 @@
 			clocks = <&l4_mp_clk>, <&peri_emac_ptp_clk>;
 			clock-names = "stmmaceth", "ptp_ref";
 			resets = <&rst EMAC0_RESET>, <&rst EMAC0_OCP_RESET>;
-			reset-names = "stmmaceth", "ahb";
+			reset-names = "stmmaceth", "stmmaceth-ocp";
 			snps,axi-config = <&socfpga_axi_setup>;
 			status = "disabled";
 		};
@@ -448,7 +447,7 @@
 		gmac1: ethernet@ff802000 {
 			compatible = "altr,socfpga-stmmac-a10-s10", "snps,dwmac-3.72a", "snps,dwmac";
 			altr,sysmgr-syscon = <&sysmgr 0x48 8>;
-		        reg = <0xff802000 0x2000>;
+			reg = <0xff802000 0x2000>;
 			interrupts = <0 93 IRQ_TYPE_LEVEL_HIGH>;
 			interrupt-names = "macirq";
 			/* Filled in by bootloader */
@@ -460,7 +459,7 @@
 			clocks = <&l4_mp_clk>, <&peri_emac_ptp_clk>;
 			clock-names = "stmmaceth", "ptp_ref";
 			resets = <&rst EMAC1_RESET>, <&rst EMAC1_OCP_RESET>;
-			reset-names = "stmmaceth", "ahb";
+			reset-names = "stmmaceth", "stmmaceth-ocp";
 			snps,axi-config = <&socfpga_axi_setup>;
 			status = "disabled";
 		};
@@ -480,7 +479,7 @@
 			clocks = <&l4_mp_clk>, <&peri_emac_ptp_clk>;
 			clock-names = "stmmaceth", "ptp_ref";
 			resets = <&rst EMAC2_RESET>, <&rst EMAC2_OCP_RESET>;
-			reset-names = "stmmaceth", "ahb";
+			reset-names = "stmmaceth", "stmmaceth-ocp";
 			snps,axi-config = <&socfpga_axi_setup>;
 			status = "disabled";
 		};
@@ -669,7 +668,7 @@
 			status = "disabled";
 		};
 
-		nand: nand@ffb90000 {
+		nand: nand-controller@ffb90000 {
 			#address-cells = <1>;
 			#size-cells = <0>;
 			compatible = "altr,socfpga-denali-nand";
@@ -686,6 +685,9 @@
 		ocram: sram@ffe00000 {
 			compatible = "mmio-sram";
 			reg = <0xffe00000 0x40000>;
+			#address-cells = <1>;
+			#size-cells = <1>;
+			ranges;
 		};
 
 		eccmgr: eccmgr {

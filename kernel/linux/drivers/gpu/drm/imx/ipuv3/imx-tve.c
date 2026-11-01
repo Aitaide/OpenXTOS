@@ -201,25 +201,23 @@ static int tve_setup_vga(struct imx_tve *tve)
 static int imx_tve_connector_get_modes(struct drm_connector *connector)
 {
 	struct imx_tve *tve = con_to_tve(connector);
-	struct edid *edid;
-	int ret = 0;
+	const struct drm_edid *drm_edid;
+	int ret;
 
 	if (!tve->ddc)
 		return 0;
 
-	edid = drm_get_edid(connector, tve->ddc);
-	if (edid) {
-		drm_connector_update_edid_property(connector, edid);
-		ret = drm_add_edid_modes(connector, edid);
-		kfree(edid);
-	}
+	drm_edid = drm_edid_read_ddc(connector, tve->ddc);
+	drm_edid_connector_update(connector, drm_edid);
+	ret = drm_edid_connector_add_modes(connector);
+	drm_edid_free(drm_edid);
 
 	return ret;
 }
 
 static enum drm_mode_status
 imx_tve_connector_mode_valid(struct drm_connector *connector,
-			     struct drm_display_mode *mode)
+			     const struct drm_display_mode *mode)
 {
 	struct imx_tve *tve = con_to_tve(connector);
 	unsigned long rate;
@@ -307,9 +305,15 @@ static int imx_tve_atomic_check(struct drm_encoder *encoder,
 	return 0;
 }
 
+static void imx_tve_connector_destroy(struct drm_connector *connector)
+{
+	drm_connector_unregister(connector);
+	drm_connector_cleanup(connector);
+}
+
 static const struct drm_connector_funcs imx_tve_connector_funcs = {
 	.fill_modes = drm_helper_probe_single_connector_modes,
-	.destroy = imx_drm_connector_destroy,
+	.destroy = imx_tve_connector_destroy,
 	.reset = drm_atomic_helper_connector_reset,
 	.atomic_duplicate_state = drm_atomic_helper_connector_duplicate_state,
 	.atomic_destroy_state = drm_atomic_helper_connector_destroy_state,
@@ -364,17 +368,20 @@ static unsigned long clk_tve_di_recalc_rate(struct clk_hw *hw,
 	return 0;
 }
 
-static long clk_tve_di_round_rate(struct clk_hw *hw, unsigned long rate,
-				  unsigned long *prate)
+static int clk_tve_di_determine_rate(struct clk_hw *hw,
+				     struct clk_rate_request *req)
 {
 	unsigned long div;
 
-	div = *prate / rate;
+	div = req->best_parent_rate / req->rate;
 	if (div >= 4)
-		return *prate / 4;
+		req->rate = req->best_parent_rate / 4;
 	else if (div >= 2)
-		return *prate / 2;
-	return *prate;
+		req->rate = req->best_parent_rate / 2;
+	else
+		req->rate = req->best_parent_rate;
+
+	return 0;
 }
 
 static int clk_tve_di_set_rate(struct clk_hw *hw, unsigned long rate,
@@ -405,7 +412,7 @@ static int clk_tve_di_set_rate(struct clk_hw *hw, unsigned long rate,
 }
 
 static const struct clk_ops clk_tve_di_ops = {
-	.round_rate = clk_tve_di_round_rate,
+	.determine_rate = clk_tve_di_determine_rate,
 	.set_rate = clk_tve_di_set_rate,
 	.recalc_rate = clk_tve_di_recalc_rate,
 };
@@ -521,6 +528,13 @@ static const struct component_ops imx_tve_ops = {
 	.bind	= imx_tve_bind,
 };
 
+static void imx_tve_put_device(void *_dev)
+{
+	struct device *dev = _dev;
+
+	put_device(dev);
+}
+
 static int imx_tve_probe(struct platform_device *pdev)
 {
 	struct device *dev = &pdev->dev;
@@ -542,6 +556,12 @@ static int imx_tve_probe(struct platform_device *pdev)
 	if (ddc_node) {
 		tve->ddc = of_find_i2c_adapter_by_node(ddc_node);
 		of_node_put(ddc_node);
+		if (tve->ddc) {
+			ret = devm_add_action_or_reset(dev, imx_tve_put_device,
+						       &tve->ddc->dev);
+			if (ret)
+				return ret;
+		}
 	}
 
 	tve->mode = of_get_tve_mode(np);
@@ -645,10 +665,9 @@ static int imx_tve_probe(struct platform_device *pdev)
 	return component_add(dev, &imx_tve_ops);
 }
 
-static int imx_tve_remove(struct platform_device *pdev)
+static void imx_tve_remove(struct platform_device *pdev)
 {
 	component_del(&pdev->dev, &imx_tve_ops);
-	return 0;
 }
 
 static const struct of_device_id imx_tve_dt_ids[] = {
@@ -671,4 +690,3 @@ module_platform_driver(imx_tve_driver);
 MODULE_DESCRIPTION("i.MX Television Encoder driver");
 MODULE_AUTHOR("Philipp Zabel, Pengutronix");
 MODULE_LICENSE("GPL");
-MODULE_ALIAS("platform:imx-tve");

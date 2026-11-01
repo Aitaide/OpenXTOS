@@ -254,6 +254,7 @@ def install_sdk(stage, work):
     for name in ['openbci_cyton.py','cyton_capture.py','cyton_replay.py','device_contract.py']:
         shutil.copy2(ROOT/'tools/xtos-eeg-pipeline'/name,cyton/name)
     shutil.copy2(ROOT/'system/rootfs/usr/bin/xtos-selftest',stage/'usr/bin/xtos-selftest')
+    shutil.copy2(ROOT/'system/rootfs/usr/bin/xtos-rt-status',stage/'usr/bin/xtos-rt-status')
     return install_eeg_stream(stage,work,ROOT)
 
 

@@ -1,4 +1,4 @@
-/* SPDX-License-Identifier: ISC */
+/* SPDX-License-Identifier: BSD-3-Clause-Clear */
 /* Copyright (C) 2022 MediaTek Inc. */
 
 #ifndef __MT76_CONNAC2_MAC_H
@@ -30,6 +30,11 @@ enum {
 	MT_LMAC_BMC0,
 	MT_LMAC_BCN0,
 	MT_LMAC_PSMP0,
+};
+
+enum {
+	MT_TXS_MPDU_FMT = 0,
+	MT_TXS_PPDU_FMT = 2,
 };
 
 #define MT_TX_FREE_MSDU_CNT		GENMASK(9, 0)
@@ -348,6 +353,13 @@ enum tx_mcu_port_q_idx {
 enum tx_port_idx {
 	MT_TX_PORT_IDX_LMAC,
 	MT_TX_PORT_IDX_MCU
+};
+
+enum tx_frag_idx {
+	MT_TX_FRAG_NONE,
+	MT_TX_FRAG_FIRST,
+	MT_TX_FRAG_MID,
+	MT_TX_FRAG_LAST
 };
 
 #endif /* __MT76_CONNAC2_MAC_H */

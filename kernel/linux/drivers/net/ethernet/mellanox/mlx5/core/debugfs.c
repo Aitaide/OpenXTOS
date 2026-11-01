@@ -143,8 +143,8 @@ static ssize_t average_read(struct file *filp, char __user *buf, size_t count,
 	return simple_read_from_buffer(buf, count, pos, tbuf, ret);
 }
 
-static ssize_t average_write(struct file *filp, const char __user *buf,
-			     size_t count, loff_t *pos)
+static ssize_t reset_write(struct file *filp, const char __user *buf,
+			   size_t count, loff_t *pos)
 {
 	struct mlx5_cmd_stats *stats;
 
@@ -152,6 +152,11 @@ static ssize_t average_write(struct file *filp, const char __user *buf,
 	spin_lock_irq(&stats->lock);
 	stats->sum = 0;
 	stats->n = 0;
+	stats->failed = 0;
+	stats->failed_mbox_status = 0;
+	stats->last_failed_errno = 0;
+	stats->last_failed_mbox_status = 0;
+	stats->last_failed_syndrome = 0;
 	spin_unlock_irq(&stats->lock);
 
 	*pos += count;
@@ -159,11 +164,16 @@ static ssize_t average_write(struct file *filp, const char __user *buf,
 	return count;
 }
 
-static const struct file_operations stats_fops = {
+static const struct file_operations reset_fops = {
+	.owner	= THIS_MODULE,
+	.open	= simple_open,
+	.write	= reset_write,
+};
+
+static const struct file_operations average_fops = {
 	.owner	= THIS_MODULE,
 	.open	= simple_open,
 	.read	= average_read,
-	.write	= average_write,
 };
 
 static ssize_t slots_read(struct file *filp, char __user *buf, size_t count,
@@ -191,7 +201,7 @@ static const struct file_operations slots_fops = {
 static struct mlx5_cmd_stats *
 mlx5_cmdif_alloc_stats(struct xarray *stats_xa, int opcode)
 {
-	struct mlx5_cmd_stats *stats = kzalloc(sizeof(*stats), GFP_KERNEL);
+	struct mlx5_cmd_stats *stats = kzalloc_obj(*stats);
 	int err;
 
 	if (!stats)
@@ -228,8 +238,10 @@ void mlx5_cmdif_debugfs_init(struct mlx5_core_dev *dev)
 				continue;
 			stats->root = debugfs_create_dir(namep, *cmd);
 
+			debugfs_create_file("reset", 0200, stats->root, stats,
+					    &reset_fops);
 			debugfs_create_file("average", 0400, stats->root, stats,
-					    &stats_fops);
+					    &average_fops);
 			debugfs_create_u64("n", 0400, stats->root, &stats->n);
 			debugfs_create_u64("failed", 0400, stats->root, &stats->failed);
 			debugfs_create_u64("failed_mbox_status", 0400, stats->root,
@@ -273,10 +285,6 @@ void mlx5_pages_debugfs_init(struct mlx5_core_dev *dev)
 	pages = dev->priv.dbg.pages_debugfs;
 
 	debugfs_create_u32("fw_pages_total", 0400, pages, &dev->priv.fw_pages);
-	debugfs_create_u32("fw_pages_vfs", 0400, pages, &dev->priv.page_counters[MLX5_VF]);
-	debugfs_create_u32("fw_pages_ec_vfs", 0400, pages, &dev->priv.page_counters[MLX5_EC_VF]);
-	debugfs_create_u32("fw_pages_sfs", 0400, pages, &dev->priv.page_counters[MLX5_SF]);
-	debugfs_create_u32("fw_pages_host_pf", 0400, pages, &dev->priv.page_counters[MLX5_HOST_PF]);
 	debugfs_create_u32("fw_pages_alloc_failed", 0400, pages, &dev->priv.fw_pages_alloc_failed);
 	debugfs_create_u32("fw_pages_give_dropped", 0400, pages, &dev->priv.give_pages_dropped);
 	debugfs_create_u32("fw_pages_reclaim_discard", 0400, pages,
@@ -286,6 +294,44 @@ void mlx5_pages_debugfs_init(struct mlx5_core_dev *dev)
 void mlx5_pages_debugfs_cleanup(struct mlx5_core_dev *dev)
 {
 	debugfs_remove_recursive(dev->priv.dbg.pages_debugfs);
+}
+
+void mlx5_pages_by_func_type_debugfs_init(struct mlx5_core_dev *dev)
+{
+	struct dentry *pages = dev->priv.dbg.pages_debugfs;
+
+	if (!pages)
+		return;
+
+	if (!dev->priv.eswitch &&
+	    MLX5_CAP_GEN(dev, icm_mng_function_id_mode) ==
+	    MLX5_ID_MODE_FUNCTION_VHCA_ID)
+		return;
+
+	debugfs_create_u32("fw_pages_vfs", 0400, pages,
+			   &dev->priv.page_counters[MLX5_VF]);
+	debugfs_create_u32("fw_pages_ec_vfs", 0400, pages,
+			   &dev->priv.page_counters[MLX5_EC_VF]);
+	debugfs_create_u32("fw_pages_sfs", 0400, pages,
+			   &dev->priv.page_counters[MLX5_SF]);
+	debugfs_create_u32("fw_pages_host_pf", 0400, pages,
+			   &dev->priv.page_counters[MLX5_HOST_PF]);
+	debugfs_create_u32("fw_pages_spfs", 0400, pages,
+			   &dev->priv.page_counters[MLX5_SPF]);
+}
+
+void mlx5_pages_by_func_type_debugfs_cleanup(struct mlx5_core_dev *dev)
+{
+	struct dentry *pages = dev->priv.dbg.pages_debugfs;
+
+	if (!pages)
+		return;
+
+	debugfs_lookup_and_remove("fw_pages_vfs", pages);
+	debugfs_lookup_and_remove("fw_pages_ec_vfs", pages);
+	debugfs_lookup_and_remove("fw_pages_sfs", pages);
+	debugfs_lookup_and_remove("fw_pages_host_pf", pages);
+	debugfs_lookup_and_remove("fw_pages_spfs", pages);
 }
 
 static u64 qp_read_field(struct mlx5_core_dev *dev, struct mlx5_core_qp *qp,
@@ -497,7 +543,7 @@ static int add_res_tree(struct mlx5_core_dev *dev, enum dbg_rsc_type type,
 	char resn[32];
 	int i;
 
-	d = kzalloc(struct_size(d, fields, nfile), GFP_KERNEL);
+	d = kzalloc_flex(*d, fields, nfile);
 	if (!d)
 		return -ENOMEM;
 
@@ -600,4 +646,20 @@ void mlx5_debug_cq_remove(struct mlx5_core_dev *dev, struct mlx5_core_cq *cq)
 		rem_res_tree(cq->dbg);
 		cq->dbg = NULL;
 	}
+}
+
+static int vhca_id_show(struct seq_file *file, void *priv)
+{
+	struct mlx5_core_dev *dev = file->private;
+
+	seq_printf(file, "0x%x\n", MLX5_CAP_GEN(dev, vhca_id));
+	return 0;
+}
+
+DEFINE_SHOW_ATTRIBUTE(vhca_id);
+
+void mlx5_vhca_debugfs_init(struct mlx5_core_dev *dev)
+{
+	debugfs_create_file("vhca_id", 0400, dev->priv.dbg.dbg_root, dev,
+			    &vhca_id_fops);
 }

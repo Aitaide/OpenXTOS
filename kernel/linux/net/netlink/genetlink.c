@@ -22,6 +22,8 @@
 #include <net/sock.h>
 #include <net/genetlink.h>
 
+#include "genetlink.h"
+
 static DEFINE_MUTEX(genl_mutex); /* serialization of message processing */
 static DECLARE_RWSEM(cb_lock);
 
@@ -90,9 +92,7 @@ static unsigned long mc_group_start = 0x3 | BIT(GENL_ID_CTRL) |
 static unsigned long *mc_groups = &mc_group_start;
 static unsigned long mc_groups_longs = 1;
 
-/* We need the last attribute with non-zero ID therefore a 2-entry array */
 static struct nla_policy genl_policy_reject_all[] = {
-	{ .type = NLA_REJECT },
 	{ .type = NLA_REJECT },
 };
 
@@ -104,13 +104,10 @@ static void
 genl_op_fill_in_reject_policy(const struct genl_family *family,
 			      struct genl_ops *op)
 {
-	BUILD_BUG_ON(ARRAY_SIZE(genl_policy_reject_all) - 1 != 1);
-
 	if (op->policy || op->cmd < family->resv_start_op)
 		return;
 
 	op->policy = genl_policy_reject_all;
-	op->maxattr = 1;
 }
 
 static void
@@ -121,7 +118,6 @@ genl_op_fill_in_reject_policy_split(const struct genl_family *family,
 		return;
 
 	op->policy = genl_policy_reject_all;
-	op->maxattr = 1;
 }
 
 static const struct genl_family *genl_family_find_byid(unsigned int id)
@@ -225,7 +221,8 @@ static void genl_op_from_split(struct genl_op_iter *iter)
 	}
 
 	if (i + cnt < family->n_split_ops &&
-	    family->split_ops[i + cnt].flags & GENL_CMD_CAP_DUMP) {
+	    family->split_ops[i + cnt].flags & GENL_CMD_CAP_DUMP &&
+	    (!cnt || family->split_ops[i + cnt].cmd == iter->doit.cmd)) {
 		iter->dumpit = family->split_ops[i + cnt];
 		genl_op_fill_in_reject_policy_split(family, &iter->dumpit);
 		cnt++;
@@ -247,6 +244,7 @@ genl_get_cmd_split(u32 cmd, u8 flag, const struct genl_family *family,
 		if (family->split_ops[i].cmd == cmd &&
 		    family->split_ops[i].flags & flag) {
 			*op = family->split_ops[i];
+			genl_op_fill_in_reject_policy_split(family, op);
 			return 0;
 		}
 
@@ -630,6 +628,138 @@ static int genl_validate_ops(const struct genl_family *family)
 	return 0;
 }
 
+static void *genl_sk_priv_alloc(struct genl_family *family)
+{
+	void *priv;
+
+	priv = kzalloc(family->sock_priv_size, GFP_KERNEL);
+	if (!priv)
+		return ERR_PTR(-ENOMEM);
+
+	if (family->sock_priv_init)
+		family->sock_priv_init(priv);
+
+	return priv;
+}
+
+static void genl_sk_priv_free(const struct genl_family *family, void *priv)
+{
+	if (family->sock_priv_destroy)
+		family->sock_priv_destroy(priv);
+	kfree(priv);
+}
+
+static int genl_sk_privs_alloc(struct genl_family *family)
+{
+	if (!family->sock_priv_size)
+		return 0;
+
+	family->sock_privs = kzalloc_obj(*family->sock_privs);
+	if (!family->sock_privs)
+		return -ENOMEM;
+	xa_init(family->sock_privs);
+	return 0;
+}
+
+static void genl_sk_privs_free(const struct genl_family *family)
+{
+	unsigned long id;
+	void *priv;
+
+	if (!family->sock_priv_size)
+		return;
+
+	xa_for_each(family->sock_privs, id, priv)
+		genl_sk_priv_free(family, priv);
+
+	xa_destroy(family->sock_privs);
+	kfree(family->sock_privs);
+}
+
+static void genl_sk_priv_free_by_sock(struct genl_family *family,
+				      struct sock *sk)
+{
+	void *priv;
+
+	if (!family->sock_priv_size)
+		return;
+	priv = xa_erase(family->sock_privs, (unsigned long) sk);
+	if (!priv)
+		return;
+	genl_sk_priv_free(family, priv);
+}
+
+static void genl_release(struct sock *sk, unsigned long *groups)
+{
+	struct genl_family *family;
+	unsigned int id;
+
+	down_read(&cb_lock);
+
+	idr_for_each_entry(&genl_fam_idr, family, id)
+		genl_sk_priv_free_by_sock(family, sk);
+
+	up_read(&cb_lock);
+}
+
+/**
+ * __genl_sk_priv_get - Get family private pointer for socket, if exists
+ *
+ * @family: family
+ * @sk: socket
+ *
+ * Lookup a private memory for a Generic netlink family and specified socket.
+ *
+ * Caller should make sure this is called in RCU read locked section.
+ *
+ * Return: valid pointer on success, otherwise negative error value
+ * encoded by ERR_PTR(), NULL in case priv does not exist.
+ */
+void *__genl_sk_priv_get(struct genl_family *family, struct sock *sk)
+{
+	if (WARN_ON_ONCE(!family->sock_privs))
+		return ERR_PTR(-EINVAL);
+	return xa_load(family->sock_privs, (unsigned long) sk);
+}
+
+/**
+ * genl_sk_priv_get - Get family private pointer for socket
+ *
+ * @family: family
+ * @sk: socket
+ *
+ * Lookup a private memory for a Generic netlink family and specified socket.
+ * Allocate the private memory in case it was not already done.
+ *
+ * Return: valid pointer on success, otherwise negative error value
+ * encoded by ERR_PTR().
+ */
+void *genl_sk_priv_get(struct genl_family *family, struct sock *sk)
+{
+	void *priv, *old_priv;
+
+	priv = __genl_sk_priv_get(family, sk);
+	if (priv)
+		return priv;
+
+	/* priv for the family does not exist so far, create it. */
+
+	priv = genl_sk_priv_alloc(family);
+	if (IS_ERR(priv))
+		return ERR_CAST(priv);
+
+	old_priv = xa_cmpxchg(family->sock_privs, (unsigned long) sk, NULL,
+			      priv, GFP_KERNEL);
+	if (old_priv) {
+		genl_sk_priv_free(family, priv);
+		if (xa_is_err(old_priv))
+			return ERR_PTR(xa_err(old_priv));
+		/* Race happened, priv for the socket was already inserted. */
+		return old_priv;
+	}
+	return priv;
+}
+
 /**
  * genl_register_family - register a generic netlink family
  * @family: generic netlink family
@@ -658,6 +788,10 @@ int genl_register_family(struct genl_family *family)
 		goto errout_locked;
 	}
 
+	err = genl_sk_privs_alloc(family);
+	if (err)
+		goto errout_locked;
+
 	/*
 	 * Sadly, a few cases need to be special-cased
 	 * due to them having previously abused the API
@@ -678,7 +812,7 @@ int genl_register_family(struct genl_family *family)
 				      start, end + 1, GFP_KERNEL);
 	if (family->id < 0) {
 		err = family->id;
-		goto errout_locked;
+		goto errout_sk_privs_free;
 	}
 
 	err = genl_validate_assign_mc_groups(family);
@@ -697,6 +831,8 @@ int genl_register_family(struct genl_family *family)
 
 errout_remove:
 	idr_remove(&genl_fam_idr, family->id);
+errout_sk_privs_free:
+	genl_sk_privs_free(family);
 errout_locked:
 	genl_unlock_all();
 	return err;
@@ -727,6 +863,9 @@ int genl_unregister_family(const struct genl_family *family)
 	up_write(&cb_lock);
 	wait_event(genl_sk_destructing_waitq,
 		   atomic_read(&genl_sk_destructing_cnt) == 0);
+
+	genl_sk_privs_free(family);
+
 	genl_unlock();
 
 	genl_ctrl_event(CTRL_CMD_DELFAMILY, family, NULL, 0);
@@ -768,7 +907,7 @@ EXPORT_SYMBOL(genlmsg_put);
 
 static struct genl_dumpit_info *genl_dumpit_info_alloc(void)
 {
-	return kmalloc(sizeof(struct genl_dumpit_info), GFP_KERNEL);
+	return kmalloc_obj(struct genl_dumpit_info);
 }
 
 static void genl_dumpit_info_free(const struct genl_dumpit_info *info)
@@ -790,13 +929,17 @@ genl_family_rcv_msg_attrs_parse(const struct genl_family *family,
 	struct nlattr **attrbuf;
 	int err;
 
-	if (!ops->maxattr)
+	if (!ops->policy)
 		return NULL;
 
-	attrbuf = kmalloc_array(ops->maxattr + 1,
-				sizeof(struct nlattr *), GFP_KERNEL);
-	if (!attrbuf)
-		return ERR_PTR(-ENOMEM);
+	if (ops->maxattr) {
+		attrbuf = kmalloc_objs(struct nlattr *, ops->maxattr + 1);
+		if (!attrbuf)
+			return ERR_PTR(-ENOMEM);
+	} else {
+		/* Reject all policy, __nlmsg_parse() will just validate */
+		attrbuf = NULL;
+	}
 
 	err = __nlmsg_parse(nlh, hdrlen, attrbuf, ops->maxattr, ops->policy,
 			    validate, extack);
@@ -853,7 +996,7 @@ static int genl_start(struct netlink_callback *cb)
 	info->info.attrs	= attrs;
 	genl_info_net_set(&info->info, sock_net(cb->skb->sk));
 	info->info.extack	= cb->extack;
-	memset(&info->info.user_ptr, 0, sizeof(info->info.user_ptr));
+	memset(&info->info.ctx, 0, sizeof(info->info.ctx));
 
 	cb->data = info;
 	if (ops->start) {
@@ -960,7 +1103,7 @@ static int genl_family_rcv_msg_doit(const struct genl_family *family,
 	info.attrs = attrbuf;
 	info.extack = extack;
 	genl_info_net_set(&info, net);
-	memset(&info.user_ptr, 0, sizeof(info.user_ptr));
+	memset(&info.ctx, 0, sizeof(info.ctx));
 
 	if (ops->pre_doit) {
 		err = ops->pre_doit(ops, skb, &info);
@@ -1090,7 +1233,7 @@ static int ctrl_fill_info(const struct genl_family *family, u32 portid, u32 seq,
 
 	hdr = genlmsg_put(skb, portid, seq, &genl_ctrl, flags, cmd);
 	if (hdr == NULL)
-		return -1;
+		return -EMSGSIZE;
 
 	if (nla_put_string(skb, CTRL_ATTR_FAMILY_NAME, family->name) ||
 	    nla_put_u16(skb, CTRL_ATTR_FAMILY_ID, family->id) ||
@@ -1213,6 +1356,7 @@ static int ctrl_dumpfamily(struct sk_buff *skb, struct netlink_callback *cb)
 	struct net *net = sock_net(skb->sk);
 	int fams_to_skip = cb->args[0];
 	unsigned int id;
+	int err = 0;
 
 	idr_for_each_entry(&genl_fam_idr, rt, id) {
 		if (!rt->netnsok && !net_eq(net, &init_net))
@@ -1221,16 +1365,17 @@ static int ctrl_dumpfamily(struct sk_buff *skb, struct netlink_callback *cb)
 		if (n++ < fams_to_skip)
 			continue;
 
-		if (ctrl_fill_info(rt, NETLINK_CB(cb->skb).portid,
-				   cb->nlh->nlmsg_seq, NLM_F_MULTI,
-				   skb, CTRL_CMD_NEWFAMILY) < 0) {
+		err = ctrl_fill_info(rt, NETLINK_CB(cb->skb).portid,
+				     cb->nlh->nlmsg_seq, NLM_F_MULTI,
+				     skb, CTRL_CMD_NEWFAMILY);
+		if (err) {
 			n--;
 			break;
 		}
 	}
 
 	cb->args[0] = n;
-	return skb->len;
+	return err;
 }
 
 static struct sk_buff *ctrl_build_family_msg(const struct genl_family *family,
@@ -1355,15 +1500,11 @@ static int genl_ctrl_event(int event, const struct genl_family *family,
 	if (IS_ERR(msg))
 		return PTR_ERR(msg);
 
-	if (!family->netnsok) {
+	if (!family->netnsok)
 		genlmsg_multicast_netns(&genl_ctrl, &init_net, msg, 0,
 					0, GFP_KERNEL);
-	} else {
-		rcu_read_lock();
-		genlmsg_multicast_allns(&genl_ctrl, msg, 0,
-					0, GFP_ATOMIC);
-		rcu_read_unlock();
-	}
+	else
+		genlmsg_multicast_allns(&genl_ctrl, msg, 0, 0);
 
 	return 0;
 }
@@ -1372,6 +1513,7 @@ struct ctrl_dump_policy_ctx {
 	struct netlink_policy_dump_state *state;
 	const struct genl_family *rt;
 	struct genl_op_iter *op_iter;
+	struct module *owner;
 	u32 op;
 	u16 fam_id;
 	u8 dump_map:1,
@@ -1414,6 +1556,9 @@ static int ctrl_dumppolicy_start(struct netlink_callback *cb)
 		return -ENOENT;
 
 	ctx->rt = rt;
+	ctx->owner = rt->module;
+	if (!try_module_get(ctx->owner))
+		return -ENOENT;
 
 	if (tb[CTRL_ATTR_OP]) {
 		struct genl_split_ops doit, dump;
@@ -1424,7 +1569,7 @@ static int ctrl_dumppolicy_start(struct netlink_callback *cb)
 		err = genl_get_cmd_both(ctx->op, rt, &doit, &dump);
 		if (err) {
 			NL_SET_BAD_ATTR(cb->extack, tb[CTRL_ATTR_OP]);
-			return err;
+			goto err_put_owner;
 		}
 
 		if (doit.policy) {
@@ -1442,16 +1587,20 @@ static int ctrl_dumppolicy_start(struct netlink_callback *cb)
 				goto err_free_state;
 		}
 
-		if (!ctx->state)
-			return -ENODATA;
+		if (!ctx->state) {
+			err = -ENODATA;
+			goto err_put_owner;
+		}
 
 		ctx->dump_map = 1;
 		return 0;
 	}
 
-	ctx->op_iter = kmalloc(sizeof(*ctx->op_iter), GFP_KERNEL);
-	if (!ctx->op_iter)
-		return -ENOMEM;
+	ctx->op_iter = kmalloc_obj(*ctx->op_iter);
+	if (!ctx->op_iter) {
+		err = -ENOMEM;
+		goto err_put_owner;
+	}
 
 	genl_op_iter_init(rt, ctx->op_iter);
 	ctx->dump_map = genl_op_iter_next(ctx->op_iter);
@@ -1483,6 +1632,8 @@ err_free_state:
 	netlink_policy_dump_free(ctx->state);
 err_free_op_iter:
 	kfree(ctx->op_iter);
+err_put_owner:
+	module_put(ctx->owner);
 	return err;
 }
 
@@ -1505,7 +1656,7 @@ static void *ctrl_dumppolicy_prep(struct sk_buff *skb,
 }
 
 static int ctrl_dumppolicy_put_op(struct sk_buff *skb,
-				  struct netlink_callback *cb,
+				  struct netlink_callback *cb, u32 cmd,
 				  struct genl_split_ops *doit,
 				  struct genl_split_ops *dumpit)
 {
@@ -1526,7 +1677,7 @@ static int ctrl_dumppolicy_put_op(struct sk_buff *skb,
 	if (!nest_pol)
 		goto err;
 
-	nest_op = nla_nest_start(skb, doit->cmd);
+	nest_op = nla_nest_start(skb, cmd);
 	if (!nest_op)
 		goto err;
 
@@ -1570,7 +1721,8 @@ static int ctrl_dumppolicy(struct sk_buff *skb, struct netlink_callback *cb)
 						      &doit, &dumpit)))
 				return -ENOENT;
 
-			if (ctrl_dumppolicy_put_op(skb, cb, &doit, &dumpit))
+			if (ctrl_dumppolicy_put_op(skb, cb, ctx->op,
+						   &doit, &dumpit))
 				return skb->len;
 
 			/* done with the per-op policy index list */
@@ -1579,6 +1731,7 @@ static int ctrl_dumppolicy(struct sk_buff *skb, struct netlink_callback *cb)
 
 		while (ctx->dump_map) {
 			if (ctrl_dumppolicy_put_op(skb, cb,
+						   ctx->op_iter->cmd,
 						   &ctx->op_iter->doit,
 						   &ctx->op_iter->dumpit))
 				return skb->len;
@@ -1619,6 +1772,7 @@ static int ctrl_dumppolicy_done(struct netlink_callback *cb)
 
 	kfree(ctx->op_iter);
 	netlink_policy_dump_free(ctx->state);
+	module_put(ctx->owner);
 	return 0;
 }
 
@@ -1687,9 +1841,18 @@ static int genl_bind(struct net *net, int group)
 			continue;
 
 		grp = &family->mcgrps[i];
-		if ((grp->flags & GENL_UNS_ADMIN_PERM) &&
+		if ((grp->flags & GENL_MCAST_CAP_NET_ADMIN) &&
 		    !ns_capable(net->user_ns, CAP_NET_ADMIN))
 			ret = -EPERM;
+		if ((grp->flags & GENL_MCAST_CAP_SYS_ADMIN) &&
+		    !ns_capable(net->user_ns, CAP_SYS_ADMIN))
+			ret = -EPERM;
+
+		if (ret)
+			break;
+
+		if (family->bind)
+			family->bind(i);
 
 		break;
 	}
@@ -1698,12 +1861,40 @@ static int genl_bind(struct net *net, int group)
 	return ret;
 }
 
+static void genl_unbind(struct net *net, int group)
+{
+	const struct genl_family *family;
+	unsigned int id;
+
+	down_read(&cb_lock);
+
+	idr_for_each_entry(&genl_fam_idr, family, id) {
+		int i;
+
+		if (family->n_mcgrps == 0)
+			continue;
+
+		i = group - family->mcgrp_offset;
+		if (i < 0 || i >= family->n_mcgrps)
+			continue;
+
+		if (family->unbind)
+			family->unbind(i);
+
+		break;
+	}
+
+	up_read(&cb_lock);
+}
+
 static int __net_init genl_pernet_init(struct net *net)
 {
 	struct netlink_kernel_cfg cfg = {
 		.input		= genl_rcv,
 		.flags		= NL_CFG_F_NONROOT_RECV,
 		.bind		= genl_bind,
+		.unbind		= genl_unbind,
+		.release	= genl_release,
 	};
 
 	/* we'll bump the group number right afterwards */
@@ -1749,23 +1940,23 @@ problem:
 
 core_initcall(genl_init);
 
-static int genlmsg_mcast(struct sk_buff *skb, u32 portid, unsigned long group,
-			 gfp_t flags)
+static int genlmsg_mcast(struct sk_buff *skb, u32 portid, unsigned long group)
 {
 	struct sk_buff *tmp;
 	struct net *net, *prev = NULL;
 	bool delivered = false;
 	int err;
 
+	rcu_read_lock();
 	for_each_net_rcu(net) {
 		if (prev) {
-			tmp = skb_clone(skb, flags);
+			tmp = skb_clone(skb, GFP_ATOMIC);
 			if (!tmp) {
 				err = -ENOMEM;
 				goto error;
 			}
 			err = nlmsg_multicast(prev->genl_sock, tmp,
-					      portid, group, flags);
+					      portid, group, GFP_ATOMIC);
 			if (!err)
 				delivered = true;
 			else if (err != -ESRCH)
@@ -1774,27 +1965,33 @@ static int genlmsg_mcast(struct sk_buff *skb, u32 portid, unsigned long group,
 
 		prev = net;
 	}
+	err = nlmsg_multicast(prev->genl_sock, skb, portid, group, GFP_ATOMIC);
 
-	err = nlmsg_multicast(prev->genl_sock, skb, portid, group, flags);
+	rcu_read_unlock();
+
 	if (!err)
 		delivered = true;
 	else if (err != -ESRCH)
 		return err;
 	return delivered ? 0 : -ESRCH;
  error:
+	rcu_read_unlock();
+
 	kfree_skb(skb);
 	return err;
 }
 
 int genlmsg_multicast_allns(const struct genl_family *family,
 			    struct sk_buff *skb, u32 portid,
-			    unsigned int group, gfp_t flags)
+			    unsigned int group)
 {
-	if (WARN_ON_ONCE(group >= family->n_mcgrps))
+	if (WARN_ON_ONCE(group >= family->n_mcgrps)) {
+		kfree_skb(skb);
 		return -EINVAL;
+	}
 
 	group = family->mcgrp_offset + group;
-	return genlmsg_mcast(skb, portid, group, flags);
+	return genlmsg_mcast(skb, portid, group);
 }
 EXPORT_SYMBOL(genlmsg_multicast_allns);
 
@@ -1804,8 +2001,10 @@ void genl_notify(const struct genl_family *family, struct sk_buff *skb,
 	struct net *net = genl_info_net(info);
 	struct sock *sk = net->genl_sock;
 
-	if (WARN_ON_ONCE(group >= family->n_mcgrps))
+	if (WARN_ON_ONCE(group >= family->n_mcgrps)) {
+		kfree_skb(skb);
 		return;
+	}
 
 	group = family->mcgrp_offset + group;
 	nlmsg_notify(sk, skb, info->snd_portid, group,

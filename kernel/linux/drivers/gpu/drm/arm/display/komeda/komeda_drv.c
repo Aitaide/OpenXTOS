@@ -9,7 +9,7 @@
 #include <linux/of.h>
 #include <linux/platform_device.h>
 #include <linux/pm_runtime.h>
-#include <drm/drm_fbdev_generic.h>
+#include <drm/clients/drm_client_setup.h>
 #include <drm/drm_module.h>
 #include <drm/drm_of.h>
 #include "komeda_dev.h"
@@ -45,11 +45,23 @@ static void komeda_platform_remove(struct platform_device *pdev)
 	devm_kfree(dev, mdrv);
 }
 
+static void komeda_platform_shutdown(struct platform_device *pdev)
+{
+	struct device *dev = &pdev->dev;
+	struct komeda_drv *mdrv = dev_get_drvdata(dev);
+
+	komeda_kms_shutdown(mdrv->kms);
+}
+
 static int komeda_platform_probe(struct platform_device *pdev)
 {
 	struct device *dev = &pdev->dev;
 	struct komeda_drv *mdrv;
 	int err;
+
+	err = dma_set_mask_and_coherent(dev, DMA_BIT_MASK(40));
+	if (err)
+		return dev_err_probe(dev, err, "DMA mask error\n");
 
 	mdrv = devm_kzalloc(dev, sizeof(*mdrv), GFP_KERNEL);
 	if (!mdrv)
@@ -62,8 +74,11 @@ static int komeda_platform_probe(struct platform_device *pdev)
 	}
 
 	pm_runtime_enable(dev);
-	if (!pm_runtime_enabled(dev))
-		komeda_dev_resume(mdrv->mdev);
+	if (!pm_runtime_enabled(dev)) {
+		err = komeda_dev_resume(mdrv->mdev);
+		if (err)
+			goto err_destroy_mdev;
+	}
 
 	mdrv->kms = komeda_kms_attach(mdrv->mdev);
 	if (IS_ERR(mdrv->kms)) {
@@ -72,7 +87,7 @@ static int komeda_platform_probe(struct platform_device *pdev)
 	}
 
 	dev_set_drvdata(dev, mdrv);
-	drm_fbdev_generic_setup(&mdrv->kms->base, 32);
+	drm_client_setup(&mdrv->kms->base, NULL);
 
 	return 0;
 
@@ -81,7 +96,7 @@ destroy_mdev:
 		pm_runtime_disable(dev);
 	else
 		komeda_dev_suspend(mdrv->mdev);
-
+err_destroy_mdev:
 	komeda_dev_destroy(mdrv->mdev);
 
 free_mdrv:
@@ -92,6 +107,7 @@ free_mdrv:
 static const struct of_device_id komeda_of_match[] = {
 	{ .compatible = "arm,mali-d71", .data = d71_identify, },
 	{ .compatible = "arm,mali-d32", .data = d71_identify, },
+	{ .compatible = "armchina,linlon-d6", .data = d71_identify, },
 	{},
 };
 
@@ -127,11 +143,12 @@ static int __maybe_unused komeda_pm_suspend(struct device *dev)
 static int __maybe_unused komeda_pm_resume(struct device *dev)
 {
 	struct komeda_drv *mdrv = dev_get_drvdata(dev);
+	int err = 0;
 
 	if (!pm_runtime_status_suspended(dev))
-		komeda_dev_resume(mdrv->mdev);
+		err = komeda_dev_resume(mdrv->mdev);
 
-	return drm_mode_config_helper_resume(&mdrv->kms->base);
+	return err ? err : drm_mode_config_helper_resume(&mdrv->kms->base);
 }
 
 static const struct dev_pm_ops komeda_pm_ops = {
@@ -141,7 +158,8 @@ static const struct dev_pm_ops komeda_pm_ops = {
 
 static struct platform_driver komeda_platform_driver = {
 	.probe	= komeda_platform_probe,
-	.remove_new = komeda_platform_remove,
+	.remove = komeda_platform_remove,
+	.shutdown = komeda_platform_shutdown,
 	.driver	= {
 		.name = "komeda",
 		.of_match_table	= komeda_of_match,

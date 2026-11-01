@@ -179,7 +179,7 @@ static int gred_enqueue(struct sk_buff *skb, struct Qdisc *sch,
 			 * if no default DP has been configured. This
 			 * allows for DP flows to be left untouched.
 			 */
-			if (likely(sch->qstats.backlog + qdisc_pkt_len(skb) <=
+			if (likely((u64)sch->qstats.backlog + qdisc_pkt_len(skb) <=
 					sch->limit))
 				return qdisc_enqueue_tail(skb, sch);
 			else
@@ -244,17 +244,17 @@ static int gred_enqueue(struct sk_buff *skb, struct Qdisc *sch,
 		break;
 	}
 
-	if (gred_backlog(t, q, sch) + qdisc_pkt_len(skb) <= q->limit) {
+	if ((u64)gred_backlog(t, q, sch) + qdisc_pkt_len(skb) <= q->limit) {
 		q->backlog += qdisc_pkt_len(skb);
 		return qdisc_enqueue_tail(skb, sch);
 	}
 
 	q->stats.pdrop++;
 drop:
-	return qdisc_drop(skb, sch, to_free);
+	return qdisc_drop_reason(skb, sch, to_free, QDISC_DROP_OVERLIMIT);
 
 congestion_drop:
-	qdisc_drop(skb, sch, to_free);
+	qdisc_drop_reason(skb, sch, to_free, QDISC_DROP_CONGESTED);
 	return NET_XMIT_CN;
 }
 
@@ -359,7 +359,7 @@ static int gred_offload_dump_stats(struct Qdisc *sch)
 	unsigned int i;
 	int ret;
 
-	hw_stats = kzalloc(sizeof(*hw_stats), GFP_KERNEL);
+	hw_stats = kzalloc_obj(*hw_stats);
 	if (!hw_stats)
 		return -ENOMEM;
 
@@ -388,8 +388,8 @@ static int gred_offload_dump_stats(struct Qdisc *sch)
 		bytes += u64_stats_read(&hw_stats->stats.bstats[i].bytes);
 		packets += u64_stats_read(&hw_stats->stats.bstats[i].packets);
 		sch->qstats.qlen += hw_stats->stats.qstats[i].qlen;
-		sch->qstats.backlog += hw_stats->stats.qstats[i].backlog;
-		sch->qstats.drops += hw_stats->stats.qstats[i].drops;
+		qstats_backlog_add(sch, hw_stats->stats.qstats[i].backlog);
+		__qdisc_qstats_drop(sch, hw_stats->stats.qstats[i].drops);
 		sch->qstats.requeues += hw_stats->stats.qstats[i].requeues;
 		sch->qstats.overlimits += hw_stats->stats.qstats[i].overlimits;
 	}
@@ -668,7 +668,7 @@ static int gred_change(struct Qdisc *sch, struct nlattr *opt,
 		return -EINVAL;
 	}
 
-	max_P = tb[TCA_GRED_MAX_P] ? nla_get_u32(tb[TCA_GRED_MAX_P]) : 0;
+	max_P = nla_get_u32_default(tb[TCA_GRED_MAX_P], 0);
 
 	ctl = nla_data(tb[TCA_GRED_PARMS]);
 	stab = nla_data(tb[TCA_GRED_STAB]);
@@ -700,7 +700,7 @@ static int gred_change(struct Qdisc *sch, struct nlattr *opt,
 			prio = ctl->prio;
 	}
 
-	prealloc = kzalloc(sizeof(*prealloc), GFP_KERNEL);
+	prealloc = kzalloc_obj(*prealloc);
 	sch_tree_lock(sch);
 
 	err = gred_change_vq(sch, ctl->DP, ctl, prio, stab, max_P, &prealloc,
@@ -757,7 +757,7 @@ static int gred_init(struct Qdisc *sch, struct nlattr *opt,
 		             * psched_mtu(qdisc_dev(sch));
 
 	if (qdisc_dev(sch)->netdev_ops->ndo_setup_tc) {
-		table->opt = kzalloc(sizeof(*table->opt), GFP_KERNEL);
+		table->opt = kzalloc_obj(*table->opt);
 		if (!table->opt)
 			return -ENOMEM;
 	}
@@ -913,7 +913,8 @@ static void gred_destroy(struct Qdisc *sch)
 	for (i = 0; i < table->DPs; i++)
 		gred_destroy_vq(table->tab[i]);
 
-	gred_offload(sch, TC_GRED_DESTROY);
+	if (table->opt)
+		gred_offload(sch, TC_GRED_DESTROY);
 	kfree(table->opt);
 }
 
@@ -930,6 +931,7 @@ static struct Qdisc_ops gred_qdisc_ops __read_mostly = {
 	.dump		=	gred_dump,
 	.owner		=	THIS_MODULE,
 };
+MODULE_ALIAS_NET_SCH("gred");
 
 static int __init gred_module_init(void)
 {
@@ -945,3 +947,4 @@ module_init(gred_module_init)
 module_exit(gred_module_exit)
 
 MODULE_LICENSE("GPL");
+MODULE_DESCRIPTION("Generic Random Early Detection qdisc");

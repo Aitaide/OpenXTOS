@@ -1,7 +1,7 @@
 #!/bin/sh
 # SPDX-License-Identifier: GPL-2.0
 
-BPF_FILE="../bpf/xdp_dummy.bpf.o"
+BPF_FILE="lib/xdp_dummy.bpf.o"
 readonly STATS="$(mktemp -p /tmp ns-XXXXXX)"
 readonly BASE=`basename $STATS`
 readonly SRC=2
@@ -9,6 +9,8 @@ readonly DST=1
 readonly DST_NAT=100
 readonly NS_SRC=$BASE$SRC
 readonly NS_DST=$BASE$DST
+# shellcheck disable=SC2155 # prefer RO variable over return value from cmd
+readonly YNL="$(dirname "$(readlink -f "$0")")/../../../net/ynl/pyynl/cli.py"
 
 # "baremetal" network used for raw UDP traffic
 readonly BM_NET_V4=192.168.1.
@@ -46,8 +48,6 @@ create_ns() {
 		ip -n $BASE$ns addr add dev veth$ns $BM_NET_V4$ns/24
 		ip -n $BASE$ns addr add dev veth$ns $BM_NET_V6$ns/64 nodad
 	done
-	echo "#kernel" > $BASE
-	chmod go-rw $BASE
 }
 
 __chk_flag() {
@@ -74,6 +74,37 @@ chk_gro_flag() {
 
 chk_tso_flag() {
 	__chk_flag "$1" $2 $3 tcp-segmentation-offload
+}
+
+chk_xdp_feature() {
+	local msg="$1"
+	local target=$2
+	local expected=$3
+	local feature=$4
+	local ifindex
+	local out
+	local st
+	local flag
+
+	ifindex=`ip netns exec $BASE$target cat /sys/class/net/veth$target/ifindex`
+	out=`ip netns exec $BASE$target "$YNL" --family netdev --do dev-get \
+		--output-json --json "{\"ifindex\": $ifindex}" 2>&1`
+	st=$?
+
+	printf "%-60s" "$msg"
+	if [ $st -ne 0 ]; then
+		echo " fail - ynl cli error: $out"
+		ret=1
+		return
+	fi
+
+	flag=`echo "$out" | grep -c "\"$feature\""`
+	if [ "$flag" = "$expected" ]; then
+		echo " ok "
+	else
+		echo " fail - expected $expected found $flag"
+		ret=1
+	fi
 }
 
 chk_channels() {
@@ -218,12 +249,13 @@ while getopts "hs:" option; do
 done
 
 if [ ! -f ${BPF_FILE} ]; then
-	echo "Missing ${BPF_FILE}. Build bpf selftest first"
+	echo "Missing ${BPF_FILE}. Run 'make' first"
 	exit 1
 fi
 
 [ $CPUS -lt 2 ] && echo "Only one CPU available, some tests will be skipped"
 [ $STRESS -gt 0 -a $CPUS -lt 3 ] && echo " stress test will be skipped, too"
+[ ! -f "$YNL" ] && echo "ynl cli not found, ndo-xmit tests will be skipped"
 
 create_ns
 chk_gro_flag "default - gro flag" $SRC off
@@ -247,6 +279,35 @@ chk_gro "        - aggregation with TSO off" 1
 cleanup
 
 create_ns
+ip -n $NS_DST link set dev veth$DST up
+ip -n $NS_DST link set dev veth$DST xdp object ${BPF_FILE} section xdp
+chk_gro_flag "gro vs xdp while down - gro flag off" $DST off
+ip -n $NS_DST link set dev veth$DST down
+chk_gro_flag "                      - after down" $DST off
+ip -n $NS_DST link set dev veth$DST xdp off
+chk_gro_flag "                      - after xdp off" $DST off
+ip -n $NS_DST link set dev veth$DST up
+chk_gro_flag "                      - after up" $DST off
+ip -n $NS_SRC link set dev veth$SRC xdp object ${BPF_FILE} section xdp
+chk_gro_flag "                      - after peer xdp" $DST off
+cleanup
+
+create_ns
+ip -n $NS_DST link set dev veth$DST up
+ip -n $NS_DST link set dev veth$DST xdp object ${BPF_FILE} section xdp
+ip netns exec $NS_DST ethtool -K veth$DST generic-receive-offload on
+chk_gro_flag "gro vs xdp while down - gro flag on" $DST on
+ip -n $NS_DST link set dev veth$DST down
+chk_gro_flag "                      - after down" $DST on
+ip -n $NS_DST link set dev veth$DST xdp off
+chk_gro_flag "                      - after xdp off" $DST on
+ip -n $NS_DST link set dev veth$DST up
+chk_gro_flag "                      - after up" $DST on
+ip -n $NS_SRC link set dev veth$SRC xdp object ${BPF_FILE} section xdp
+chk_gro_flag "                      - after peer xdp" $DST on
+cleanup
+
+create_ns
 chk_channels "default channels" $DST 1 1
 
 ip -n $NS_DST link set dev veth$DST down
@@ -256,6 +317,18 @@ chk_gro_flag "        - peer gro flag" $SRC off
 chk_tso_flag "        - tso flag" $SRC on
 chk_tso_flag "        - peer tso flag" $DST on
 ip -n $NS_DST link set dev veth$DST up
+if [ -f "$YNL" ]; then
+	chk_xdp_feature "        - peer ndo-xmit" $SRC 1 ndo-xmit
+	# make sure the peer flag is set before disabling gro while down
+	ip netns exec $NS_DST ethtool -K veth$DST gro off
+	ip netns exec $NS_DST ethtool -K veth$DST gro on
+	chk_xdp_feature "        - peer ndo-xmit re-armed" $SRC 1 ndo-xmit
+	ip -n $NS_DST link set dev veth$DST down
+	ip netns exec $NS_DST ethtool -K veth$DST gro off
+	ip -n $NS_DST link set dev veth$DST up
+	chk_xdp_feature "        - peer ndo-xmit cleared" $SRC 0 ndo-xmit
+	ip netns exec $NS_DST ethtool -K veth$DST gro on
+fi
 ip netns exec $NS_SRC ethtool -K veth$SRC tx-udp-segmentation off
 ip netns exec $NS_DST ethtool -K veth$DST rx-udp-gro-forwarding on
 chk_gro "        - aggregation with TSO off" 1
@@ -313,11 +386,14 @@ if [ $CPUS -gt 2 ]; then
 fi
 
 ip -n $NS_DST link set dev veth$DST xdp object ${BPF_FILE} section xdp 2>/dev/null
-chk_gro_flag "with xdp attached - gro flag" $DST on
+chk_gro_flag "with xdp attached - gro flag" $DST off
 chk_gro_flag "        - peer gro flag" $SRC off
 chk_tso_flag "        - tso flag" $SRC off
 chk_tso_flag "        - peer tso flag" $DST on
 ip netns exec $NS_DST ethtool -K veth$DST rx-udp-gro-forwarding on
+chk_gro "        - no aggregation" 10
+ip netns exec $NS_DST ethtool -K veth$DST generic-receive-offload on
+chk_gro_flag "        - gro flag with GRO on" $DST on
 chk_gro "        - aggregation" 1
 
 

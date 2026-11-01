@@ -47,6 +47,8 @@ static const u8 REG_VOLTAGE_LIMIT_MSB_SHIFT[2][5] = {
 #define REG_PWM(x)		(0x60 + (x))
 #define REG_SMARTFAN_EN(x)      (0x64 + (x) / 2)
 #define SMARTFAN_EN_SHIFT(x)    ((x) % 2 * 4)
+#define REG_SMARTFAN_STEP_UP_TIME	0x6e
+#define REG_SMARTFAN_STEP_DOWN_TIME	0x6f
 #define REG_VENDOR_ID		0xfd
 #define REG_CHIP_ID		0xfe
 #define REG_VERSION_ID		0xff
@@ -229,41 +231,34 @@ abort:
 
 static int nct7802_read_fan(struct nct7802_data *data, u8 reg_fan)
 {
-	unsigned int f1, f2;
+	unsigned int regs[2] = {reg_fan, REG_FANCOUNT_LOW};
+	u8 f[2];
 	int ret;
 
-	mutex_lock(&data->access_lock);
-	ret = regmap_read(data->regmap, reg_fan, &f1);
-	if (ret < 0)
-		goto abort;
-	ret = regmap_read(data->regmap, REG_FANCOUNT_LOW, &f2);
-	if (ret < 0)
-		goto abort;
-	ret = (f1 << 5) | (f2 >> 3);
+	ret = regmap_multi_reg_read(data->regmap, regs, f, 2);
+	if (ret)
+		return ret;
+	ret = (f[0] << 5) | (f[1] >> 3);
 	/* convert fan count to rpm */
 	if (ret == 0x1fff)	/* maximum value, assume fan is stopped */
 		ret = 0;
 	else if (ret)
 		ret = DIV_ROUND_CLOSEST(1350000U, ret);
-abort:
-	mutex_unlock(&data->access_lock);
 	return ret;
 }
 
 static int nct7802_read_fan_min(struct nct7802_data *data, u8 reg_fan_low,
 				u8 reg_fan_high)
 {
-	unsigned int f1, f2;
+	unsigned int regs[2] = {reg_fan_low, reg_fan_high};
+	u8 f[2];
 	int ret;
 
-	mutex_lock(&data->access_lock);
-	ret = regmap_read(data->regmap, reg_fan_low, &f1);
+	ret = regmap_multi_reg_read(data->regmap, regs, f, 2);
 	if (ret < 0)
-		goto abort;
-	ret = regmap_read(data->regmap, reg_fan_high, &f2);
-	if (ret < 0)
-		goto abort;
-	ret = f1 | ((f2 & 0xf8) << 5);
+		return ret;
+
+	ret = f[0] | ((f[1] & 0xf8) << 5);
 	/* convert fan count to rpm */
 	if (ret == 0x1fff)	/* maximum value, assume no limit */
 		ret = 0;
@@ -271,8 +266,6 @@ static int nct7802_read_fan_min(struct nct7802_data *data, u8 reg_fan_low,
 		ret = DIV_ROUND_CLOSEST(1350000U, ret);
 	else
 		ret = 1350000U;
-abort:
-	mutex_unlock(&data->access_lock);
 	return ret;
 }
 
@@ -302,33 +295,26 @@ static u8 nct7802_vmul[] = { 4, 2, 2, 2, 2 };
 
 static int nct7802_read_voltage(struct nct7802_data *data, int nr, int index)
 {
-	unsigned int v1, v2;
+	u8 v[2];
 	int ret;
 
-	mutex_lock(&data->access_lock);
 	if (index == 0) {	/* voltage */
-		ret = regmap_read(data->regmap, REG_VOLTAGE[nr], &v1);
+		unsigned int regs[2] = {REG_VOLTAGE[nr], REG_VOLTAGE_LOW};
+
+		ret = regmap_multi_reg_read(data->regmap, regs, v, 2);
 		if (ret < 0)
-			goto abort;
-		ret = regmap_read(data->regmap, REG_VOLTAGE_LOW, &v2);
-		if (ret < 0)
-			goto abort;
-		ret = ((v1 << 2) | (v2 >> 6)) * nct7802_vmul[nr];
+			return ret;
+		ret = ((v[0] << 2) | (v[1] >> 6)) * nct7802_vmul[nr];
 	}  else {	/* limit */
 		int shift = 8 - REG_VOLTAGE_LIMIT_MSB_SHIFT[index - 1][nr];
+		unsigned int regs[2] = {REG_VOLTAGE_LIMIT_LSB[index - 1][nr],
+					REG_VOLTAGE_LIMIT_MSB[nr]};
 
-		ret = regmap_read(data->regmap,
-				  REG_VOLTAGE_LIMIT_LSB[index - 1][nr], &v1);
+		ret = regmap_multi_reg_read(data->regmap, regs, v, 2);
 		if (ret < 0)
-			goto abort;
-		ret = regmap_read(data->regmap, REG_VOLTAGE_LIMIT_MSB[nr],
-				  &v2);
-		if (ret < 0)
-			goto abort;
-		ret = (v1 | ((v2 << shift) & 0x300)) * nct7802_vmul[nr];
+			return ret;
+		ret = (v[0] | ((v[1] << shift) & 0x300)) * nct7802_vmul[nr];
 	}
-abort:
-	mutex_unlock(&data->access_lock);
 	return ret;
 }
 
@@ -574,6 +560,77 @@ beep_store(struct device *dev, struct device_attribute *attr, const char *buf,
 	err = regmap_update_bits(data->regmap, sattr->nr, 1 << sattr->index,
 				 val ? 1 << sattr->index : 0);
 	return err ? : count;
+}
+
+static ssize_t step_time_show(struct device *dev, struct device_attribute *attr,
+			      char *buf, bool step_up)
+{
+	struct nct7802_data *data = dev_get_drvdata(dev);
+	unsigned int reg, val;
+	int ret;
+
+	if (step_up)
+		reg = REG_SMARTFAN_STEP_UP_TIME;
+	else
+		reg = REG_SMARTFAN_STEP_DOWN_TIME;
+
+	ret = regmap_read(data->regmap, reg, &val);
+	if (ret < 0)
+		return ret;
+
+	return sprintf(buf, "%u\n", val * 100); /* Convert from ds to ms */
+}
+
+static ssize_t step_up_time_show(struct device *dev,
+				 struct device_attribute *attr, char *buf)
+{
+	return step_time_show(dev, attr, buf, true);
+}
+
+static ssize_t step_down_time_show(struct device *dev,
+				   struct device_attribute *attr, char *buf)
+{
+	return step_time_show(dev, attr, buf, false);
+}
+
+static ssize_t step_time_store(struct device *dev,
+			       struct device_attribute *attr, const char *buf,
+			       size_t count, bool step_up)
+{
+	struct nct7802_data *data = dev_get_drvdata(dev);
+	unsigned long val;
+	unsigned int reg;
+	int ret;
+
+	ret = kstrtoul(buf, 10, &val);
+	if (ret < 0)
+		return ret;
+
+	/* Clamp range, and convert from ms to ds */
+	val = DIV_ROUND_CLOSEST(clamp_val(val, 100, 25500), 100);
+
+	if (step_up)
+		reg = REG_SMARTFAN_STEP_UP_TIME;
+	else
+		reg = REG_SMARTFAN_STEP_DOWN_TIME;
+
+	ret = regmap_write(data->regmap, reg, val);
+
+	return ret ? : count;
+}
+
+static ssize_t step_up_time_store(struct device *dev,
+				  struct device_attribute *attr,
+				  const char *buf, size_t count)
+{
+	return step_time_store(dev, attr, buf, count, true);
+}
+
+static ssize_t step_down_time_store(struct device *dev,
+				    struct device_attribute *attr,
+				    const char *buf, size_t count)
+{
+	return step_time_store(dev, attr, buf, count, false);
 }
 
 static SENSOR_DEVICE_ATTR_RW(temp1_type, temp_type, 0);
@@ -991,12 +1048,30 @@ static const struct attribute_group nct7802_auto_point_group = {
 	.attrs = nct7802_auto_point_attrs,
 };
 
+/* 7.2.102 0x6E FANCTL Step Up Time Register */
+static SENSOR_DEVICE_ATTR_RW(step_up_time, step_up_time, 0);
+
+/* 7.2.103 0x6F FANCTL Step Down Time Register */
+static SENSOR_DEVICE_ATTR_RW(step_down_time, step_down_time, 0);
+
+static struct attribute *nct7802_step_time_attrs[] = {
+	&sensor_dev_attr_step_up_time.dev_attr.attr,
+	&sensor_dev_attr_step_down_time.dev_attr.attr,
+
+	NULL
+};
+
+static const struct attribute_group nct7802_step_time_group = {
+	.attrs = nct7802_step_time_attrs,
+};
+
 static const struct attribute_group *nct7802_groups[] = {
 	&nct7802_temp_group,
 	&nct7802_in_group,
 	&nct7802_fan_group,
 	&nct7802_pwm_group,
 	&nct7802_auto_point_group,
+	&nct7802_step_time_group,
 	NULL
 };
 
@@ -1051,7 +1126,7 @@ static bool nct7802_regmap_is_volatile(struct device *dev, unsigned int reg)
 static const struct regmap_config nct7802_regmap_config = {
 	.reg_bits = 8,
 	.val_bits = 8,
-	.cache_type = REGCACHE_RBTREE,
+	.cache_type = REGCACHE_MAPLE,
 	.volatile_reg = nct7802_regmap_is_volatile,
 };
 
@@ -1145,17 +1220,14 @@ static int nct7802_configure_channels(struct device *dev,
 {
 	/* Enable local temperature sensor by default */
 	u8 mode_mask = MODE_LTD_EN, mode_val = MODE_LTD_EN;
-	struct device_node *node;
 	int err;
 
 	if (dev->of_node) {
-		for_each_child_of_node(dev->of_node, node) {
+		for_each_child_of_node_scoped(dev->of_node, node) {
 			err = nct7802_get_channel_config(dev, node, &mode_mask,
 							 &mode_val);
-			if (err) {
-				of_node_put(node);
+			if (err)
 				return err;
-			}
 		}
 	}
 
@@ -1212,7 +1284,7 @@ static const unsigned short nct7802_address_list[] = {
 };
 
 static const struct i2c_device_id nct7802_idtable[] = {
-	{ "nct7802", 0 },
+	{ .name = "nct7802" },
 	{ }
 };
 MODULE_DEVICE_TABLE(i2c, nct7802_idtable);

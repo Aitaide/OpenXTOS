@@ -52,9 +52,7 @@ static void update_enumeration_value(int instance_id, char *attr_value)
 {
 	struct enumeration_data *enum_data = &bioscfg_drv.enumeration_data[instance_id];
 
-	strscpy(enum_data->current_value,
-		attr_value,
-		sizeof(enum_data->current_value));
+	strscpy(enum_data->current_value, attr_value);
 }
 
 ATTRIBUTE_S_COMMON_PROPERTY_SHOW(display_name, enumeration);
@@ -96,8 +94,11 @@ int hp_alloc_enumeration_data(void)
 	bioscfg_drv.enumeration_instances_count =
 		hp_get_instance_count(HP_WMI_BIOS_ENUMERATION_GUID);
 
-	bioscfg_drv.enumeration_data = kcalloc(bioscfg_drv.enumeration_instances_count,
-					       sizeof(*bioscfg_drv.enumeration_data), GFP_KERNEL);
+	if (!bioscfg_drv.enumeration_instances_count)
+		return -EINVAL;
+	bioscfg_drv.enumeration_data = kvzalloc_objs(*bioscfg_drv.enumeration_data,
+						     bioscfg_drv.enumeration_instances_count);
+
 	if (!bioscfg_drv.enumeration_data) {
 		bioscfg_drv.enumeration_instances_count = 0;
 		return -ENOMEM;
@@ -162,10 +163,11 @@ static int hp_populate_enumeration_elements_from_package(union acpi_object *enum
 
 		/* Check that both expected and read object type match */
 		if (expected_enum_types[eloc] != enum_obj[elem].type) {
-			pr_err("Error expected type %d for elem %d, but got type %d instead\n",
-			       expected_enum_types[eloc], elem, enum_obj[elem].type);
+			pr_warn("Unexpected element type at elem %d: expected %d, got %d, skipping\n",
+				elem, expected_enum_types[eloc], enum_obj[elem].type);
 			kfree(str_value);
-			return -EIO;
+			str_value = NULL;
+			continue;
 		}
 
 		/* Assign appropriate element value to corresponding field */
@@ -174,8 +176,7 @@ static int hp_populate_enumeration_elements_from_package(union acpi_object *enum
 		case VALUE:
 			break;
 		case PATH:
-			strscpy(enum_data->common.path, str_value,
-				sizeof(enum_data->common.path));
+			strscpy(enum_data->common.path, str_value);
 			break;
 		case IS_READONLY:
 			enum_data->common.is_readonly = int_value;
@@ -210,7 +211,7 @@ static int hp_populate_enumeration_elements_from_package(union acpi_object *enum
 		case PREREQUISITES:
 			size = min_t(u32, enum_data->common.prerequisites_size, MAX_PREREQUISITES_SIZE);
 			for (reqs = 0; reqs < size; reqs++) {
-				if (elem >= enum_obj_count) {
+				if (elem + reqs >= enum_obj_count) {
 					pr_err("Error enum-objects package is too small\n");
 					return -EINVAL;
 				}
@@ -222,13 +223,13 @@ static int hp_populate_enumeration_elements_from_package(union acpi_object *enum
 				if (ret)
 					return -EINVAL;
 
-				strscpy(enum_data->common.prerequisites[reqs],
-					str_value,
-					sizeof(enum_data->common.prerequisites[reqs]));
+				strscpy(enum_data->common.prerequisites[reqs], str_value);
 
 				kfree(str_value);
 				str_value = NULL;
 			}
+			if (size)
+				elem += size - 1;
 			break;
 
 		case SECURITY_LEVEL:
@@ -236,8 +237,7 @@ static int hp_populate_enumeration_elements_from_package(union acpi_object *enum
 			break;
 
 		case ENUM_CURRENT_VALUE:
-			strscpy(enum_data->current_value,
-				str_value, sizeof(enum_data->current_value));
+			strscpy(enum_data->current_value, str_value);
 			break;
 		case ENUM_SIZE:
 			if (int_value > MAX_VALUES_SIZE) {
@@ -261,7 +261,7 @@ static int hp_populate_enumeration_elements_from_package(union acpi_object *enum
 
 			for (pos_values = 0; pos_values < size && pos_values < MAX_VALUES_SIZE;
 			     pos_values++) {
-				if (elem >= enum_obj_count) {
+				if (elem + pos_values >= enum_obj_count) {
 					pr_err("Error enum-objects package is too small\n");
 					return -EINVAL;
 				}
@@ -278,13 +278,13 @@ static int hp_populate_enumeration_elements_from_package(union acpi_object *enum
 				 * is greater than MAX_VALUES_SIZE
 				 */
 				if (size < MAX_VALUES_SIZE)
-					strscpy(enum_data->possible_values[pos_values],
-						str_value,
-						sizeof(enum_data->possible_values[pos_values]));
+					strscpy(enum_data->possible_values[pos_values], str_value);
 
 				kfree(str_value);
 				str_value = NULL;
 			}
+			if (size)
+				elem += (size < MAX_VALUES_SIZE ? size : MAX_VALUES_SIZE) - 1;
 			break;
 		default:
 			pr_warn("Invalid element: %d found in Enumeration attribute or data may be malformed\n", elem);
@@ -305,10 +305,12 @@ exit_enumeration_package:
  * Populate all properties of an instance under enumeration attribute
  *
  * @enum_obj: ACPI object with enumeration data
+ * @enum_obj_count: Number of elements in @enum_obj
  * @instance_id: The instance to enumerate
  * @attr_name_kobj: The parent kernel object
  */
 int hp_populate_enumeration_package_data(union acpi_object *enum_obj,
+					 int enum_obj_count,
 					 int instance_id,
 					 struct kobject *attr_name_kobj)
 {
@@ -317,7 +319,7 @@ int hp_populate_enumeration_package_data(union acpi_object *enum_obj,
 	enum_data->attr_name_kobj = attr_name_kobj;
 
 	hp_populate_enumeration_elements_from_package(enum_obj,
-						      enum_obj->package.count,
+						      enum_obj_count,
 						      instance_id);
 	hp_update_attribute_permissions(enum_data->common.is_readonly,
 					&enumeration_current_val);
@@ -452,6 +454,6 @@ void hp_exit_enumeration_attributes(void)
 	}
 	bioscfg_drv.enumeration_instances_count = 0;
 
-	kfree(bioscfg_drv.enumeration_data);
+	kvfree(bioscfg_drv.enumeration_data);
 	bioscfg_drv.enumeration_data = NULL;
 }

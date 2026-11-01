@@ -13,9 +13,9 @@
 #include <linux/wait.h>
 #include <linux/rwsem.h>
 
-#ifdef CONFIG_PROC_SYSCTL
+#ifdef CONFIG_SYSCTL
 
-static void *get_uts(struct ctl_table *table)
+static void *get_uts(const struct ctl_table *table)
 {
 	char *which = table->data;
 	struct uts_namespace *uts_ns;
@@ -30,7 +30,7 @@ static void *get_uts(struct ctl_table *table)
  *	Special case of dostring for the UTS structure. This has locks
  *	to observe. Should this be in kernel/sys.c ????
  */
-static int proc_do_uts_string(struct ctl_table *table, int write,
+static int proc_do_uts_string(const struct ctl_table *table, int write,
 		  void *buffer, size_t *lenp, loff_t *ppos)
 {
 	struct ctl_table uts_table;
@@ -75,7 +75,7 @@ static DEFINE_CTL_TABLE_POLL(hostname_poll);
 static DEFINE_CTL_TABLE_POLL(domainname_poll);
 
 // Note: update 'enum uts_proc' to match any changes to this table
-static struct ctl_table uts_kern_table[] = {
+static const struct ctl_table uts_kern_table[] = {
 	{
 		.procname	= "arch",
 		.data		= init_uts_ns.name.machine,
@@ -120,17 +120,16 @@ static struct ctl_table uts_kern_table[] = {
 		.proc_handler	= proc_do_uts_string,
 		.poll		= &domainname_poll,
 	},
-	{}
 };
 
-#ifdef CONFIG_PROC_SYSCTL
+#ifdef CONFIG_SYSCTL
 /*
  * Notify userspace about a change in a certain entry of uts_kern_table,
  * identified by the parameter proc.
  */
 void uts_proc_notify(enum uts_proc proc)
 {
-	struct ctl_table *table = &uts_kern_table[proc];
+	const struct ctl_table *table = &uts_kern_table[proc];
 
 	proc_sys_poll_notify(table->poll);
 }

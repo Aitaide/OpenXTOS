@@ -291,6 +291,7 @@ static struct _vcs_dpi_soc_bounding_box_st dcn3_15_soc = {
 	.do_urgent_latency_adjustment = false,
 	.urgent_latency_adjustment_fabric_clock_component_us = 0,
 	.urgent_latency_adjustment_fabric_clock_reference_mhz = 0,
+	.dispclk_dppclk_vco_speed_mhz = 2400.0,
 	.num_chans = 4,
 	.dummy_pstate_latency_us = 10.0
 };
@@ -438,6 +439,7 @@ static struct _vcs_dpi_soc_bounding_box_st dcn3_16_soc = {
 	.do_urgent_latency_adjustment = false,
 	.urgent_latency_adjustment_fabric_clock_component_us = 0,
 	.urgent_latency_adjustment_fabric_clock_reference_mhz = 0,
+	.dispclk_dppclk_vco_speed_mhz = 2500.0,
 };
 
 void dcn31_zero_pipe_dcc_fraction(display_e2e_pipe_params_st *pipes,
@@ -483,8 +485,12 @@ void dcn31_calculate_wm_and_dlg_fp(
 		int pipe_cnt,
 		int vlevel)
 {
-	int i, pipe_idx, total_det = 0, active_hubp_count = 0;
+	int total_det = 0, active_hubp_count = 0;
+	unsigned int i, pipe_idx;
 	double dcfclk = context->bw_ctx.dml.vba.DCFCLKState[vlevel][context->bw_ctx.dml.vba.maxMpcComb];
+	uint32_t cstate_enter_plus_exit_z8_ns;
+	uint32_t minimum_z8_residency_time_ns =
+			(uint32_t)dc->debug.minimum_z8_residency_time * 1000U;
 
 	dc_assert_fp_enabled();
 
@@ -496,7 +502,7 @@ void dcn31_calculate_wm_and_dlg_fp(
 	 * Override any clocks that can block S0i3 to min here
 	 */
 	if (pipe_cnt == 0) {
-		context->bw_ctx.bw.dcn.clk.dcfclk_khz = dcfclk; // always should be vlevel 0
+		context->bw_ctx.bw.dcn.clk.dcfclk_khz = (int)dcfclk; // always should be vlevel 0
 		return;
 	}
 
@@ -504,22 +510,29 @@ void dcn31_calculate_wm_and_dlg_fp(
 	pipes[0].clks_cfg.dcfclk_mhz = dcfclk;
 	pipes[0].clks_cfg.socclk_mhz = context->bw_ctx.dml.soc.clock_limits[vlevel].socclk_mhz;
 
+	cstate_enter_plus_exit_z8_ns =
+		(uint32_t)(get_wm_z8_stutter_enter_exit(&context->bw_ctx.dml, pipes, pipe_cnt) * 1000);
+
+	if (get_stutter_period(&context->bw_ctx.dml, pipes, pipe_cnt) < dc->debug.minimum_z8_residency_time &&
+				cstate_enter_plus_exit_z8_ns < minimum_z8_residency_time_ns)
+		cstate_enter_plus_exit_z8_ns = minimum_z8_residency_time_ns;
+
 	/* Set A:
 	 * All clocks min required
 	 *
 	 * Set A calculated last so that following calculations are based on Set A
 	 */
 	dc->res_pool->funcs->update_soc_for_wm_a(dc, context);
-	context->bw_ctx.bw.dcn.watermarks.a.urgent_ns = get_wm_urgent(&context->bw_ctx.dml, pipes, pipe_cnt) * 1000;
-	context->bw_ctx.bw.dcn.watermarks.a.cstate_pstate.cstate_enter_plus_exit_ns = get_wm_stutter_enter_exit(&context->bw_ctx.dml, pipes, pipe_cnt) * 1000;
-	context->bw_ctx.bw.dcn.watermarks.a.cstate_pstate.cstate_exit_ns = get_wm_stutter_exit(&context->bw_ctx.dml, pipes, pipe_cnt) * 1000;
-	context->bw_ctx.bw.dcn.watermarks.a.cstate_pstate.pstate_change_ns = get_wm_dram_clock_change(&context->bw_ctx.dml, pipes, pipe_cnt) * 1000;
-	context->bw_ctx.bw.dcn.watermarks.a.cstate_pstate.cstate_enter_plus_exit_z8_ns = get_wm_z8_stutter_enter_exit(&context->bw_ctx.dml, pipes, pipe_cnt) * 1000;
-	context->bw_ctx.bw.dcn.watermarks.a.cstate_pstate.cstate_exit_z8_ns = get_wm_z8_stutter_exit(&context->bw_ctx.dml, pipes, pipe_cnt) * 1000;
-	context->bw_ctx.bw.dcn.watermarks.a.pte_meta_urgent_ns = get_wm_memory_trip(&context->bw_ctx.dml, pipes, pipe_cnt) * 1000;
-	context->bw_ctx.bw.dcn.watermarks.a.frac_urg_bw_nom = get_fraction_of_urgent_bandwidth(&context->bw_ctx.dml, pipes, pipe_cnt) * 1000;
-	context->bw_ctx.bw.dcn.watermarks.a.frac_urg_bw_flip = get_fraction_of_urgent_bandwidth_imm_flip(&context->bw_ctx.dml, pipes, pipe_cnt) * 1000;
-	context->bw_ctx.bw.dcn.watermarks.a.urgent_latency_ns = get_urgent_latency(&context->bw_ctx.dml, pipes, pipe_cnt) * 1000;
+	context->bw_ctx.bw.dcn.watermarks.a.urgent_ns = (uint32_t)(get_wm_urgent(&context->bw_ctx.dml, pipes, pipe_cnt) * 1000);
+	context->bw_ctx.bw.dcn.watermarks.a.cstate_pstate.cstate_enter_plus_exit_ns = (uint32_t)(get_wm_stutter_enter_exit(&context->bw_ctx.dml, pipes, pipe_cnt) * 1000);
+	context->bw_ctx.bw.dcn.watermarks.a.cstate_pstate.cstate_exit_ns = (uint32_t)(get_wm_stutter_exit(&context->bw_ctx.dml, pipes, pipe_cnt) * 1000);
+	context->bw_ctx.bw.dcn.watermarks.a.cstate_pstate.pstate_change_ns = (uint32_t)(get_wm_dram_clock_change(&context->bw_ctx.dml, pipes, pipe_cnt) * 1000);
+	context->bw_ctx.bw.dcn.watermarks.a.cstate_pstate.cstate_enter_plus_exit_z8_ns = cstate_enter_plus_exit_z8_ns;
+	context->bw_ctx.bw.dcn.watermarks.a.cstate_pstate.cstate_exit_z8_ns = (uint32_t)(get_wm_z8_stutter_exit(&context->bw_ctx.dml, pipes, pipe_cnt) * 1000);
+	context->bw_ctx.bw.dcn.watermarks.a.pte_meta_urgent_ns = (uint32_t)(get_wm_memory_trip(&context->bw_ctx.dml, pipes, pipe_cnt) * 1000);
+	context->bw_ctx.bw.dcn.watermarks.a.frac_urg_bw_nom = (uint32_t)(get_fraction_of_urgent_bandwidth(&context->bw_ctx.dml, pipes, pipe_cnt) * 1000);
+	context->bw_ctx.bw.dcn.watermarks.a.frac_urg_bw_flip = (uint32_t)(get_fraction_of_urgent_bandwidth_imm_flip(&context->bw_ctx.dml, pipes, pipe_cnt) * 1000);
+	context->bw_ctx.bw.dcn.watermarks.a.urgent_latency_ns = (uint32_t)(get_urgent_latency(&context->bw_ctx.dml, pipes, pipe_cnt) * 1000);
 	context->bw_ctx.bw.dcn.watermarks.b = context->bw_ctx.bw.dcn.watermarks.a;
 	context->bw_ctx.bw.dcn.watermarks.c = context->bw_ctx.bw.dcn.watermarks.a;
 	context->bw_ctx.bw.dcn.watermarks.d = context->bw_ctx.bw.dcn.watermarks.a;
@@ -568,7 +581,7 @@ void dcn31_calculate_wm_and_dlg_fp(
 			continue;
 
 		context->res_ctx.pipe_ctx[i].det_buffer_size_kb =
-				get_det_buffer_size_kbytes(&context->bw_ctx.dml, pipes, pipe_cnt, pipe_idx);
+				(int)get_det_buffer_size_kbytes(&context->bw_ctx.dml, pipes, pipe_cnt, pipe_idx);
 		if (context->res_ctx.pipe_ctx[i].det_buffer_size_kb > 384)
 			context->res_ctx.pipe_ctx[i].det_buffer_size_kb /= 2;
 		total_det += context->res_ctx.pipe_ctx[i].det_buffer_size_kb;
@@ -577,12 +590,12 @@ void dcn31_calculate_wm_and_dlg_fp(
 	context->bw_ctx.bw.dcn.compbuf_size_kb = context->bw_ctx.dml.ip.config_return_buffer_size_in_kbytes - total_det;
 }
 
-void dcn31_update_bw_bounding_box(struct dc *dc, struct clk_bw_params *bw_params)
+void dcn31_update_bw_bounding_box_fpu(struct dc *dc, struct clk_bw_params *bw_params)
 {
 	struct _vcs_dpi_voltage_scaling_st *s = dc->scratch.update_bw_bounding_box.clock_limits;
 	struct clk_limit_table *clk_table = &bw_params->clk_table;
 	unsigned int i, closest_clk_lvl;
-	int max_dispclk_mhz = 0, max_dppclk_mhz = 0;
+	unsigned int max_dispclk_mhz = 0, max_dppclk_mhz = 0;
 	int j;
 
 	dc_assert_fp_enabled();
@@ -637,9 +650,9 @@ void dcn31_update_bw_bounding_box(struct dc *dc, struct clk_bw_params *bw_params
 			dcn3_1_soc.clock_limits[closest_clk_lvl].phyclk_d18_mhz;
 		s[i].phyclk_mhz = dcn3_1_soc.clock_limits[closest_clk_lvl].phyclk_mhz;
 	}
-	if (clk_table->num_entries) {
+
+	if (clk_table->num_entries)
 		dcn3_1_soc.num_states = clk_table->num_entries;
-	}
 
 	memcpy(dcn3_1_soc.clock_limits, s, sizeof(dcn3_1_soc.clock_limits));
 
@@ -655,10 +668,10 @@ void dcn31_update_bw_bounding_box(struct dc *dc, struct clk_bw_params *bw_params
 	dml_init_instance(&dc->dml, &dcn3_1_soc, &dcn3_1_ip, DML_PROJECT_DCN31);
 }
 
-void dcn315_update_bw_bounding_box(struct dc *dc, struct clk_bw_params *bw_params)
+void dcn315_update_bw_bounding_box_fpu(struct dc *dc, struct clk_bw_params *bw_params)
 {
 	struct clk_limit_table *clk_table = &bw_params->clk_table;
-	int i, max_dispclk_mhz = 0, max_dppclk_mhz = 0;
+	unsigned int i, max_dispclk_mhz = 0, max_dppclk_mhz = 0;
 
 	dc_assert_fp_enabled();
 
@@ -716,12 +729,12 @@ void dcn315_update_bw_bounding_box(struct dc *dc, struct clk_bw_params *bw_param
 	dml_init_instance(&dc->dml, &dcn3_15_soc, &dcn3_15_ip, DML_PROJECT_DCN315);
 }
 
-void dcn316_update_bw_bounding_box(struct dc *dc, struct clk_bw_params *bw_params)
+void dcn316_update_bw_bounding_box_fpu(struct dc *dc, struct clk_bw_params *bw_params)
 {
 	struct _vcs_dpi_voltage_scaling_st *s = dc->scratch.update_bw_bounding_box.clock_limits;
 	struct clk_limit_table *clk_table = &bw_params->clk_table;
 	unsigned int i, closest_clk_lvl;
-	int max_dispclk_mhz = 0, max_dppclk_mhz = 0;
+	unsigned int max_dispclk_mhz = 0, max_dppclk_mhz = 0;
 	int j;
 
 	dc_assert_fp_enabled();
@@ -752,23 +765,11 @@ void dcn316_update_bw_bounding_box(struct dc *dc, struct clk_bw_params *bw_param
 				break;
 			}
 		}
-		// Ported from DCN315
-		if (clk_table->num_entries == 1) {
-			/*smu gives one DPM level, let's take the highest one*/
-			closest_clk_lvl = dcn3_16_soc.num_states - 1;
-		}
 
 		s[i].state = i;
 
 		/* Clocks dependent on voltage level. */
 		s[i].dcfclk_mhz = clk_table->entries[i].dcfclk_mhz;
-		if (clk_table->num_entries == 1 &&
-		    s[i].dcfclk_mhz <
-		    dcn3_16_soc.clock_limits[closest_clk_lvl].dcfclk_mhz) {
-			/*SMU fix not released yet*/
-			s[i].dcfclk_mhz =
-				dcn3_16_soc.clock_limits[closest_clk_lvl].dcfclk_mhz;
-		}
 		s[i].fabricclk_mhz = clk_table->entries[i].fclk_mhz;
 		s[i].socclk_mhz = clk_table->entries[i].socclk_mhz;
 		s[i].dram_speed_mts = clk_table->entries[i].memclk_mhz *
@@ -789,9 +790,9 @@ void dcn316_update_bw_bounding_box(struct dc *dc, struct clk_bw_params *bw_param
 			dcn3_16_soc.clock_limits[closest_clk_lvl].phyclk_d18_mhz;
 		s[i].phyclk_mhz = dcn3_16_soc.clock_limits[closest_clk_lvl].phyclk_mhz;
 	}
-	if (clk_table->num_entries) {
+
+	if (clk_table->num_entries)
 		dcn3_16_soc.num_states = clk_table->num_entries;
-	}
 
 	memcpy(dcn3_16_soc.clock_limits, s, sizeof(dcn3_16_soc.clock_limits));
 
@@ -810,13 +811,17 @@ void dcn316_update_bw_bounding_box(struct dc *dc, struct clk_bw_params *bw_param
 
 int dcn_get_max_non_odm_pix_rate_100hz(struct _vcs_dpi_soc_bounding_box_st *soc)
 {
-	return soc->clock_limits[0].dispclk_mhz * 10000.0 / (1.0 + soc->dcn_downspread_percent / 100.0);
+	dc_assert_fp_enabled();
+
+	return (int)(soc->clock_limits[0].dispclk_mhz * 10000.0 / (1.0 + soc->dcn_downspread_percent / 100.0));
 }
 
 int dcn_get_approx_det_segs_required_for_pstate(
 		struct _vcs_dpi_soc_bounding_box_st *soc,
 		int pix_clk_100hz, int bpp, int seg_size_kb)
 {
+	dc_assert_fp_enabled();
+
 	/* Roughly calculate required crb to hide latency. In practice there is slightly
 	 * more buffer available for latency hiding
 	 */

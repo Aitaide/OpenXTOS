@@ -1,4 +1,4 @@
-/* SPDX-License-Identifier: ISC */
+/* SPDX-License-Identifier: BSD-3-Clause-Clear */
 /* Copyright (C) 2023 MediaTek Inc. */
 
 #ifndef __MT76_CONNAC3_MAC_H
@@ -18,6 +18,11 @@ enum {
 	MT_LMAC_PSMP0,
 };
 
+enum {
+	TXS_FM_MPDU = 0,
+	TXS_FM_PPDU = 2,
+};
+
 #define MT_CT_PARSE_LEN			72
 #define MT_CT_DMA_BUF_NUM		2
 
@@ -28,8 +33,6 @@ enum {
 #define MT_RXD0_MESH			BIT(18)
 #define MT_RXD0_MHCP			BIT(19)
 #define MT_RXD0_NORMAL_ETH_TYPE_OFS	GENMASK(22, 16)
-#define MT_RXD0_NORMAL_IP_SUM		BIT(23)
-#define MT_RXD0_NORMAL_UDP_TCP_SUM	BIT(24)
 
 #define MT_RXD0_SW_PKT_TYPE_MASK	GENMASK(31, 16)
 #define MT_RXD0_SW_PKT_TYPE_MAP		0x380F
@@ -80,6 +83,8 @@ enum {
 #define MT_RXD3_NORMAL_BEACON_UC	BIT(21)
 #define MT_RXD3_NORMAL_CO_ANT		BIT(22)
 #define MT_RXD3_NORMAL_FCS_ERR		BIT(24)
+#define MT_RXD3_NORMAL_IP_SUM		BIT(26)
+#define MT_RXD3_NORMAL_UDP_TCP_SUM	BIT(27)
 #define MT_RXD3_NORMAL_VLAN2ETH		BIT(31)
 
 /* RXD DW4 */
@@ -142,6 +147,28 @@ enum {
 #define MT_CRXV_HE_RU3_L		GENMASK(31, 27)
 #define MT_CRXV_HE_RU3_H		GENMASK(3, 0)
 
+#define MT_CRXV_EHT_NUM_USER		GENMASK(26, 20)
+#define MT_CRXV_EHT_LTF_SIZE		GENMASK(28, 27)
+#define MT_CRXV_EHT_LDPC_EXT_SYM	BIT(30)
+#define MT_CRXV_EHT_PE_DISAMBIG		BIT(1)
+#define MT_CRXV_EHT_UPLINK		BIT(2)
+#define MT_CRXV_EHT_MU_AID		GENMASK(27, 17)
+#define MT_CRXV_EHT_BEAM_CHNG		BIT(29)
+#define MT_CRXV_EHT_DOPPLER		BIT(0)
+#define MT_CRXV_EHT_BSS_COLOR		GENMASK(15, 10)
+#define MT_CRXV_EHT_TXOP_DUR		GENMASK(23, 17)
+#define MT_CRXV_EHT_SR_MASK		GENMASK(11, 8)
+#define MT_CRXV_EHT_SR1_MASK		GENMASK(15, 12)
+#define MT_CRXV_EHT_SR2_MASK		GENMASK(19, 16)
+#define MT_CRXV_EHT_SR3_MASK		GENMASK(23, 20)
+#define MT_CRXV_EHT_RU0			GENMASK(8, 0)
+#define MT_CRXV_EHT_RU1			GENMASK(17, 9)
+#define MT_CRXV_EHT_RU2			GENMASK(26, 18)
+#define MT_CRXV_EHT_RU3_L		GENMASK(31, 27)
+#define MT_CRXV_EHT_RU3_H		GENMASK(3, 0)
+#define MT_CRXV_EHT_SIG_MCS		GENMASK(19, 18)
+#define MT_CRXV_EHT_LTF_SYM		GENMASK(22, 20)
+
 enum tx_header_format {
 	MT_HDR_FORMAT_802_3,
 	MT_HDR_FORMAT_CMD,
@@ -173,6 +200,13 @@ enum tx_mgnt_type {
 	MT_TX_NORMAL,
 	MT_TX_TIMING,
 	MT_TX_ADDBA,
+};
+
+enum tx_frag_idx {
+	MT_TX_FRAG_NONE,
+	MT_TX_FRAG_FIRST,
+	MT_TX_FRAG_MID,
+	MT_TX_FRAG_LAST
 };
 
 #define MT_CT_INFO_APPLY_TXD		BIT(0)
@@ -207,7 +241,9 @@ enum tx_mgnt_type {
 #define MT_TXD2_HDR_PAD			GENMASK(11, 10)
 #define MT_TXD2_RTS			BIT(9)
 #define MT_TXD2_OWN_MAC_MAP		BIT(8)
+#define MT_TXD2_OWN_MAC_MAP_V2		BIT(9)
 #define MT_TXD2_BF_TYPE			GENMASK(6, 7)
+#define MT_TXD2_BF_TYPE_V2		GENMASK(6, 8)
 #define MT_TXD2_FRAME_TYPE		GENMASK(5, 4)
 #define MT_TXD2_SUB_TYPE		GENMASK(3, 0)
 
@@ -232,6 +268,7 @@ enum tx_mgnt_type {
 #define MT_TXD5_BYPASS_TBB		BIT(14)
 #define MT_TXD5_BYPASS_RBB		BIT(13)
 #define MT_TXD5_BSS_COLOR_ZERO		BIT(12)
+#define MT_TXD5_OCUP_BY_OTHER_LNK	BIT(11)
 #define MT_TXD5_TX_STATUS_HOST		BIT(10)
 #define MT_TXD5_TX_STATUS_MCU		BIT(9)
 #define MT_TXD5_TX_STATUS_FMT		BIT(8)
@@ -239,14 +276,21 @@ enum tx_mgnt_type {
 
 #define MT_TXD6_TX_SRC			GENMASK(31, 30)
 #define MT_TXD6_VTA			BIT(28)
-#define MT_TXD6_BW			GENMASK(25, 22)
+#define MT_TXD6_FIXED_BW		BIT(25)
+#define MT_TXD6_BW			GENMASK(24, 22)
+#define MT_TXD6_BW_V2			GENMASK(25, 22)
 #define MT_TXD6_TX_RATE			GENMASK(21, 16)
 #define MT_TXD6_TIMESTAMP_OFS_EN	BIT(15)
+#define MT_TXD6_TIMESTAMP_OFS_EN_V2	GENMASK(15, 13)
 #define MT_TXD6_TIMESTAMP_OFS_IDX	GENMASK(14, 10)
+#define MT_TXD6_TIMESTAMP_OFS_IDX_V2	GENMASK(12, 8)
+#define MT_TXD6_TID_ADDBA		GENMASK(10, 8)
 #define MT_TXD6_MSDU_CNT		GENMASK(9, 4)
+#define MT_TXD6_MSDU_CNT_V2		GENMASK(15, 10)
 #define MT_TXD6_DIS_MAT			BIT(3)
 #define MT_TXD6_DAS			BIT(2)
 #define MT_TXD6_AMSDU_CAP		BIT(1)
+#define MT_TXD6_MLD			BIT(0)
 
 #define MT_TXD7_TXD_LEN			GENMASK(31, 30)
 #define MT_TXD7_IP_SUM			BIT(29)
@@ -255,7 +299,22 @@ enum tx_mgnt_type {
 #define MT_TXD7_CTXD			BIT(26)
 #define MT_TXD7_CTXD_CNT		GENMASK(25, 22)
 #define MT_TXD7_UDP_TCP_SUM		BIT(15)
+#define MT_TXD7_IMMEDIATE_TX		BIT(14)
+#define MT_TXD7_FORCE_RTS_CTS		BIT(13)
+#define MT_TXD7_ENABLE_ICI		BIT(12)
 #define MT_TXD7_TX_TIME			GENMASK(9, 0)
+
+#define MT_TXD9_WLAN_IDX		GENMASK(23, 8)
+
+#define MT_TXP_BUF_LEN			GENMASK(11, 0)
+#define MT_TXP_DMA_ADDR_H		GENMASK(15, 12)
+
+#define MT_TXP0_TOKEN_ID0		GENMASK(14, 0)
+#define MT_TXP0_TOKEN_ID0_VALID_MASK	BIT(15)
+
+#define MT_TXP1_TID_ADDBA		GENMASK(14, 12)
+#define MT_TXP3_ML0_MASK		BIT(15)
+#define MT_TXP3_DMA_ADDR_H		GENMASK(13, 12)
 
 #define MT_TX_RATE_STBC			BIT(14)
 #define MT_TX_RATE_NSS			GENMASK(13, 10)
@@ -269,7 +328,7 @@ enum tx_mgnt_type {
 #define MT_TXFREE0_MSDU_CNT		GENMASK(25, 16)
 #define MT_TXFREE0_RX_BYTE		GENMASK(15, 0)
 
-#define MT_TXFREE1_VER			GENMASK(18, 16)
+#define MT_TXFREE1_VER			GENMASK(19, 16)
 
 #define MT_TXFREE_INFO_PAIR		BIT(31)
 #define MT_TXFREE_INFO_HEADER		BIT(30)
@@ -277,6 +336,9 @@ enum tx_mgnt_type {
 #define MT_TXFREE_INFO_MSDU_ID		GENMASK(14, 0)
 #define MT_TXFREE_INFO_COUNT		GENMASK(27, 24)
 #define MT_TXFREE_INFO_STAT		GENMASK(29, 28)
+
+#define MT_TXS_HDR_SIZE			4 /* Unit: DW */
+#define MT_TXS_SIZE			12 /* Unit: DW */
 
 #define MT_TXS0_BW			GENMASK(31, 29)
 #define MT_TXS0_TID			GENMASK(28, 26)
@@ -315,6 +377,7 @@ enum tx_mgnt_type {
 
 #define MT_TXS4_TIMESTAMP		GENMASK(31, 0)
 
+/* MPDU based TXS */
 #define MT_TXS5_F0_FINAL_MPDU		BIT(31)
 #define MT_TXS5_F0_QOS			BIT(30)
 #define MT_TXS5_F0_TX_COUNT		GENMASK(29, 25)
@@ -335,5 +398,45 @@ enum tx_mgnt_type {
 #define MT_TXS7_F0_RCPI_0		GENMASK(7, 0)
 #define MT_TXS7_F1_MPDU_RETRY_COUNT	GENMASK(31, 24)
 #define MT_TXS7_F1_MPDU_RETRY_BYTES	GENMASK(23, 0)
+
+/* PPDU based TXS */
+#define MT_TXS5_MPDU_TX_CNT		GENMASK(30, 20)
+#define MT_TXS5_MPDU_TX_BYTE_SCALE	BIT(15)
+#define MT_TXS5_MPDU_TX_BYTE		GENMASK(14, 0)
+
+#define MT_TXS6_MPDU_FAIL_CNT		GENMASK(30, 20)
+#define MT_TXS6_MPDU_FAIL_BYTE_SCALE	BIT(15)
+#define MT_TXS6_MPDU_FAIL_BYTE		GENMASK(14, 0)
+
+#define MT_TXS7_MPDU_RETRY_CNT		GENMASK(30, 20)
+#define MT_TXS7_MPDU_RETRY_BYTE_SCALE	BIT(15)
+#define MT_TXS7_MPDU_RETRY_BYTE		GENMASK(14, 0)
+
+struct mt7928_uni_txdone_event {
+	__le16  tag;
+	__le16  len;
+
+	u8      pid;            /* HW packet ID */
+	u8      status;         /* TX_RESULT_xx */
+	__le16  seq;            /* packet sequence number */
+
+	u8      wcid;           /* WLAN index (WTBL) */
+	u8      tx_count;       /* TX attempts including retries */
+	__le16  tx_rate;
+
+	u8      flag;           /* TXS_WITH_ADVANCED_INFO or TXS_IS_EXIST */
+	u8      tid;
+	u8      rsp_rate;
+	u8      rate_tbl_idx;   /* last TX rate index from WLAN table */
+
+	u8      bw;             /* bandwidth used for this PPDU */
+	u8      tx_pwr;         /* dBm */
+	u8      flush_reason;
+	u8      rsv[1];
+
+	__le32  tx_delay;       /* unit: 32us, UMAC TX to TX status */
+	__le32  timestamp;      /* local TSF at first bit of MAC header */
+	__le32  applied_flags;
+} __packed;
 
 #endif /* __MT76_CONNAC3_MAC_H */

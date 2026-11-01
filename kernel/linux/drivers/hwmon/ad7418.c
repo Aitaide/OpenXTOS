@@ -230,8 +230,6 @@ static void ad7418_init_client(struct i2c_client *client)
 	}
 }
 
-static const struct i2c_device_id ad7418_id[];
-
 static int ad7418_probe(struct i2c_client *client)
 {
 	struct device *dev = &client->dev;
@@ -252,10 +250,7 @@ static int ad7418_probe(struct i2c_client *client)
 
 	mutex_init(&data->lock);
 	data->client = client;
-	if (dev->of_node)
-		data->type = (uintptr_t)of_device_get_match_data(dev);
-	else
-		data->type = i2c_match_id(ad7418_id, client)->driver_data;
+	data->type = (uintptr_t)i2c_get_match_data(client);
 
 	switch (data->type) {
 	case ad7416:
@@ -286,9 +281,9 @@ static int ad7418_probe(struct i2c_client *client)
 }
 
 static const struct i2c_device_id ad7418_id[] = {
-	{ "ad7416", ad7416 },
-	{ "ad7417", ad7417 },
-	{ "ad7418", ad7418 },
+	{ .name = "ad7416", .driver_data = ad7416 },
+	{ .name = "ad7417", .driver_data = ad7417 },
+	{ .name = "ad7418", .driver_data = ad7418 },
 	{ }
 };
 MODULE_DEVICE_TABLE(i2c, ad7418_id);

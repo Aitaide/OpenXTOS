@@ -28,61 +28,16 @@
 #include <signal.h>
 #include <stdlib.h>
 #include <pthread.h>
-#include "../kselftest.h"
+#include <errno.h>
+#include "clock-helpers.h"
+#include "kselftest.h"
 
-#define CLOCK_REALTIME			0
-#define CLOCK_MONOTONIC			1
-#define CLOCK_PROCESS_CPUTIME_ID	2
-#define CLOCK_THREAD_CPUTIME_ID		3
-#define CLOCK_MONOTONIC_RAW		4
-#define CLOCK_REALTIME_COARSE		5
-#define CLOCK_MONOTONIC_COARSE		6
-#define CLOCK_BOOTTIME			7
-#define CLOCK_REALTIME_ALARM		8
-#define CLOCK_BOOTTIME_ALARM		9
-#define CLOCK_HWSPECIFIC		10
-#define CLOCK_TAI			11
-#define NR_CLOCKIDS			12
-
-
-#define NSEC_PER_SEC 1000000000ULL
 #define UNREASONABLE_LAT (NSEC_PER_SEC * 5) /* hopefully we resume in 5 secs */
 
 #define SUSPEND_SECS 15
 int alarmcount;
 int alarm_clock_id;
 struct timespec start_time;
-
-
-char *clockstring(int clockid)
-{
-	switch (clockid) {
-	case CLOCK_REALTIME:
-		return "CLOCK_REALTIME";
-	case CLOCK_MONOTONIC:
-		return "CLOCK_MONOTONIC";
-	case CLOCK_PROCESS_CPUTIME_ID:
-		return "CLOCK_PROCESS_CPUTIME_ID";
-	case CLOCK_THREAD_CPUTIME_ID:
-		return "CLOCK_THREAD_CPUTIME_ID";
-	case CLOCK_MONOTONIC_RAW:
-		return "CLOCK_MONOTONIC_RAW";
-	case CLOCK_REALTIME_COARSE:
-		return "CLOCK_REALTIME_COARSE";
-	case CLOCK_MONOTONIC_COARSE:
-		return "CLOCK_MONOTONIC_COARSE";
-	case CLOCK_BOOTTIME:
-		return "CLOCK_BOOTTIME";
-	case CLOCK_REALTIME_ALARM:
-		return "CLOCK_REALTIME_ALARM";
-	case CLOCK_BOOTTIME_ALARM:
-		return "CLOCK_BOOTTIME_ALARM";
-	case CLOCK_TAI:
-		return "CLOCK_TAI";
-	}
-	return "UNKNOWN_CLOCKID";
-}
-
 
 long long timespec_sub(struct timespec a, struct timespec b)
 {
@@ -142,13 +97,13 @@ int main(void)
 
 		alarmcount = 0;
 		if (timer_create(alarm_clock_id, &se, &tm1) == -1) {
-			printf("timer_create failed, %s unsupported?\n",
-					clockstring(alarm_clock_id));
+			printf("timer_create failed, %s unsupported?: %s\n",
+					clock_name(alarm_clock_id), strerror(errno));
 			break;
 		}
 
 		clock_gettime(alarm_clock_id, &start_time);
-		printf("Start time (%s): %ld:%ld\n", clockstring(alarm_clock_id),
+		printf("Start time (%s): %ld:%ld\n", clock_name(alarm_clock_id),
 				start_time.tv_sec, start_time.tv_nsec);
 		printf("Setting alarm for every %i seconds\n", SUSPEND_SECS);
 		its1.it_value = start_time;
@@ -173,6 +128,6 @@ int main(void)
 		timer_delete(tm1);
 	}
 	if (final_ret)
-		return ksft_exit_fail();
-	return ksft_exit_pass();
+		ksft_exit_fail();
+	ksft_exit_pass();
 }

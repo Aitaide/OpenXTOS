@@ -14,8 +14,6 @@
  *
  * The only non-static object here is ext2_dir_inode_operations.
  *
- * TODO: get rid of kmap() use, add readahead.
- *
  * Copyright (C) 1992, 1993, 1994, 1995
  * Remy Card (card@masi.ibp.fr)
  * Laboratoire MASI - Institut Blaise Pascal
@@ -101,7 +99,7 @@ struct dentry *ext2_get_parent(struct dentry *child)
  */
 static int ext2_create (struct mnt_idmap * idmap,
 			struct inode * dir, struct dentry * dentry,
-			umode_t mode, bool excl)
+			umode_t mode)
 {
 	struct inode *inode;
 	int err;
@@ -225,19 +223,20 @@ static int ext2_link (struct dentry * old_dentry, struct inode * dir,
 	return err;
 }
 
-static int ext2_mkdir(struct mnt_idmap * idmap,
-	struct inode * dir, struct dentry * dentry, umode_t mode)
+static struct dentry *ext2_mkdir(struct mnt_idmap * idmap,
+				 struct inode * dir, struct dentry * dentry,
+				 umode_t mode)
 {
 	struct inode * inode;
 	int err;
 
 	err = dquot_initialize(dir);
 	if (err)
-		return err;
+		return ERR_PTR(err);
 
 	inode_inc_link_count(dir);
 
-	inode = ext2_new_inode(dir, S_IFDIR | mode, &dentry->d_name);
+	inode = ext2_new_inode(dir, mode, &dentry->d_name);
 	err = PTR_ERR(inode);
 	if (IS_ERR(inode))
 		goto out_dir;
@@ -258,7 +257,7 @@ static int ext2_mkdir(struct mnt_idmap * idmap,
 
 	d_instantiate_new(dentry, inode);
 out:
-	return err;
+	return ERR_PTR(err);
 
 out_fail:
 	inode_dec_link_count(inode);
@@ -273,26 +272,29 @@ static int ext2_unlink(struct inode *dir, struct dentry *dentry)
 {
 	struct inode *inode = d_inode(dentry);
 	struct ext2_dir_entry_2 *de;
-	struct page *page;
+	struct folio *folio;
 	int err;
 
 	err = dquot_initialize(dir);
 	if (err)
 		goto out;
 
-	de = ext2_find_entry(dir, &dentry->d_name, &page);
+	de = ext2_find_entry(dir, &dentry->d_name, &folio);
 	if (IS_ERR(de)) {
 		err = PTR_ERR(de);
 		goto out;
 	}
 
-	err = ext2_delete_entry(de, page);
-	ext2_put_page(page, de);
+	err = ext2_delete_entry(de, folio);
+	folio_release_kmap(folio, de);
 	if (err)
 		goto out;
 
 	inode_set_ctime_to_ts(inode, inode_get_ctime(dir));
-	inode_dec_link_count(inode);
+
+	if (inode->i_nlink)
+		inode_dec_link_count(inode);
+
 	err = 0;
 out:
 	return err;
@@ -321,10 +323,11 @@ static int ext2_rename (struct mnt_idmap * idmap,
 {
 	struct inode * old_inode = d_inode(old_dentry);
 	struct inode * new_inode = d_inode(new_dentry);
-	struct page * dir_page = NULL;
+	struct folio *dir_folio = NULL;
 	struct ext2_dir_entry_2 * dir_de = NULL;
-	struct page * old_page;
+	struct folio * old_folio;
 	struct ext2_dir_entry_2 * old_de;
+	bool old_is_dir = S_ISDIR(old_inode->i_mode);
 	int err;
 
 	if (flags & ~RENAME_NOREPLACE)
@@ -338,44 +341,44 @@ static int ext2_rename (struct mnt_idmap * idmap,
 	if (err)
 		return err;
 
-	old_de = ext2_find_entry(old_dir, &old_dentry->d_name, &old_page);
+	old_de = ext2_find_entry(old_dir, &old_dentry->d_name, &old_folio);
 	if (IS_ERR(old_de))
 		return PTR_ERR(old_de);
 
-	if (S_ISDIR(old_inode->i_mode)) {
+	if (old_is_dir && old_dir != new_dir) {
 		err = -EIO;
-		dir_de = ext2_dotdot(old_inode, &dir_page);
+		dir_de = ext2_dotdot(old_inode, &dir_folio);
 		if (!dir_de)
 			goto out_old;
 	}
 
 	if (new_inode) {
-		struct page *new_page;
+		struct folio *new_folio;
 		struct ext2_dir_entry_2 *new_de;
 
 		err = -ENOTEMPTY;
-		if (dir_de && !ext2_empty_dir (new_inode))
+		if (old_is_dir && !ext2_empty_dir(new_inode))
 			goto out_dir;
 
 		new_de = ext2_find_entry(new_dir, &new_dentry->d_name,
-					 &new_page);
+					 &new_folio);
 		if (IS_ERR(new_de)) {
 			err = PTR_ERR(new_de);
 			goto out_dir;
 		}
-		err = ext2_set_link(new_dir, new_de, new_page, old_inode, true);
-		ext2_put_page(new_page, new_de);
+		err = ext2_set_link(new_dir, new_de, new_folio, old_inode, true);
+		folio_release_kmap(new_folio, new_de);
 		if (err)
 			goto out_dir;
 		inode_set_ctime_current(new_inode);
-		if (dir_de)
+		if (old_is_dir)
 			drop_nlink(new_inode);
 		inode_dec_link_count(new_inode);
 	} else {
 		err = ext2_add_link(new_dentry, old_inode);
 		if (err)
 			goto out_dir;
-		if (dir_de)
+		if (old_is_dir)
 			inode_inc_link_count(new_dir);
 	}
 
@@ -386,19 +389,19 @@ static int ext2_rename (struct mnt_idmap * idmap,
 	inode_set_ctime_current(old_inode);
 	mark_inode_dirty(old_inode);
 
-	err = ext2_delete_entry(old_de, old_page);
-	if (!err && dir_de) {
+	err = ext2_delete_entry(old_de, old_folio);
+	if (!err && old_is_dir) {
 		if (old_dir != new_dir)
-			err = ext2_set_link(old_inode, dir_de, dir_page,
+			err = ext2_set_link(old_inode, dir_de, dir_folio,
 					    new_dir, false);
 
 		inode_dec_link_count(old_dir);
 	}
 out_dir:
 	if (dir_de)
-		ext2_put_page(dir_page, dir_de);
+		folio_release_kmap(dir_folio, dir_de);
 out_old:
-	ext2_put_page(old_page, old_de);
+	folio_release_kmap(old_folio, old_de);
 	return err;
 }
 

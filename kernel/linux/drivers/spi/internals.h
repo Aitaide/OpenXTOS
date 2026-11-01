@@ -5,8 +5,8 @@
  *
  * Author: Boris Brezillon <boris.brezillon@bootlin.com>
  *
- * Helpers needed by the spi or spi-mem logic. Should not be used outside of
- * spi-mem.c and spi.c.
+ * Helpers needed by the SPI core and its tests. Should not be used outside
+ * drivers/spi/.
  */
 
 #ifndef __LINUX_SPI_INTERNALS_H
@@ -20,6 +20,11 @@
 void spi_flush_queue(struct spi_controller *ctrl);
 
 #ifdef CONFIG_HAS_DMA
+#if IS_ENABLED(CONFIG_KUNIT)
+int __spi_map_msg(struct spi_controller *ctlr, struct spi_message *msg);
+int __spi_unmap_msg(struct spi_controller *ctlr, struct spi_message *msg);
+#endif
+
 int spi_map_buf(struct spi_controller *ctlr, struct device *dev,
 		struct sg_table *sgt, void *buf, size_t len,
 		enum dma_data_direction dir);
@@ -39,5 +44,13 @@ static inline void spi_unmap_buf(struct spi_controller *ctlr,
 {
 }
 #endif /* CONFIG_HAS_DMA */
+
+static inline bool spi_xfer_is_dma_mapped(struct spi_controller *ctlr,
+					  struct spi_device *spi,
+					  struct spi_transfer *xfer)
+{
+	return ctlr->can_dma && ctlr->can_dma(ctlr, spi, xfer) &&
+	       (xfer->tx_sg_mapped || xfer->rx_sg_mapped);
+}
 
 #endif /* __LINUX_SPI_INTERNALS_H */

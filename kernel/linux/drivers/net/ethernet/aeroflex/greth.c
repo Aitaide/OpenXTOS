@@ -484,7 +484,7 @@ greth_start_xmit_gbit(struct sk_buff *skb, struct net_device *dev)
 
 	if (unlikely(skb->len > MAX_FRAME_SIZE)) {
 		dev->stats.tx_errors++;
-		goto out;
+		goto len_error;
 	}
 
 	/* Save skb pointer. */
@@ -575,6 +575,7 @@ frag_map_error:
 map_error:
 	if (net_ratelimit())
 		dev_warn(greth->dev, "Could not create TX DMA mapping\n");
+len_error:
 	dev_kfree_skb(skb);
 out:
 	return err;
@@ -1420,6 +1421,8 @@ static int greth_of_probe(struct platform_device *ofdev)
 	/* Check if MAC can handle MDIO interrupts */
 	greth->mdio_int_en = (tmp >> 26) & 1;
 
+	dev->netdev_ops = &greth_netdev_ops;
+
 	err = greth_mdio_init(greth);
 	if (err) {
 		if (netif_msg_probe(greth))
@@ -1497,7 +1500,6 @@ static int greth_of_probe(struct platform_device *ofdev)
 		dev->flags &= ~IFF_MULTICAST;
 	}
 
-	dev->netdev_ops = &greth_netdev_ops;
 	dev->ethtool_ops = &greth_ethtool_ops;
 
 	err = register_netdev(dev);
@@ -1525,7 +1527,7 @@ error1:
 	return err;
 }
 
-static int greth_of_remove(struct platform_device *of_dev)
+static void greth_of_remove(struct platform_device *of_dev)
 {
 	struct net_device *ndev = platform_get_drvdata(of_dev);
 	struct greth_private *greth = netdev_priv(ndev);
@@ -1544,8 +1546,6 @@ static int greth_of_remove(struct platform_device *of_dev)
 	of_iounmap(&of_dev->resource[0], greth->regs, resource_size(&of_dev->resource[0]));
 
 	free_netdev(ndev);
-
-	return 0;
 }
 
 static const struct of_device_id greth_of_match[] = {

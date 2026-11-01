@@ -27,6 +27,7 @@
 #include <linux/gfp.h>
 #include <linux/page-flags.h>
 #include <linux/mm.h>
+#include <asm/cpuid/api.h>
 #include "agp.h"
 #include "intel-agp.h"
 
@@ -465,4 +466,5 @@ module_init(agp_efficeon_init);
 module_exit(agp_efficeon_cleanup);
 
 MODULE_AUTHOR("Carlos Puchol <cpglinux@puchol.com>");
+MODULE_DESCRIPTION("Transmeta's Efficeon AGPGART driver");
 MODULE_LICENSE("GPL and additional rights");

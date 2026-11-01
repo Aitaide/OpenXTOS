@@ -1,10 +1,11 @@
-// SPDX-License-Identifier: GPL-2.0 or BSD-3-Clause
+// SPDX-License-Identifier: GPL-2.0 OR BSD-3-Clause
 /*
  * Copyright(c) 2016 - 2018 Intel Corporation.
  */
 
 #include <linux/slab.h>
 #include <linux/vmalloc.h>
+#include <rdma/uverbs_ioctl.h>
 #include "cq.h"
 #include "vt.h"
 #include "trace.h"
@@ -149,15 +150,16 @@ static void send_complete(struct work_struct *work)
  * rvt_create_cq - create a completion queue
  * @ibcq: Allocated CQ
  * @attr: creation attributes
- * @udata: user data for libibverbs.so
+ * @attrs: uverbs bundle
  *
  * Called by ib_create_cq() in the generic verbs code.
  *
  * Return: 0 on success
  */
 int rvt_create_cq(struct ib_cq *ibcq, const struct ib_cq_init_attr *attr,
-		  struct ib_udata *udata)
+		  struct uverbs_attr_bundle *attrs)
 {
+	struct ib_udata *udata = &attrs->driver_udata;
 	struct ib_device *ibdev = ibcq->device;
 	struct rvt_dev_info *rdi = ib_to_rvt(ibdev);
 	struct rvt_cq *cq = ibcq_to_rvtcq(ibcq);
@@ -335,7 +337,7 @@ int rvt_req_notify_cq(struct ib_cq *ibcq, enum ib_cq_notify_flags notify_flags)
  *
  * Return: 0 for success.
  */
-int rvt_resize_cq(struct ib_cq *ibcq, int cqe, struct ib_udata *udata)
+int rvt_resize_cq(struct ib_cq *ibcq, unsigned int cqe, struct ib_udata *udata)
 {
 	struct rvt_cq *cq = ibcq_to_rvtcq(ibcq);
 	u32 head, tail, n;
@@ -347,7 +349,7 @@ int rvt_resize_cq(struct ib_cq *ibcq, int cqe, struct ib_udata *udata)
 	struct rvt_k_cq_wc *k_wc = NULL;
 	struct rvt_k_cq_wc *old_k_wc = NULL;
 
-	if (cqe < 1 || cqe > rdi->dparms.props.max_cqe)
+	if (cqe > rdi->dparms.props.max_cqe)
 		return -EINVAL;
 
 	/*
@@ -370,7 +372,7 @@ int rvt_resize_cq(struct ib_cq *ibcq, int cqe, struct ib_udata *udata)
 	if (udata && udata->outlen >= sizeof(__u64)) {
 		__u64 offset = 0;
 
-		ret = ib_copy_to_udata(udata, &offset, sizeof(offset));
+		ret = ib_respond_udata(udata, offset);
 		if (ret)
 			goto bail_free;
 	}
@@ -516,7 +518,8 @@ int rvt_poll_cq(struct ib_cq *ibcq, int num_entries, struct ib_wc *entry)
  */
 int rvt_driver_cq_init(void)
 {
-	comp_vector_wq = alloc_workqueue("%s", WQ_HIGHPRI | WQ_CPU_INTENSIVE,
+	comp_vector_wq = alloc_workqueue("%s",
+					 WQ_HIGHPRI | WQ_CPU_INTENSIVE | WQ_PERCPU,
 					 0, "rdmavt_cq");
 	if (!comp_vector_wq)
 		return -ENOMEM;

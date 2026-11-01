@@ -257,10 +257,8 @@ static int sun6i_msgbox_probe(struct platform_device *pdev)
 
 	ret = devm_request_irq(dev, irq_of_parse_and_map(dev->of_node, 0),
 			       sun6i_msgbox_irq, 0, dev_name(dev), mbox);
-	if (ret) {
-		dev_err(dev, "Failed to register IRQ handler: %d\n", ret);
+	if (ret)
 		goto err_disable_unprepare;
-	}
 
 	mbox->controller.dev           = dev;
 	mbox->controller.ops           = &sun6i_msgbox_chan_ops;
@@ -287,15 +285,13 @@ err_disable_unprepare:
 	return ret;
 }
 
-static int sun6i_msgbox_remove(struct platform_device *pdev)
+static void sun6i_msgbox_remove(struct platform_device *pdev)
 {
 	struct sun6i_msgbox *mbox = platform_get_drvdata(pdev);
 
 	mbox_controller_unregister(&mbox->controller);
 	/* See the comment in sun6i_msgbox_probe about the reset line. */
 	clk_disable_unprepare(mbox->clk);
-
-	return 0;
 }
 
 static const struct of_device_id sun6i_msgbox_of_match[] = {
@@ -309,7 +305,7 @@ static struct platform_driver sun6i_msgbox_driver = {
 		.name = "sun6i-msgbox",
 		.of_match_table = sun6i_msgbox_of_match,
 	},
-	.probe  = sun6i_msgbox_probe,
+	.probe = sun6i_msgbox_probe,
 	.remove = sun6i_msgbox_remove,
 };
 module_platform_driver(sun6i_msgbox_driver);

@@ -31,7 +31,6 @@
 #include <linux/list.h>
 #include <linux/mutex.h>
 #include <linux/sched/mm.h>
-#include <linux/hmm.h>
 #include "amdgpu.h"
 #include "kfd_priv.h"
 
@@ -40,12 +39,11 @@
 			((adev)->hive ? (void *)(adev)->hive : (void *)(adev))
 
 struct svm_range_bo {
-	struct amdgpu_bo		*bo;
+	struct amdgpu_bo		bo;
 	struct kref			kref;
 	struct list_head		range_list; /* all svm ranges shared this bo */
 	spinlock_t			list_lock;
-	struct amdgpu_amdkfd_fence	*eviction_fence;
-	struct work_struct		eviction_work;
+	struct mm_struct		*mm;
 	uint32_t			evicting;
 	struct work_struct		release_work;
 	struct kfd_node			*node;
@@ -78,6 +76,7 @@ struct svm_work_list_item {
  * @update_list:link list node used to add to update_list
  * @mapping:    bo_va mapping structure to create and update GPU page table
  * @npages:     number of pages
+ * @vram_pages: vram pages number in this svm_range
  * @dma_addr:   dma mapping address on each GPU for system memory physical page
  * @ttm_res:    vram ttm resource map
  * @offset:     range start offset within mm_nodes
@@ -88,7 +87,9 @@ struct svm_work_list_item {
  * @flags:      flags defined as KFD_IOCTL_SVM_FLAG_*
  * @perferred_loc: perferred location, 0 for CPU, or GPU id
  * @perfetch_loc: last prefetch location, 0 for CPU, or GPU id
- * @actual_loc: the actual location, 0 for CPU, or GPU id
+ * @actual_loc: this svm_range location. 0: all pages are from sys ram;
+ *              GPU id: this svm_range may include vram pages from GPU with
+ *              id actual_loc.
  * @granularity:migration granularity, log2 num pages
  * @invalid:    not 0 means cpu page table is invalidated
  * @validate_timestamp: system timestamp when range is validated
@@ -98,6 +99,9 @@ struct svm_work_list_item {
  * @child_list: list header for split ranges which are not added to svms yet
  * @bitmap_access: index bitmap of GPUs which can access the range
  * @bitmap_aip: index bitmap of GPUs which can access the range in place
+ * @bitmap_needs_unmap: index bitmap of GPUs which currently set NO_ACCESS
+ * @bitmap_mapped: index bitmap of GPUs which currently have the range mapped
+ * @mapping_done: true if range_validate_and_map complete successfully
  *
  * Data structure for virtual memory range shared by CPU and GPUs, it can be
  * allocated from system memory ram or device vram, and migrate from ram to vram
@@ -112,6 +116,7 @@ struct svm_range {
 	struct list_head		list;
 	struct list_head		update_list;
 	uint64_t			npages;
+	uint64_t			vram_pages;
 	dma_addr_t			*dma_addr[MAX_GPU_INSTANCE];
 	struct ttm_resource		*ttm_res;
 	uint64_t			offset;
@@ -132,9 +137,10 @@ struct svm_range {
 	struct list_head		child_list;
 	DECLARE_BITMAP(bitmap_access, MAX_GPU_INSTANCE);
 	DECLARE_BITMAP(bitmap_aip, MAX_GPU_INSTANCE);
-	bool				validated_once;
-	bool				mapped_to_gpu;
-	bool				is_error_flag;
+	DECLARE_BITMAP(bitmap_needs_unmap, MAX_GPU_INSTANCE);
+	DECLARE_BITMAP(bitmap_mapped, MAX_GPU_INSTANCE);
+	bool				mapping_done;
+	atomic_t			queue_refcount;
 };
 
 static inline void svm_range_lock(struct svm_range *prange)
@@ -167,25 +173,24 @@ struct svm_range *svm_range_from_addr(struct svm_range_list *svms,
 				      struct svm_range **parent);
 struct kfd_node *svm_range_get_node_by_id(struct svm_range *prange,
 					  uint32_t gpu_id);
+void svm_range_bo_destroy(struct ttm_buffer_object *tbo);
 int svm_range_vram_node_new(struct kfd_node *node, struct svm_range *prange,
 			    bool clear);
 void svm_range_vram_node_free(struct svm_range *prange);
-int svm_range_split_by_granularity(struct kfd_process *p, struct mm_struct *mm,
-			       unsigned long addr, struct svm_range *parent,
-			       struct svm_range *prange);
 int svm_range_restore_pages(struct amdgpu_device *adev, unsigned int pasid,
-			    uint32_t vmid, uint32_t node_id, uint64_t addr,
+			    uint32_t vmid, uint32_t node_id, uint64_t addr, uint64_t ts,
 			    bool write_fault);
-int svm_range_schedule_evict_svm_bo(struct amdgpu_amdkfd_fence *fence);
+int svm_range_evict_svm_bo(struct amdgpu_bo *bo);
+
 void svm_range_add_list_work(struct svm_range_list *svms,
 			     struct svm_range *prange, struct mm_struct *mm,
 			     enum svm_work_list_ops op);
 void schedule_deferred_list_work(struct svm_range_list *svms);
-void svm_range_dma_unmap(struct device *dev, dma_addr_t *dma_addr,
+void svm_range_dma_unmap_dev(struct device *dev, dma_addr_t *dma_addr,
 			 unsigned long offset, unsigned long npages);
-void svm_range_free_dma_mappings(struct svm_range *prange, bool unmap_dma);
-int svm_range_get_info(struct kfd_process *p, uint32_t *num_svm_ranges,
-		       uint64_t *svm_priv_data_size);
+void svm_range_dma_unmap(struct svm_range *prange);
+void svm_range_get_info(struct kfd_process *p, uint32_t *num_svm_ranges,
+			uint64_t *svm_priv_data_size);
 int kfd_criu_checkpoint_svm(struct kfd_process *p,
 			    uint8_t __user *user_priv_data,
 			    uint64_t *priv_offset);
@@ -202,7 +207,7 @@ void svm_range_list_lock_and_flush_work(struct svm_range_list *svms, struct mm_s
  * is initialized to not 0 when page migration register device memory.
  */
 #define KFD_IS_SVM_API_SUPPORTED(adev) ((adev)->kfd.pgmap.type != 0 ||\
-					(adev)->gmc.is_app_apu)
+					((adev)->apu_prefer_gtt))
 
 void svm_range_bo_unref_async(struct svm_range_bo *svm_bo);
 
@@ -225,25 +230,26 @@ static inline void svm_range_list_fini(struct kfd_process *p)
 static inline int svm_range_restore_pages(struct amdgpu_device *adev,
 					  unsigned int pasid,
 					  uint32_t client_id, uint32_t node_id,
-					  uint64_t addr, bool write_fault)
+					  uint64_t addr, uint64_t ts, bool write_fault)
 {
 	return -EFAULT;
 }
 
-static inline int svm_range_schedule_evict_svm_bo(
-		struct amdgpu_amdkfd_fence *fence)
+static inline void svm_range_bo_destroy(struct ttm_buffer_object *tbo)
 {
-	WARN_ONCE(1, "SVM eviction fence triggered, but SVM is disabled");
-	return -EINVAL;
 }
 
-static inline int svm_range_get_info(struct kfd_process *p,
-				     uint32_t *num_svm_ranges,
-				     uint64_t *svm_priv_data_size)
+static inline int svm_range_evict_svm_bo(struct amdgpu_bo *bo)
+{
+	return 0;
+}
+
+static inline void svm_range_get_info(struct kfd_process *p,
+				      uint32_t *num_svm_ranges,
+				      uint64_t *svm_priv_data_size)
 {
 	*num_svm_ranges = 0;
 	*svm_priv_data_size = 0;
-	return 0;
 }
 
 static inline int kfd_criu_checkpoint_svm(struct kfd_process *p,

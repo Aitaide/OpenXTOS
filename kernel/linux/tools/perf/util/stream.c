@@ -52,7 +52,6 @@ static struct evlist_streams *evlist_streams__new(int nr_evsel,
 			goto err;
 
 		s->nr_streams_max = nr_streams_max;
-		s->evsel_idx = -1;
 	}
 
 	els->ev_streams = es;
@@ -132,14 +131,14 @@ static int evlist__init_callchain_streams(struct evlist *evlist,
 	struct evsel *pos;
 	int i = 0;
 
-	BUG_ON(els->nr_evsel < evlist->core.nr_entries);
+	BUG_ON(els->nr_evsel < evlist__nr_entries(evlist));
 
 	evlist__for_each_entry(evlist, pos) {
 		struct hists *hists = evsel__hists(pos);
 
 		hists__output_resort(hists, NULL);
 		init_hot_callchain(hists, &es[i]);
-		es[i].evsel_idx = pos->core.idx;
+		es[i].evsel = pos;
 		i++;
 	}
 
@@ -149,7 +148,7 @@ static int evlist__init_callchain_streams(struct evlist *evlist,
 struct evlist_streams *evlist__create_streams(struct evlist *evlist,
 					      int nr_streams_max)
 {
-	int nr_evsel = evlist->core.nr_entries, ret = -1;
+	int nr_evsel = evlist__nr_entries(evlist), ret = -1;
 	struct evlist_streams *els = evlist_streams__new(nr_evsel,
 							 nr_streams_max);
 
@@ -166,12 +165,12 @@ struct evlist_streams *evlist__create_streams(struct evlist *evlist,
 }
 
 struct evsel_streams *evsel_streams__entry(struct evlist_streams *els,
-					   int evsel_idx)
+					   const struct evsel *evsel)
 {
 	struct evsel_streams *es = els->ev_streams;
 
 	for (int i = 0; i < els->nr_evsel; i++) {
-		if (es[i].evsel_idx == evsel_idx)
+		if (es[i].evsel == evsel)
 			return &es[i];
 	}
 

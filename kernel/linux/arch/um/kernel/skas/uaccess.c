@@ -170,8 +170,8 @@ static int strncpy_chunk_from_user(unsigned long from, int len, void *arg)
 	char **to_ptr = arg, *to = *to_ptr;
 	int n;
 
-	strncpy(to, (void *) from, len);
-	n = strnlen(to, len);
+	n = strnlen((void *) from, len);
+	memcpy_and_pad(to, len, (void *) from, n, 0);
 	*to_ptr += n;
 
 	if (n < len)
@@ -236,7 +236,9 @@ EXPORT_SYMBOL(strnlen_user);
  *			  argument and comparison of the previous
  *			  futex value with another constant.
  *
- * @encoded_op:	encoded operation to execute
+ * @op:		operation to execute
+ * @oparg:	argument to operation
+ * @oval:	old value at uaddr
  * @uaddr:	pointer to user space address
  *
  * Return:

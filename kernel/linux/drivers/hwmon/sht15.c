@@ -981,10 +981,8 @@ static int sht15_probe(struct platform_device *pdev)
 			       IRQF_TRIGGER_FALLING,
 			       "sht15 data",
 			       data);
-	if (ret) {
-		dev_err(&pdev->dev, "failed to get irq for data line\n");
+	if (ret)
 		goto err_release_reg;
-	}
 	disable_irq_nosync(gpiod_to_irq(data->data));
 	ret = sht15_connection_reset(data);
 	if (ret)
@@ -1017,7 +1015,7 @@ err_release_reg:
 	return ret;
 }
 
-static int sht15_remove(struct platform_device *pdev)
+static void sht15_remove(struct platform_device *pdev)
 {
 	struct sht15_data *data = platform_get_drvdata(pdev);
 	int ret;
@@ -1033,16 +1031,14 @@ static int sht15_remove(struct platform_device *pdev)
 		regulator_unregister_notifier(data->reg, &data->nb);
 		regulator_disable(data->reg);
 	}
-
-	return 0;
 }
 
 static const struct platform_device_id sht15_device_ids[] = {
-	{ "sht10", sht10 },
-	{ "sht11", sht11 },
-	{ "sht15", sht15 },
-	{ "sht71", sht71 },
-	{ "sht75", sht75 },
+	{ .name = "sht10", .driver_data = sht10 },
+	{ .name = "sht11", .driver_data = sht11 },
+	{ .name = "sht15", .driver_data = sht15 },
+	{ .name = "sht71", .driver_data = sht71 },
+	{ .name = "sht75", .driver_data = sht75 },
 	{ }
 };
 MODULE_DEVICE_TABLE(platform, sht15_device_ids);

@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: MIT */
 /*
  * Copyright 2019 Advanced Micro Devices, Inc.
  *
@@ -26,8 +27,11 @@
 #ifndef AMD_DAL_DEV_AMDGPU_DM_AMDGPU_DM_CRC_H_
 #define AMD_DAL_DEV_AMDGPU_DM_AMDGPU_DM_CRC_H_
 
+#include "dc_types.h"
+
 struct drm_crtc;
 struct dm_crtc_state;
+struct amdgpu_device;
 
 enum amdgpu_dm_pipe_crc_source {
 	AMDGPU_DM_PIPE_CRC_SOURCE_NONE = 0,
@@ -40,20 +44,52 @@ enum amdgpu_dm_pipe_crc_source {
 };
 
 #ifdef CONFIG_DRM_AMD_SECURE_DISPLAY
+#define MAX_CRTC 6
+
+enum secure_display_mode {
+	/* via dmub + psp */
+	LEGACY_MODE = 0,
+	/* driver directly */
+	DISPLAY_CRC_MODE,
+	SECURE_DISPLAY_MODE_MAX,
+};
+
+struct phy_id_mapping {
+	bool assigned;
+	bool is_mst;
+	uint8_t enc_hw_inst;
+	u8 lct;
+	u8 port_num;
+	u8 rad[8];
+};
+
+struct crc_data {
+	uint32_t crc_R;
+	uint32_t crc_G;
+	uint32_t crc_B;
+	uint32_t frame_count;
+	bool crc_ready;
+};
+
+struct crc_info {
+	struct crc_data crc[MAX_CRC_WINDOW_NUM];
+	spinlock_t lock;
+};
+
 struct crc_window_param {
 	uint16_t x_start;
 	uint16_t y_start;
 	uint16_t x_end;
 	uint16_t y_end;
 	/* CRC window is activated or not*/
-	bool activated;
+	bool enable;
 	/* Update crc window during vertical blank or not */
 	bool update_win;
 	/* skip reading/writing for few frames */
 	int skip_frame_cnt;
 };
 
-struct secure_display_context {
+struct secure_display_crtc_context {
 	/* work to notify PSP TA*/
 	struct work_struct notify_ta_work;
 
@@ -63,7 +99,20 @@ struct secure_display_context {
 	struct drm_crtc *crtc;
 
 	/* Region of Interest (ROI) */
-	struct rect rect;
+	struct crc_window roi[MAX_CRC_WINDOW_NUM];
+
+	struct crc_info crc_info;
+};
+
+struct secure_display_context {
+
+	struct secure_display_crtc_context *crtc_ctx;
+    /* Whether dmub support multiple ROI setting */
+	bool support_mul_roi;
+	enum secure_display_mode op_mode;
+	bool phy_mapping_updated;
+	int phy_id_mapping_cnt;
+	struct phy_id_mapping phy_id_mapping[MAX_CRTC];
 };
 #endif
 
@@ -95,12 +144,24 @@ void amdgpu_dm_crtc_handle_crc_irq(struct drm_crtc *crtc);
 #ifdef CONFIG_DRM_AMD_SECURE_DISPLAY
 bool amdgpu_dm_crc_window_is_activated(struct drm_crtc *crtc);
 void amdgpu_dm_crtc_handle_crc_window_irq(struct drm_crtc *crtc);
-struct secure_display_context *amdgpu_dm_crtc_secure_display_create_contexts(
-						struct amdgpu_device *adev);
+void amdgpu_dm_crtc_secure_display_create_contexts(struct amdgpu_device *adev);
 #else
 #define amdgpu_dm_crc_window_is_activated(x)
 #define amdgpu_dm_crtc_handle_crc_window_irq(x)
 #define amdgpu_dm_crtc_secure_display_create_contexts(x)
+#endif
+
+#if IS_ENABLED(CONFIG_DRM_AMD_DC_KUNIT_TEST)
+enum amdgpu_dm_pipe_crc_source dm_parse_crc_source(const char *source);
+bool dm_is_crc_source_crtc(enum amdgpu_dm_pipe_crc_source src);
+bool dm_is_crc_source_dprx(enum amdgpu_dm_pipe_crc_source src);
+bool dm_need_crc_dither(enum amdgpu_dm_pipe_crc_source src);
+bool dm_need_dp_aux(enum amdgpu_dm_pipe_crc_source source,
+		    enum amdgpu_dm_pipe_crc_source cur_crc_src);
+bool dm_crc_source_should_start_dprx(enum amdgpu_dm_pipe_crc_source source,
+				      enum amdgpu_dm_pipe_crc_source cur_crc_src);
+bool dm_crc_source_should_stop_dprx(enum amdgpu_dm_pipe_crc_source source,
+				     enum amdgpu_dm_pipe_crc_source cur_crc_src);
 #endif
 
 #endif /* AMD_DAL_DEV_AMDGPU_DM_AMDGPU_DM_CRC_H_ */

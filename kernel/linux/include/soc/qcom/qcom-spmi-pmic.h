@@ -1,6 +1,6 @@
 /* SPDX-License-Identifier: GPL-2.0-only */
 /* Copyright (c) 2022 Linaro. All rights reserved.
- * Author: Caleb Connolly <caleb.connolly@linaro.org>
+ * Author: Casey Connolly <casey.connolly@linaro.org>
  */
 
 #ifndef __QCOM_SPMI_PMIC_H__
@@ -31,6 +31,7 @@
 #define PM8998_SUBTYPE		0x14
 #define PMI8998_SUBTYPE		0x15
 #define PM8005_SUBTYPE		0x18
+#define PM8937_SUBTYPE		0x19
 #define PM660L_SUBTYPE		0x1a
 #define PM660_SUBTYPE		0x1b
 #define PM8150_SUBTYPE		0x1e
@@ -48,8 +49,23 @@
 #define PMK8350_SUBTYPE		0x2f
 #define PMR735B_SUBTYPE		0x34
 #define PM6350_SUBTYPE		0x36
-#define PM2250_SUBTYPE		0x37
-
+#define PM4125_SUBTYPE		0x37
+#define PM8010_SUBTYPE		0x41
+#define PM8550VS_SUBTYPE	0x45
+#define PM8550VE_SUBTYPE	0x46
+#define PMR735D_SUBTYPE	0x48
+#define PM8550_SUBTYPE		0x49
+#define PMK8550_SUBTYPE	0x4a
+#define PMM8650AU_SUBTYPE       0x4e
+#define PMM8650AU_PSAIL_SUBTYPE 0x4f
+#define PM8750B_SUBTYPE	0x56
+#define PMD8028_SUBTYPE	0x57
+#define PMK8850_SUBTYPE	0x5c
+#define PMH0101_SUBTYPE	0x5d
+#define SMB2370_SUBTYPE	0x5f
+#define PMH0104_SUBTYPE	0x60
+#define PMH0110_SUBTYPE	0x61
+#define PMCX0102_SUBTYPE	0x62
 #define PMI8998_FAB_ID_SMIC	0x11
 #define PMI8998_FAB_ID_GF	0x30
 

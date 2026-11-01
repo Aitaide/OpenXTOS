@@ -202,7 +202,6 @@ static int ath_rx_edma_init(struct ath_softc *sc, int nbufs)
 	struct sk_buff *skb;
 	struct ath_rxbuf *bf;
 	int error = 0, i;
-	u32 size;
 
 	ath9k_hw_set_rx_bufsize(ah, common->rx_bufsize -
 				    ah->caps.rx_status_len);
@@ -212,8 +211,7 @@ static int ath_rx_edma_init(struct ath_softc *sc, int nbufs)
 	ath_rx_edma_init_queue(&sc->rx.rx_edma[ATH9K_RX_QUEUE_HP],
 			       ah->caps.rx_hp_qdepth);
 
-	size = sizeof(struct ath_rxbuf) * nbufs;
-	bf = devm_kzalloc(sc->dev, size, GFP_KERNEL);
+	bf = devm_kcalloc(sc->dev, sizeof(struct ath_rxbuf), nbufs, GFP_KERNEL);
 	if (!bf)
 		return -ENOMEM;
 
@@ -1042,8 +1040,8 @@ static void ath_rx_count_airtime(struct ath_softc *sc,
 	if (!!(rxs->encoding == RX_ENC_HT)) {
 		/* MCS rates */
 
-		airtime += ath_pkt_duration(sc, rxs->rate_idx, len,
-					is_40, is_sgi, is_sp);
+		airtime += ath_pkt_duration(rxs->rate_idx, len,
+					    is_40, is_sgi, is_sp);
 	} else {
 
 		phy = IS_CCK_RATE(rs->rs_rate) ? WLAN_RC_PHY_CCK : WLAN_RC_PHY_OFDM;

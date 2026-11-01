@@ -53,12 +53,14 @@ u64 amdgpu_nbio_get_pcie_replay_count(struct amdgpu_device *adev)
 	return 0;
 }
 
-void amdgpu_nbio_get_pcie_usage(struct amdgpu_device *adev, uint64_t *count0,
-				uint64_t *count1)
+bool amdgpu_nbio_is_replay_cnt_supported(struct amdgpu_device *adev)
 {
-	if (adev->nbio.funcs->get_pcie_usage)
-		adev->nbio.funcs->get_pcie_usage(adev, count0, count1);
+	if (amdgpu_sriov_vf(adev) || !adev->asic_funcs ||
+	    !adev->asic_funcs->get_pcie_replay_count ||
+	    (!adev->nbio.funcs || !adev->nbio.funcs->get_pcie_replay_count))
+		return false;
 
+	return true;
 }
 
 int amdgpu_nbio_ras_late_init(struct amdgpu_device *adev, struct ras_common_if *ras_block)
@@ -81,4 +83,14 @@ int amdgpu_nbio_ras_late_init(struct amdgpu_device *adev, struct ras_common_if *
 late_fini:
 	amdgpu_ras_block_late_fini(adev, ras_block);
 	return r;
+}
+
+
+void amdgpu_nbio_program_aspm(struct amdgpu_device *adev)
+{
+	if (!amdgpu_device_should_use_aspm(adev))
+		return;
+
+	if (adev->nbio.funcs->program_aspm)
+		adev->nbio.funcs->program_aspm(adev);
 }

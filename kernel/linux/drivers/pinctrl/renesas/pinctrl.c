@@ -83,8 +83,7 @@ static int sh_pfc_map_add_config(struct pinctrl_map *map,
 {
 	unsigned long *cfgs;
 
-	cfgs = kmemdup(configs, num_configs * sizeof(*cfgs),
-		       GFP_KERNEL);
+	cfgs = kmemdup_array(configs, num_configs, sizeof(*cfgs), GFP_KERNEL);
 	if (cfgs == NULL)
 		return -ENOMEM;
 
@@ -241,7 +240,6 @@ static int sh_pfc_dt_node_to_map(struct pinctrl_dev *pctldev,
 {
 	struct sh_pfc_pinctrl *pmx = pinctrl_dev_get_drvdata(pctldev);
 	struct device *dev = pmx->pfc->dev;
-	struct device_node *child;
 	unsigned int index;
 	int ret;
 
@@ -249,13 +247,11 @@ static int sh_pfc_dt_node_to_map(struct pinctrl_dev *pctldev,
 	*num_maps = 0;
 	index = 0;
 
-	for_each_child_of_node(np, child) {
+	for_each_child_of_node_scoped(np, child) {
 		ret = sh_pfc_dt_subnode_to_map(pctldev, child, map, num_maps,
 					       &index);
-		if (ret < 0) {
-			of_node_put(child);
+		if (ret < 0)
 			goto done;
-		}
 	}
 
 	/* If no mapping has been found in child nodes try the config node. */
@@ -723,6 +719,30 @@ static int sh_pfc_pinconf_set(struct pinctrl_dev *pctldev, unsigned _pin,
 	return 0;
 }
 
+static int sh_pfc_pinconf_group_get(struct pinctrl_dev *pctldev,
+				    unsigned int group, unsigned long *config)
+{
+	struct sh_pfc_pinctrl *pmx = pinctrl_dev_get_drvdata(pctldev);
+	const unsigned int *pins = pmx->pfc->info->groups[group].pins;
+	unsigned int num_pins = pmx->pfc->info->groups[group].nr_pins;
+	unsigned long prev_config = 0;
+	int ret;
+
+	for (unsigned int i = 0; i < num_pins; ++i) {
+		ret = sh_pfc_pinconf_get(pctldev, pins[i], config);
+		if (ret)
+			return ret;
+
+		/* configs should match for all pins in the group */
+		if (i && prev_config != *config)
+			return -ENOTSUPP;
+
+		prev_config = *config;
+	}
+
+	return 0;
+}
+
 static int sh_pfc_pinconf_group_set(struct pinctrl_dev *pctldev, unsigned group,
 				    unsigned long *configs,
 				    unsigned num_configs)
@@ -730,7 +750,8 @@ static int sh_pfc_pinconf_group_set(struct pinctrl_dev *pctldev, unsigned group,
 	struct sh_pfc_pinctrl *pmx = pinctrl_dev_get_drvdata(pctldev);
 	const unsigned int *pins;
 	unsigned int num_pins;
-	unsigned int i, ret;
+	unsigned int i;
+	int ret;
 
 	pins = pmx->pfc->info->groups[group].pins;
 	num_pins = pmx->pfc->info->groups[group].nr_pins;
@@ -748,6 +769,7 @@ static const struct pinconf_ops sh_pfc_pinconf_ops = {
 	.is_generic			= true,
 	.pin_config_get			= sh_pfc_pinconf_get,
 	.pin_config_set			= sh_pfc_pinconf_set,
+	.pin_config_group_get		= sh_pfc_pinconf_group_get,
 	.pin_config_group_set		= sh_pfc_pinconf_group_set,
 	.pin_config_config_dbg_show	= pinconf_generic_dump_config,
 };

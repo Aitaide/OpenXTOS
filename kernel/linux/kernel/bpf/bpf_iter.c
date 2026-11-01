@@ -38,8 +38,7 @@ static DEFINE_MUTEX(link_mutex);
 /* incremented on every opened seq_file */
 static atomic64_t session_id;
 
-static int prepare_seq_file(struct file *file, struct bpf_iter_link *link,
-			    const struct bpf_iter_seq_info *seq_info);
+static int prepare_seq_file(struct file *file, struct bpf_iter_link *link);
 
 static void bpf_iter_inc_seq_num(struct seq_file *seq)
 {
@@ -87,7 +86,7 @@ static bool bpf_iter_support_resched(struct seq_file *seq)
 
 /* bpf_seq_read, a customized and simpler version for bpf iterator.
  * The following are differences from seq_read():
- *  . fixed buffer size (PAGE_SIZE)
+ *  . fixed buffer size (PAGE_SIZE << 3)
  *  . assuming NULL ->llseek()
  *  . stop() may call bpf program, handling potential overflow there
  */
@@ -257,7 +256,7 @@ static int iter_open(struct inode *inode, struct file *file)
 {
 	struct bpf_iter_link *link = inode->i_private;
 
-	return prepare_seq_file(file, link, __get_seq_info(link));
+	return prepare_seq_file(file, link);
 }
 
 static int iter_release(struct inode *inode, struct file *file)
@@ -283,7 +282,6 @@ static int iter_release(struct inode *inode, struct file *file)
 
 const struct file_operations bpf_iter_fops = {
 	.open		= iter_open,
-	.llseek		= no_llseek,
 	.read		= bpf_seq_read,
 	.release	= iter_release,
 };
@@ -297,7 +295,7 @@ int bpf_iter_reg_target(const struct bpf_iter_reg *reg_info)
 {
 	struct bpf_iter_target_info *tinfo;
 
-	tinfo = kzalloc(sizeof(*tinfo), GFP_KERNEL);
+	tinfo = kzalloc_obj(*tinfo);
 	if (!tinfo)
 		return -ENOMEM;
 
@@ -336,7 +334,7 @@ static void cache_btf_id(struct bpf_iter_target_info *tinfo,
 	tinfo->btf_id = prog->aux->attach_btf_id;
 }
 
-bool bpf_iter_prog_supported(struct bpf_prog *prog)
+int bpf_iter_prog_supported(struct bpf_prog *prog)
 {
 	const char *attach_fname = prog->aux->attach_func_name;
 	struct bpf_iter_target_info *tinfo = NULL, *iter;
@@ -345,7 +343,7 @@ bool bpf_iter_prog_supported(struct bpf_prog *prog)
 	int prefix_len = strlen(prefix);
 
 	if (strncmp(attach_fname, prefix, prefix_len))
-		return false;
+		return -EINVAL;
 
 	mutex_lock(&targets_mutex);
 	list_for_each_entry(iter, &targets, list) {
@@ -361,12 +359,11 @@ bool bpf_iter_prog_supported(struct bpf_prog *prog)
 	}
 	mutex_unlock(&targets_mutex);
 
-	if (tinfo) {
-		prog->aux->ctx_arg_info_size = tinfo->reg_info->ctx_arg_info_size;
-		prog->aux->ctx_arg_info = tinfo->reg_info->ctx_arg_info;
-	}
+	if (!tinfo)
+		return -EINVAL;
 
-	return tinfo != NULL;
+	return bpf_prog_ctx_arg_info_init(prog, tinfo->reg_info->ctx_arg_info,
+					  tinfo->reg_info->ctx_arg_info_size);
 }
 
 const struct bpf_func_proto *
@@ -548,14 +545,15 @@ int bpf_iter_link_attach(const union bpf_attr *attr, bpfptr_t uattr,
 		return -ENOENT;
 
 	/* Only allow sleepable program for resched-able iterator */
-	if (prog->aux->sleepable && !bpf_iter_target_support_resched(tinfo))
+	if (prog->sleepable && !bpf_iter_target_support_resched(tinfo))
 		return -EINVAL;
 
-	link = kzalloc(sizeof(*link), GFP_USER | __GFP_NOWARN);
+	link = kzalloc_obj(*link, GFP_USER | __GFP_NOWARN);
 	if (!link)
 		return -ENOMEM;
 
-	bpf_link_init(&link->link, BPF_LINK_TYPE_ITER, &bpf_iter_link_lops, prog);
+	bpf_link_init(&link->link, BPF_LINK_TYPE_ITER, &bpf_iter_link_lops, prog,
+		      attr->link_create.attach_type);
 	link->tinfo = tinfo;
 
 	err = bpf_link_prime(&link->link, &link_primer);
@@ -588,9 +586,9 @@ static void init_seq_meta(struct bpf_iter_priv_data *priv_data,
 	priv_data->done_stop = false;
 }
 
-static int prepare_seq_file(struct file *file, struct bpf_iter_link *link,
-			    const struct bpf_iter_seq_info *seq_info)
+static int prepare_seq_file(struct file *file, struct bpf_iter_link *link)
 {
+	const struct bpf_iter_seq_info *seq_info = __get_seq_info(link);
 	struct bpf_iter_priv_data *priv_data;
 	struct bpf_iter_target_info *tinfo;
 	struct bpf_prog *prog;
@@ -636,37 +634,24 @@ release_prog:
 int bpf_iter_new_fd(struct bpf_link *link)
 {
 	struct bpf_iter_link *iter_link;
-	struct file *file;
 	unsigned int flags;
-	int err, fd;
+	int err;
 
 	if (link->ops != &bpf_iter_link_lops)
 		return -EINVAL;
 
 	flags = O_RDONLY | O_CLOEXEC;
-	fd = get_unused_fd_flags(flags);
-	if (fd < 0)
-		return fd;
 
-	file = anon_inode_getfile("bpf_iter", &bpf_iter_fops, NULL, flags);
-	if (IS_ERR(file)) {
-		err = PTR_ERR(file);
-		goto free_fd;
-	}
+	FD_PREPARE(fdf, flags, anon_inode_getfile("bpf_iter", &bpf_iter_fops, NULL, flags));
+	if (fdf.err)
+		return fdf.err;
 
 	iter_link = container_of(link, struct bpf_iter_link, link);
-	err = prepare_seq_file(file, iter_link, __get_seq_info(iter_link));
+	err = prepare_seq_file(fd_prepare_file(fdf), iter_link);
 	if (err)
-		goto free_file;
+		return err; /* Automatic cleanup handles fput */
 
-	fd_install(fd, file);
-	return fd;
-
-free_file:
-	fput(file);
-free_fd:
-	put_unused_fd(fd);
-	return err;
+	return fd_publish(fdf);
 }
 
 struct bpf_prog *bpf_iter_get_info(struct bpf_iter_meta *meta, bool in_stop)
@@ -697,7 +682,7 @@ int bpf_iter_run_prog(struct bpf_prog *prog, void *ctx)
 	struct bpf_run_ctx run_ctx, *old_run_ctx;
 	int ret;
 
-	if (prog->aux->sleepable) {
+	if (prog->sleepable) {
 		rcu_read_lock_trace();
 		migrate_disable();
 		might_fault();
@@ -707,13 +692,11 @@ int bpf_iter_run_prog(struct bpf_prog *prog, void *ctx)
 		migrate_enable();
 		rcu_read_unlock_trace();
 	} else {
-		rcu_read_lock();
-		migrate_disable();
+		rcu_read_lock_dont_migrate();
 		old_run_ctx = bpf_set_run_ctx(&run_ctx);
 		ret = bpf_prog_run(prog, ctx);
 		bpf_reset_run_ctx(old_run_ctx);
-		migrate_enable();
-		rcu_read_unlock();
+		rcu_read_unlock_migrate();
 	}
 
 	/* bpf program can only return 0 or 1:
@@ -771,7 +754,7 @@ const struct bpf_func_proto bpf_loop_proto = {
 	.func		= bpf_loop,
 	.gpl_only	= false,
 	.ret_type	= RET_INTEGER,
-	.arg1_type	= ARG_ANYTHING,
+	.arg1_type	= ARG_SCALAR,
 	.arg2_type	= ARG_PTR_TO_FUNC,
 	.arg3_type	= ARG_PTR_TO_STACK_OR_NULL,
 	.arg4_type	= ARG_ANYTHING,
@@ -782,9 +765,7 @@ struct bpf_iter_num_kern {
 	int end; /* final value, exclusive */
 } __aligned(8);
 
-__diag_push();
-__diag_ignore_all("-Wmissing-prototypes",
-		  "Global functions as their definitions will be in vmlinux BTF");
+__bpf_kfunc_start_defs();
 
 __bpf_kfunc int bpf_iter_num_new(struct bpf_iter_num *it, int start, int end)
 {
@@ -792,8 +773,6 @@ __bpf_kfunc int bpf_iter_num_new(struct bpf_iter_num *it, int start, int end)
 
 	BUILD_BUG_ON(sizeof(struct bpf_iter_num_kern) != sizeof(struct bpf_iter_num));
 	BUILD_BUG_ON(__alignof__(struct bpf_iter_num_kern) != __alignof__(struct bpf_iter_num));
-
-	BTF_TYPE_EMIT(struct btf_iter_num);
 
 	/* start == end is legit, it's an empty range and we'll just get NULL
 	 * on first (and any subsequent) bpf_iter_num_next() call
@@ -803,8 +782,8 @@ __bpf_kfunc int bpf_iter_num_new(struct bpf_iter_num *it, int start, int end)
 		return -EINVAL;
 	}
 
-	/* avoid overflows, e.g., if start == INT_MIN and end == INT_MAX */
-	if ((s64)end - (s64)start > BPF_MAX_LOOPS) {
+	/* start <= end here, so end - start fits in a u32 without overflow */
+	if ((u32)(end - start) > BPF_MAX_LOOPS) {
 		s->cur = s->end = 0;
 		return -E2BIG;
 	}
@@ -823,12 +802,11 @@ __bpf_kfunc int *bpf_iter_num_next(struct bpf_iter_num* it)
 {
 	struct bpf_iter_num_kern *s = (void *)it;
 
-	/* check failed initialization or if we are done (same behavior);
-	 * need to be careful about overflow, so convert to s64 for checks,
-	 * e.g., if s->cur == s->end == INT_MAX, we can't just do
-	 * s->cur + 1 >= s->end
+	/*
+	 * s->cur < s->end while iterating, else s->cur == s->end == 0; the signed
+	 * s->cur + 1 >= s->end holds even when s->cur + 1 wraps (start == INT_MIN).
 	 */
-	if ((s64)(s->cur + 1) >= s->end) {
+	if (s->cur + 1 >= s->end) {
 		s->cur = s->end = 0;
 		return NULL;
 	}
@@ -840,9 +818,7 @@ __bpf_kfunc int *bpf_iter_num_next(struct bpf_iter_num* it)
 
 __bpf_kfunc void bpf_iter_num_destroy(struct bpf_iter_num *it)
 {
-	struct bpf_iter_num_kern *s = (void *)it;
-
-	s->cur = s->end = 0;
+	/* no-op */
 }
 
-__diag_pop();
+__bpf_kfunc_end_defs();

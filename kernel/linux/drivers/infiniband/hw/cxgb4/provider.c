@@ -52,6 +52,7 @@
 #include <rdma/ib_smi.h>
 #include <rdma/ib_umem.h>
 #include <rdma/ib_user_verbs.h>
+#include <rdma/uverbs_ioctl.h>
 
 #include "iw_cxgb4.h"
 
@@ -79,7 +80,7 @@ static int c4iw_alloc_ucontext(struct ib_ucontext *ucontext,
 	struct ib_device *ibdev = ucontext->device;
 	struct c4iw_ucontext *context = to_c4iw_ucontext(ucontext);
 	struct c4iw_dev *rhp = to_c4iw_dev(ibdev);
-	struct c4iw_alloc_ucontext_resp uresp;
+	struct c4iw_alloc_ucontext_resp uresp = {};
 	int ret = 0;
 	struct c4iw_mm_entry *mm = NULL;
 
@@ -92,7 +93,7 @@ static int c4iw_alloc_ucontext(struct ib_ucontext *ucontext,
 		pr_err_once("Warning - downlevel libcxgb4 (non-fatal), device status page disabled\n");
 		rhp->rdev.flags |= T4_STATUS_PAGE_DISABLED;
 	} else {
-		mm = kmalloc(sizeof(*mm), GFP_KERNEL);
+		mm = kmalloc_obj(*mm);
 		if (!mm) {
 			ret = -ENOMEM;
 			goto err;
@@ -105,14 +106,16 @@ static int c4iw_alloc_ucontext(struct ib_ucontext *ucontext,
 		context->key += PAGE_SIZE;
 		spin_unlock(&context->mmap_lock);
 
-		ret = ib_copy_to_udata(udata, &uresp,
-				       sizeof(uresp) - sizeof(uresp.reserved));
+		ret = ib_respond_udata(udata, uresp);
 		if (ret)
 			goto err_mm;
 
 		mm->key = uresp.status_page_key;
 		mm->addr = virt_to_phys(rhp->rdev.status_page);
 		mm->len = PAGE_SIZE;
+		mm->vaddr = NULL;
+		mm->dma_addr = 0;
+		insert_flag_to_mmap(&rhp->rdev, mm, mm->addr);
 		insert_mmap(context, mm);
 	}
 	return 0;
@@ -131,6 +134,11 @@ static int c4iw_mmap(struct ib_ucontext *context, struct vm_area_struct *vma)
 	struct c4iw_mm_entry *mm;
 	struct c4iw_ucontext *ucontext;
 	u64 addr;
+	u8 mmap_flag;
+	size_t size;
+	void *vaddr;
+	unsigned long vm_pgoff;
+	dma_addr_t dma_addr;
 
 	pr_debug("pgoff 0x%lx key 0x%x len %d\n", vma->vm_pgoff,
 		 key, len);
@@ -145,47 +153,38 @@ static int c4iw_mmap(struct ib_ucontext *context, struct vm_area_struct *vma)
 	if (!mm)
 		return -EINVAL;
 	addr = mm->addr;
+	vaddr = mm->vaddr;
+	dma_addr = mm->dma_addr;
+	size = mm->len;
+	mmap_flag = mm->mmap_flag;
 	kfree(mm);
 
-	if ((addr >= pci_resource_start(rdev->lldi.pdev, 0)) &&
-	    (addr < (pci_resource_start(rdev->lldi.pdev, 0) +
-		    pci_resource_len(rdev->lldi.pdev, 0)))) {
-
-		/*
-		 * MA_SYNC register...
-		 */
-		vma->vm_page_prot = pgprot_noncached(vma->vm_page_prot);
+	switch (mmap_flag) {
+	case CXGB4_MMAP_BAR:
+		ret = io_remap_pfn_range(vma, vma->vm_start, addr >> PAGE_SHIFT,
+					 len,
+					 pgprot_noncached(vma->vm_page_prot));
+		break;
+	case CXGB4_MMAP_BAR_WC:
+		ret = io_remap_pfn_range(vma, vma->vm_start,
+					 addr >> PAGE_SHIFT,
+					 len, t4_pgprot_wc(vma->vm_page_prot));
+		break;
+	case CXGB4_MMAP_CONTIG:
 		ret = io_remap_pfn_range(vma, vma->vm_start,
 					 addr >> PAGE_SHIFT,
 					 len, vma->vm_page_prot);
-	} else if ((addr >= pci_resource_start(rdev->lldi.pdev, 2)) &&
-		   (addr < (pci_resource_start(rdev->lldi.pdev, 2) +
-		    pci_resource_len(rdev->lldi.pdev, 2)))) {
-
-		/*
-		 * Map user DB or OCQP memory...
-		 */
-		if (addr >= rdev->oc_mw_pa)
-			vma->vm_page_prot = t4_pgprot_wc(vma->vm_page_prot);
-		else {
-			if (!is_t4(rdev->lldi.adapter_type))
-				vma->vm_page_prot =
-					t4_pgprot_wc(vma->vm_page_prot);
-			else
-				vma->vm_page_prot =
-					pgprot_noncached(vma->vm_page_prot);
-		}
-		ret = io_remap_pfn_range(vma, vma->vm_start,
-					 addr >> PAGE_SHIFT,
-					 len, vma->vm_page_prot);
-	} else {
-
-		/*
-		 * Map WQ or CQ contig dma memory...
-		 */
-		ret = remap_pfn_range(vma, vma->vm_start,
-				      addr >> PAGE_SHIFT,
-				      len, vma->vm_page_prot);
+		break;
+	case CXGB4_MMAP_NON_CONTIG:
+		vm_pgoff = vma->vm_pgoff;
+		vma->vm_pgoff = 0;
+		ret = dma_mmap_coherent(&rdev->lldi.pdev->dev, vma,
+					vaddr, dma_addr, size);
+		vma->vm_pgoff = vm_pgoff;
+		break;
+	default:
+		ret = -EINVAL;
+		break;
 	}
 
 	return ret;
@@ -210,8 +209,9 @@ static int c4iw_allocate_pd(struct ib_pd *pd, struct ib_udata *udata)
 {
 	struct c4iw_pd *php = to_c4iw_pd(pd);
 	struct ib_device *ibdev = pd->device;
-	u32 pdid;
 	struct c4iw_dev *rhp;
+	u32 pdid;
+	int ret;
 
 	pr_debug("ibdev %p\n", ibdev);
 	rhp = (struct c4iw_dev *) ibdev;
@@ -224,9 +224,10 @@ static int c4iw_allocate_pd(struct ib_pd *pd, struct ib_udata *udata)
 	if (udata) {
 		struct c4iw_alloc_pd_resp uresp = {.pdid = php->pdid};
 
-		if (ib_copy_to_udata(udata, &uresp, sizeof(uresp))) {
+		ret = ib_respond_udata(udata, uresp);
+		if (ret) {
 			c4iw_deallocate_pd(&php->ibpd, udata);
-			return -EFAULT;
+			return ret;
 		}
 	}
 	mutex_lock(&rhp->rdev.stats.lock);
@@ -258,11 +259,13 @@ static int c4iw_query_device(struct ib_device *ibdev, struct ib_device_attr *pro
 {
 
 	struct c4iw_dev *dev;
+	int err;
 
 	pr_debug("ibdev %p\n", ibdev);
 
-	if (uhw->inlen || uhw->outlen)
-		return -EINVAL;
+	err = ib_no_udata_io(uhw);
+	if (err)
+		return err;
 
 	dev = to_c4iw_dev(ibdev);
 	addrconf_addr_eui48((u8 *)&props->sys_image_guid,
@@ -474,6 +477,7 @@ static const struct ib_device_ops c4iw_dev_ops = {
 	.fill_res_cq_entry = c4iw_fill_res_cq_entry,
 	.fill_res_cm_id_entry = c4iw_fill_res_cm_id_entry,
 	.fill_res_mr_entry = c4iw_fill_res_mr_entry,
+	.fill_res_qp_entry = c4iw_fill_res_qp_entry,
 	.get_dev_fw_str = get_dev_fw_str,
 	.get_dma_mr = c4iw_get_dma_mr,
 	.get_hw_stats = c4iw_get_mib,

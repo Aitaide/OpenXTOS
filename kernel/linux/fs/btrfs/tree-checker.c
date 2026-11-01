@@ -21,7 +21,6 @@
 #include "messages.h"
 #include "ctree.h"
 #include "tree-checker.h"
-#include "disk-io.h"
 #include "compression.h"
 #include "volumes.h"
 #include "misc.h"
@@ -29,6 +28,8 @@
 #include "accessors.h"
 #include "file-item.h"
 #include "inode-item.h"
+#include "dir-item.h"
+#include "extent-tree.h"
 
 /*
  * Error message should follow the following format:
@@ -64,6 +65,7 @@ static void generic_err(const struct extent_buffer *eb, int slot,
 	vaf.fmt = fmt;
 	vaf.va = &args;
 
+	dump_page(folio_page(eb->folios[0], 0), "eb page dump");
 	btrfs_crit(fs_info,
 		"corrupt %s: root=%llu block=%llu slot=%d, %pV",
 		btrfs_header_level(eb) == 0 ? "leaf" : "node",
@@ -91,6 +93,7 @@ static void file_extent_err(const struct extent_buffer *eb, int slot,
 	vaf.fmt = fmt;
 	vaf.va = &args;
 
+	dump_page(folio_page(eb->folios[0], 0), "eb page dump");
 	btrfs_crit(fs_info,
 	"corrupt %s: root=%llu block=%llu slot=%d ino=%llu file_offset=%llu, %pV",
 		btrfs_header_level(eb) == 0 ? "leaf" : "node",
@@ -151,6 +154,7 @@ static void dir_item_err(const struct extent_buffer *eb, int slot,
 	vaf.fmt = fmt;
 	vaf.va = &args;
 
+	dump_page(folio_page(eb->folios[0], 0), "eb page dump");
 	btrfs_crit(fs_info,
 		"corrupt %s: root=%llu block=%llu slot=%d ino=%llu, %pV",
 		btrfs_header_level(eb) == 0 ? "leaf" : "node",
@@ -179,15 +183,16 @@ static bool check_prev_ino(struct extent_buffer *leaf,
 	/* Only these key->types needs to be checked */
 	ASSERT(key->type == BTRFS_XATTR_ITEM_KEY ||
 	       key->type == BTRFS_INODE_REF_KEY ||
+	       key->type == BTRFS_INODE_EXTREF_KEY ||
 	       key->type == BTRFS_DIR_INDEX_KEY ||
 	       key->type == BTRFS_DIR_ITEM_KEY ||
-	       key->type == BTRFS_EXTENT_DATA_KEY);
+	       key->type == BTRFS_EXTENT_DATA_KEY, "key->type=%u", key->type);
 
 	/*
 	 * Only subvolume trees along with their reloc trees need this check.
 	 * Things like log tree doesn't follow this ino requirement.
 	 */
-	if (!is_fstree(btrfs_header_owner(leaf)))
+	if (!btrfs_is_fstree(btrfs_header_owner(leaf)))
 		return true;
 
 	if (key->objectid == prev_key->objectid)
@@ -291,6 +296,33 @@ static int check_extent_data_item(struct extent_buffer *leaf,
 		return 0;
 	}
 
+	/*
+	 * For the data reloc tree, file extent items are written by
+	 * relocation's own paths. The data reloc inode is created with
+	 * BTRFS_INODE_NOCOMPRESS, so insert_ordered_extent_file_extent()
+	 * always leaves the compression field at 0. Encryption and
+	 * other_encoding are reserved-and-zero in btrfs. A non-zero value
+	 * for any of these means the leaf decoded from disk does not match
+	 * what the kernel wrote, i.e. on-disk corruption.
+	 *
+	 * The file_extent_item's offset field is NOT a universal invariant
+	 * here: partial-PREALLOC writebacks legitimately produce REG items
+	 * with non-zero offset at non-boundary keys. The offset check is
+	 * performed at the call site in get_new_location(), which only
+	 * inspects cluster-boundary keys where offset is always 0.
+	 */
+	if (unlikely(btrfs_header_owner(leaf) == BTRFS_DATA_RELOC_TREE_OBJECTID &&
+		     (btrfs_file_extent_compression(leaf, fi) ||
+		      btrfs_file_extent_encryption(leaf, fi) ||
+		      btrfs_file_extent_other_encoding(leaf, fi)))) {
+		file_extent_err(leaf, slot,
+"invalid encoding fields for data reloc tree, compression=%u encryption=%u other_encoding=%u",
+				btrfs_file_extent_compression(leaf, fi),
+				btrfs_file_extent_encryption(leaf, fi),
+				btrfs_file_extent_other_encoding(leaf, fi));
+		return -EUCLEAN;
+	}
+
 	/* Regular or preallocated extent has fixed item size */
 	if (unlikely(item_size != sizeof(*fi))) {
 		file_extent_err(leaf, slot,
@@ -334,6 +366,24 @@ static int check_extent_data_item(struct extent_buffer *leaf,
 					prev_end, key->offset);
 			return -EUCLEAN;
 		}
+	}
+
+	/*
+	 * For non-compressed data extents, ram_bytes should match its
+	 * disk_num_bytes.
+	 * However we do not really utilize ram_bytes in this case, so this check
+	 * is only optional for DEBUG builds for developers to catch the
+	 * unexpected behaviors.
+	 */
+	if (IS_ENABLED(CONFIG_BTRFS_DEBUG) &&
+	    btrfs_file_extent_compression(leaf, fi) == BTRFS_COMPRESS_NONE &&
+	    btrfs_file_extent_disk_bytenr(leaf, fi)) {
+		if (WARN_ON(btrfs_file_extent_ram_bytes(leaf, fi) !=
+			    btrfs_file_extent_disk_num_bytes(leaf, fi)))
+			file_extent_err(leaf, slot,
+"mismatch ram_bytes (%llu) and disk_num_bytes (%llu) for non-compressed extent",
+					btrfs_file_extent_ram_bytes(leaf, fi),
+					btrfs_file_extent_disk_num_bytes(leaf, fi));
 	}
 
 	return 0;
@@ -453,7 +503,7 @@ static int check_root_key(struct extent_buffer *leaf, struct btrfs_key *key,
 	 * to be COWed to be relocated.
 	 */
 	if (unlikely(is_root_item && key->objectid == BTRFS_TREE_RELOC_OBJECTID &&
-		     !is_fstree(key->offset))) {
+		     !btrfs_is_fstree(key->offset))) {
 		generic_err(leaf, slot,
 		"invalid reloc tree for root %lld, root id is not a subvolume tree",
 			    key->offset);
@@ -471,7 +521,7 @@ static int check_root_key(struct extent_buffer *leaf, struct btrfs_key *key,
 	}
 
 	/* DIR_ITEM/INDEX/INODE_REF is not allowed to point to non-fs trees */
-	if (unlikely(!is_fstree(key->objectid) && !is_root_item)) {
+	if (unlikely(!btrfs_is_fstree(key->objectid) && !is_root_item)) {
 		dir_item_err(leaf, slot,
 		"invalid location key objectid, have %llu expect [%llu, %llu]",
 				key->objectid, BTRFS_FIRST_FREE_OBJECTID,
@@ -547,9 +597,10 @@ static int check_dir_item(struct extent_buffer *leaf,
 
 		/* dir type check */
 		dir_type = btrfs_dir_ftype(leaf, di);
-		if (unlikely(dir_type >= BTRFS_FT_MAX)) {
+		if (unlikely(dir_type <= BTRFS_FT_UNKNOWN ||
+			     dir_type >= BTRFS_FT_MAX)) {
 			dir_item_err(leaf, slot,
-			"invalid dir item type, have %u expect [0, %u)",
+			"invalid dir item type, have %u expect (0, %u)",
 				dir_type, BTRFS_FT_MAX);
 			return -EUCLEAN;
 		}
@@ -612,7 +663,7 @@ static int check_dir_item(struct extent_buffer *leaf,
 		 */
 		if (key->type == BTRFS_DIR_ITEM_KEY ||
 		    key->type == BTRFS_XATTR_ITEM_KEY) {
-			char namebuf[max(BTRFS_NAME_LEN, XATTR_NAME_MAX)];
+			char namebuf[MAX(BTRFS_NAME_LEN, XATTR_NAME_MAX)];
 
 			read_extent_buffer(leaf, namebuf,
 					(unsigned long)(di + 1), name_len);
@@ -646,6 +697,7 @@ static void block_group_err(const struct extent_buffer *eb, int slot,
 	vaf.fmt = fmt;
 	vaf.va = &args;
 
+	dump_page(folio_page(eb->folios[0], 0), "eb page dump");
 	btrfs_crit(fs_info,
 	"corrupt %s: root=%llu block=%llu slot=%d bg_start=%llu bg_len=%llu, %pV",
 		btrfs_header_level(eb) == 0 ? "leaf" : "node",
@@ -663,6 +715,7 @@ static int check_block_group_item(struct extent_buffer *leaf,
 	u64 chunk_objectid;
 	u64 flags;
 	u64 type;
+	size_t exp_size;
 
 	/*
 	 * Here we don't really care about alignment since extent allocator can
@@ -674,10 +727,15 @@ static int check_block_group_item(struct extent_buffer *leaf,
 		return -EUCLEAN;
 	}
 
-	if (unlikely(item_size != sizeof(bgi))) {
+	if (btrfs_fs_incompat(fs_info, REMAP_TREE))
+		exp_size = sizeof(struct btrfs_block_group_item_v2);
+	else
+		exp_size = sizeof(struct btrfs_block_group_item);
+
+	if (unlikely(item_size != exp_size)) {
 		block_group_err(leaf, slot,
 			"invalid item size, have %u expect %zu",
-				item_size, sizeof(bgi));
+				item_size, exp_size);
 		return -EUCLEAN;
 	}
 
@@ -723,38 +781,85 @@ static int check_block_group_item(struct extent_buffer *leaf,
 		return -EUCLEAN;
 	}
 
+	if (unlikely(flags & BTRFS_BLOCK_GROUP_METADATA_REMAP &&
+		     !btrfs_fs_incompat(fs_info, REMAP_TREE))) {
+		block_group_err(leaf, slot,
+"invalid flags, have 0x%llx (METADATA_REMAP flag set) but no remap-tree incompat flag",
+				flags);
+		return -EUCLEAN;
+	}
+
 	type = flags & BTRFS_BLOCK_GROUP_TYPE_MASK;
 	if (unlikely(type != BTRFS_BLOCK_GROUP_DATA &&
 		     type != BTRFS_BLOCK_GROUP_METADATA &&
 		     type != BTRFS_BLOCK_GROUP_SYSTEM &&
+		     type != BTRFS_BLOCK_GROUP_METADATA_REMAP &&
 		     type != (BTRFS_BLOCK_GROUP_METADATA |
 			      BTRFS_BLOCK_GROUP_DATA))) {
 		block_group_err(leaf, slot,
-"invalid type, have 0x%llx (%lu bits set) expect either 0x%llx, 0x%llx, 0x%llx or 0x%llx",
+"invalid type, have 0x%llx (%lu bits set) expect either 0x%llx, 0x%llx, 0x%llx, 0x%llx or 0x%llx",
 			type, hweight64(type),
 			BTRFS_BLOCK_GROUP_DATA, BTRFS_BLOCK_GROUP_METADATA,
-			BTRFS_BLOCK_GROUP_SYSTEM,
+			BTRFS_BLOCK_GROUP_SYSTEM, BTRFS_BLOCK_GROUP_METADATA_REMAP,
 			BTRFS_BLOCK_GROUP_METADATA | BTRFS_BLOCK_GROUP_DATA);
 		return -EUCLEAN;
 	}
+
+	if (unlikely(!btrfs_fs_incompat(fs_info, REMAP_TREE) &&
+		     type == BTRFS_BLOCK_GROUP_METADATA_REMAP)) {
+		block_group_err(leaf, slot,
+		"invalid type, METADATA_REMAP set but REMAP_TREE incompat flag not set");
+		return -EUCLEAN;
+	}
+
+	if (unlikely(!btrfs_fs_incompat(fs_info, REMAP_TREE) &&
+		     flags & BTRFS_BLOCK_GROUP_REMAPPED)) {
+		block_group_err(leaf, slot,
+		"invalid flags, REMAPPED set but REMAP_TREE incompat flag not set");
+		return -EUCLEAN;
+	}
+
+	if (item_size == sizeof(struct btrfs_block_group_item_v2)) {
+		struct btrfs_block_group_item_v2 *bgi2;
+		u64 remap_bytes;
+		u32 identity_remap_count;
+
+		bgi2 = btrfs_item_ptr(leaf, slot, struct btrfs_block_group_item_v2);
+		remap_bytes = btrfs_block_group_v2_remap_bytes(leaf, bgi2);
+
+		if (unlikely(remap_bytes > key->offset)) {
+			block_group_err(leaf, slot,
+				"invalid remap_bytes, have %llu expect [0, %llu]",
+					remap_bytes, key->offset);
+			return -EUCLEAN;
+		}
+
+		identity_remap_count = btrfs_block_group_v2_identity_remap_count(leaf, bgi2);
+		if (unlikely((u64)identity_remap_count >
+			     key->offset >> fs_info->sectorsize_bits)) {
+			block_group_err(leaf, slot,
+				"invalid identity_remap_count, have %u expect [0, %llu]",
+					identity_remap_count,
+					key->offset >> fs_info->sectorsize_bits);
+			return -EUCLEAN;
+		}
+	}
+
 	return 0;
 }
 
-__printf(4, 5)
+__printf(5, 6)
 __cold
-static void chunk_err(const struct extent_buffer *leaf,
+static void chunk_err(const struct btrfs_fs_info *fs_info,
+		      const struct extent_buffer *leaf,
 		      const struct btrfs_chunk *chunk, u64 logical,
 		      const char *fmt, ...)
 {
-	const struct btrfs_fs_info *fs_info = leaf->fs_info;
-	bool is_sb;
+	bool is_sb = !leaf;
 	struct va_format vaf;
 	va_list args;
 	int i;
 	int slot = -1;
-
-	/* Only superblock eb is able to have such small offset */
-	is_sb = (leaf->start == BTRFS_SUPER_INFO_OFFSET);
 
 	if (!is_sb) {
 		/*
@@ -785,16 +890,46 @@ static void chunk_err(const struct extent_buffer *leaf,
 	va_end(args);
 }
 
+static bool valid_stripe_count(u64 profile, u16 num_stripes, u16 sub_stripes)
+{
+	switch (profile) {
+	case BTRFS_BLOCK_GROUP_RAID0:
+		return true;
+	case BTRFS_BLOCK_GROUP_RAID10:
+		return sub_stripes == btrfs_raid_array[BTRFS_RAID_RAID10].sub_stripes;
+	case BTRFS_BLOCK_GROUP_RAID1:
+		return num_stripes == btrfs_raid_array[BTRFS_RAID_RAID1].devs_min;
+	case BTRFS_BLOCK_GROUP_RAID1C3:
+		return num_stripes == btrfs_raid_array[BTRFS_RAID_RAID1C3].devs_min;
+	case BTRFS_BLOCK_GROUP_RAID1C4:
+		return num_stripes == btrfs_raid_array[BTRFS_RAID_RAID1C4].devs_min;
+	case BTRFS_BLOCK_GROUP_RAID5:
+		return num_stripes >= btrfs_raid_array[BTRFS_RAID_RAID5].devs_min;
+	case BTRFS_BLOCK_GROUP_RAID6:
+		return num_stripes >= btrfs_raid_array[BTRFS_RAID_RAID6].devs_min;
+	case BTRFS_BLOCK_GROUP_DUP:
+		return num_stripes == btrfs_raid_array[BTRFS_RAID_DUP].dev_stripes;
+	case 0: /* SINGLE */
+		return num_stripes == btrfs_raid_array[BTRFS_RAID_SINGLE].dev_stripes;
+	default:
+		BUG();
+	}
+}
+
 /*
  * The common chunk check which could also work on super block sys chunk array.
+ *
+ * If @leaf is NULL, then @chunk must be an on-stack chunk item.
+ * (For superblock sys_chunk array, and fs_info->sectorsize is unreliable)
  *
  * Return -EUCLEAN if anything is corrupted.
  * Return 0 if everything is OK.
  */
-int btrfs_check_chunk_valid(struct extent_buffer *leaf,
-			    struct btrfs_chunk *chunk, u64 logical)
+int btrfs_check_chunk_valid(const struct btrfs_fs_info *fs_info,
+			    const struct extent_buffer *leaf,
+			    const struct btrfs_chunk *chunk, u64 logical,
+			    u32 sectorsize)
 {
-	struct btrfs_fs_info *fs_info = leaf->fs_info;
 	u64 length;
 	u64 chunk_end;
 	u64 stripe_len;
@@ -802,63 +937,75 @@ int btrfs_check_chunk_valid(struct extent_buffer *leaf,
 	u16 sub_stripes;
 	u64 type;
 	u64 features;
+	u32 chunk_sector_size;
 	bool mixed = false;
+	bool remapped;
 	int raid_index;
 	int nparity;
 	int ncopies;
 
-	length = btrfs_chunk_length(leaf, chunk);
-	stripe_len = btrfs_chunk_stripe_len(leaf, chunk);
-	num_stripes = btrfs_chunk_num_stripes(leaf, chunk);
-	sub_stripes = btrfs_chunk_sub_stripes(leaf, chunk);
-	type = btrfs_chunk_type(leaf, chunk);
+	if (leaf) {
+		length = btrfs_chunk_length(leaf, chunk);
+		stripe_len = btrfs_chunk_stripe_len(leaf, chunk);
+		num_stripes = btrfs_chunk_num_stripes(leaf, chunk);
+		sub_stripes = btrfs_chunk_sub_stripes(leaf, chunk);
+		type = btrfs_chunk_type(leaf, chunk);
+		chunk_sector_size = btrfs_chunk_sector_size(leaf, chunk);
+	} else {
+		length = btrfs_stack_chunk_length(chunk);
+		stripe_len = btrfs_stack_chunk_stripe_len(chunk);
+		num_stripes = btrfs_stack_chunk_num_stripes(chunk);
+		sub_stripes = btrfs_stack_chunk_sub_stripes(chunk);
+		type = btrfs_stack_chunk_type(chunk);
+		chunk_sector_size = btrfs_stack_chunk_sector_size(chunk);
+	}
 	raid_index = btrfs_bg_flags_to_raid_index(type);
 	ncopies = btrfs_raid_array[raid_index].ncopies;
 	nparity = btrfs_raid_array[raid_index].nparity;
+	remapped = (type & BTRFS_BLOCK_GROUP_REMAPPED);
 
-	if (unlikely(!num_stripes)) {
-		chunk_err(leaf, chunk, logical,
+	if (unlikely(!remapped && !num_stripes)) {
+		chunk_err(fs_info, leaf, chunk, logical,
 			  "invalid chunk num_stripes, have %u", num_stripes);
 		return -EUCLEAN;
 	}
-	if (unlikely(num_stripes < ncopies)) {
-		chunk_err(leaf, chunk, logical,
+	if (unlikely(num_stripes != 0 && num_stripes < ncopies)) {
+		chunk_err(fs_info, leaf, chunk, logical,
 			  "invalid chunk num_stripes < ncopies, have %u < %d",
 			  num_stripes, ncopies);
 		return -EUCLEAN;
 	}
 	if (unlikely(nparity && num_stripes == nparity)) {
-		chunk_err(leaf, chunk, logical,
+		chunk_err(fs_info, leaf, chunk, logical,
 			  "invalid chunk num_stripes == nparity, have %u == %d",
 			  num_stripes, nparity);
 		return -EUCLEAN;
 	}
-	if (unlikely(!IS_ALIGNED(logical, fs_info->sectorsize))) {
-		chunk_err(leaf, chunk, logical,
+	if (unlikely(!IS_ALIGNED(logical, sectorsize))) {
+		chunk_err(fs_info, leaf, chunk, logical,
 		"invalid chunk logical, have %llu should aligned to %u",
-			  logical, fs_info->sectorsize);
+			  logical, sectorsize);
 		return -EUCLEAN;
 	}
-	if (unlikely(btrfs_chunk_sector_size(leaf, chunk) != fs_info->sectorsize)) {
-		chunk_err(leaf, chunk, logical,
+	if (unlikely(chunk_sector_size != sectorsize)) {
+		chunk_err(fs_info, leaf, chunk, logical,
 			  "invalid chunk sectorsize, have %u expect %u",
-			  btrfs_chunk_sector_size(leaf, chunk),
-			  fs_info->sectorsize);
+			  chunk_sector_size, sectorsize);
 		return -EUCLEAN;
 	}
-	if (unlikely(!length || !IS_ALIGNED(length, fs_info->sectorsize))) {
-		chunk_err(leaf, chunk, logical,
+	if (unlikely(!length || !IS_ALIGNED(length, sectorsize))) {
+		chunk_err(fs_info, leaf, chunk, logical,
 			  "invalid chunk length, have %llu", length);
 		return -EUCLEAN;
 	}
 	if (unlikely(check_add_overflow(logical, length, &chunk_end))) {
-		chunk_err(leaf, chunk, logical,
+		chunk_err(fs_info, leaf, chunk, logical,
 "invalid chunk logical start and length, have logical start %llu length %llu",
 			  logical, length);
 		return -EUCLEAN;
 	}
 	if (unlikely(!is_power_of_2(stripe_len) || stripe_len != BTRFS_STRIPE_LEN)) {
-		chunk_err(leaf, chunk, logical,
+		chunk_err(fs_info, leaf, chunk, logical,
 			  "invalid chunk stripe length: %llu",
 			  stripe_len);
 		return -EUCLEAN;
@@ -872,30 +1019,27 @@ int btrfs_check_chunk_valid(struct extent_buffer *leaf,
 	 * Thus it should be a good way to catch obvious bitflips.
 	 */
 	if (unlikely(length >= btrfs_stripe_nr_to_offset(U32_MAX))) {
-		chunk_err(leaf, chunk, logical,
+		chunk_err(fs_info, leaf, chunk, logical,
 			  "chunk length too large: have %llu limit %llu",
 			  length, btrfs_stripe_nr_to_offset(U32_MAX));
 		return -EUCLEAN;
 	}
-	if (unlikely(type & ~(BTRFS_BLOCK_GROUP_TYPE_MASK |
-			      BTRFS_BLOCK_GROUP_PROFILE_MASK))) {
-		chunk_err(leaf, chunk, logical,
+	if (unlikely(type & ~BTRFS_BLOCK_GROUP_VALID)) {
+		chunk_err(fs_info, leaf, chunk, logical,
 			  "unrecognized chunk type: 0x%llx",
-			  ~(BTRFS_BLOCK_GROUP_TYPE_MASK |
-			    BTRFS_BLOCK_GROUP_PROFILE_MASK) &
-			  btrfs_chunk_type(leaf, chunk));
+			  type & ~BTRFS_BLOCK_GROUP_VALID);
 		return -EUCLEAN;
 	}
 
 	if (unlikely(!has_single_bit_set(type & BTRFS_BLOCK_GROUP_PROFILE_MASK) &&
 		     (type & BTRFS_BLOCK_GROUP_PROFILE_MASK) != 0)) {
-		chunk_err(leaf, chunk, logical,
+		chunk_err(fs_info, leaf, chunk, logical,
 		"invalid chunk profile flag: 0x%llx, expect 0 or 1 bit set",
 			  type & BTRFS_BLOCK_GROUP_PROFILE_MASK);
 		return -EUCLEAN;
 	}
 	if (unlikely((type & BTRFS_BLOCK_GROUP_TYPE_MASK) == 0)) {
-		chunk_err(leaf, chunk, logical,
+		chunk_err(fs_info, leaf, chunk, logical,
 	"missing chunk type flag, have 0x%llx one bit must be set in 0x%llx",
 			  type, BTRFS_BLOCK_GROUP_TYPE_MASK);
 		return -EUCLEAN;
@@ -904,7 +1048,7 @@ int btrfs_check_chunk_valid(struct extent_buffer *leaf,
 	if (unlikely((type & BTRFS_BLOCK_GROUP_SYSTEM) &&
 		     (type & (BTRFS_BLOCK_GROUP_METADATA |
 			      BTRFS_BLOCK_GROUP_DATA)))) {
-		chunk_err(leaf, chunk, logical,
+		chunk_err(fs_info, leaf, chunk, logical,
 			  "system chunk with data or metadata type: 0x%llx",
 			  type);
 		return -EUCLEAN;
@@ -917,29 +1061,30 @@ int btrfs_check_chunk_valid(struct extent_buffer *leaf,
 	if (!mixed) {
 		if (unlikely((type & BTRFS_BLOCK_GROUP_METADATA) &&
 			     (type & BTRFS_BLOCK_GROUP_DATA))) {
-			chunk_err(leaf, chunk, logical,
+			chunk_err(fs_info, leaf, chunk, logical,
 			"mixed chunk type in non-mixed mode: 0x%llx", type);
 			return -EUCLEAN;
 		}
 	}
 
-	if (unlikely((type & BTRFS_BLOCK_GROUP_RAID10 &&
-		      sub_stripes != btrfs_raid_array[BTRFS_RAID_RAID10].sub_stripes) ||
-		     (type & BTRFS_BLOCK_GROUP_RAID1 &&
-		      num_stripes != btrfs_raid_array[BTRFS_RAID_RAID1].devs_min) ||
-		     (type & BTRFS_BLOCK_GROUP_RAID1C3 &&
-		      num_stripes != btrfs_raid_array[BTRFS_RAID_RAID1C3].devs_min) ||
-		     (type & BTRFS_BLOCK_GROUP_RAID1C4 &&
-		      num_stripes != btrfs_raid_array[BTRFS_RAID_RAID1C4].devs_min) ||
-		     (type & BTRFS_BLOCK_GROUP_RAID5 &&
-		      num_stripes < btrfs_raid_array[BTRFS_RAID_RAID5].devs_min) ||
-		     (type & BTRFS_BLOCK_GROUP_RAID6 &&
-		      num_stripes < btrfs_raid_array[BTRFS_RAID_RAID6].devs_min) ||
-		     (type & BTRFS_BLOCK_GROUP_DUP &&
-		      num_stripes != btrfs_raid_array[BTRFS_RAID_DUP].dev_stripes) ||
-		     ((type & BTRFS_BLOCK_GROUP_PROFILE_MASK) == 0 &&
-		      num_stripes != btrfs_raid_array[BTRFS_RAID_SINGLE].dev_stripes))) {
-		chunk_err(leaf, chunk, logical,
+	if (unlikely((type & BTRFS_BLOCK_GROUP_METADATA_REMAP) &&
+		     !(features & BTRFS_FEATURE_INCOMPAT_REMAP_TREE))) {
+		chunk_err(fs_info, leaf, chunk, logical,
+		"METADATA_REMAP chunk type without REMAP_TREE incompat bit");
+		return -EUCLEAN;
+	}
+
+	if (unlikely(remapped &&
+		     !(features & BTRFS_FEATURE_INCOMPAT_REMAP_TREE))) {
+		chunk_err(fs_info, leaf, chunk, logical,
+		"REMAPPED chunk flag without REMAP_TREE incompat bit");
+		return -EUCLEAN;
+	}
+
+	if (!remapped &&
+	    !valid_stripe_count(type & BTRFS_BLOCK_GROUP_PROFILE_MASK,
+				num_stripes, sub_stripes)) {
+		chunk_err(fs_info, leaf, chunk, logical,
 			"invalid num_stripes:sub_stripes %u:%u for profile %llu",
 			num_stripes, sub_stripes,
 			type & BTRFS_BLOCK_GROUP_PROFILE_MASK);
@@ -959,14 +1104,15 @@ static int check_leaf_chunk_item(struct extent_buffer *leaf,
 				 struct btrfs_chunk *chunk,
 				 struct btrfs_key *key, int slot)
 {
+	struct btrfs_fs_info *fs_info = leaf->fs_info;
 	int num_stripes;
 
-	if (unlikely(btrfs_item_size(leaf, slot) < sizeof(struct btrfs_chunk))) {
-		chunk_err(leaf, chunk, key->offset,
+	if (unlikely(btrfs_item_size(leaf, slot) < offsetof(struct btrfs_chunk, stripe))) {
+		chunk_err(fs_info, leaf, chunk, key->offset,
 			"invalid chunk item size: have %u expect [%zu, %u)",
 			btrfs_item_size(leaf, slot),
-			sizeof(struct btrfs_chunk),
-			BTRFS_LEAF_DATA_SIZE(leaf->fs_info));
+			offsetof(struct btrfs_chunk, stripe),
+			BTRFS_LEAF_DATA_SIZE(fs_info));
 		return -EUCLEAN;
 	}
 
@@ -977,14 +1123,15 @@ static int check_leaf_chunk_item(struct extent_buffer *leaf,
 
 	if (unlikely(btrfs_chunk_item_size(num_stripes) !=
 		     btrfs_item_size(leaf, slot))) {
-		chunk_err(leaf, chunk, key->offset,
+		chunk_err(fs_info, leaf, chunk, key->offset,
 			"invalid chunk item size: have %u expect %lu",
 			btrfs_item_size(leaf, slot),
 			btrfs_chunk_item_size(num_stripes));
 		return -EUCLEAN;
 	}
 out:
-	return btrfs_check_chunk_valid(leaf, chunk, key->offset);
+	return btrfs_check_chunk_valid(fs_info, leaf, chunk, key->offset,
+				       fs_info->sectorsize);
 }
 
 __printf(3, 4)
@@ -1002,6 +1149,7 @@ static void dev_item_err(const struct extent_buffer *eb, int slot,
 	vaf.fmt = fmt;
 	vaf.va = &args;
 
+	dump_page(folio_page(eb->folios[0], 0), "eb page dump");
 	btrfs_crit(eb->fs_info,
 	"corrupt %s: root=%llu block=%llu slot=%d devid=%llu %pV",
 		btrfs_header_level(eb) == 0 ? "leaf" : "node",
@@ -1172,7 +1320,7 @@ static int check_root_item(struct extent_buffer *leaf, struct btrfs_key *key,
 	/*
 	 * For legacy root item, the members starting at generation_v2 will be
 	 * all filled with 0.
-	 * And since we allow geneartion_v2 as 0, it will still pass the check.
+	 * And since we allow generation_v2 as 0, it will still pass the check.
 	 */
 	read_extent_buffer(leaf, &ri, btrfs_item_ptr_offset(leaf, slot),
 			   btrfs_item_size(leaf, slot));
@@ -1218,8 +1366,25 @@ static int check_root_item(struct extent_buffer *leaf, struct btrfs_key *key,
 	}
 	if (unlikely(btrfs_root_drop_level(&ri) >= BTRFS_MAX_LEVEL)) {
 		generic_err(leaf, slot,
-			    "invalid root level, have %u expect [0, %u]",
+			    "invalid root drop_level, have %u expect [0, %u]",
 			    btrfs_root_drop_level(&ri), BTRFS_MAX_LEVEL - 1);
+		return -EUCLEAN;
+	}
+	/*
+	 * If drop_progress.objectid is non-zero, a btrfs_drop_snapshot() was
+	 * interrupted and the resume point was recorded in drop_progress and
+	 * drop_level.  In that case drop_level must be >= 1: level 0 is the
+	 * leaf level and drop_snapshot never saves a checkpoint there (it
+	 * only records checkpoints at internal node levels in DROP_REFERENCE
+	 * stage).  A zero drop_level combined with a non-zero drop_progress
+	 * objectid indicates on-disk corruption and would cause a BUG_ON in
+	 * merge_reloc_root() and btrfs_drop_snapshot() at mount time.
+	 */
+	if (unlikely(btrfs_disk_key_objectid(&ri.drop_progress) != 0 &&
+		     btrfs_root_drop_level(&ri) == 0)) {
+		generic_err(leaf, slot,
+			    "invalid root drop_level 0 with non-zero drop_progress objectid %llu",
+			    btrfs_disk_key_objectid(&ri.drop_progress));
 		return -EUCLEAN;
 	}
 
@@ -1230,6 +1395,37 @@ static int check_root_item(struct extent_buffer *leaf, struct btrfs_key *key,
 			    btrfs_root_flags(&ri), valid_root_flags);
 		return -EUCLEAN;
 	}
+	return 0;
+}
+
+static int check_root_ref(struct extent_buffer *leaf, struct btrfs_key *key, int slot)
+{
+	struct btrfs_root_ref *rref;
+	u32 item_size = btrfs_item_size(leaf, slot);
+	u32 name_len;
+
+	if (unlikely(item_size <= sizeof(*rref))) {
+		generic_err(leaf, slot,
+			    "invalid root ref item size for key type %u, have %u expect > %zu",
+			    key->type, item_size, sizeof(*rref));
+		return -EUCLEAN;
+	}
+
+	rref = btrfs_item_ptr(leaf, slot, struct btrfs_root_ref);
+	name_len = btrfs_root_ref_name_len(leaf, rref);
+	if (unlikely(name_len > BTRFS_NAME_LEN)) {
+		generic_err(leaf, slot,
+			    "root ref name too long for key type %u, have %u max %u",
+			    key->type, name_len, BTRFS_NAME_LEN);
+		return -EUCLEAN;
+	}
+	if (unlikely(item_size != sizeof(*rref) + name_len)) {
+		generic_err(leaf, slot,
+			    "invalid root ref item size for key type %u, have %u expect %zu",
+			    key->type, item_size, sizeof(*rref) + name_len);
+		return -EUCLEAN;
+	}
+
 	return 0;
 }
 
@@ -1257,11 +1453,25 @@ static void extent_err(const struct extent_buffer *eb, int slot,
 	vaf.fmt = fmt;
 	vaf.va = &args;
 
+	dump_page(folio_page(eb->folios[0], 0), "eb page dump");
 	btrfs_crit(eb->fs_info,
 	"corrupt %s: block=%llu slot=%d extent bytenr=%llu len=%llu %pV",
 		btrfs_header_level(eb) == 0 ? "leaf" : "node",
 		eb->start, slot, bytenr, len, &vaf);
 	va_end(args);
+}
+
+static bool is_valid_dref_root(u64 rootid)
+{
+	/*
+	 * The following tree root objectids are allowed to have a data backref:
+	 * - subvolume trees
+	 * - data reloc tree
+	 * - tree root
+	 *   For v1 space cache
+	 */
+	return btrfs_is_fstree(rootid) || rootid == BTRFS_DATA_RELOC_TREE_OBJECTID ||
+	       rootid == BTRFS_ROOT_TREE_OBJECTID;
 }
 
 static int check_extent_item(struct extent_buffer *leaf,
@@ -1274,6 +1484,8 @@ static int check_extent_item(struct extent_buffer *leaf,
 	unsigned long ptr;	/* Current pointer inside inline refs */
 	unsigned long end;	/* Extent item end */
 	const u32 item_size = btrfs_item_size(leaf, slot);
+	u8 last_type = 0;
+	u64 last_seq = U64_MAX;
 	u64 flags;
 	u64 generation;
 	u64 total_refs;		/* Total refs in btrfs_extent_item */
@@ -1320,6 +1532,18 @@ static int check_extent_item(struct extent_buffer *leaf,
 	 *    2.2) Ref type specific data
 	 *         Either using btrfs_extent_inline_ref::offset, or specific
 	 *         data structure.
+	 *
+	 *    All above inline items should follow the order:
+	 *
+	 *    - All btrfs_extent_inline_ref::type should be in an ascending
+	 *      order
+	 *
+	 *    - Within the same type, the items should follow a descending
+	 *      order by their sequence number. The sequence number is
+	 *      determined by:
+	 *      * btrfs_extent_inline_ref::offset for all types  other than
+	 *        EXTENT_DATA_REF
+	 *      * hash_extent_data_ref() for EXTENT_DATA_REF
 	 */
 	if (unlikely(item_size < sizeof(*ei))) {
 		extent_err(leaf, slot,
@@ -1401,6 +1625,9 @@ static int check_extent_item(struct extent_buffer *leaf,
 		struct btrfs_extent_inline_ref *iref;
 		struct btrfs_extent_data_ref *dref;
 		struct btrfs_shared_data_ref *sref;
+		u64 seq;
+		u64 dref_root;
+		u64 dref_objectid;
 		u64 dref_offset;
 		u64 inline_offset;
 		u8 inline_type;
@@ -1414,10 +1641,11 @@ static int check_extent_item(struct extent_buffer *leaf,
 		iref = (struct btrfs_extent_inline_ref *)ptr;
 		inline_type = btrfs_extent_inline_ref_type(leaf, iref);
 		inline_offset = btrfs_extent_inline_ref_offset(leaf, iref);
+		seq = inline_offset;
 		if (unlikely(ptr + btrfs_extent_inline_ref_size(inline_type) > end)) {
 			extent_err(leaf, slot,
 "inline ref item overflows extent item, ptr %lu iref size %u end %lu",
-				   ptr, inline_type, end);
+				   ptr, btrfs_extent_inline_ref_size(inline_type), end);
 			return -EUCLEAN;
 		}
 
@@ -1443,12 +1671,36 @@ static int check_extent_item(struct extent_buffer *leaf,
 		 */
 		case BTRFS_EXTENT_DATA_REF_KEY:
 			dref = (struct btrfs_extent_data_ref *)(&iref->offset);
+			dref_root = btrfs_extent_data_ref_root(leaf, dref);
+			dref_objectid = btrfs_extent_data_ref_objectid(leaf, dref);
 			dref_offset = btrfs_extent_data_ref_offset(leaf, dref);
+			seq = hash_extent_data_ref(
+					btrfs_extent_data_ref_root(leaf, dref),
+					btrfs_extent_data_ref_objectid(leaf, dref),
+					btrfs_extent_data_ref_offset(leaf, dref));
+			if (unlikely(!is_valid_dref_root(dref_root))) {
+				extent_err(leaf, slot,
+					   "invalid data ref root value %llu",
+					   dref_root);
+				return -EUCLEAN;
+			}
+			if (unlikely(dref_objectid < BTRFS_FIRST_FREE_OBJECTID ||
+				     dref_objectid > BTRFS_LAST_FREE_OBJECTID)) {
+				extent_err(leaf, slot,
+					   "invalid data ref objectid value %llu",
+					   dref_objectid);
+				return -EUCLEAN;
+			}
 			if (unlikely(!IS_ALIGNED(dref_offset,
 						 fs_info->sectorsize))) {
 				extent_err(leaf, slot,
 		"invalid data ref offset, have %llu expect aligned to %u",
 					   dref_offset, fs_info->sectorsize);
+				return -EUCLEAN;
+			}
+			if (unlikely(btrfs_extent_data_ref_count(leaf, dref) == 0)) {
+				extent_err(leaf, slot,
+			"invalid data ref count, should have non-zero value");
 				return -EUCLEAN;
 			}
 			inline_refs += btrfs_extent_data_ref_count(leaf, dref);
@@ -1463,13 +1715,39 @@ static int check_extent_item(struct extent_buffer *leaf,
 					   inline_offset, fs_info->sectorsize);
 				return -EUCLEAN;
 			}
+			if (unlikely(btrfs_shared_data_ref_count(leaf, sref) == 0)) {
+				extent_err(leaf, slot,
+			"invalid shared data ref count, should have non-zero value");
+				return -EUCLEAN;
+			}
 			inline_refs += btrfs_shared_data_ref_count(leaf, sref);
+			break;
+		case BTRFS_EXTENT_OWNER_REF_KEY:
+			WARN_ON(!btrfs_fs_incompat(fs_info, SIMPLE_QUOTA));
 			break;
 		default:
 			extent_err(leaf, slot, "unknown inline ref type: %u",
 				   inline_type);
 			return -EUCLEAN;
 		}
+		if (unlikely(inline_type < last_type)) {
+			extent_err(leaf, slot,
+				   "inline ref out-of-order: has type %u, prev type %u",
+				   inline_type, last_type);
+			return -EUCLEAN;
+		}
+		/* Type changed, allow the sequence starts from U64_MAX again. */
+		if (inline_type > last_type)
+			last_seq = U64_MAX;
+		if (unlikely(seq > last_seq)) {
+			extent_err(leaf, slot,
+"inline ref out-of-order: has type %u offset %llu seq 0x%llx, prev type %u seq 0x%llx",
+				   inline_type, inline_offset, seq,
+				   last_type, last_seq);
+			return -EUCLEAN;
+		}
+		last_type = inline_type;
+		last_seq = seq;
 		ptr += btrfs_extent_inline_ref_size(inline_type);
 	}
 	/* No padding is allowed */
@@ -1498,10 +1776,9 @@ static int check_extent_item(struct extent_buffer *leaf,
 
 		if (unlikely(prev_end > key->objectid)) {
 			extent_err(leaf, slot,
-	"previous extent [%llu %u %llu] overlaps current extent [%llu %u %llu]",
-				   prev_key->objectid, prev_key->type,
-				   prev_key->offset, key->objectid, key->type,
-				   key->offset);
+	"previous extent " BTRFS_KEY_FMT " overlaps current extent " BTRFS_KEY_FMT,
+				   BTRFS_KEY_FMT_VALUE(prev_key),
+				   BTRFS_KEY_FMT_VALUE(key));
 			return -EUCLEAN;
 		}
 	}
@@ -1514,8 +1791,18 @@ static int check_simple_keyed_refs(struct extent_buffer *leaf,
 {
 	u32 expect_item_size = 0;
 
-	if (key->type == BTRFS_SHARED_DATA_REF_KEY)
+	if (key->type == BTRFS_SHARED_DATA_REF_KEY) {
+		struct btrfs_shared_data_ref *sref;
+
+		sref = btrfs_item_ptr(leaf, slot, struct btrfs_shared_data_ref);
+		if (unlikely(btrfs_shared_data_ref_count(leaf, sref) == 0)) {
+			extent_err(leaf, slot,
+		"invalid shared data backref count, should have non-zero value");
+			return -EUCLEAN;
+		}
+
 		expect_item_size = sizeof(struct btrfs_shared_data_ref);
+	}
 
 	if (unlikely(btrfs_item_size(leaf, slot) != expect_item_size)) {
 		generic_err(leaf, slot,
@@ -1561,6 +1848,8 @@ static int check_extent_data_ref(struct extent_buffer *leaf,
 		return -EUCLEAN;
 	}
 	for (; ptr < end; ptr += sizeof(*dref)) {
+		u64 root;
+		u64 objectid;
 		u64 offset;
 
 		/*
@@ -1568,11 +1857,31 @@ static int check_extent_data_ref(struct extent_buffer *leaf,
 		 * overflow from the leaf due to hash collisions.
 		 */
 		dref = (struct btrfs_extent_data_ref *)ptr;
+		root = btrfs_extent_data_ref_root(leaf, dref);
+		objectid = btrfs_extent_data_ref_objectid(leaf, dref);
 		offset = btrfs_extent_data_ref_offset(leaf, dref);
+		if (unlikely(!is_valid_dref_root(root))) {
+			extent_err(leaf, slot,
+				   "invalid extent data backref root value %llu",
+				   root);
+			return -EUCLEAN;
+		}
+		if (unlikely(objectid < BTRFS_FIRST_FREE_OBJECTID ||
+			     objectid > BTRFS_LAST_FREE_OBJECTID)) {
+			extent_err(leaf, slot,
+				   "invalid extent data backref objectid value %llu",
+				   objectid);
+			return -EUCLEAN;
+		}
 		if (unlikely(!IS_ALIGNED(offset, leaf->fs_info->sectorsize))) {
 			extent_err(leaf, slot,
 	"invalid extent data backref offset, have %llu expect aligned to %u",
 				   offset, leaf->fs_info->sectorsize);
+			return -EUCLEAN;
+		}
+		if (unlikely(btrfs_extent_data_ref_count(leaf, dref) == 0)) {
+			extent_err(leaf, slot,
+	"invalid extent data backref count, should have non-zero value");
 			return -EUCLEAN;
 		}
 	}
@@ -1600,20 +1909,36 @@ static int check_inode_ref(struct extent_buffer *leaf,
 		return -EUCLEAN;
 	}
 
+	if (unlikely(btrfs_is_fstree(btrfs_header_owner(leaf)) &&
+	     (key->offset < BTRFS_FIRST_FREE_OBJECTID ||
+	      key->offset > BTRFS_LAST_FREE_OBJECTID))) {
+		inode_ref_err(leaf, slot,
+			      "invalid offset for ref key, have %llu expect [%llu, %lld]",
+			      key->offset, BTRFS_FIRST_FREE_OBJECTID,
+			      BTRFS_LAST_FREE_OBJECTID);
+		return -EUCLEAN;
+	}
+
 	ptr = btrfs_item_ptr_offset(leaf, slot);
 	end = ptr + btrfs_item_size(leaf, slot);
 	while (ptr < end) {
 		u16 namelen;
 
-		if (unlikely(ptr + sizeof(iref) > end)) {
+		if (unlikely(ptr + sizeof(*iref) > end)) {
 			inode_ref_err(leaf, slot,
 			"inode ref overflow, ptr %lu end %lu inode_ref_size %zu",
-				ptr, end, sizeof(iref));
+				ptr, end, sizeof(*iref));
 			return -EUCLEAN;
 		}
 
 		iref = (struct btrfs_inode_ref *)ptr;
 		namelen = btrfs_inode_ref_name_len(leaf, iref);
+		if (unlikely(namelen == 0 || namelen > BTRFS_NAME_LEN)) {
+			inode_ref_err(leaf, slot,
+				"invalid inode ref name length, has %u expect [1, %u]",
+				namelen, BTRFS_NAME_LEN);
+			return -EUCLEAN;
+		}
 		if (unlikely(ptr + sizeof(*iref) + namelen > end)) {
 			inode_ref_err(leaf, slot,
 				"inode ref overflow, ptr %lu end %lu namelen %u",
@@ -1627,6 +1952,392 @@ static int check_inode_ref(struct extent_buffer *leaf,
 		 * consuming for inodes with too many hard links.
 		 */
 		ptr += sizeof(*iref) + namelen;
+	}
+	return 0;
+}
+
+static int check_inode_extref(struct extent_buffer *leaf,
+			      struct btrfs_key *key, struct btrfs_key *prev_key,
+			      int slot)
+{
+	unsigned long ptr = btrfs_item_ptr_offset(leaf, slot);
+	unsigned long end = ptr + btrfs_item_size(leaf, slot);
+	const bool is_fstree = btrfs_is_fstree(btrfs_header_owner(leaf));
+
+	if (unlikely(!check_prev_ino(leaf, key, slot, prev_key)))
+		return -EUCLEAN;
+
+	while (ptr < end) {
+		struct btrfs_inode_extref *extref = (struct btrfs_inode_extref *)ptr;
+		u64 parent;
+		u16 namelen;
+
+		if (unlikely(ptr + sizeof(*extref) > end)) {
+			inode_ref_err(leaf, slot,
+			"inode extref overflow, ptr %lu end %lu inode_extref size %zu",
+				      ptr, end, sizeof(*extref));
+			return -EUCLEAN;
+		}
+
+		parent = btrfs_inode_extref_parent(leaf, extref);
+		if (unlikely(is_fstree && (parent < BTRFS_FIRST_FREE_OBJECTID ||
+					   parent > BTRFS_LAST_FREE_OBJECTID))) {
+			inode_ref_err(leaf, slot,
+		      "invalid parent for extref key, have %llu expect [%llu, %lld]",
+			      parent, BTRFS_FIRST_FREE_OBJECTID,
+				      BTRFS_LAST_FREE_OBJECTID);
+			return -EUCLEAN;
+		}
+
+		namelen = btrfs_inode_extref_name_len(leaf, extref);
+		if (unlikely(namelen == 0 || namelen > BTRFS_NAME_LEN)) {
+			inode_ref_err(leaf, slot,
+				"invalid inode extref name length, has %u expect [1, %u]",
+				namelen, BTRFS_NAME_LEN);
+			return -EUCLEAN;
+		}
+
+		if (unlikely(ptr + sizeof(*extref) + namelen > end)) {
+			inode_ref_err(leaf, slot,
+				"inode extref overflow, ptr %lu end %lu namelen %u",
+				ptr, end, namelen);
+			return -EUCLEAN;
+		}
+		ptr += sizeof(*extref) + namelen;
+	}
+	return 0;
+}
+
+static int check_raid_stripe_extent(const struct extent_buffer *leaf,
+				    const struct btrfs_key *key, int slot)
+{
+	if (unlikely(!IS_ALIGNED(key->objectid, leaf->fs_info->sectorsize))) {
+		generic_err(leaf, slot,
+"invalid key objectid for raid stripe extent, have %llu expect aligned to %u",
+			    key->objectid, leaf->fs_info->sectorsize);
+		return -EUCLEAN;
+	}
+
+	if (unlikely(!btrfs_fs_incompat(leaf->fs_info, RAID_STRIPE_TREE))) {
+		generic_err(leaf, slot,
+	"RAID_STRIPE_EXTENT present but RAID_STRIPE_TREE incompat bit unset");
+		return -EUCLEAN;
+	}
+
+	return 0;
+}
+
+static int check_remap_key(const struct extent_buffer *leaf,
+			   const struct btrfs_key *key, int slot)
+{
+	const u32 item_size = btrfs_item_size(leaf, slot);
+	const u32 sectorsize = leaf->fs_info->sectorsize;
+	u64 end;
+
+	if (unlikely(!btrfs_fs_incompat(leaf->fs_info, REMAP_TREE))) {
+		generic_err(leaf, slot,
+		"remap key type %u present but REMAP_TREE incompat bit unset",
+			    key->type);
+		return -EUCLEAN;
+	}
+
+	switch (key->type) {
+	case BTRFS_IDENTITY_REMAP_KEY:
+		if (unlikely(item_size != 0)) {
+			generic_err(leaf, slot,
+			"invalid item size for IDENTITY_REMAP, have %u expect 0",
+				    item_size);
+			return -EUCLEAN;
+		}
+	break;
+	case BTRFS_REMAP_KEY:
+	case BTRFS_REMAP_BACKREF_KEY:
+		if (unlikely(item_size != sizeof(struct btrfs_remap_item))) {
+			generic_err(leaf, slot,
+			"invalid item size for remap key type %u, have %u expect %zu",
+				    key->type, item_size,
+				    sizeof(struct btrfs_remap_item));
+			return -EUCLEAN;
+		}
+		break;
+	}
+
+	if (unlikely(key->offset == 0)) {
+		generic_err(leaf, slot,
+			    "invalid remap key length, have 0 expect nonzero");
+		return -EUCLEAN;
+	}
+
+	if (unlikely(!IS_ALIGNED(key->objectid, sectorsize))) {
+		generic_err(leaf, slot,
+		"invalid remap key objectid, have %llu expect aligned to %u",
+			    key->objectid, sectorsize);
+		return -EUCLEAN;
+	}
+
+	if (unlikely(!IS_ALIGNED(key->offset, sectorsize))) {
+		generic_err(leaf, slot,
+		"invalid remap key offset (length), have %llu expect aligned to %u",
+			    key->offset, sectorsize);
+		return -EUCLEAN;
+	}
+
+	if (unlikely(check_add_overflow(key->objectid, key->offset, &end))) {
+		generic_err(leaf, slot,
+		"remap key overflow, objectid %llu + offset %llu wraps",
+			    key->objectid, key->offset);
+		return -EUCLEAN;
+	}
+
+	return 0;
+}
+
+static int check_dev_extent_item(const struct extent_buffer *leaf,
+				 const struct btrfs_key *key,
+				 int slot,
+				 struct btrfs_key *prev_key)
+{
+	struct btrfs_dev_extent *de;
+	const u32 sectorsize = leaf->fs_info->sectorsize;
+
+	de = btrfs_item_ptr(leaf, slot, struct btrfs_dev_extent);
+	/* Basic fixed member checks. */
+	if (unlikely(btrfs_dev_extent_chunk_tree(leaf, de) !=
+		     BTRFS_CHUNK_TREE_OBJECTID)) {
+		generic_err(leaf, slot,
+			    "invalid dev extent chunk tree id, has %llu expect %llu",
+			    btrfs_dev_extent_chunk_tree(leaf, de),
+			    BTRFS_CHUNK_TREE_OBJECTID);
+		return -EUCLEAN;
+	}
+	if (unlikely(btrfs_dev_extent_chunk_objectid(leaf, de) !=
+		     BTRFS_FIRST_CHUNK_TREE_OBJECTID)) {
+		generic_err(leaf, slot,
+			    "invalid dev extent chunk objectid, has %llu expect %llu",
+			    btrfs_dev_extent_chunk_objectid(leaf, de),
+			    BTRFS_FIRST_CHUNK_TREE_OBJECTID);
+		return -EUCLEAN;
+	}
+	/* Alignment check. */
+	if (unlikely(!IS_ALIGNED(key->offset, sectorsize))) {
+		generic_err(leaf, slot,
+			    "invalid dev extent key.offset, has %llu not aligned to %u",
+			    key->offset, sectorsize);
+		return -EUCLEAN;
+	}
+	if (unlikely(!IS_ALIGNED(btrfs_dev_extent_chunk_offset(leaf, de),
+				 sectorsize))) {
+		generic_err(leaf, slot,
+			    "invalid dev extent chunk offset, has %llu not aligned to %u",
+			    btrfs_dev_extent_chunk_offset(leaf, de),
+			    sectorsize);
+		return -EUCLEAN;
+	}
+	if (unlikely(!IS_ALIGNED(btrfs_dev_extent_length(leaf, de),
+				 sectorsize))) {
+		generic_err(leaf, slot,
+			    "invalid dev extent length, has %llu not aligned to %u",
+			    btrfs_dev_extent_length(leaf, de), sectorsize);
+		return -EUCLEAN;
+	}
+	/* Overlap check with previous dev extent. */
+	if (slot && prev_key->objectid == key->objectid &&
+	    prev_key->type == key->type) {
+		struct btrfs_dev_extent *prev_de;
+		u64 prev_len;
+
+		prev_de = btrfs_item_ptr(leaf, slot - 1, struct btrfs_dev_extent);
+		prev_len = btrfs_dev_extent_length(leaf, prev_de);
+		if (unlikely(prev_key->offset + prev_len > key->offset)) {
+			generic_err(leaf, slot,
+		"dev extent overlap, prev offset %llu len %llu current offset %llu",
+				    prev_key->offset, prev_len, key->offset);
+			return -EUCLEAN;
+		}
+	}
+	return 0;
+}
+
+static int check_free_space_info(struct extent_buffer *leaf, struct btrfs_key *key,
+				 int slot)
+{
+	struct btrfs_fs_info *fs_info = leaf->fs_info;
+	struct btrfs_free_space_info *fsi;
+	const u32 blocksize = fs_info->sectorsize;
+	u64 end;
+	u32 flags;
+
+	if (unlikely(!IS_ALIGNED(key->objectid, blocksize))) {
+		generic_err(leaf, slot,
+		"free space info key objectid is not aligned to %u, has " BTRFS_KEY_FMT,
+			    blocksize, BTRFS_KEY_FMT_VALUE(key));
+		return -EUCLEAN;
+	}
+	if (unlikely(!IS_ALIGNED(key->offset, blocksize))) {
+		generic_err(leaf, slot,
+		"free space info key offset is not aligned to %u, has " BTRFS_KEY_FMT,
+			    blocksize, BTRFS_KEY_FMT_VALUE(key));
+		return -EUCLEAN;
+	}
+	if (unlikely(check_add_overflow(key->objectid, key->offset, &end))) {
+		generic_err(leaf, slot,
+			    "free space info key overflows, has " BTRFS_KEY_FMT,
+			    BTRFS_KEY_FMT_VALUE(key));
+		return -EUCLEAN;
+	}
+	if (unlikely(btrfs_item_size(leaf, slot) !=
+		     sizeof(struct btrfs_free_space_info))) {
+		generic_err(leaf, slot,
+		"invalid item size for free space info, has %u expect %zu",
+			    btrfs_item_size(leaf, slot),
+			    sizeof(struct btrfs_free_space_info));
+		return -EUCLEAN;
+	}
+	fsi = btrfs_item_ptr(leaf, slot, struct btrfs_free_space_info);
+	flags = btrfs_free_space_flags(leaf, fsi);
+	if (unlikely(flags & ~BTRFS_FREE_SPACE_FLAGS_MASK)) {
+		generic_err(leaf, slot,
+		"unknown flags for free space info, has 0x%x valid mask 0x%lx",
+			    flags, BTRFS_FREE_SPACE_FLAGS_MASK);
+		return -EUCLEAN;
+	}
+	if (unlikely(btrfs_free_space_extent_count(leaf, fsi) >
+		     key->offset >> fs_info->sectorsize_bits)) {
+		generic_err(leaf, slot,
+			    "suspicious extent count, has %u max valid %llu",
+			    btrfs_free_space_extent_count(leaf, fsi),
+			    key->offset >> fs_info->sectorsize_bits);
+		return -EUCLEAN;
+	}
+	return 0;
+}
+
+static int check_free_space_common_key(struct extent_buffer *leaf, struct btrfs_key *key, int slot,
+				       struct btrfs_key *prev_key)
+{
+	struct btrfs_fs_info *fs_info = leaf->fs_info;
+	const u32 blocksize = fs_info->sectorsize;
+	const char *type_str = (key->type == BTRFS_FREE_SPACE_EXTENT_KEY) ? "extent" : "bitmap";
+	u64 end;
+
+	if (unlikely(!IS_ALIGNED(key->objectid, blocksize))) {
+		generic_err(leaf, slot,
+		"free space %s key objectid is not aligned to %u, has " BTRFS_KEY_FMT,
+			    type_str, blocksize, BTRFS_KEY_FMT_VALUE(key));
+		return -EUCLEAN;
+	}
+	if (unlikely(!IS_ALIGNED(key->offset, blocksize))) {
+		generic_err(leaf, slot,
+		"free space %s key offset is not aligned to %u, has " BTRFS_KEY_FMT,
+			    type_str, blocksize, BTRFS_KEY_FMT_VALUE(key));
+		return -EUCLEAN;
+	}
+	if (unlikely(key->offset == 0)) {
+		generic_err(leaf, slot, "free space %s length is 0", type_str);
+		return -EUCLEAN;
+	}
+	if (unlikely(check_add_overflow(key->objectid, key->offset, &end))) {
+		generic_err(leaf, slot,
+			    "free space %s end overflow, have objectid %llu offset %llu",
+			    type_str, key->objectid, key->offset);
+		return -EUCLEAN;
+	}
+	if (slot == 0)
+		return 0;
+
+	/*
+	 * Make sure the current key is inside the block group, and matching
+	 * the expected info type.
+	 */
+	if (prev_key->type == BTRFS_FREE_SPACE_INFO_KEY) {
+		struct btrfs_free_space_info *fsi;
+		u32 info_flags;
+
+		if (unlikely(key->objectid < prev_key->objectid ||
+			     key->objectid + key->offset > prev_key->objectid + prev_key->offset)) {
+			generic_err(leaf, slot,
+"free space %s is not inside the space info, prev key " BTRFS_KEY_FMT " current key " BTRFS_KEY_FMT,
+				    type_str, BTRFS_KEY_FMT_VALUE(prev_key),
+				    BTRFS_KEY_FMT_VALUE(key));
+			return -EUCLEAN;
+		}
+		fsi = btrfs_item_ptr(leaf, slot - 1, struct btrfs_free_space_info);
+		info_flags = btrfs_free_space_flags(leaf, fsi);
+		if (unlikely((info_flags == BTRFS_FREE_SPACE_USING_BITMAPS &&
+			      key->type == BTRFS_FREE_SPACE_EXTENT_KEY) ||
+			     (info_flags != BTRFS_FREE_SPACE_USING_BITMAPS &&
+			      key->type == BTRFS_FREE_SPACE_BITMAP_KEY))) {
+			generic_err(leaf, slot,
+"free space %s key type is not matching the type of space info, key type %u space info flags %u",
+				    type_str, key->type, info_flags);
+			return -EUCLEAN;
+		}
+		return 0;
+	}
+	/*
+	 * Previous key should be either FREE_SPACE_EXTENT or FREE_SPACE_BITMAP.
+	 * Inside the same block group the key type should match each other, and
+	 * no overlaps.
+	 */
+	if (unlikely(key->type != prev_key->type)) {
+		generic_err(leaf, slot,
+"free space %s key type is not matching the type of previous key, key type %u prev key type %u",
+			    type_str, key->type, prev_key->type);
+		return -EUCLEAN;
+	}
+	if (unlikely(prev_key->objectid + prev_key->offset > key->objectid)) {
+		generic_err(leaf, slot,
+"free space %s key overlaps previous key, prev key " BTRFS_KEY_FMT " current key " BTRFS_KEY_FMT,
+			    type_str, BTRFS_KEY_FMT_VALUE(prev_key),
+			    BTRFS_KEY_FMT_VALUE(key));
+		return -EUCLEAN;
+	}
+	return 0;
+}
+
+static int check_free_space_extent(struct extent_buffer *leaf, struct btrfs_key *key, int slot,
+				   struct btrfs_key *prev_key)
+{
+	int ret;
+
+	ret = check_free_space_common_key(leaf, key, slot, prev_key);
+	if (unlikely(ret < 0))
+		return ret;
+
+	if (unlikely(btrfs_item_size(leaf, slot) != 0)) {
+		generic_err(leaf, slot,
+			    "invalid item size for free space extent, has %u expect 0",
+			    btrfs_item_size(leaf, slot));
+		return -EUCLEAN;
+	}
+	return 0;
+}
+
+static int check_free_space_bitmap(struct extent_buffer *leaf,
+				   struct btrfs_key *key, int slot,
+				   struct btrfs_key *prev_key)
+{
+	struct btrfs_fs_info *fs_info = leaf->fs_info;
+	u32 expected_item_size;
+	int ret;
+
+	ret = check_free_space_common_key(leaf, key, slot, prev_key);
+	if (unlikely(ret < 0))
+		return ret;
+
+	/*
+	 * The item must hold exactly the right number of bitmap bytes for the
+	 * range described by key->offset.  A mismatch means the item was
+	 * truncated or the key is corrupt; either way the bitmap data is not
+	 * safe to access.
+	 */
+	expected_item_size = DIV_ROUND_UP(key->offset >> fs_info->sectorsize_bits,
+					  BITS_PER_BYTE);
+	if (unlikely(btrfs_item_size(leaf, slot) != expected_item_size)) {
+		generic_err(leaf, slot,
+			    "invalid item size for free space bitmap, has %u expect %u",
+			    btrfs_item_size(leaf, slot), expected_item_size);
+		return -EUCLEAN;
 	}
 	return 0;
 }
@@ -1657,6 +2368,9 @@ static enum btrfs_tree_block_status check_leaf_item(struct extent_buffer *leaf,
 	case BTRFS_INODE_REF_KEY:
 		ret = check_inode_ref(leaf, key, prev_key, slot);
 		break;
+	case BTRFS_INODE_EXTREF_KEY:
+		ret = check_inode_extref(leaf, key, prev_key, slot);
+		break;
 	case BTRFS_BLOCK_GROUP_ITEM_KEY:
 		ret = check_block_group_item(leaf, key, slot);
 		break;
@@ -1667,11 +2381,18 @@ static enum btrfs_tree_block_status check_leaf_item(struct extent_buffer *leaf,
 	case BTRFS_DEV_ITEM_KEY:
 		ret = check_dev_item(leaf, key, slot);
 		break;
+	case BTRFS_DEV_EXTENT_KEY:
+		ret = check_dev_extent_item(leaf, key, slot, prev_key);
+		break;
 	case BTRFS_INODE_ITEM_KEY:
 		ret = check_inode_item(leaf, key, slot);
 		break;
 	case BTRFS_ROOT_ITEM_KEY:
 		ret = check_root_item(leaf, key, slot);
+		break;
+	case BTRFS_ROOT_REF_KEY:
+	case BTRFS_ROOT_BACKREF_KEY:
+		ret = check_root_ref(leaf, key, slot);
 		break;
 	case BTRFS_EXTENT_ITEM_KEY:
 	case BTRFS_METADATA_ITEM_KEY:
@@ -1685,9 +2406,26 @@ static enum btrfs_tree_block_status check_leaf_item(struct extent_buffer *leaf,
 	case BTRFS_EXTENT_DATA_REF_KEY:
 		ret = check_extent_data_ref(leaf, key, slot);
 		break;
+	case BTRFS_RAID_STRIPE_KEY:
+		ret = check_raid_stripe_extent(leaf, key, slot);
+		break;
+	case BTRFS_FREE_SPACE_INFO_KEY:
+		ret = check_free_space_info(leaf, key, slot);
+		break;
+	case BTRFS_FREE_SPACE_EXTENT_KEY:
+		ret = check_free_space_extent(leaf, key, slot, prev_key);
+		break;
+	case BTRFS_FREE_SPACE_BITMAP_KEY:
+		ret = check_free_space_bitmap(leaf, key, slot, prev_key);
+		break;
+	case BTRFS_IDENTITY_REMAP_KEY:
+	case BTRFS_REMAP_KEY:
+	case BTRFS_REMAP_BACKREF_KEY:
+		ret = check_remap_key(leaf, key, slot);
+		break;
 	}
 
-	if (ret)
+	if (unlikely(ret))
 		return BTRFS_TREE_BLOCK_INVALID_ITEM;
 	return BTRFS_TREE_BLOCK_CLEAN;
 }
@@ -1706,6 +2444,11 @@ enum btrfs_tree_block_status __btrfs_check_leaf(struct extent_buffer *leaf)
 			"invalid level for leaf, have %d expect 0",
 			btrfs_header_level(leaf));
 		return BTRFS_TREE_BLOCK_INVALID_LEVEL;
+	}
+
+	if (unlikely(!btrfs_header_flag(leaf, BTRFS_HEADER_FLAG_WRITTEN))) {
+		generic_err(leaf, 0, "invalid flag for leaf, WRITTEN not set");
+		return BTRFS_TREE_BLOCK_WRITTEN_NOT_SET;
 	}
 
 	/*
@@ -1769,16 +2512,16 @@ enum btrfs_tree_block_status __btrfs_check_leaf(struct extent_buffer *leaf)
 	for (slot = 0; slot < nritems; slot++) {
 		u32 item_end_expected;
 		u64 item_data_end;
+		enum btrfs_tree_block_status ret;
 
 		btrfs_item_key_to_cpu(leaf, &key, slot);
 
 		/* Make sure the keys are in the right order */
 		if (unlikely(btrfs_comp_cpu_keys(&prev_key, &key) >= 0)) {
 			generic_err(leaf, slot,
-	"bad key order, prev (%llu %u %llu) current (%llu %u %llu)",
-				prev_key.objectid, prev_key.type,
-				prev_key.offset, key.objectid, key.type,
-				key.offset);
+	"bad key order, prev " BTRFS_KEY_FMT " current " BTRFS_KEY_FMT,
+				    BTRFS_KEY_FMT_VALUE(&prev_key),
+				    BTRFS_KEY_FMT_VALUE(&key));
 			return BTRFS_TREE_BLOCK_BAD_KEY_ORDER;
 		}
 
@@ -1824,21 +2567,10 @@ enum btrfs_tree_block_status __btrfs_check_leaf(struct extent_buffer *leaf)
 			return BTRFS_TREE_BLOCK_INVALID_OFFSETS;
 		}
 
-		/*
-		 * We only want to do this if WRITTEN is set, otherwise the leaf
-		 * may be in some intermediate state and won't appear valid.
-		 */
-		if (btrfs_header_flag(leaf, BTRFS_HEADER_FLAG_WRITTEN)) {
-			enum btrfs_tree_block_status ret;
-
-			/*
-			 * Check if the item size and content meet other
-			 * criteria
-			 */
-			ret = check_leaf_item(leaf, &key, slot, &prev_key);
-			if (unlikely(ret != BTRFS_TREE_BLOCK_CLEAN))
-				return ret;
-		}
+		/* Check if the item size and content meet other criteria. */
+		ret = check_leaf_item(leaf, &key, slot, &prev_key);
+		if (unlikely(ret != BTRFS_TREE_BLOCK_CLEAN))
+			return ret;
 
 		prev_key.objectid = key.objectid;
 		prev_key.type = key.type;
@@ -1867,6 +2599,11 @@ enum btrfs_tree_block_status __btrfs_check_node(struct extent_buffer *node)
 	int slot;
 	int level = btrfs_header_level(node);
 	u64 bytenr;
+
+	if (unlikely(!btrfs_header_flag(node, BTRFS_HEADER_FLAG_WRITTEN))) {
+		generic_err(node, 0, "invalid flag for node, WRITTEN not set");
+		return BTRFS_TREE_BLOCK_WRITTEN_NOT_SET;
+	}
 
 	if (unlikely(level <= 0 || level >= BTRFS_MAX_LEVEL)) {
 		generic_err(node, 0,
@@ -1902,10 +2639,9 @@ enum btrfs_tree_block_status __btrfs_check_node(struct extent_buffer *node)
 
 		if (unlikely(btrfs_comp_cpu_keys(&key, &next_key) >= 0)) {
 			generic_err(node, slot,
-	"bad key order, current (%llu %u %llu) next (%llu %u %llu)",
-				key.objectid, key.type, key.offset,
-				next_key.objectid, next_key.type,
-				next_key.offset);
+	"bad key order, current " BTRFS_KEY_FMT " next " BTRFS_KEY_FMT,
+				    BTRFS_KEY_FMT_VALUE(&key),
+				    BTRFS_KEY_FMT_VALUE(&next_key));
 			return BTRFS_TREE_BLOCK_BAD_KEY_ORDER;
 		}
 	}
@@ -1925,14 +2661,14 @@ ALLOW_ERROR_INJECTION(btrfs_check_node, ERRNO);
 
 int btrfs_check_eb_owner(const struct extent_buffer *eb, u64 root_owner)
 {
-	const bool is_subvol = is_fstree(root_owner);
+	const bool is_subvol = btrfs_is_fstree(root_owner);
 	const u64 eb_owner = btrfs_header_owner(eb);
 
 	/*
 	 * Skip dummy fs, as selftests don't create unique ebs for each dummy
 	 * root.
 	 */
-	if (test_bit(BTRFS_FS_STATE_DUMMY_FS_INFO, &eb->fs_info->fs_state))
+	if (btrfs_is_testing(eb->fs_info))
 		return 0;
 	/*
 	 * There are several call sites (backref walking, qgroup, and data
@@ -1967,7 +2703,7 @@ int btrfs_check_eb_owner(const struct extent_buffer *eb, u64 root_owner)
 	 * For subvolume trees, owners can mismatch, but they should all belong
 	 * to subvolume trees.
 	 */
-	if (unlikely(is_subvol != is_fstree(eb_owner))) {
+	if (unlikely(is_subvol != btrfs_is_fstree(eb_owner))) {
 		btrfs_crit(eb->fs_info,
 "corrupted %s, root=%llu block=%llu owner mismatch, have %llu expect [%llu, %llu]",
 			btrfs_header_level(eb) == 0 ? "leaf" : "node",
@@ -1978,8 +2714,8 @@ int btrfs_check_eb_owner(const struct extent_buffer *eb, u64 root_owner)
 	return 0;
 }
 
-int btrfs_verify_level_key(struct extent_buffer *eb, int level,
-			   struct btrfs_key *first_key, u64 parent_transid)
+int btrfs_verify_level_key(struct extent_buffer *eb,
+			   const struct btrfs_tree_parent_check *check)
 {
 	struct btrfs_fs_info *fs_info = eb->fs_info;
 	int found_level;
@@ -1987,16 +2723,15 @@ int btrfs_verify_level_key(struct extent_buffer *eb, int level,
 	int ret;
 
 	found_level = btrfs_header_level(eb);
-	if (found_level != level) {
-		WARN(IS_ENABLED(CONFIG_BTRFS_DEBUG),
-		     KERN_ERR "BTRFS: tree level check failed\n");
+	if (unlikely(found_level != check->level)) {
+		DEBUG_WARN();
 		btrfs_err(fs_info,
 "tree level mismatch detected, bytenr=%llu level expected=%u has=%u",
-			  eb->start, level, found_level);
-		return -EIO;
+			  eb->start, check->level, found_level);
+		return -EUCLEAN;
 	}
 
-	if (!first_key)
+	if (!check->has_first_key)
 		return 0;
 
 	/*
@@ -2005,15 +2740,15 @@ int btrfs_verify_level_key(struct extent_buffer *eb, int level,
 	 * So we only checks tree blocks which is read from disk, whose
 	 * generation <= fs_info->last_trans_committed.
 	 */
-	if (btrfs_header_generation(eb) > fs_info->last_trans_committed)
+	if (btrfs_header_generation(eb) > btrfs_get_last_trans_committed(fs_info))
 		return 0;
 
 	/* We have @first_key, so this @eb must have at least one item */
-	if (btrfs_header_nritems(eb) == 0) {
+	if (unlikely(btrfs_header_nritems(eb) == 0)) {
 		btrfs_err(fs_info,
 		"invalid tree nritems, bytenr=%llu nritems=0 expect >0",
 			  eb->start);
-		WARN_ON(IS_ENABLED(CONFIG_BTRFS_DEBUG));
+		DEBUG_WARN();
 		return -EUCLEAN;
 	}
 
@@ -2021,15 +2756,14 @@ int btrfs_verify_level_key(struct extent_buffer *eb, int level,
 		btrfs_node_key_to_cpu(eb, &found_key, 0);
 	else
 		btrfs_item_key_to_cpu(eb, &found_key, 0);
-	ret = btrfs_comp_cpu_keys(first_key, &found_key);
 
-	if (ret) {
-		WARN(IS_ENABLED(CONFIG_BTRFS_DEBUG),
-		     KERN_ERR "BTRFS: tree first key check failed\n");
+	ret = btrfs_comp_cpu_keys(&check->first_key, &found_key);
+	if (unlikely(ret)) {
+		DEBUG_WARN();
 		btrfs_err(fs_info,
 "tree first key mismatch detected, bytenr=%llu parent_transid=%llu key expected=(%llu,%u,%llu) has=(%llu,%u,%llu)",
-			  eb->start, parent_transid, first_key->objectid,
-			  first_key->type, first_key->offset,
+			  eb->start, check->transid, check->first_key.objectid,
+			  check->first_key.type, check->first_key.offset,
 			  found_key.objectid, found_key.type,
 			  found_key.offset);
 	}

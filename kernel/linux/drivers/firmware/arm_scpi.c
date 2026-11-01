@@ -18,6 +18,7 @@
 
 #include <linux/bitmap.h>
 #include <linux/bitfield.h>
+#include <linux/cleanup.h>
 #include <linux/device.h>
 #include <linux/err.h>
 #include <linux/export.h>
@@ -26,9 +27,12 @@
 #include <linux/list.h>
 #include <linux/mailbox_client.h>
 #include <linux/module.h>
+#include <linux/of.h>
 #include <linux/of_address.h>
 #include <linux/of_platform.h>
+#include <linux/platform_device.h>
 #include <linux/printk.h>
+#include <linux/property.h>
 #include <linux/pm_opp.h>
 #include <linux/scpi_protocol.h>
 #include <linux/slab.h>
@@ -627,14 +631,17 @@ static struct scpi_dvfs_info *scpi_dvfs_get_info(u8 domain)
 	if (ret)
 		return ERR_PTR(ret);
 
-	info = kmalloc(sizeof(*info), GFP_KERNEL);
+	if (!buf.opp_count || buf.opp_count > MAX_DVFS_OPPS)
+		return ERR_PTR(-EINVAL);
+
+	info = kmalloc_obj(*info);
 	if (!info)
 		return ERR_PTR(-ENOMEM);
 
 	info->count = buf.opp_count;
 	info->latency = le16_to_cpu(buf.latency) * 1000; /* uS to nS */
 
-	info->opps = kcalloc(info->count, sizeof(*opp), GFP_KERNEL);
+	info->opps = kzalloc_objs(*opp, info->count);
 	if (!info->opps) {
 		kfree(info);
 		return ERR_PTR(-ENOMEM);
@@ -654,12 +661,15 @@ static struct scpi_dvfs_info *scpi_dvfs_get_info(u8 domain)
 static int scpi_dev_domain_id(struct device *dev)
 {
 	struct of_phandle_args clkspec;
+	int domain;
 
 	if (of_parse_phandle_with_args(dev->of_node, "clocks", "#clock-cells",
 				       0, &clkspec))
 		return -EINVAL;
 
-	return clkspec.args[0];
+	domain = clkspec.args[0];
+	of_node_put(clkspec.np);
+	return domain;
 }
 
 static struct scpi_dvfs_info *scpi_dvfs_info(struct device *dev)
@@ -860,7 +870,7 @@ static void scpi_free_channels(void *data)
 		mbox_free_channel(info->channels[i].chan);
 }
 
-static int scpi_remove(struct platform_device *pdev)
+static void scpi_remove(struct platform_device *pdev)
 {
 	int i;
 	struct scpi_drvinfo *info = platform_get_drvdata(pdev);
@@ -871,8 +881,6 @@ static int scpi_remove(struct platform_device *pdev)
 		kfree(info->dvfs[i]->opps);
 		kfree(info->dvfs[i]);
 	}
-
-	return 0;
 }
 
 #define MAX_SCPI_XFERS		10
@@ -894,11 +902,6 @@ static int scpi_alloc_xfer_list(struct device *dev, struct scpi_chan *ch)
 	return 0;
 }
 
-static const struct of_device_id legacy_scpi_of_match[] = {
-	{.compatible = "arm,scpi-pre-1.0"},
-	{},
-};
-
 static const struct of_device_id shmem_of_match[] __maybe_unused = {
 	{ .compatible = "amlogic,meson-gxbb-scp-shmem", },
 	{ .compatible = "amlogic,meson-axg-scp-shmem", },
@@ -919,8 +922,7 @@ static int scpi_probe(struct platform_device *pdev)
 	if (!scpi_drvinfo)
 		return -ENOMEM;
 
-	if (of_match_device(legacy_scpi_of_match, &pdev->dev))
-		scpi_drvinfo->is_legacy = true;
+	scpi_drvinfo->is_legacy = !!device_get_match_data(dev);
 
 	count = of_count_phandle_with_args(np, "mboxes", "#mbox-cells");
 	if (count < 0) {
@@ -942,13 +944,13 @@ static int scpi_probe(struct platform_device *pdev)
 		int idx = scpi_drvinfo->num_chans;
 		struct scpi_chan *pchan = scpi_drvinfo->channels + idx;
 		struct mbox_client *cl = &pchan->cl;
-		struct device_node *shmem = of_parse_phandle(np, "shmem", idx);
+		struct device_node *shmem __free(device_node) =
+			of_parse_phandle(np, "shmem", idx);
 
 		if (!of_match_node(shmem_of_match, shmem))
 			return -ENXIO;
 
 		ret = of_address_to_resource(shmem, 0, &res);
-		of_node_put(shmem);
 		if (ret) {
 			dev_err(dev, "failed to get SCPI payload mem resource\n");
 			return ret;
@@ -1038,7 +1040,7 @@ static int scpi_probe(struct platform_device *pdev)
 
 static const struct of_device_id scpi_of_match[] = {
 	{.compatible = "arm,scpi"},
-	{.compatible = "arm,scpi-pre-1.0"},
+	{.compatible = "arm,scpi-pre-1.0", .data = (void *)1UL },
 	{},
 };
 

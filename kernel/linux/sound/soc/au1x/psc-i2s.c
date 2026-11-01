@@ -262,11 +262,22 @@ static int au1xpsc_i2s_startup(struct snd_pcm_substream *substream,
 	return 0;
 }
 
+static const u64 au1xpsc_selectable_formats =
+	SND_SOC_POSSIBLE_DAIFMT_I2S	|
+	SND_SOC_POSSIBLE_DAIFMT_RIGHT_J	|
+	SND_SOC_POSSIBLE_DAIFMT_LEFT_J	|
+	SND_SOC_POSSIBLE_DAIFMT_NB_NF	|
+	SND_SOC_POSSIBLE_DAIFMT_NB_IF	|
+	SND_SOC_POSSIBLE_DAIFMT_IB_NF	|
+	SND_SOC_POSSIBLE_DAIFMT_IB_IF;
+
 static const struct snd_soc_dai_ops au1xpsc_i2s_dai_ops = {
 	.startup	= au1xpsc_i2s_startup,
 	.trigger	= au1xpsc_i2s_trigger,
 	.hw_params	= au1xpsc_i2s_hw_params,
 	.set_fmt	= au1xpsc_i2s_set_fmt,
+	.auto_selectable_formats	= &au1xpsc_selectable_formats,
+	.num_auto_selectable_formats	= 1,
 };
 
 static const struct snd_soc_dai_driver au1xpsc_i2s_dai_template = {
@@ -354,7 +365,6 @@ static void au1xpsc_i2s_drvremove(struct platform_device *pdev)
 	wmb(); /* drain writebuffer */
 }
 
-#ifdef CONFIG_PM
 static int au1xpsc_i2s_drvsuspend(struct device *dev)
 {
 	struct au1xpsc_audio_data *wd = dev_get_drvdata(dev);
@@ -385,26 +395,16 @@ static int au1xpsc_i2s_drvresume(struct device *dev)
 	return 0;
 }
 
-static const struct dev_pm_ops au1xpsci2s_pmops = {
-	.suspend	= au1xpsc_i2s_drvsuspend,
-	.resume		= au1xpsc_i2s_drvresume,
-};
-
-#define AU1XPSCI2S_PMOPS &au1xpsci2s_pmops
-
-#else
-
-#define AU1XPSCI2S_PMOPS NULL
-
-#endif
+static DEFINE_SIMPLE_DEV_PM_OPS(au1xpsci2s_pmops, au1xpsc_i2s_drvsuspend,
+				au1xpsc_i2s_drvresume);
 
 static struct platform_driver au1xpsc_i2s_driver = {
 	.driver		= {
 		.name	= "au1xpsc_i2s",
-		.pm	= AU1XPSCI2S_PMOPS,
+		.pm	= pm_ptr(&au1xpsci2s_pmops),
 	},
 	.probe		= au1xpsc_i2s_drvprobe,
-	.remove_new	= au1xpsc_i2s_drvremove,
+	.remove		= au1xpsc_i2s_drvremove,
 };
 
 module_platform_driver(au1xpsc_i2s_driver);

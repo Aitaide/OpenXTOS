@@ -43,7 +43,7 @@ static inline void *kmap(struct page *page);
  * Counterpart to kmap(). A NOOP for CONFIG_HIGHMEM=n and for mappings of
  * pages in the low memory area.
  */
-static inline void kunmap(struct page *page);
+static inline void kunmap(const struct page *page);
 
 /**
  * kmap_to_page - Get the page for a kmap'ed address
@@ -93,7 +93,7 @@ static inline void kmap_flush_unused(void);
  * disabling migration in order to keep the virtual address stable across
  * preemption. No caller of kmap_local_page() can rely on this side effect.
  */
-static inline void *kmap_local_page(struct page *page);
+static inline void *kmap_local_page(const struct page *page);
 
 /**
  * kmap_local_folio - Map a page in this folio for temporary usage
@@ -129,7 +129,7 @@ static inline void *kmap_local_page(struct page *page);
  * Context: Can be invoked from any context.
  * Return: The virtual address of @offset.
  */
-static inline void *kmap_local_folio(struct folio *folio, size_t offset);
+static inline void *kmap_local_folio(const struct folio *folio, size_t offset);
 
 /**
  * kmap_atomic - Atomically map a page for temporary usage - Deprecated!
@@ -176,10 +176,10 @@ static inline void *kmap_local_folio(struct folio *folio, size_t offset);
  * kunmap_atomic(vaddr2);
  * kunmap_atomic(vaddr1);
  */
-static inline void *kmap_atomic(struct page *page);
+static inline void *kmap_atomic(const struct page *page);
 
 /* Highmem related interfaces for management code */
-static inline unsigned int nr_free_highpages(void);
+static inline unsigned long nr_free_highpages(void);
 static inline unsigned long totalhigh_pages(void);
 
 #ifndef ARCH_HAS_FLUSH_ANON_PAGE
@@ -197,15 +197,111 @@ static inline void invalidate_kernel_vmap_range(void *vaddr, int size)
 }
 #endif
 
-/* when CONFIG_HIGHMEM is not set these will be plain clear/copy_page */
 #ifndef clear_user_highpage
+#ifndef clear_user_page
+/**
+ * clear_user_page() - clear a page to be mapped to user space
+ * @addr: the address of the page
+ * @vaddr: the address of the user mapping
+ * @page: the page
+ *
+ * We condition the definition of clear_user_page() on the architecture
+ * not having a custom clear_user_highpage(). That's because if there
+ * is some special flushing needed for clear_user_highpage() then it
+ * is likely that clear_user_page() also needs some magic. And, since
+ * our only caller is the generic clear_user_highpage(), not defining
+ * is not much of a loss.
+ */
+static inline void clear_user_page(void *addr, unsigned long vaddr, struct page *page)
+{
+	clear_page(addr);
+}
+#endif
+
+/**
+ * clear_user_pages() - clear a page range to be mapped to user space
+ * @addr: start address
+ * @vaddr: start address of the user mapping
+ * @page: start page
+ * @npages: number of pages
+ *
+ * Assumes that the region (@addr, +@npages) has been validated
+ * already so this does no exception handling.
+ *
+ * If the architecture provides a clear_user_page(), use that;
+ * otherwise, we can safely use clear_pages().
+ */
+static inline void clear_user_pages(void *addr, unsigned long vaddr,
+		struct page *page, unsigned int npages)
+{
+
+#ifdef clear_user_page
+	do {
+		clear_user_page(addr, vaddr, page);
+		addr += PAGE_SIZE;
+		vaddr += PAGE_SIZE;
+		page++;
+	} while (--npages);
+#else
+	/*
+	 * Prefer clear_pages() to allow for architectural optimizations
+	 * when operating on contiguous page ranges.
+	 */
+	clear_pages(addr, npages);
+#endif
+}
+
+/**
+ * clear_user_highpage() - clear a page to be mapped to user space
+ * @page: start page
+ * @vaddr: start address of the user mapping
+ *
+ * With !CONFIG_HIGHMEM this (and the copy_user_highpage() below) will
+ * be plain clear_user_page() (and copy_user_page()).
+ */
 static inline void clear_user_highpage(struct page *page, unsigned long vaddr)
 {
 	void *addr = kmap_local_page(page);
 	clear_user_page(addr, vaddr, page);
 	kunmap_local(addr);
 }
+#endif /* clear_user_highpage */
+
+/**
+ * clear_user_highpages() - clear a page range to be mapped to user space
+ * @page: start page
+ * @vaddr: start address of the user mapping
+ * @npages: number of pages
+ *
+ * Assumes that all the pages in the region (@page, +@npages) are valid
+ * so this does no exception handling.
+ */
+static inline void clear_user_highpages(struct page *page, unsigned long vaddr,
+					unsigned int npages)
+{
+
+#if defined(clear_user_highpage) || defined(CONFIG_HIGHMEM)
+	/*
+	 * An architecture defined clear_user_highpage() implies special
+	 * handling is needed.
+	 *
+	 * So we use that or, the generic variant if CONFIG_HIGHMEM is
+	 * enabled.
+	 */
+	do {
+		clear_user_highpage(page, vaddr);
+		vaddr += PAGE_SIZE;
+		page++;
+	} while (--npages);
+#else
+
+	/*
+	 * Prefer clear_user_pages() to allow for architectural optimizations
+	 * when operating on contiguous page ranges.
+	 */
+	clear_user_pages(page_address(page), vaddr, page, npages);
 #endif
+}
 
 #ifndef vma_alloc_zeroed_movable_folio
 /**
@@ -226,8 +322,8 @@ struct folio *vma_alloc_zeroed_movable_folio(struct vm_area_struct *vma,
 {
 	struct folio *folio;
 
-	folio = vma_alloc_folio(GFP_HIGHUSER_MOVABLE, 0, vma, vaddr, false);
-	if (folio)
+	folio = vma_alloc_folio(GFP_HIGHUSER_MOVABLE, 0, vma, vaddr);
+	if (folio && user_alloc_needs_zeroing())
 		clear_user_highpage(&folio->page, vaddr);
 
 	return folio;
@@ -249,10 +345,13 @@ static inline void clear_highpage_kasan_tagged(struct page *page)
 	kunmap_local(kaddr);
 }
 
-#ifndef __HAVE_ARCH_TAG_CLEAR_HIGHPAGE
+#ifndef __HAVE_ARCH_TAG_CLEAR_HIGHPAGES
 
-static inline void tag_clear_highpage(struct page *page)
+/* Returns true if the caller has to initialize the pages */
+static inline bool tag_clear_highpages(struct page *page, int numpages,
+		bool clear_pages)
 {
+	return clear_pages;
 }
 
 #endif
@@ -290,12 +389,6 @@ static inline void zero_user_segment(struct page *page,
 	unsigned start, unsigned end)
 {
 	zero_user_segments(page, start, end, 0, 0);
-}
-
-static inline void zero_user(struct page *page,
-	unsigned start, unsigned size)
-{
-	zero_user_segments(page, start, start + size, 0, 0);
 }
 
 #ifndef __HAVE_ARCH_COPY_USER_HIGHPAGE
@@ -352,6 +445,9 @@ static inline int copy_mc_user_highpage(struct page *to, struct page *from,
 	kunmap_local(vto);
 	kunmap_local(vfrom);
 
+	if (ret)
+		memory_failure_queue(page_to_pfn(from), 0);
+
 	return ret;
 }
 
@@ -367,6 +463,9 @@ static inline int copy_mc_highpage(struct page *to, struct page *from)
 		kmsan_copy_page_meta(to, from);
 	kunmap_local(vto);
 	kunmap_local(vfrom);
+
+	if (ret)
+		memory_failure_queue(page_to_pfn(from), 0);
 
 	return ret;
 }
@@ -396,6 +495,33 @@ static inline void memcpy_page(struct page *dst_page, size_t dst_off,
 	memcpy(dst + dst_off, src + src_off, len);
 	kunmap_local(src);
 	kunmap_local(dst);
+}
+
+static inline void memcpy_folio(struct folio *dst_folio, size_t dst_off,
+		struct folio *src_folio, size_t src_off, size_t len)
+{
+	VM_BUG_ON(dst_off + len > folio_size(dst_folio));
+	VM_BUG_ON(src_off + len > folio_size(src_folio));
+
+	do {
+		char *dst = kmap_local_folio(dst_folio, dst_off);
+		const char *src = kmap_local_folio(src_folio, src_off);
+		size_t chunk = len;
+
+		if (folio_test_highmem(dst_folio) &&
+		    chunk > PAGE_SIZE - offset_in_page(dst_off))
+			chunk = PAGE_SIZE - offset_in_page(dst_off);
+		if (folio_test_highmem(src_folio) &&
+		    chunk > PAGE_SIZE - offset_in_page(src_off))
+			chunk = PAGE_SIZE - offset_in_page(src_off);
+		memcpy(dst, src, chunk);
+		kunmap_local(src);
+		kunmap_local(dst);
+
+		dst_off += chunk;
+		src_off += chunk;
+		len -= chunk;
+	} while (len > 0);
 }
 
 static inline void memset_page(struct page *page, size_t offset, int val,
@@ -439,6 +565,13 @@ static inline void memzero_page(struct page *page, size_t offset, size_t len)
 	kunmap_local(addr);
 }
 
+/**
+ * memcpy_from_folio - Copy a range of bytes from a folio.
+ * @to: The memory to copy to.
+ * @folio: The folio to read from.
+ * @offset: The first byte in the folio to read.
+ * @len: The number of bytes to copy.
+ */
 static inline void memcpy_from_folio(char *to, struct folio *folio,
 		size_t offset, size_t len)
 {
@@ -448,18 +581,25 @@ static inline void memcpy_from_folio(char *to, struct folio *folio,
 		const char *from = kmap_local_folio(folio, offset);
 		size_t chunk = len;
 
-		if (folio_test_highmem(folio) &&
+		if (folio_test_partial_kmap(folio) &&
 		    chunk > PAGE_SIZE - offset_in_page(offset))
 			chunk = PAGE_SIZE - offset_in_page(offset);
 		memcpy(to, from, chunk);
 		kunmap_local(from);
 
-		from += chunk;
+		to += chunk;
 		offset += chunk;
 		len -= chunk;
 	} while (len > 0);
 }
 
+/**
+ * memcpy_to_folio - Copy a range of bytes to a folio.
+ * @folio: The folio to write to.
+ * @offset: The first byte in the folio to store to.
+ * @from: The memory to copy from.
+ * @len: The number of bytes to copy.
+ */
 static inline void memcpy_to_folio(struct folio *folio, size_t offset,
 		const char *from, size_t len)
 {
@@ -469,7 +609,7 @@ static inline void memcpy_to_folio(struct folio *folio, size_t offset,
 		char *to = kmap_local_folio(folio, offset);
 		size_t chunk = len;
 
-		if (folio_test_highmem(folio) &&
+		if (folio_test_partial_kmap(folio) &&
 		    chunk > PAGE_SIZE - offset_in_page(offset))
 			chunk = PAGE_SIZE - offset_in_page(offset);
 		memcpy(to, from, chunk);
@@ -481,6 +621,82 @@ static inline void memcpy_to_folio(struct folio *folio, size_t offset,
 	} while (len > 0);
 
 	flush_dcache_folio(folio);
+}
+
+/**
+ * folio_zero_tail - Zero the tail of a folio.
+ * @folio: The folio to zero.
+ * @offset: The byte offset in the folio to start zeroing at.
+ * @kaddr: The address the folio is currently mapped to.
+ *
+ * If you have already used kmap_local_folio() to map a folio, written
+ * some data to it and now need to zero the end of the folio (and flush
+ * the dcache), you can use this function.  If you do not have the
+ * folio kmapped (eg the folio has been partially populated by DMA),
+ * use folio_zero_range() or folio_zero_segment() instead.
+ *
+ * Return: An address which can be passed to kunmap_local().
+ */
+static inline __must_check void *folio_zero_tail(struct folio *folio,
+		size_t offset, void *kaddr)
+{
+	size_t len = folio_size(folio) - offset;
+
+	if (folio_test_partial_kmap(folio)) {
+		size_t max = PAGE_SIZE - offset_in_page(offset);
+
+		while (len > max) {
+			memset(kaddr, 0, max);
+			kunmap_local(kaddr);
+			len -= max;
+			offset += max;
+			max = PAGE_SIZE;
+			kaddr = kmap_local_folio(folio, offset);
+		}
+	}
+
+	memset(kaddr, 0, len);
+	flush_dcache_folio(folio);
+
+	return kaddr;
+}
+
+/**
+ * folio_fill_tail - Copy some data to a folio and pad with zeroes.
+ * @folio: The destination folio.
+ * @offset: The offset into @folio at which to start copying.
+ * @from: The data to copy.
+ * @len: How many bytes of data to copy.
+ *
+ * This function is most useful for filesystems which support inline data.
+ * When they want to copy data from the inode into the page cache, this
+ * function does everything for them.  It supports large folios even on
+ * HIGHMEM configurations.
+ */
+static inline void folio_fill_tail(struct folio *folio, size_t offset,
+		const char *from, size_t len)
+{
+	char *to = kmap_local_folio(folio, offset);
+
+	VM_BUG_ON(offset + len > folio_size(folio));
+
+	if (folio_test_partial_kmap(folio)) {
+		size_t max = PAGE_SIZE - offset_in_page(offset);
+
+		while (len > max) {
+			memcpy(to, from, max);
+			kunmap_local(to);
+			len -= max;
+			from += max;
+			offset += max;
+			max = PAGE_SIZE;
+			to = kmap_local_folio(folio, offset);
+		}
+	}
+
+	memcpy(to, from, len);
+	to = folio_zero_tail(folio, offset + len, to + len);
+	kunmap_local(to);
 }
 
 /**
@@ -501,7 +717,7 @@ static inline size_t memcpy_from_file_folio(char *to, struct folio *folio,
 	size_t offset = offset_in_folio(folio, pos);
 	char *from = kmap_local_folio(folio, offset);
 
-	if (folio_test_highmem(folio)) {
+	if (folio_test_partial_kmap(folio)) {
 		offset = offset_in_page(offset);
 		len = min_t(size_t, len, PAGE_SIZE - offset);
 	} else
@@ -551,10 +767,18 @@ static inline void folio_zero_range(struct folio *folio,
 	zero_user_segments(&folio->page, start, start + length, 0, 0);
 }
 
-static inline void unmap_and_put_page(struct page *page, void *addr)
+/**
+ * folio_release_kmap - Unmap a folio and drop a refcount.
+ * @folio: The folio to release.
+ * @addr: The address previously returned by a call to kmap_local_folio().
+ *
+ * It is common, eg in directory handling to kmap a folio.  This function
+ * unmaps the folio and drops the refcount that was being held to keep the
+ * folio alive while we accessed it.
+ */
+static inline void folio_release_kmap(struct folio *folio, void *addr)
 {
 	kunmap_local(addr);
-	put_page(page);
+	folio_put(folio);
 }
-
 #endif /* _LINUX_HIGHMEM_H */

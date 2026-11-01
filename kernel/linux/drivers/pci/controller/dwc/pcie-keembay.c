@@ -14,7 +14,6 @@
 #include <linux/iopoll.h>
 #include <linux/irqchip/chained_irq.h>
 #include <linux/kernel.h>
-#include <linux/mod_devicetable.h>
 #include <linux/pci.h>
 #include <linux/platform_device.h>
 #include <linux/property.h>
@@ -58,7 +57,6 @@
 struct keembay_pcie {
 	struct dw_pcie		pci;
 	void __iomem		*apb_base;
-	enum dw_pcie_device_mode mode;
 
 	struct clk		*clk_master;
 	struct clk		*clk_aux;
@@ -101,7 +99,7 @@ static void keembay_pcie_ltssm_set(struct keembay_pcie *pcie, bool enable)
 	writel(val, pcie->apb_base + PCIE_REGS_PCIE_APP_CNTRL);
 }
 
-static int keembay_pcie_link_up(struct dw_pcie *pci)
+static bool keembay_pcie_link_up(struct dw_pcie *pci)
 {
 	struct keembay_pcie *pcie = dev_get_drvdata(pci->dev);
 	u32 val;
@@ -117,7 +115,7 @@ static int keembay_pcie_start_link(struct dw_pcie *pci)
 	u32 val;
 	int ret;
 
-	if (pcie->mode == DW_PCIE_EP_TYPE)
+	if (pcie->pci.mode == DW_PCIE_EP_TYPE)
 		return 0;
 
 	keembay_pcie_ltssm_set(pcie, false);
@@ -280,28 +278,29 @@ static int keembay_pcie_setup_msi_irq(struct keembay_pcie *pcie)
 	return 0;
 }
 
-static void keembay_pcie_ep_init(struct dw_pcie_ep *ep)
+static int keembay_pcie_ep_init(struct dw_pcie_ep *ep)
 {
 	struct dw_pcie *pci = to_dw_pcie_from_ep(ep);
 	struct keembay_pcie *pcie = dev_get_drvdata(pci->dev);
 
 	writel(EDMA_INT_EN, pcie->apb_base + PCIE_REGS_INTERRUPT_ENABLE);
+
+	return 0;
 }
 
 static int keembay_pcie_ep_raise_irq(struct dw_pcie_ep *ep, u8 func_no,
-				     enum pci_epc_irq_type type,
-				     u16 interrupt_num)
+				     unsigned int type, u16 interrupt_num)
 {
 	struct dw_pcie *pci = to_dw_pcie_from_ep(ep);
 
 	switch (type) {
-	case PCI_EPC_IRQ_LEGACY:
-		/* Legacy interrupts are not supported in Keem Bay */
-		dev_err(pci->dev, "Legacy IRQ is not supported\n");
+	case PCI_IRQ_INTX:
+		/* INTx interrupts are not supported in Keem Bay */
+		dev_err(pci->dev, "INTx IRQ is not supported\n");
 		return -EINVAL;
-	case PCI_EPC_IRQ_MSI:
+	case PCI_IRQ_MSI:
 		return dw_pcie_ep_raise_msi_irq(ep, func_no, interrupt_num);
-	case PCI_EPC_IRQ_MSIX:
+	case PCI_IRQ_MSIX:
 		return dw_pcie_ep_raise_msix_irq(ep, func_no, interrupt_num);
 	default:
 		dev_err(pci->dev, "Unknown IRQ type %d\n", type);
@@ -310,11 +309,12 @@ static int keembay_pcie_ep_raise_irq(struct dw_pcie_ep *ep, u8 func_no,
 }
 
 static const struct pci_epc_features keembay_pcie_epc_features = {
-	.linkup_notifier	= false,
+	DWC_EPC_COMMON_FEATURES,
 	.msi_capable		= true,
 	.msix_capable		= true,
-	.reserved_bar		= BIT(BAR_1) | BIT(BAR_3) | BIT(BAR_5),
-	.bar_fixed_64bit	= BIT(BAR_0) | BIT(BAR_2) | BIT(BAR_4),
+	.bar[BAR_0]		= { .only_64bit = true, },
+	.bar[BAR_2]		= { .only_64bit = true, },
+	.bar[BAR_4]		= { .only_64bit = true, },
 	.align			= SZ_16K,
 };
 
@@ -325,7 +325,7 @@ keembay_pcie_get_features(struct dw_pcie_ep *ep)
 }
 
 static const struct dw_pcie_ep_ops keembay_pcie_ep_ops = {
-	.ep_init	= keembay_pcie_ep_init,
+	.init		= keembay_pcie_ep_init,
 	.raise_irq	= keembay_pcie_ep_raise_irq,
 	.get_features	= keembay_pcie_get_features,
 };
@@ -393,6 +393,7 @@ static int keembay_pcie_probe(struct platform_device *pdev)
 	struct keembay_pcie *pcie;
 	struct dw_pcie *pci;
 	enum dw_pcie_device_mode mode;
+	int ret;
 
 	data = device_get_match_data(dev);
 	if (!data)
@@ -408,7 +409,7 @@ static int keembay_pcie_probe(struct platform_device *pdev)
 	pci->dev = dev;
 	pci->ops = &keembay_pcie_ops;
 
-	pcie->mode = mode;
+	pcie->pci.mode = mode;
 
 	pcie->apb_base = devm_platform_ioremap_resource_byname(pdev, "apb");
 	if (IS_ERR(pcie->apb_base))
@@ -416,7 +417,7 @@ static int keembay_pcie_probe(struct platform_device *pdev)
 
 	platform_set_drvdata(pdev, pcie);
 
-	switch (pcie->mode) {
+	switch (pcie->pci.mode) {
 	case DW_PCIE_RC_TYPE:
 		if (!IS_ENABLED(CONFIG_PCIE_KEEMBAY_HOST))
 			return -ENODEV;
@@ -427,11 +428,26 @@ static int keembay_pcie_probe(struct platform_device *pdev)
 			return -ENODEV;
 
 		pci->ep.ops = &keembay_pcie_ep_ops;
-		return dw_pcie_ep_init(&pci->ep);
+		ret = dw_pcie_ep_init(&pci->ep);
+		if (ret)
+			return ret;
+
+		ret = dw_pcie_ep_init_registers(&pci->ep);
+		if (ret) {
+			dev_err(dev, "Failed to initialize DWC endpoint registers\n");
+			dw_pcie_ep_deinit(&pci->ep);
+			return ret;
+		}
+
+		pci_epc_init_notify(pci->ep.epc);
+
+		break;
 	default:
-		dev_err(dev, "Invalid device type %d\n", pcie->mode);
+		dev_err(dev, "Invalid device type %d\n", pcie->pci.mode);
 		return -ENODEV;
 	}
+
+	return 0;
 }
 
 static const struct keembay_pcie_of_data keembay_pcie_rc_of_data = {

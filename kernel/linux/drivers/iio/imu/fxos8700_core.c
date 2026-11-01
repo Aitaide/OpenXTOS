@@ -2,13 +2,12 @@
 /*
  * FXOS8700 - NXP IMU (accelerometer plus magnetometer)
  *
- * IIO core driver for FXOS8700, with support for I2C/SPI busses
+ * IIO core driver for FXOS8700, with support for I2C/SPI buses
  *
  * TODO: Buffer, trigger, and IRQ support
  */
 #include <linux/module.h>
 #include <linux/regmap.h>
-#include <linux/acpi.h>
 #include <linux/bitops.h>
 #include <linux/bitfield.h>
 

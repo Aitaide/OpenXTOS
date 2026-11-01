@@ -103,16 +103,14 @@ static int rb532_pata_driver_probe(struct platform_device *pdev)
 {
 	int irq;
 	struct gpio_desc *gpiod;
-	struct resource *res;
 	struct ata_host *ah;
 	struct rb532_cf_info *info;
+	void __iomem *iobase;
 	int ret;
 
-	res = platform_get_resource(pdev, IORESOURCE_MEM, 0);
-	if (!res) {
-		dev_err(&pdev->dev, "no IOMEM resource found\n");
-		return -EINVAL;
-	}
+	iobase = devm_platform_ioremap_resource(pdev, 0);
+	if (IS_ERR(iobase))
+		return PTR_ERR(iobase);
 
 	irq = platform_get_irq(pdev, 0);
 	if (irq < 0)
@@ -139,11 +137,7 @@ static int rb532_pata_driver_probe(struct platform_device *pdev)
 	ah->private_data = info;
 	info->gpio_line = gpiod;
 	info->irq = irq;
-
-	info->iobase = devm_ioremap(&pdev->dev, res->start,
-				resource_size(res));
-	if (!info->iobase)
-		return -ENOMEM;
+	info->iobase = iobase;
 
 	rb532_pata_setup_ports(ah);
 
@@ -164,7 +158,7 @@ static void rb532_pata_driver_remove(struct platform_device *pdev)
 
 static struct platform_driver rb532_pata_platform_driver = {
 	.probe		= rb532_pata_driver_probe,
-	.remove_new	= rb532_pata_driver_remove,
+	.remove		= rb532_pata_driver_remove,
 	.driver	 = {
 		.name   = DRV_NAME,
 	},

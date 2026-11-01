@@ -18,11 +18,11 @@
 #include <sound/pcm.h>
 #include <sound/initval.h>
 #include <sound/soc.h>
-#include <sound/pxa2xx-lib.h>
 #include <sound/dmaengine_pcm.h>
 
 #include <linux/platform_data/asoc-pxa.h>
 
+#include "pxa2xx-lib.h"
 #include "pxa2xx-i2s.h"
 
 /*
@@ -93,8 +93,8 @@ static struct snd_dmaengine_dai_dma_data pxa2xx_i2s_pcm_stereo_in = {
 static int pxa2xx_i2s_startup(struct snd_pcm_substream *substream,
 			      struct snd_soc_dai *dai)
 {
-	struct snd_soc_pcm_runtime *rtd = asoc_substream_to_rtd(substream);
-	struct snd_soc_dai *cpu_dai = asoc_rtd_to_cpu(rtd, 0);
+	struct snd_soc_pcm_runtime *rtd = snd_soc_substream_to_rtd(substream);
+	struct snd_soc_dai *cpu_dai = snd_soc_rtd_to_cpu(rtd, 0);
 
 	if (IS_ERR(clk_i2s))
 		return PTR_ERR(clk_i2s);
@@ -356,7 +356,7 @@ static struct snd_soc_dai_driver pxa_i2s_dai = {
 
 static const struct snd_soc_component_driver pxa_i2s_component = {
 	.name			= "pxa-i2s",
-	.pcm_construct		= pxa2xx_soc_pcm_new,
+	.pcm_new		= pxa2xx_soc_pcm_new,
 	.open			= pxa2xx_soc_pcm_open,
 	.close			= pxa2xx_soc_pcm_close,
 	.hw_params		= pxa2xx_soc_pcm_hw_params,

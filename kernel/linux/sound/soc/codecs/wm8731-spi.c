@@ -12,7 +12,6 @@
 
 #include <linux/spi/spi.h>
 #include <linux/module.h>
-#include <linux/of_device.h>
 
 #include "wm8731.h"
 

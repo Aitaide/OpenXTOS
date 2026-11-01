@@ -92,7 +92,7 @@ struct wmi *ath9k_init_wmi(struct ath9k_htc_priv *priv)
 {
 	struct wmi *wmi;
 
-	wmi = kzalloc(sizeof(struct wmi), GFP_KERNEL);
+	wmi = kzalloc_obj(struct wmi);
 	if (!wmi)
 		return NULL;
 
@@ -146,6 +146,12 @@ void ath9k_wmi_event_tasklet(struct tasklet_struct *t)
 	unsigned long flags;
 	u16 cmd_id;
 
+	/* Check if ath9k_init_device() completed. */
+	if (!smp_load_acquire(&priv->initialized)) {
+		tasklet_schedule(t);
+		return;
+	}
+
 	do {
 		spin_lock_irqsave(&wmi->wmi_lock, flags);
 		skb = __skb_dequeue(&wmi->wmi_event_queue);
@@ -169,10 +175,6 @@ void ath9k_wmi_event_tasklet(struct tasklet_struct *t)
 					     &wmi->drv_priv->fatal_work);
 			break;
 		case WMI_TXSTATUS_EVENTID:
-			/* Check if ath9k_tx_init() completed. */
-			if (!data_race(priv->tx.initialized))
-				break;
-
 			spin_lock_bh(&priv->tx.tx_lock);
 			if (priv->tx.flags & ATH9K_HTC_OP_TX_DRAIN) {
 				spin_unlock_bh(&priv->tx.tx_lock);

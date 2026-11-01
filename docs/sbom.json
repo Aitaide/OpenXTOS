@@ -1,10 +1,10 @@
 {
   "bomFormat": "CycloneDX",
   "specVersion": "1.5",
-  "serialNumber": "urn:uuid:b5be1eb58d2f6af2ccefe7a87baa63ac8faa",
+  "serialNumber": "urn:uuid:a9da0f4b7b79f99e870472abbdd6a0c562b2",
   "version": 1,
   "metadata": {
-    "timestamp": "2026-11-01T08:42:34.489471+00:00",
+    "timestamp": "2026-11-01T15:45:56.414211+00:00",
     "component": {
       "type": "application",
       "bom-ref": "xtos-component-xtos-system",
@@ -17,7 +17,7 @@
           }
         }
       ],
-      "description": "XTOS real-time operating system research build: Linux 6.6.0-rt15 kernel + XTOS BCI components + BusyBox userland + XTOS SDK",
+      "description": "XTOS real-time operating system research build: Linux mainline-RT kernel + XTOS BCI components + BusyBox userland + XTOS SDK",
       "scope": "required"
     },
     "tools": [
@@ -30,11 +30,11 @@
     "properties": [
       {
         "name": "xtos:git-commit",
-        "value": "0ee8b87f367e1cd59e996d4d5bf0bf91ef0e2e21"
+        "value": "155beef4e3eadb0824bf4dd7fd3ead73765b4bb2"
       },
       {
         "name": "xtos:kernel-release",
-        "value": "6.6.0-rt15"
+        "value": "7.3.1"
       },
       {
         "name": "xtos:generated-by-host",
@@ -55,8 +55,56 @@
           }
         }
       ],
-      "description": "XTOS real-time operating system research build: Linux 6.6.0-rt15 kernel + XTOS BCI components + BusyBox userland + XTOS SDK",
+      "description": "XTOS real-time operating system research build: Linux mainline-RT kernel + XTOS BCI components + BusyBox userland + XTOS SDK",
       "scope": "required"
+    },
+    {
+      "type": "library",
+      "bom-ref": "xtos-component-xtos-rt-diagnostics",
+      "name": "xtos-rt-diagnostics",
+      "version": "1.0.1",
+      "licenses": [
+        {
+          "license": {
+            "id": "Apache-2.0"
+          }
+        }
+      ],
+      "description": "Read-only mainline/legacy PREEMPT_RT identity and explicit native tuning tools; no physical latency guarantee",
+      "scope": "required",
+      "purl": "pkg:generic/xtos-rt-diagnostics@1.0.1",
+      "properties": [
+        {
+          "name": "xtos:source-path",
+          "value": "."
+        }
+      ],
+      "hashes": [
+        {
+          "alg": "SHA-256",
+          "content": "2f84a3927037b12d9d60e5b0cbdfd3bd538c238fae001332c6c5bf512e2b3d78"
+        },
+        {
+          "alg": "SHA-256",
+          "content": "56e9ef10d4d086d1588eb0a8fa4166e8a9ebfc23e138537ff007a3a573a36db5"
+        },
+        {
+          "alg": "SHA-256",
+          "content": "03449707194653e4db30e63e2a410a586f3febfca88e21faeb9998368086a2f6"
+        },
+        {
+          "alg": "SHA-256",
+          "content": "c723fc3a1f6d60f964ecdde732b586557bf1dd853bfbe4a0f0ed13ad622844aa"
+        },
+        {
+          "alg": "SHA-256",
+          "content": "30caa3c21c863118728d223a1112c2ce42829fcdb0a6d129fafccf44e11feb17"
+        },
+        {
+          "alg": "SHA-256",
+          "content": "7547acfcac4739f24269d704c0db63955f1e4a23e0a1f9f7e61afbd2c018bbab"
+        }
+      ]
     },
     {
       "type": "library",
@@ -172,7 +220,7 @@
       "type": "library",
       "bom-ref": "xtos-component-linux",
       "name": "linux",
-      "version": "6.6.0",
+      "version": "7.3.1",
       "licenses": [
         {
           "license": {
@@ -180,25 +228,49 @@
           }
         }
       ],
-      "description": "Linux kernel source vendored in kernel/linux (upstream 6.6.0)",
+      "description": "Linux kernel with mainline PREEMPT_RT support; configuration/source inventory, not runtime acceptance",
       "scope": "required",
-      "purl": "pkg:generic/linux@6.6.0",
+      "purl": "pkg:generic/linux@7.3.1",
       "externalReferences": [
         {
           "type": "distribution",
-          "url": "https://kernel.org/pub/linux/kernel/v6.x/linux-6.6.0.tar.xz"
+          "url": "https://cdn.kernel.org/pub/linux/kernel/v7.x/linux-7.3.1.tar.xz"
         }
       ],
       "properties": [
         {
           "name": "xtos:source-path",
           "value": "kernel/linux"
+        },
+        {
+          "name": "xtos:source-pin-sha256",
+          "value": "f6030daa6c231db13785e93fa879fa7e4d4290416c232de76bca60318343b6e3"
+        },
+        {
+          "name": "xtos:upstream-archive-bytes",
+          "value": "162406920"
+        },
+        {
+          "name": "xtos:rt-mode",
+          "value": "mainline"
+        },
+        {
+          "name": "xtos:rt-config",
+          "value": "CONFIG_PREEMPT_RT=y"
+        },
+        {
+          "name": "xtos:rt-runtime-evidence",
+          "value": "not-validated"
+        },
+        {
+          "name": "xtos:upstream-archive-sha256",
+          "value": "fa595aad93734f829c963c2a90ef7c3673224fd7fdae7b49406e397cde2de231"
         }
       ],
       "hashes": [
         {
           "alg": "SHA-256",
-          "content": "e2c19bb5a1ef678d150dfc26f11bfa91e5a4458738f305f4abb7848ebeb2b399"
+          "content": "912401b1a346bfc7a904af4ab20716fe86bcbe9de1e494e0f2a7f22ccd478726"
         },
         {
           "alg": "SHA-256",
@@ -218,8 +290,8 @@
           }
         }
       ],
-      "description": "PREEMPT_RT realtime patch set applied to the vendored kernel",
-      "scope": "required",
+      "description": "Historical 6.6-rt15 external PREEMPT_RT patch; not applied to Linux 7.3.1",
+      "scope": "excluded",
       "purl": "pkg:generic/preempt-rt@6.6-rt15",
       "externalReferences": [
         {
@@ -258,11 +330,107 @@
       "properties": [
         {
           "name": "xtos:source-path",
-          "value": "kernel/patches/xtos-linux-6.6.patch"
+          "value": "kernel/patches/xtos-linux-7.3.1.patch"
         },
         {
           "name": "openbci-cyton-packet.h",
           "value": "5f7c40cc6ccff6aae11ff2071ff8eb6c2ba3cfcfc9232b9fdba058502f617d9c"
+        },
+        {
+          "name": "xtos:source:drivers/Kconfig",
+          "value": "4370cae0caa4ee08e9a01a359aa42ddc54a1982adcba8cf00e44c009f287c8d8"
+        },
+        {
+          "name": "xtos:source:drivers/Makefile",
+          "value": "5a2dd7da8be0921c1438eb372fc9ed732e3820f954fe5fbce64d526913464d37"
+        },
+        {
+          "name": "xtos:source:init/Kconfig",
+          "value": "10591efb35a62d6387adc7dd1900c58e17dac0ba3b145e0fb4d1d7c01d44b557"
+        },
+        {
+          "name": "xtos:source:kernel/sched/Makefile",
+          "value": "b3bb9a48240ec73277ff13bb8bf544259730826a64635217762966347618b7e1"
+        },
+        {
+          "name": "xtos:source:drivers/xtos/Kconfig",
+          "value": "2de678c925b7d7a2217ef378ba646743c8606019e9cb3552600b46cd9db4c391"
+        },
+        {
+          "name": "xtos:source:drivers/xtos/Makefile",
+          "value": "8023da29635c69fc0ecfdc5c2fd255b91114b18d0945134c511c3f69007a2b35"
+        },
+        {
+          "name": "xtos:source:drivers/xtos/bci/Kconfig",
+          "value": "a1edc7cecf1b0276f7e437957a5c17ce5568675a2dcfc0592bb89dd29d0a2f5c"
+        },
+        {
+          "name": "xtos:source:drivers/xtos/bci/Makefile",
+          "value": "d6564c7e57c051dd9a999efd4e9d931afdb1a0ca2ce236356e0c07feb429b1de"
+        },
+        {
+          "name": "xtos:source:drivers/xtos/bci/xtos_bci_core.c",
+          "value": "33a57a8655b9227f7f7a714df44b00188a720371dd20043619f56c1211979ea3"
+        },
+        {
+          "name": "xtos:source:drivers/xtos/bci/xtos_bci_buffer.c",
+          "value": "42cb88d16c14562f1fb3112412db26c4f75f9c032ad2e824decc34efc75e5153"
+        },
+        {
+          "name": "xtos:source:drivers/xtos/bci/xtos_bci_snapshot.c",
+          "value": "6866366b822985764951a82a15d5eb3112b27f11e2b03cec8d8722e2f4765e5a"
+        },
+        {
+          "name": "xtos:source:drivers/xtos/bci/xtos_bci_snapshot.h",
+          "value": "34b01c01146618b03aa726c10966550c117b6ba1819b1b93fed94ecded568c5e"
+        },
+        {
+          "name": "xtos:source:drivers/xtos/bci/xtos_cyton_config.h",
+          "value": "697de9a1a9fdb3877b307f2913ef9c6ba1a2afe7c70f5ff89b0d7f3e4ea42cf5"
+        },
+        {
+          "name": "xtos:source:drivers/xtos/bci/xtos_cyton_packet.h",
+          "value": "5f7c40cc6ccff6aae11ff2071ff8eb6c2ba3cfcfc9232b9fdba058502f617d9c"
+        },
+        {
+          "name": "xtos:source:drivers/xtos/bci/devices/openbci_cyton.c",
+          "value": "bf044a1004fc2c252a711c3f30907567fdf192e72179fc18b903df72f32e8c0f"
+        },
+        {
+          "name": "xtos:source:kernel/sched/xtos/Kconfig",
+          "value": "085dbd8f61da2ecc2d3dfe2e2fd8997ed6693c490786f2e12c12e09fe1babb58"
+        },
+        {
+          "name": "xtos:source:kernel/sched/xtos_sched.c",
+          "value": "4019dc9f63972e718b4a00202c24518fd914266d79dc8a8e700ea500ef243c45"
+        },
+        {
+          "name": "xtos:source:kernel/sched/xtos_prio.h",
+          "value": "ae34030679ea8dd28ffedd306a38bf47965caa1e5d92d124f892c5254a43ef5d"
+        },
+        {
+          "name": "xtos:source:include/linux/xtos.h",
+          "value": "b1c135a9db5839bc407b333b41075fbaced4177ec6745c42c55d708a1885bfb4"
+        },
+        {
+          "name": "xtos:source:include/linux/xtos_bci.h",
+          "value": "e471c40b0866362f484ddbb239f6f55649f6d441223e3a7a46a0d06cdcee9497"
+        },
+        {
+          "name": "xtos:source:include/linux/xtos_queue.h",
+          "value": "e5b4e6f2c6f94cffd681076fc86771ad58c538ddfa3083791be8cd7a22efc477"
+        },
+        {
+          "name": "xtos:source:include/uapi/linux/xtos_bci.h",
+          "value": "58c8b2376fbc138656a90fbd5588651fc82cf230022a9e307976beb23a9f3de4"
+        },
+        {
+          "name": "xtos:source:include/uapi/linux/xtos_bci_config.h",
+          "value": "5cb1751c7a77ce49c11d44694056dd4e85aa68a0ec08b960425d9bb7d412b5dd"
+        },
+        {
+          "name": "xtos:source:include/uapi/linux/xtos_bci_snapshot.h",
+          "value": "df59dbf6d3529634442bc9f4cc60a3c71635ba44ad922913771835fa182f3fda"
         },
         {
           "name": "xtos:source:drivers/xtos/bci/xtos_bci_frame.c",
@@ -288,7 +456,7 @@
       "hashes": [
         {
           "alg": "SHA-256",
-          "content": "b22c3bd7cafbf78679e19f45ec3b9d7c7043e0d2bde124798d3d8922614fcd28"
+          "content": "46e980b60ac3e04b37b1c3d2fd2cc59648cdaeba016b2a122dfac5dbebf8ee85"
         }
       ]
     },
@@ -1125,10 +1293,10 @@
     {
       "ref": "xtos-component-xtos-system",
       "dependsOn": [
+        "xtos-component-xtos-rt-diagnostics",
         "xtos-component-xtos-xr",
         "xtos-component-openxr-headers",
         "xtos-component-linux",
-        "xtos-component-preempt-rt",
         "xtos-component-xtos-linux-integration",
         "xtos-component-busybox",
         "xtos-component-libxtos-rt",
@@ -1144,6 +1312,10 @@
         "xtos-component-xtos-ai-runtime",
         "xtos-component-xtos-action-gate"
       ]
+    },
+    {
+      "ref": "xtos-component-xtos-rt-diagnostics",
+      "dependsOn": []
     },
     {
       "ref": "xtos-component-xtos-xr",
@@ -1166,7 +1338,9 @@
     },
     {
       "ref": "xtos-component-xtos-linux-integration",
-      "dependsOn": []
+      "dependsOn": [
+        "xtos-component-linux"
+      ]
     },
     {
       "ref": "xtos-component-busybox",

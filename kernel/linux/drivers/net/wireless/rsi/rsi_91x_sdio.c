@@ -828,7 +828,7 @@ static int rsi_init_sdio_interface(struct rsi_hw *adapter,
 	struct rsi_91x_sdiodev *rsi_91x_dev;
 	int status;
 
-	rsi_91x_dev = kzalloc(sizeof(*rsi_91x_dev), GFP_KERNEL);
+	rsi_91x_dev = kzalloc_obj(*rsi_91x_dev);
 	if (!rsi_91x_dev)
 		return -ENOMEM;
 
@@ -1443,9 +1443,8 @@ static int rsi_thaw(struct device *dev)
 	return 0;
 }
 
-static void rsi_shutdown(struct device *dev)
+static void rsi_shutdown(struct sdio_func *pfunction)
 {
-	struct sdio_func *pfunction = dev_to_sdio_func(dev);
 	struct rsi_hw *adapter = sdio_get_drvdata(pfunction);
 	struct rsi_91x_sdiodev *sdev = adapter->rsi_dev;
 	struct ieee80211_hw *hw = adapter->hw;
@@ -1513,42 +1512,13 @@ static struct sdio_driver rsi_driver = {
 	.remove     = rsi_disconnect,
 	.id_table   = rsi_dev_table,
 #ifdef CONFIG_PM
+	.shutdown   = rsi_shutdown,
 	.drv = {
 		.pm = &rsi_pm_ops,
-		.shutdown   = rsi_shutdown,
 	}
 #endif
 };
-
-/**
- * rsi_module_init() - This function registers the sdio module.
- * @void: Void.
- *
- * Return: 0 on success.
- */
-static int rsi_module_init(void)
-{
-	int ret;
-
-	ret = sdio_register_driver(&rsi_driver);
-	rsi_dbg(INIT_ZONE, "%s: Registering driver\n", __func__);
-	return ret;
-}
-
-/**
- * rsi_module_exit() - This function unregisters the sdio module.
- * @void: Void.
- *
- * Return: None.
- */
-static void rsi_module_exit(void)
-{
-	sdio_unregister_driver(&rsi_driver);
-	rsi_dbg(INFO_ZONE, "%s: Unregistering driver\n", __func__);
-}
-
-module_init(rsi_module_init);
-module_exit(rsi_module_exit);
+module_sdio_driver(rsi_driver);
 
 MODULE_AUTHOR("Redpine Signals Inc");
 MODULE_DESCRIPTION("Common SDIO layer for RSI drivers");

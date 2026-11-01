@@ -6,6 +6,7 @@
  */
 
 #include <linux/acpi.h>
+#include <linux/cleanup.h>
 #include <linux/debugfs.h>
 #include <linux/delay.h>
 #include <linux/dmi.h>
@@ -81,6 +82,10 @@ static const struct key_entry huawei_wmi_keymap[] = {
 	{ KE_KEY,    0x289, { KEY_WLAN } },
 	// Huawei |M| key
 	{ KE_KEY,    0x28a, { KEY_CONFIG } },
+	// HONOR YOYO key
+	{ KE_KEY,    0x28b, { KEY_NOTIFICATION_CENTER } },
+	// HONOR print screen
+	{ KE_KEY,    0x28e, { KEY_PRINT } },
 	// Keyboard backlit
 	{ KE_IGNORE, 0x293, { KEY_KBDILLUMTOGGLE } },
 	{ KE_IGNORE, 0x294, { KEY_KBDILLUMUP } },
@@ -310,7 +315,6 @@ static void huawei_wmi_leds_setup(struct device *dev)
 	huawei->cdev.max_brightness = 1;
 	huawei->cdev.brightness_set_blocking = &huawei_wmi_micmute_led_set;
 	huawei->cdev.default_trigger = "audio-micmute";
-	huawei->cdev.brightness = ledtrig_audio_get(LED_AUDIO_MICMUTE);
 	huawei->cdev.dev = dev;
 	huawei->cdev.flags = LED_CORE_SUSPENDRESUME;
 
@@ -380,7 +384,7 @@ static ssize_t charge_control_start_threshold_show(struct device *dev,
 	if (err)
 		return err;
 
-	return sprintf(buf, "%d\n", start);
+	return sysfs_emit(buf, "%d\n", start);
 }
 
 static ssize_t charge_control_end_threshold_show(struct device *dev,
@@ -393,7 +397,7 @@ static ssize_t charge_control_end_threshold_show(struct device *dev,
 	if (err)
 		return err;
 
-	return sprintf(buf, "%d\n", end);
+	return sysfs_emit(buf, "%d\n", end);
 }
 
 static ssize_t charge_control_thresholds_show(struct device *dev,
@@ -406,7 +410,7 @@ static ssize_t charge_control_thresholds_show(struct device *dev,
 	if (err)
 		return err;
 
-	return sprintf(buf, "%d %d\n", start, end);
+	return sysfs_emit(buf, "%d %d\n", start, end);
 }
 
 static ssize_t charge_control_start_threshold_store(struct device *dev,
@@ -524,11 +528,104 @@ static void huawei_wmi_battery_exit(struct device *dev)
 
 /* Fn lock */
 
+/* GFRS byte[1] / SFRS byte[2] (FRSR) fn-lock state values */
+#define FN_LOCK_ACPI_OFF	1
+#define FN_LOCK_ACPI_ON		2
+#define FN_LOCK_ACPI_STAT_OK	0
+
+/*
+ * Newer Huawei models (e.g. HUAWEI FLMH-XX / MateBook 14 2024) use direct
+ * ACPI methods \GFRS / \SFRS (Get/Set Fn key Reversal Status) to control
+ * Fn-lock via EC registers 0x6B (read) and 0x6C (write).
+ *
+ * GFRS response buffer layout:
+ *   byte[0] = STAT (FN_LOCK_ACPI_STAT_OK = success)
+ *   byte[1] = FN_LOCK_ACPI_OFF (fn-lock off) or FN_LOCK_ACPI_ON (fn-lock on)
+ *
+ * SFRS argument layout (CreateByteField(Arg0, 0x02, FRSR)):
+ *   Value is read from byte[2] of the integer argument, so it must be
+ *   passed as (value << 16):
+ *   (FN_LOCK_ACPI_OFF << 16) = fn-lock off (writes 0x55 to EC 0x6C)
+ *   (FN_LOCK_ACPI_ON  << 16) = fn-lock on  (writes 0x5A to EC 0x6C)
+ */
+
+static int huawei_acpi_fn_lock_get(int *on)
+{
+	union acpi_object acpi_arg;
+	struct acpi_object_list arg_list = { .count = 1, .pointer = &acpi_arg };
+	struct acpi_buffer output = { ACPI_ALLOCATE_BUFFER, NULL };
+	acpi_status status;
+
+	acpi_arg.type = ACPI_TYPE_INTEGER;
+	acpi_arg.integer.value = 0;
+
+	status = acpi_evaluate_object(NULL, "\\GFRS", &arg_list, &output);
+	if (ACPI_FAILURE(status))
+		return -EIO;
+
+	union acpi_object *obj __free(kfree) = output.pointer;
+	if (!obj || obj->type != ACPI_TYPE_BUFFER || obj->buffer.length < 2)
+		return -ENODATA;
+
+	/* byte[0] = STAT, byte[1] = fn-lock state */
+	if (obj->buffer.pointer[0] != FN_LOCK_ACPI_STAT_OK)
+		return -EIO;
+
+	switch (obj->buffer.pointer[1]) {
+	case FN_LOCK_ACPI_OFF:
+		if (on)
+			*on = 0;
+		break;
+	case FN_LOCK_ACPI_ON:
+		if (on)
+			*on = 1;
+		break;
+	default:
+		return -ENODATA;
+	}
+
+	return 0;
+}
+
+static int huawei_acpi_fn_lock_set(int on)
+{
+	union acpi_object acpi_arg;
+	struct acpi_object_list arg_list = { .count = 1, .pointer = &acpi_arg };
+	struct acpi_buffer output = { ACPI_ALLOCATE_BUFFER, NULL };
+	acpi_status status;
+
+	/*
+	 * SFRS reads byte[2] of its argument via CreateByteField(Arg0, 0x02).
+	 * on=0 → FRSR=FN_LOCK_ACPI_OFF → EC gets 0x55 (fn-lock off)
+	 * on=1 → FRSR=FN_LOCK_ACPI_ON  → EC gets 0x5A (fn-lock on)
+	 */
+	acpi_arg.type = ACPI_TYPE_INTEGER;
+	acpi_arg.integer.value = (on ? FN_LOCK_ACPI_ON : FN_LOCK_ACPI_OFF) << 16;
+
+	status = acpi_evaluate_object(NULL, "\\SFRS", &arg_list, &output);
+	if (ACPI_FAILURE(status))
+		return -EIO;
+
+	union acpi_object *obj __free(kfree) = output.pointer;
+	if (!obj || obj->type != ACPI_TYPE_BUFFER || obj->buffer.length < 1)
+		return -ENODATA;
+
+	if (obj->buffer.pointer[0] != FN_LOCK_ACPI_STAT_OK)
+		return -EIO;
+
+	return 0;
+}
+
 static int huawei_wmi_fn_lock_get(int *on)
 {
 	u8 ret[0x100] = { 0 };
 	int err, i;
 
+	/* Newer models: use direct ACPI \GFRS method */
+	if (acpi_has_method(NULL, "\\GFRS"))
+		return huawei_acpi_fn_lock_get(on);
+
+	/* WMI fallback */
 	err = huawei_wmi_cmd(FN_LOCK_GET, ret, 0x100);
 	if (err)
 		return err;
@@ -547,6 +644,11 @@ static int huawei_wmi_fn_lock_set(int on)
 {
 	union hwmi_arg arg;
 
+	/* Newer models: use direct ACPI \SFRS method */
+	if (acpi_has_method(NULL, "\\SFRS"))
+		return huawei_acpi_fn_lock_set(on);
+
+	/* WMI fallback */
 	arg.cmd = FN_LOCK_SET;
 	arg.args[2] = on + 1; // 0 undefined, 1 off, 2 on.
 
@@ -563,7 +665,7 @@ static ssize_t fn_lock_state_show(struct device *dev,
 	if (err)
 		return err;
 
-	return sprintf(buf, "%d\n", on);
+	return sysfs_emit(buf, "%d\n", on);
 }
 
 static ssize_t fn_lock_state_store(struct device *dev,
@@ -735,26 +837,14 @@ static void huawei_wmi_process_key(struct input_dev *idev, int code)
 	sparse_keymap_report_entry(idev, key, 1, true);
 }
 
-static void huawei_wmi_input_notify(u32 value, void *context)
+static void huawei_wmi_input_notify(union acpi_object *obj, void *context)
 {
 	struct input_dev *idev = (struct input_dev *)context;
-	struct acpi_buffer response = { ACPI_ALLOCATE_BUFFER, NULL };
-	union acpi_object *obj;
-	acpi_status status;
 
-	status = wmi_get_event_data(value, &response);
-	if (ACPI_FAILURE(status)) {
-		dev_err(&idev->dev, "Unable to get event data\n");
-		return;
-	}
-
-	obj = (union acpi_object *)response.pointer;
 	if (obj && obj->type == ACPI_TYPE_INTEGER)
 		huawei_wmi_process_key(idev, obj->integer.value);
 	else
 		dev_err(&idev->dev, "Bad response type\n");
-
-	kfree(response.pointer);
 }
 
 static int huawei_wmi_input_setup(struct device *dev, const char *guid)
@@ -855,7 +945,7 @@ static struct platform_driver huawei_wmi_driver = {
 		.name = "huawei-wmi",
 	},
 	.probe = huawei_wmi_probe,
-	.remove_new = huawei_wmi_remove,
+	.remove = huawei_wmi_remove,
 };
 
 static __init int huawei_wmi_init(void)
@@ -863,7 +953,7 @@ static __init int huawei_wmi_init(void)
 	struct platform_device *pdev;
 	int err;
 
-	huawei_wmi = kzalloc(sizeof(struct huawei_wmi), GFP_KERNEL);
+	huawei_wmi = kzalloc_obj(struct huawei_wmi);
 	if (!huawei_wmi)
 		return -ENOMEM;
 

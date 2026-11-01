@@ -111,7 +111,7 @@ static void sa1100_mctrl_check(struct sa1100_port *sport)
  */
 static void sa1100_timeout(struct timer_list *t)
 {
-	struct sa1100_port *sport = from_timer(sport, t, timer);
+	struct sa1100_port *sport = timer_container_of(sport, t, timer);
 	unsigned long flags;
 
 	if (sport->port.state) {
@@ -369,7 +369,7 @@ static void sa1100_shutdown(struct uart_port *port)
 	/*
 	 * Stop our timer.
 	 */
-	del_timer_sync(&sport->timer);
+	timer_delete_sync(&sport->timer);
 
 	/*
 	 * Free the interrupt
@@ -421,7 +421,7 @@ sa1100_set_termios(struct uart_port *port, struct ktermios *termios,
 	baud = uart_get_baud_rate(port, termios, old, 0, port->uartclk/16); 
 	quot = uart_get_divisor(port, baud);
 
-	del_timer_sync(&sport->timer);
+	timer_delete_sync(&sport->timer);
 
 	uart_port_lock_irqsave(&sport->port, &flags);
 
@@ -870,14 +870,12 @@ static int sa1100_serial_probe(struct platform_device *dev)
 	return 0;
 }
 
-static int sa1100_serial_remove(struct platform_device *pdev)
+static void sa1100_serial_remove(struct platform_device *pdev)
 {
 	struct sa1100_port *sport = platform_get_drvdata(pdev);
 
 	if (sport)
 		uart_remove_one_port(&sa1100_reg, &sport->port);
-
-	return 0;
 }
 
 static struct platform_driver sa11x0_serial_driver = {

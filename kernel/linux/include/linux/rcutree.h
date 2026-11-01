@@ -34,20 +34,11 @@ static inline void rcu_virt_note_context_switch(void)
 }
 
 void synchronize_rcu_expedited(void);
-void kvfree_call_rcu(struct rcu_head *head, void *ptr);
 
 void rcu_barrier(void);
-bool rcu_eqs_special_set(int cpu);
-void rcu_momentary_dyntick_idle(void);
-void kfree_rcu_scheduler_running(void);
-bool rcu_gp_might_be_stalled(void);
+void rcu_momentary_eqs(void);
 
-struct rcu_gp_oldstate {
-	unsigned long rgos_norm;
-	unsigned long rgos_exp;
-};
-
-// Maximum number of rcu_gp_oldstate values corresponding to
+// Maximum number of rcu_gp_seq values corresponding to
 // not-yet-completed RCU grace periods.
 #define NUM_ACTIVE_RCU_POLL_FULL_OLDSTATE 4
 
@@ -64,29 +55,29 @@ struct rcu_gp_oldstate {
  * to a list header, allowing those structures to be slightly smaller.
  *
  * Note that equality is judged on a bitwise basis, so that an
- * @rcu_gp_oldstate structure with an already-completed state in one field
+ * @rcu_gp_seq structure with an already-completed state in one field
  * will compare not-equal to a structure with an already-completed state
- * in the other field.  After all, the @rcu_gp_oldstate structure is opaque
+ * in the other field.  After all, the @rcu_gp_seq structure is opaque
  * so how did such a situation come to pass in the first place?
  */
-static inline bool same_state_synchronize_rcu_full(struct rcu_gp_oldstate *rgosp1,
-						   struct rcu_gp_oldstate *rgosp2)
+static inline bool same_state_synchronize_rcu_full(struct rcu_gp_seq *rgosp1,
+						   struct rcu_gp_seq *rgosp2)
 {
-	return rgosp1->rgos_norm == rgosp2->rgos_norm && rgosp1->rgos_exp == rgosp2->rgos_exp;
+	return rgosp1->norm == rgosp2->norm && rgosp1->exp == rgosp2->exp;
 }
 
 unsigned long start_poll_synchronize_rcu_expedited(void);
-void start_poll_synchronize_rcu_expedited_full(struct rcu_gp_oldstate *rgosp);
+void start_poll_synchronize_rcu_expedited_full(struct rcu_gp_seq *gsp);
 void cond_synchronize_rcu_expedited(unsigned long oldstate);
-void cond_synchronize_rcu_expedited_full(struct rcu_gp_oldstate *rgosp);
+void cond_synchronize_rcu_expedited_full(struct rcu_gp_seq *gsp);
 unsigned long get_state_synchronize_rcu(void);
-void get_state_synchronize_rcu_full(struct rcu_gp_oldstate *rgosp);
+void get_state_synchronize_rcu_full(struct rcu_gp_seq *gsp);
 unsigned long start_poll_synchronize_rcu(void);
-void start_poll_synchronize_rcu_full(struct rcu_gp_oldstate *rgosp);
+void start_poll_synchronize_rcu_full(struct rcu_gp_seq *gsp);
 bool poll_state_synchronize_rcu(unsigned long oldstate);
-bool poll_state_synchronize_rcu_full(struct rcu_gp_oldstate *rgosp);
+bool poll_state_synchronize_rcu_full(struct rcu_gp_seq *gsp);
 void cond_synchronize_rcu(unsigned long oldstate);
-void cond_synchronize_rcu_full(struct rcu_gp_oldstate *rgosp);
+void cond_synchronize_rcu_full(struct rcu_gp_seq *gsp);
 
 #ifdef CONFIG_PROVE_RCU
 void rcu_irq_exit_check_preempt(void);
@@ -104,16 +95,28 @@ extern int rcu_scheduler_active;
 void rcu_end_inkernel_boot(void);
 bool rcu_inkernel_boot_has_ended(void);
 bool rcu_is_watching(void);
-#ifndef CONFIG_PREEMPTION
+#ifndef CONFIG_PREEMPT_RCU
 void rcu_all_qs(void);
 #endif
 
 /* RCUtree hotplug events */
 int rcutree_prepare_cpu(unsigned int cpu);
 int rcutree_online_cpu(unsigned int cpu);
-int rcutree_offline_cpu(unsigned int cpu);
+void rcutree_report_cpu_starting(unsigned int cpu);
+
+#ifdef CONFIG_HOTPLUG_CPU
 int rcutree_dead_cpu(unsigned int cpu);
 int rcutree_dying_cpu(unsigned int cpu);
-void rcu_cpu_starting(unsigned int cpu);
+int rcutree_offline_cpu(unsigned int cpu);
+#else
+#define rcutree_dead_cpu NULL
+#define rcutree_dying_cpu NULL
+#define rcutree_offline_cpu NULL
+#endif
+
+void rcutree_migrate_callbacks(int cpu);
+
+/* Called from hotplug and also arm64 early secondary boot failure */
+void rcutree_report_cpu_dead(void);
 
 #endif /* __LINUX_RCUTREE_H */

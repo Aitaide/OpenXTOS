@@ -17,17 +17,47 @@ static struct virtio_device_id id_table[] = {
  /* Initialize virt queue */
 static int init_vq(struct virtio_pmem *vpmem)
 {
+	int err;
+
 	/* single vq */
 	vpmem->req_vq = virtio_find_single_vq(vpmem->vdev,
 					virtio_pmem_host_ack, "flush_queue");
-	if (IS_ERR(vpmem->req_vq))
-		return PTR_ERR(vpmem->req_vq);
+	if (IS_ERR(vpmem->req_vq)) {
+		err = PTR_ERR(vpmem->req_vq);
+		vpmem->req_vq = NULL;
+		return err;
+	}
 
 	spin_lock_init(&vpmem->pmem_lock);
 	INIT_LIST_HEAD(&vpmem->req_list);
+	vpmem->req_inflight = NULL;
+	WRITE_ONCE(vpmem->broken, false);
 
 	return 0;
 };
+
+static void virtio_pmem_del_vqs(struct virtio_pmem *vpmem)
+{
+	if (!vpmem->req_vq)
+		return;
+
+	vpmem->vdev->config->del_vqs(vpmem->vdev);
+	vpmem->req_vq = NULL;
+}
+
+static int virtio_pmem_validate(struct virtio_device *vdev)
+{
+	struct virtio_shm_region shm_reg;
+
+	if (virtio_has_feature(vdev, VIRTIO_PMEM_F_SHMEM_REGION) &&
+		!virtio_get_shm_region(vdev, &shm_reg, (u8)VIRTIO_PMEM_SHMEM_REGION_ID)
+	) {
+		dev_notice(&vdev->dev, "failed to get shared memory region %d\n",
+				VIRTIO_PMEM_SHMEM_REGION_ID);
+		__virtio_clear_bit(vdev, VIRTIO_PMEM_F_SHMEM_REGION);
+	}
+	return 0;
+}
 
 static int virtio_pmem_probe(struct virtio_device *vdev)
 {
@@ -35,6 +65,7 @@ static int virtio_pmem_probe(struct virtio_device *vdev)
 	struct nd_region *nd_region;
 	struct virtio_pmem *vpmem;
 	struct resource res;
+	struct virtio_shm_region shm_reg;
 	int err = 0;
 
 	if (!vdev->config->get) {
@@ -49,18 +80,32 @@ static int virtio_pmem_probe(struct virtio_device *vdev)
 		goto out_err;
 	}
 
+	mutex_init(&vpmem->flush_lock);
 	vpmem->vdev = vdev;
 	vdev->priv = vpmem;
-	err = init_vq(vpmem);
-	if (err) {
-		dev_err(&vdev->dev, "failed to initialize virtio pmem vq's\n");
+	vpmem->flush_wq = alloc_ordered_workqueue("virtio-pmem-flush",
+						  WQ_MEM_RECLAIM);
+	if (!vpmem->flush_wq) {
+		err = -ENOMEM;
 		goto out_err;
 	}
 
-	virtio_cread_le(vpmem->vdev, struct virtio_pmem_config,
-			start, &vpmem->start);
-	virtio_cread_le(vpmem->vdev, struct virtio_pmem_config,
-			size, &vpmem->size);
+	err = init_vq(vpmem);
+	if (err) {
+		dev_err(&vdev->dev, "failed to initialize virtio pmem vq's\n");
+		goto out_wq;
+	}
+
+	if (virtio_has_feature(vdev, VIRTIO_PMEM_F_SHMEM_REGION)) {
+		virtio_get_shm_region(vdev, &shm_reg, (u8)VIRTIO_PMEM_SHMEM_REGION_ID);
+		vpmem->start = shm_reg.addr;
+		vpmem->size = shm_reg.len;
+	} else {
+		virtio_cread_le(vpmem->vdev, struct virtio_pmem_config,
+				start, &vpmem->start);
+		virtio_cread_le(vpmem->vdev, struct virtio_pmem_config,
+				size, &vpmem->size);
+	}
 
 	res.start = vpmem->start;
 	res.end   = vpmem->start + vpmem->size - 1;
@@ -108,7 +153,9 @@ out_nd:
 	virtio_reset_device(vdev);
 	nvdimm_bus_unregister(vpmem->nvdimm_bus);
 out_vq:
-	vdev->config->del_vqs(vdev);
+	virtio_pmem_del_vqs(vpmem);
+out_wq:
+	destroy_workqueue(vpmem->flush_wq);
 out_err:
 	return err;
 }
@@ -116,18 +163,74 @@ out_err:
 static void virtio_pmem_remove(struct virtio_device *vdev)
 {
 	struct nvdimm_bus *nvdimm_bus = dev_get_drvdata(&vdev->dev);
+	struct virtio_pmem *vpmem = vdev->priv;
+	unsigned long flags;
+
+	spin_lock_irqsave(&vpmem->pmem_lock, flags);
+	virtio_pmem_mark_broken(vpmem);
+	spin_unlock_irqrestore(&vpmem->pmem_lock, flags);
+
+	drain_workqueue(vpmem->flush_wq);
+	virtio_reset_device(vdev);
+
+	spin_lock_irqsave(&vpmem->pmem_lock, flags);
+	virtio_pmem_drain(vpmem);
+	spin_unlock_irqrestore(&vpmem->pmem_lock, flags);
 
 	nvdimm_bus_unregister(nvdimm_bus);
-	vdev->config->del_vqs(vdev);
-	virtio_reset_device(vdev);
+	virtio_pmem_del_vqs(vpmem);
+	destroy_workqueue(vpmem->flush_wq);
 }
 
+static int virtio_pmem_freeze(struct virtio_device *vdev)
+{
+	struct virtio_pmem *vpmem = vdev->priv;
+	unsigned long flags;
+
+	spin_lock_irqsave(&vpmem->pmem_lock, flags);
+	virtio_pmem_mark_broken(vpmem);
+	spin_unlock_irqrestore(&vpmem->pmem_lock, flags);
+
+	drain_workqueue(vpmem->flush_wq);
+	virtio_reset_device(vdev);
+
+	spin_lock_irqsave(&vpmem->pmem_lock, flags);
+	virtio_pmem_drain(vpmem);
+	spin_unlock_irqrestore(&vpmem->pmem_lock, flags);
+
+	virtio_pmem_del_vqs(vpmem);
+
+	return 0;
+}
+
+static int virtio_pmem_restore(struct virtio_device *vdev)
+{
+	int ret;
+
+	ret = init_vq(vdev->priv);
+	if (ret) {
+		dev_err(&vdev->dev, "failed to initialize virtio pmem's vq\n");
+		return ret;
+	}
+	virtio_device_ready(vdev);
+
+	return 0;
+}
+
+static unsigned int features[] = {
+	VIRTIO_PMEM_F_SHMEM_REGION,
+};
+
 static struct virtio_driver virtio_pmem_driver = {
+	.feature_table		= features,
+	.feature_table_size	= ARRAY_SIZE(features),
 	.driver.name		= KBUILD_MODNAME,
-	.driver.owner		= THIS_MODULE,
 	.id_table		= id_table,
+	.validate		= virtio_pmem_validate,
 	.probe			= virtio_pmem_probe,
 	.remove			= virtio_pmem_remove,
+	.freeze			= virtio_pmem_freeze,
+	.restore		= virtio_pmem_restore,
 };
 
 module_virtio_driver(virtio_pmem_driver);

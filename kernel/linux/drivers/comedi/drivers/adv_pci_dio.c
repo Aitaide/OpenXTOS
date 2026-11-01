@@ -642,8 +642,8 @@ static int pci_dio_auto_attach(struct comedi_device *dev,
 
 		for (j = 0; j < d->chans; j++) {
 			s = &dev->subdevices[subdev++];
-			ret = subdev_8255_init(dev, s, NULL,
-					       d->addr + j * I8255_SIZE);
+			ret = subdev_8255_io_init(dev, s,
+						  d->addr + j * I8255_SIZE);
 			if (ret)
 				return ret;
 		}
@@ -664,11 +664,11 @@ static int pci_dio_auto_attach(struct comedi_device *dev,
 	if (board->timer_regbase) {
 		s = &dev->subdevices[subdev++];
 
-		dev->pacer = comedi_8254_init(dev->iobase +
-					      board->timer_regbase,
-					      0, I8254_IO8, 0);
-		if (!dev->pacer)
-			return -ENOMEM;
+		dev->pacer =
+		    comedi_8254_io_alloc(dev->iobase + board->timer_regbase,
+					 0, I8254_IO8, 0);
+		if (IS_ERR(dev->pacer))
+			return PTR_ERR(dev->pacer);
 
 		comedi_8254_subdevice_init(s, dev->pacer);
 	}
@@ -768,21 +768,21 @@ static int adv_pci_dio_pci_probe(struct pci_dev *dev,
 }
 
 static const struct pci_device_id adv_pci_dio_pci_table[] = {
-	{ PCI_VDEVICE(ADVANTECH, 0x1730), TYPE_PCI1730 },
-	{ PCI_VDEVICE(ADVANTECH, 0x1733), TYPE_PCI1733 },
-	{ PCI_VDEVICE(ADVANTECH, 0x1734), TYPE_PCI1734 },
-	{ PCI_VDEVICE(ADVANTECH, 0x1735), TYPE_PCI1735 },
-	{ PCI_VDEVICE(ADVANTECH, 0x1736), TYPE_PCI1736 },
-	{ PCI_VDEVICE(ADVANTECH, 0x1739), TYPE_PCI1739 },
-	{ PCI_VDEVICE(ADVANTECH, 0x1750), TYPE_PCI1750 },
-	{ PCI_VDEVICE(ADVANTECH, 0x1751), TYPE_PCI1751 },
-	{ PCI_VDEVICE(ADVANTECH, 0x1752), TYPE_PCI1752 },
-	{ PCI_VDEVICE(ADVANTECH, 0x1753), TYPE_PCI1753 },
-	{ PCI_VDEVICE(ADVANTECH, 0x1754), TYPE_PCI1754 },
-	{ PCI_VDEVICE(ADVANTECH, 0x1756), TYPE_PCI1756 },
-	{ PCI_VDEVICE(ADVANTECH, 0x1761), TYPE_PCI1761 },
-	{ PCI_VDEVICE(ADVANTECH, 0x1762), TYPE_PCI1762 },
-	{ 0 }
+	{ PCI_VDEVICE(ADVANTECH, 0x1730), .driver_data = TYPE_PCI1730 },
+	{ PCI_VDEVICE(ADVANTECH, 0x1733), .driver_data = TYPE_PCI1733 },
+	{ PCI_VDEVICE(ADVANTECH, 0x1734), .driver_data = TYPE_PCI1734 },
+	{ PCI_VDEVICE(ADVANTECH, 0x1735), .driver_data = TYPE_PCI1735 },
+	{ PCI_VDEVICE(ADVANTECH, 0x1736), .driver_data = TYPE_PCI1736 },
+	{ PCI_VDEVICE(ADVANTECH, 0x1739), .driver_data = TYPE_PCI1739 },
+	{ PCI_VDEVICE(ADVANTECH, 0x1750), .driver_data = TYPE_PCI1750 },
+	{ PCI_VDEVICE(ADVANTECH, 0x1751), .driver_data = TYPE_PCI1751 },
+	{ PCI_VDEVICE(ADVANTECH, 0x1752), .driver_data = TYPE_PCI1752 },
+	{ PCI_VDEVICE(ADVANTECH, 0x1753), .driver_data = TYPE_PCI1753 },
+	{ PCI_VDEVICE(ADVANTECH, 0x1754), .driver_data = TYPE_PCI1754 },
+	{ PCI_VDEVICE(ADVANTECH, 0x1756), .driver_data = TYPE_PCI1756 },
+	{ PCI_VDEVICE(ADVANTECH, 0x1761), .driver_data = TYPE_PCI1761 },
+	{ PCI_VDEVICE(ADVANTECH, 0x1762), .driver_data = TYPE_PCI1762 },
+	{ }
 };
 MODULE_DEVICE_TABLE(pci, adv_pci_dio_pci_table);
 

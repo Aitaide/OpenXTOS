@@ -630,7 +630,7 @@ spi_avmm_bridge_ctx_gen(struct spi_device *spi)
 			return ERR_PTR(-EINVAL);
 	}
 
-	br = kzalloc(sizeof(*br), GFP_KERNEL);
+	br = kzalloc_obj(*br);
 	if (!br)
 		return ERR_PTR(-ENOMEM);
 
@@ -710,4 +710,5 @@ struct regmap *__devm_regmap_init_spi_avmm(struct spi_device *spi,
 }
 EXPORT_SYMBOL_GPL(__devm_regmap_init_spi_avmm);
 
+MODULE_DESCRIPTION("Register map access API - SPI AVMM support");
 MODULE_LICENSE("GPL v2");

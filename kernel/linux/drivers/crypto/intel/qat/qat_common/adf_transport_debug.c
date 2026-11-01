@@ -2,6 +2,7 @@
 /* Copyright(c) 2014 - 2020 Intel Corporation */
 #include <linux/mutex.h>
 #include <linux/slab.h>
+#include <linux/string.h>
 #include <linux/seq_file.h>
 #include "adf_accel_devices.h"
 #include "adf_transport_internal.h"
@@ -10,16 +11,21 @@
 static DEFINE_MUTEX(ring_read_lock);
 static DEFINE_MUTEX(bank_read_lock);
 
+#define ADF_RING_NUM_MSGS(ring)					\
+	(ADF_SIZE_TO_RING_SIZE_IN_BYTES(ring->ring_size) /	\
+	ADF_MSG_SIZE_TO_BYTES(ring->msg_size))
+
 static void *adf_ring_start(struct seq_file *sfile, loff_t *pos)
 {
 	struct adf_etr_ring_data *ring = sfile->private;
+	unsigned int num_msg = ADF_RING_NUM_MSGS(ring);
+	loff_t val = *pos;
 
 	mutex_lock(&ring_read_lock);
-	if (*pos == 0)
+	if (val == 0)
 		return SEQ_START_TOKEN;
 
-	if (*pos >= (ADF_SIZE_TO_RING_SIZE_IN_BYTES(ring->ring_size) /
-		     ADF_MSG_SIZE_TO_BYTES(ring->msg_size)))
+	if (val >= num_msg)
 		return NULL;
 
 	return ring->base_addr +
@@ -29,13 +35,15 @@ static void *adf_ring_start(struct seq_file *sfile, loff_t *pos)
 static void *adf_ring_next(struct seq_file *sfile, void *v, loff_t *pos)
 {
 	struct adf_etr_ring_data *ring = sfile->private;
+	unsigned int num_msg = ADF_RING_NUM_MSGS(ring);
+	loff_t val = *pos;
 
-	if (*pos >= (ADF_SIZE_TO_RING_SIZE_IN_BYTES(ring->ring_size) /
-		     ADF_MSG_SIZE_TO_BYTES(ring->msg_size)))
+	(*pos)++;
+
+	if (val >= num_msg)
 		return NULL;
 
-	return ring->base_addr +
-		(ADF_MSG_SIZE_TO_BYTES(ring->msg_size) * (*pos)++);
+	return ring->base_addr + (ADF_MSG_SIZE_TO_BYTES(ring->msg_size) * val);
 }
 
 static int adf_ring_show(struct seq_file *sfile, void *v)
@@ -90,13 +98,13 @@ DEFINE_SEQ_ATTRIBUTE(adf_ring_debug);
 int adf_ring_debugfs_add(struct adf_etr_ring_data *ring, const char *name)
 {
 	struct adf_etr_ring_debug_entry *ring_debug;
-	char entry_name[8];
+	char entry_name[16];
 
-	ring_debug = kzalloc(sizeof(*ring_debug), GFP_KERNEL);
+	ring_debug = kzalloc_obj(*ring_debug);
 	if (!ring_debug)
 		return -ENOMEM;
 
-	strscpy(ring_debug->ring_name, name, sizeof(ring_debug->ring_name));
+	strscpy(ring_debug->ring_name, name);
 	snprintf(entry_name, sizeof(entry_name), "ring_%02d",
 		 ring->ring_number);
 
@@ -192,7 +200,7 @@ int adf_bank_debugfs_add(struct adf_etr_bank_data *bank)
 {
 	struct adf_accel_dev *accel_dev = bank->accel_dev;
 	struct dentry *parent = accel_dev->transport->debug;
-	char name[8];
+	char name[16];
 
 	snprintf(name, sizeof(name), "bank_%02d", bank->bank_number);
 	bank->bank_debug_dir = debugfs_create_dir(name, parent);

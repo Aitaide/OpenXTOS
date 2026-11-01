@@ -81,7 +81,7 @@ static int altera_ps2_probe(struct platform_device *pdev)
 	struct serio *serio;
 	int error, irq;
 
-	ps2if = devm_kzalloc(&pdev->dev, sizeof(struct ps2if), GFP_KERNEL);
+	ps2if = devm_kzalloc(&pdev->dev, sizeof(*ps2if), GFP_KERNEL);
 	if (!ps2if)
 		return -ENOMEM;
 
@@ -100,7 +100,7 @@ static int altera_ps2_probe(struct platform_device *pdev)
 		return error;
 	}
 
-	serio = kzalloc(sizeof(struct serio), GFP_KERNEL);
+	serio = kzalloc_obj(*serio);
 	if (!serio)
 		return -ENOMEM;
 
@@ -125,13 +125,11 @@ static int altera_ps2_probe(struct platform_device *pdev)
 /*
  * Remove one device from this driver.
  */
-static int altera_ps2_remove(struct platform_device *pdev)
+static void altera_ps2_remove(struct platform_device *pdev)
 {
 	struct ps2if *ps2if = platform_get_drvdata(pdev);
 
 	serio_unregister_port(ps2if->io);
-
-	return 0;
 }
 
 #ifdef CONFIG_OF

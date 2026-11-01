@@ -26,6 +26,11 @@ Dynamic debug provides:
    - format string
    - class name (as known/declared by each module)
 
+NOTE: To actually get the debug-print output on the console, you may
+need to adjust the kernel ``loglevel=``, or use ``ignore_loglevel``.
+Read about these kernel parameters in
+Documentation/admin-guide/kernel-parameters.rst.
+
 Viewing Dynamic Debug Behaviour
 ===============================
 
@@ -33,12 +38,12 @@ You can view the currently configured behaviour in the *prdbg* catalog::
 
   :#> head -n7 /proc/dynamic_debug/control
   # filename:lineno [module]function flags format
-  init/main.c:1179 [main]initcall_blacklist =_ "blacklisting initcall %s\012
-  init/main.c:1218 [main]initcall_blacklisted =_ "initcall %s blacklisted\012"
-  init/main.c:1424 [main]run_init_process =_ "  with arguments:\012"
-  init/main.c:1426 [main]run_init_process =_ "    %s\012"
-  init/main.c:1427 [main]run_init_process =_ "  with environment:\012"
-  init/main.c:1429 [main]run_init_process =_ "    %s\012"
+  init/main.c:1179 [main]initcall_blacklist =_ "blacklisting initcall %s\n"
+  init/main.c:1218 [main]initcall_blacklisted =_ "initcall %s blacklisted\n"
+  init/main.c:1424 [main]run_init_process =_ "  with arguments:\n"
+  init/main.c:1426 [main]run_init_process =_ "    %s\n"
+  init/main.c:1427 [main]run_init_process =_ "  with environment:\n"
+  init/main.c:1429 [main]run_init_process =_ "    %s\n"
 
 The 3rd space-delimited column shows the current flags, preceded by
 a ``=`` for easy use with grep/cut. ``=p`` shows enabled callsites.
@@ -54,10 +59,10 @@ query/commands to the control file.  Example::
 
   :#> ddcmd '-p; module main func run* +p'
   :#> grep =p /proc/dynamic_debug/control
-  init/main.c:1424 [main]run_init_process =p "  with arguments:\012"
-  init/main.c:1426 [main]run_init_process =p "    %s\012"
-  init/main.c:1427 [main]run_init_process =p "  with environment:\012"
-  init/main.c:1429 [main]run_init_process =p "    %s\012"
+  init/main.c:1424 [main]run_init_process =p "  with arguments:\n"
+  init/main.c:1426 [main]run_init_process =p "    %s\n"
+  init/main.c:1427 [main]run_init_process =p "  with environment:\n"
+  init/main.c:1429 [main]run_init_process =p "    %s\n"
 
 Error messages go to console/syslog::
 
@@ -104,10 +109,19 @@ The match-spec's select *prdbgs* from the catalog, upon which to apply
 the flags-spec, all constraints are ANDed together.  An absent keyword
 is the same as keyword "*".
 
+Note that since the match-spec can be empty, the flags are checked 1st,
+then the pairs of keyword and value.  Flag errs will hide keyword errs::
 
-A match specification is a keyword, which selects the attribute of
-the callsite to be compared, and a value to compare against.  Possible
-keywords are:::
+  bash-5.2# ddcmd mod bar +foo
+  dyndbg: read 13 bytes from userspace
+  dyndbg: query 0: "mod bar +foo" mod:*
+  dyndbg: unknown flag 'o'
+  dyndbg: flags parse failed
+  dyndbg: processed 1 queries, with 0 matches, 1 errs
+
+So a match-spec is a keyword, which selects the attribute of the
+callsite to be compared, and a value to compare against.  Possible
+keywords are::
 
   match-spec ::= 'func' string |
 		 'file' string |
@@ -218,12 +232,13 @@ The flags are::
   f    Include the function name
   s    Include the source file name
   l    Include line number
+  d    Include call trace
 
 For ``print_hex_dump_debug()`` and ``print_hex_dump_bytes()``, only
 the ``p`` flag has meaning, other flags are ignored.
 
-Note the regexp ``^[-+=][fslmpt_]+$`` matches a flags specification.
-To clear all flags at once, use ``=_`` or ``-fslmpt``.
+Note the regexp ``^[-+=][fslmptd_]+$`` matches a flags specification.
+To clear all flags at once, use ``=_`` or ``-fslmptd``.
 
 
 Debug messages during Boot Process
@@ -259,7 +274,7 @@ Debug Messages at Module Initialization Time
 
 When ``modprobe foo`` is called, modprobe scans ``/proc/cmdline`` for
 ``foo.params``, strips ``foo.``, and passes them to the kernel along with
-params given in modprobe args or ``/etc/modprob.d/*.conf`` files,
+params given in modprobe args or ``/etc/modprobe.d/*.conf`` files,
 in the following order:
 
 1. parameters given via ``/etc/modprobe.d/*.conf``::
@@ -321,13 +336,13 @@ Examples
   :#> ddcmd 'format "nfsd: READ" +p'
 
   // enable messages in files of which the paths include string "usb"
-  :#> ddcmd 'file *usb* +p' > /proc/dynamic_debug/control
+  :#> ddcmd 'file *usb* +p'
 
   // enable all messages
-  :#> ddcmd '+p' > /proc/dynamic_debug/control
+  :#> ddcmd '+p'
 
   // add module, function to all enabled messages
-  :#> ddcmd '+mf' > /proc/dynamic_debug/control
+  :#> ddcmd '+mf'
 
   // boot-args example, with newlines and comments for readability
   Kernel command line: ...

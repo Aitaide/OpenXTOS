@@ -17,11 +17,8 @@ properties:
   compatible:
     const: innolux,ej030na
 
-  backlight: true
-  port: true
-  power-supply: true
-  reg: true
-  reset-gpios: true
+  reg:
+    maxItems: 1
 
 required:
   - compatible

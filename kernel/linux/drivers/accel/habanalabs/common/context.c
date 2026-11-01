@@ -102,7 +102,7 @@ static void hl_ctx_fini(struct hl_ctx *ctx)
 	kfree(ctx->cs_pending);
 
 	if (ctx->asid != HL_KERNEL_ASID_ID) {
-		dev_dbg(hdev->dev, "closing user context %d\n", ctx->asid);
+		dev_dbg(hdev->dev, "closing user context, asid=%u\n", ctx->asid);
 
 		/* The engines are stopped as there is no executing CS, but the
 		 * Coresight might be still working by accessing addresses
@@ -119,6 +119,7 @@ static void hl_ctx_fini(struct hl_ctx *ctx)
 		hl_vm_ctx_fini(ctx);
 		hl_asid_free(hdev, ctx->asid);
 		hl_encaps_sig_mgr_fini(hdev, &ctx->sig_mgr);
+		mutex_destroy(&ctx->ts_reg_lock);
 	} else {
 		dev_dbg(hdev->dev, "closing kernel context\n");
 		hdev->asic_funcs->ctx_fini(ctx);
@@ -154,7 +155,7 @@ int hl_ctx_create(struct hl_device *hdev, struct hl_fpriv *hpriv)
 	struct hl_ctx *ctx;
 	int rc;
 
-	ctx = kzalloc(sizeof(*ctx), GFP_KERNEL);
+	ctx = kzalloc_obj(*ctx);
 	if (!ctx) {
 		rc = -ENOMEM;
 		goto out_err;
@@ -208,9 +209,8 @@ int hl_ctx_init(struct hl_device *hdev, struct hl_ctx *ctx, bool is_kernel_ctx)
 	spin_lock_init(&ctx->cs_lock);
 	atomic_set(&ctx->thread_ctx_switch_token, 1);
 	ctx->thread_ctx_switch_wait_token = 0;
-	ctx->cs_pending = kcalloc(hdev->asic_prop.max_pending_cs,
-				sizeof(struct hl_fence *),
-				GFP_KERNEL);
+	ctx->cs_pending = kzalloc_objs(struct hl_fence *,
+				       hdev->asic_prop.max_pending_cs);
 	if (!ctx->cs_pending)
 		return -ENOMEM;
 
@@ -267,7 +267,10 @@ int hl_ctx_init(struct hl_device *hdev, struct hl_ctx *ctx, bool is_kernel_ctx)
 
 		hl_encaps_sig_mgr_init(&ctx->sig_mgr);
 
-		dev_dbg(hdev->dev, "create user context %d\n", ctx->asid);
+		mutex_init(&ctx->ts_reg_lock);
+
+		dev_dbg(hdev->dev, "create user context, comm=\"%s\", asid=%u\n",
+			current->comm, ctx->asid);
 	}
 
 	return 0;

@@ -10,11 +10,8 @@
 #include <linux/errno.h>
 #include <linux/slab.h>
 #include <linux/tty.h>
-#include <linux/tty_driver.h>
-#include <linux/tty_flip.h>
 #include <linux/module.h>
 #include <linux/spinlock.h>
-#include <linux/uaccess.h>
 #include <linux/usb.h>
 #include <linux/usb/serial.h>
 
@@ -496,7 +493,6 @@ MODULE_DEVICE_TABLE(usb, ipaq_id_table);
 /* All of the device info needed for the Compaq iPAQ */
 static struct usb_serial_driver ipaq_device = {
 	.driver = {
-		.owner =	THIS_MODULE,
 		.name =		"ipaq",
 	},
 	.description =		"PocketPC PDA",

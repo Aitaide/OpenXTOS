@@ -229,6 +229,10 @@ static int prestera_flower_parse(struct prestera_flow_block *block,
 
 		flow_rule_match_control(f_rule, &match);
 		addr_type = match.key->addr_type;
+
+		if (flow_rule_has_control_flags(match.mask->flags,
+						f->common.extack))
+			return -EOPNOTSUPP;
 	}
 
 	if (flow_rule_match_key(f_rule, FLOW_DISSECTOR_KEY_BASIC)) {
@@ -491,7 +495,7 @@ int prestera_flower_tmplt_create(struct prestera_flow_block *block,
 	if (err)
 		return err;
 
-	template = kmalloc(sizeof(*template), GFP_KERNEL);
+	template = kmalloc_obj(*template);
 	if (!template) {
 		err = -ENOMEM;
 		goto err_malloc;

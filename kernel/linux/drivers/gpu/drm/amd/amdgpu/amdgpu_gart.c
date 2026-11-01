@@ -34,6 +34,7 @@
 #include <asm/set_memory.h>
 #endif
 #include "amdgpu.h"
+#include "amdgpu_reset.h"
 #include <drm/drm_drv.h>
 #include <drm/ttm/ttm_tt.h>
 
@@ -77,8 +78,9 @@ static int amdgpu_gart_dummy_page_init(struct amdgpu_device *adev)
 
 	if (adev->dummy_page_addr)
 		return 0;
-	adev->dummy_page_addr = dma_map_page(&adev->pdev->dev, dummy_page, 0,
-					     PAGE_SIZE, DMA_BIDIRECTIONAL);
+	adev->dummy_page_addr = dma_map_page_attrs(&adev->pdev->dev, dummy_page, 0,
+							PAGE_SIZE, DMA_BIDIRECTIONAL,
+							DMA_ATTR_SKIP_CPU_SYNC);
 	if (dma_mapping_error(&adev->pdev->dev, adev->dummy_page_addr)) {
 		dev_err(&adev->pdev->dev, "Failed to DMA MAP the dummy page\n");
 		adev->dummy_page_addr = 0;
@@ -98,8 +100,9 @@ void amdgpu_gart_dummy_page_fini(struct amdgpu_device *adev)
 {
 	if (!adev->dummy_page_addr)
 		return;
-	dma_unmap_page(&adev->pdev->dev, adev->dummy_page_addr, PAGE_SIZE,
-		       DMA_BIDIRECTIONAL);
+	dma_unmap_page_attrs(&adev->pdev->dev, adev->dummy_page_addr, PAGE_SIZE,
+				DMA_BIDIRECTIONAL,
+				DMA_ATTR_SKIP_CPU_SYNC);
 	adev->dummy_page_addr = 0;
 }
 
@@ -121,6 +124,7 @@ int amdgpu_gart_table_ram_alloc(struct amdgpu_device *adev)
 	struct amdgpu_bo_param bp;
 	dma_addr_t dma_addr;
 	struct page *p;
+	unsigned long x;
 	int ret;
 
 	if (adev->gart.bo != NULL)
@@ -129,6 +133,10 @@ int amdgpu_gart_table_ram_alloc(struct amdgpu_device *adev)
 	p = alloc_pages(gfp_flags, order);
 	if (!p)
 		return -ENOMEM;
+
+	/* assign pages to this device */
+	for (x = 0; x < (1UL << order); x++)
+		p[x].mapping = adev->mman.bdev.dev_mapping;
 
 	/* If the hardware does not support UTCL2 snooping of the CPU caches
 	 * then set_memory_wc() could be used as a workaround to mark the pages
@@ -145,7 +153,7 @@ int amdgpu_gart_table_ram_alloc(struct amdgpu_device *adev)
 
 	dev_info(adev->dev, "%s dma_addr:%pad\n", __func__, &dma_addr);
 	/* Create SG table */
-	sg = kmalloc(sizeof(*sg), GFP_KERNEL);
+	sg = kmalloc_obj(*sg);
 	if (!sg) {
 		ret = -ENOMEM;
 		goto error;
@@ -223,6 +231,7 @@ void amdgpu_gart_table_ram_free(struct amdgpu_device *adev)
 	unsigned int order = get_order(adev->gart.table_size);
 	struct sg_table *sg = adev->gart.bo->tbo.sg;
 	struct page *p;
+	unsigned long x;
 	int ret;
 
 	ret = amdgpu_bo_reserve(adev->gart.bo, false);
@@ -234,6 +243,8 @@ void amdgpu_gart_table_ram_free(struct amdgpu_device *adev)
 	sg_free_table(sg);
 	kfree(sg);
 	p = virt_to_page(adev->gart.ptr);
+	for (x = 0; x < (1UL << order); x++)
+		p[x].mapping = NULL;
 	__free_pages(p, order);
 
 	adev->gart.ptr = NULL;
@@ -251,12 +262,19 @@ void amdgpu_gart_table_ram_free(struct amdgpu_device *adev)
  */
 int amdgpu_gart_table_vram_alloc(struct amdgpu_device *adev)
 {
+	int r;
+
 	if (adev->gart.bo != NULL)
 		return 0;
 
-	return amdgpu_bo_create_kernel(adev,  adev->gart.table_size, PAGE_SIZE,
-				       AMDGPU_GEM_DOMAIN_VRAM, &adev->gart.bo,
-				       NULL, (void *)&adev->gart.ptr);
+	r = amdgpu_bo_create_kernel(adev,  adev->gart.table_size, PAGE_SIZE,
+				    AMDGPU_GEM_DOMAIN_VRAM, &adev->gart.bo,
+				    NULL, (void *)&adev->gart.ptr);
+	if (r)
+		return r;
+
+	memset_io(adev->gart.ptr, adev->gart.gart_pte_flags, adev->gart.table_size);
+	return 0;
 }
 
 /**
@@ -291,7 +309,6 @@ void amdgpu_gart_unbind(struct amdgpu_device *adev, uint64_t offset,
 			int pages)
 {
 	unsigned t;
-	unsigned p;
 	int i, j;
 	u64 page_base;
 	/* Starting from VEGA10, system bit must be 0 to mean invalid. */
@@ -305,8 +322,7 @@ void amdgpu_gart_unbind(struct amdgpu_device *adev, uint64_t offset,
 		return;
 
 	t = offset / AMDGPU_GPU_PAGE_SIZE;
-	p = t / AMDGPU_GPU_PAGES_IN_CPU_PAGE;
-	for (i = 0; i < pages; i++, p++) {
+	for (i = 0; i < pages; i++) {
 		page_base = adev->dummy_page_addr;
 		if (!adev->gart.ptr)
 			continue;
@@ -317,10 +333,7 @@ void amdgpu_gart_unbind(struct amdgpu_device *adev, uint64_t offset,
 			page_base += AMDGPU_GPU_PAGE_SIZE;
 		}
 	}
-	mb();
-	amdgpu_device_flush_hdp(adev, NULL);
-	for_each_set_bit(i, adev->vmhubs_mask, AMDGPU_MAX_VMHUBS)
-		amdgpu_gmc_flush_gpu_tlb(adev, 0, i, 0);
+	amdgpu_gart_invalidate_tlb(adev);
 
 	drm_dev_exit(idx);
 }
@@ -355,6 +368,90 @@ void amdgpu_gart_map(struct amdgpu_device *adev, uint64_t offset,
 		page_base = dma_addr[i];
 		for (j = 0; j < AMDGPU_GPU_PAGES_IN_CPU_PAGE; j++, t++) {
 			amdgpu_gmc_set_pte_pde(adev, dst, t, page_base, flags);
+			page_base += AMDGPU_GPU_PAGE_SIZE;
+		}
+	}
+	drm_dev_exit(idx);
+}
+
+/**
+ * amdgpu_gart_map_vram_range - map VRAM pages into the GART page table
+ *
+ * @adev: amdgpu_device pointer
+ * @pa: physical address of the first page to be mapped
+ * @start_page: first page to map in the GART aperture
+ * @num_pages: number of pages to be mapped
+ * @flags: page table entry flags
+ * @dst: valid CPU address of GART table, cannot be null
+ *
+ * Binds a BO that is allocated in VRAM to the GART page table
+ * (all ASICs).
+ *
+ * Useful when a kernel BO is located in VRAM but
+ * needs to be accessed from the GART address space.
+ */
+void amdgpu_gart_map_vram_range(struct amdgpu_device *adev, uint64_t pa,
+				uint64_t start_page, uint64_t num_pages,
+				uint64_t flags, void *dst)
+{
+	u32 i, j, t, idx;
+	u64 page_base;
+
+	/* The SYSTEM flag indicates the pages aren't in VRAM. */
+	WARN_ON_ONCE(flags & AMDGPU_PTE_SYSTEM);
+
+	if (!drm_dev_enter(adev_to_drm(adev), &idx))
+		return;
+
+	page_base = pa;
+	for (i = 0, t = 0; i < num_pages; i++) {
+		for (j = 0; j < AMDGPU_GPU_PAGES_IN_CPU_PAGE; j++, t++) {
+			amdgpu_gmc_set_pte_pde(adev, dst, start_page + t, page_base, flags);
+			page_base += AMDGPU_GPU_PAGE_SIZE;
+		}
+	}
+
+	drm_dev_exit(idx);
+}
+
+/**
+ * amdgpu_gart_map_gfx9_mqd - map mqd and ctrl_stack dma_addresses into GART entries
+ *
+ * @adev: amdgpu_device pointer
+ * @offset: offset into the GPU's gart aperture
+ * @pages: number of pages to bind
+ * @dma_addr: DMA addresses of pages
+ * @flags: page table entry flags
+ *
+ * Map the MQD and control stack addresses into GART entries with the correct
+ * memory types on gfxv9. The MQD occupies the first 4KB and is followed by
+ * the control stack. The MQD uses UC (uncached) memory, while the control stack
+ * uses NC (non-coherent) memory.
+ */
+void amdgpu_gart_map_gfx9_mqd(struct amdgpu_device *adev, uint64_t offset,
+			int pages, dma_addr_t *dma_addr, uint64_t flags)
+{
+	uint64_t page_base;
+	unsigned int i, j, t;
+	int idx;
+	uint64_t ctrl_flags = AMDGPU_PTE_MTYPE_VG10(flags, AMDGPU_MTYPE_NC);
+	void *dst;
+
+	if (!adev->gart.ptr)
+		return;
+
+	if (!drm_dev_enter(adev_to_drm(adev), &idx))
+		return;
+
+	t = offset / AMDGPU_GPU_PAGE_SIZE;
+	dst = adev->gart.ptr;
+	for (i = 0; i < pages; i++) {
+		page_base = dma_addr[i];
+		for (j = 0; j < AMDGPU_GPU_PAGES_IN_CPU_PAGE; j++, t++) {
+			if ((i == 0) && (j == 0))
+				amdgpu_gmc_set_pte_pde(adev, dst, t, page_base, flags);
+			else
+				amdgpu_gmc_set_pte_pde(adev, dst, t, page_base, ctrl_flags);
 			page_base += AMDGPU_GPU_PAGE_SIZE;
 		}
 	}
@@ -400,7 +497,10 @@ void amdgpu_gart_invalidate_tlb(struct amdgpu_device *adev)
 		return;
 
 	mb();
-	amdgpu_device_flush_hdp(adev, NULL);
+	if (down_read_trylock(&adev->reset_domain->sem)) {
+		amdgpu_device_flush_hdp(adev, NULL);
+		up_read(&adev->reset_domain->sem);
+	}
 	for_each_set_bit(i, adev->vmhubs_mask, AMDGPU_MAX_VMHUBS)
 		amdgpu_gmc_flush_gpu_tlb(adev, 0, i, 0);
 }
@@ -431,7 +531,7 @@ int amdgpu_gart_init(struct amdgpu_device *adev)
 	/* Compute table size */
 	adev->gart.num_cpu_pages = adev->gmc.gart_size / PAGE_SIZE;
 	adev->gart.num_gpu_pages = adev->gmc.gart_size / AMDGPU_GPU_PAGE_SIZE;
-	DRM_INFO("GART: num cpu pages %u, num gpu pages %u\n",
+	drm_info(adev_to_drm(adev), "GART: num cpu pages %u, num gpu pages %u\n",
 		 adev->gart.num_cpu_pages, adev->gart.num_gpu_pages);
 
 	return 0;

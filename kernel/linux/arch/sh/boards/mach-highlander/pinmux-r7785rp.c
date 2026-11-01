@@ -3,8 +3,9 @@
  * Copyright (C) 2008 Paul Mundt
  */
 #include <linux/init.h>
-#include <linux/gpio.h>
+#include <linux/gpio/legacy.h>
 #include <cpu/sh7785.h>
+#include <mach/highlander.h>
 
 void __init highlander_plat_pinmux_setup(void)
 {

@@ -27,19 +27,32 @@
 #define _CRYPTO_ECC_H
 
 #include <crypto/ecc_curve.h>
-#include <asm/unaligned.h>
+#include <linux/unaligned.h>
 
 /* One digit is u64 qword. */
 #define ECC_CURVE_NIST_P192_DIGITS  3
 #define ECC_CURVE_NIST_P256_DIGITS  4
 #define ECC_CURVE_NIST_P384_DIGITS  6
-#define ECC_MAX_DIGITS              (512 / 64) /* due to ecrdsa */
+#define ECC_CURVE_NIST_P521_DIGITS  9
+#define ECC_MAX_DIGITS              DIV_ROUND_UP(521, 64) /* NIST P521 */
 
 #define ECC_DIGITS_TO_BYTES_SHIFT 3
 
 #define ECC_MAX_BYTES (ECC_MAX_DIGITS << ECC_DIGITS_TO_BYTES_SHIFT)
 
 #define ECC_POINT_INIT(x, y, ndigits)	(struct ecc_point) { x, y, ndigits }
+
+/*
+ * The integers r and s making up the signature are expected to be
+ * formatted as two consecutive u64 arrays of size ECC_MAX_BYTES.
+ * The bytes within each u64 digit are in native endianness,
+ * but the order of the u64 digits themselves is little endian.
+ * This format allows direct use by internal vli_*() functions.
+ */
+struct ecdsa_raw_sig {
+	u64 r[ECC_MAX_DIGITS];
+	u64 s[ECC_MAX_DIGITS];
+};
 
 /**
  * ecc_swap_digits() - Copy ndigits from big endian array to native array
@@ -57,6 +70,19 @@ static inline void ecc_swap_digits(const void *in, u64 *out, unsigned int ndigit
 }
 
 /**
+ * ecc_digits_from_bytes() - Create ndigits-sized digits array from byte array
+ * @in:       Input byte array
+ * @nbytes:   Size of input byte array
+ * @out:      Output digits array
+ * @ndigits:  Number of digits to create from byte array
+ *
+ * The first byte in the input byte array is expected to hold the most
+ * significant bits of the large integer.
+ */
+void ecc_digits_from_bytes(const u8 *in, unsigned int nbytes,
+			   u64 *out, unsigned int ndigits);
+
+/**
  * ecc_is_key_valid() - Validate a given ECDH private key
  *
  * @curve_id:		id representing the curve to use
@@ -64,7 +90,7 @@ static inline void ecc_swap_digits(const void *in, u64 *out, unsigned int ndigit
  * @private_key:	private key to be used for the given curve
  * @private_key_len:	private key length
  *
- * Returns 0 if the key is acceptable, a negative value otherwise
+ * Returns: 0 if the key is acceptable, a negative value otherwise
  */
 int ecc_is_key_valid(unsigned int curve_id, unsigned int ndigits,
 		     const u64 *private_key, unsigned int private_key_len);
@@ -78,10 +104,11 @@ int ecc_is_key_valid(unsigned int curve_id, unsigned int ndigits,
  * @ndigits:		curve number of digits
  * @private_key:	buffer for storing the generated private key
  *
- * Returns 0 if the private key was generated successfully, a negative value
+ * Returns: 0 if the private key was generated successfully, a negative value
  * if an error occurred.
  */
-int ecc_gen_privkey(unsigned int curve_id, unsigned int ndigits, u64 *privkey);
+int ecc_gen_privkey(unsigned int curve_id, unsigned int ndigits,
+		    u64 *private_key);
 
 /**
  * ecc_make_pub_key() - Compute an ECC public key
@@ -91,7 +118,7 @@ int ecc_gen_privkey(unsigned int curve_id, unsigned int ndigits, u64 *privkey);
  * @private_key:	pregenerated private key for the given curve
  * @public_key:		buffer for storing the generated public key
  *
- * Returns 0 if the public key was generated successfully, a negative value
+ * Returns: 0 if the public key was generated successfully, a negative value
  * if an error occurred.
  */
 int ecc_make_pub_key(const unsigned int curve_id, unsigned int ndigits,
@@ -109,7 +136,7 @@ int ecc_make_pub_key(const unsigned int curve_id, unsigned int ndigits,
  * Note: It is recommended that you hash the result of crypto_ecdh_shared_secret
  * before using it for symmetric encryption or HMAC.
  *
- * Returns 0 if the shared secret was generated successfully, a negative value
+ * Returns: 0 if the shared secret was generated successfully, a negative value
  * if an error occurred.
  */
 int crypto_ecdh_shared_secret(unsigned int curve_id, unsigned int ndigits,
@@ -122,7 +149,7 @@ int crypto_ecdh_shared_secret(unsigned int curve_id, unsigned int ndigits,
  * @curve:		elliptic curve domain parameters
  * @pk:			public key as a point
  *
- * Valdiate public key according to SP800-56A section 5.6.2.3.4 ECC Partial
+ * Validate public key according to SP800-56A section 5.6.2.3.4 ECC Partial
  * Public-Key Validation Routine.
  *
  * Note: There is no check that the public key is in the correct elliptic curve
@@ -139,7 +166,7 @@ int ecc_is_pubkey_valid_partial(const struct ecc_curve *curve,
  * @curve:		elliptic curve domain parameters
  * @pk:			public key as a point
  *
- * Valdiate public key according to SP800-56A section 5.6.2.3.3 ECC Full
+ * Validate public key according to SP800-56A section 5.6.2.3.3 ECC Full
  * Public-Key Validation Routine.
  *
  * Return: 0 if validation is successful, -EINVAL if validation is failed.
@@ -152,6 +179,8 @@ int ecc_is_pubkey_valid_full(const struct ecc_curve *curve,
  *
  * @vli:		vli to check.
  * @ndigits:		length of the @vli
+ *
+ * Returns: %true if vli == 0, %false otherwise.
  */
 bool vli_is_zero(const u64 *vli, unsigned int ndigits);
 
@@ -162,7 +191,7 @@ bool vli_is_zero(const u64 *vli, unsigned int ndigits);
  * @right:		vli
  * @ndigits:		length of both vlis
  *
- * Returns sign of @left - @right, i.e. -1 if @left < @right,
+ * Returns: sign of @left - @right, i.e. -1 if @left < @right,
  * 0 if @left == @right, 1 if @left > @right.
  */
 int vli_cmp(const u64 *left, const u64 *right, unsigned int ndigits);
@@ -172,7 +201,7 @@ int vli_cmp(const u64 *left, const u64 *right, unsigned int ndigits);
  *
  * @result:		where to write result
  * @left:		vli
- * @right		vli
+ * @right:		vli
  * @ndigits:		length of all vlis
  *
  * Note: can modify in-place.
@@ -236,7 +265,7 @@ void vli_mod_mult_slow(u64 *result, const u64 *left, const u64 *right,
 unsigned int vli_num_bits(const u64 *vli, unsigned int ndigits);
 
 /**
- * ecc_aloc_point() - Allocate ECC point.
+ * ecc_alloc_point() - Allocate ECC point.
  *
  * @ndigits:		Length of vlis in u64 qwords.
  *
@@ -254,7 +283,7 @@ void ecc_free_point(struct ecc_point *p);
 /**
  * ecc_point_is_zero() - Check if point is zero.
  *
- * @p:			Point to check for zero.
+ * @point:		Point to check for zero.
  *
  * Return: true if point is the point at infinity, false otherwise.
  */
@@ -278,4 +307,6 @@ void ecc_point_mult_shamir(const struct ecc_point *result,
 			   const u64 *y, const struct ecc_point *q,
 			   const struct ecc_curve *curve);
 
+extern struct crypto_template ecdsa_x962_tmpl;
+extern struct crypto_template ecdsa_p1363_tmpl;
 #endif

@@ -10,12 +10,10 @@
 #include <linux/kernel.h>
 #include <linux/tty.h>
 #include <linux/slab.h>
-#include <linux/tty_driver.h>
 #include <linux/tty_flip.h>
 #include <linux/module.h>
 #include <linux/usb.h>
 #include <linux/usb/serial.h>
-#include <linux/uaccess.h>
 
 static const struct usb_device_id id_table[] = {
 	{ USB_DEVICE(0x05e0, 0x0600) },
@@ -149,7 +147,7 @@ static int symbol_port_probe(struct usb_serial_port *port)
 {
 	struct symbol_private *priv;
 
-	priv = kzalloc(sizeof(*priv), GFP_KERNEL);
+	priv = kzalloc_obj(*priv);
 	if (!priv)
 		return -ENOMEM;
 
@@ -169,7 +167,6 @@ static void symbol_port_remove(struct usb_serial_port *port)
 
 static struct usb_serial_driver symbol_device = {
 	.driver = {
-		.owner =	THIS_MODULE,
 		.name =		"symbol",
 	},
 	.id_table =		id_table,
@@ -190,4 +187,5 @@ static struct usb_serial_driver * const serial_drivers[] = {
 
 module_usb_serial_driver(serial_drivers, id_table);
 
+MODULE_DESCRIPTION("Symbol USB barcode to serial driver");
 MODULE_LICENSE("GPL v2");

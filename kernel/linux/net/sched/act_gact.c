@@ -89,6 +89,11 @@ static int tcf_gact_init(struct net *net, struct nlattr *nla,
 		p_parm = nla_data(tb[TCA_GACT_PROB]);
 		if (p_parm->ptype >= MAX_RAND)
 			return -EINVAL;
+		if (!tcf_action_valid(p_parm->paction)) {
+			NL_SET_ERR_MSG(extack,
+				       "invalid fallback control action");
+			return -EINVAL;
+		}
 		if (TC_ACT_EXT_CMP(p_parm->paction, TC_ACT_GOTO_CHAIN)) {
 			NL_SET_ERR_MSG(extack,
 				       "goto chain not allowed on fallback");
@@ -108,7 +113,7 @@ static int tcf_gact_init(struct net *net, struct nlattr *nla,
 		ret = ACT_P_CREATED;
 	} else if (err > 0) {
 		if (bind)/* dont override defaults */
-			return 0;
+			return ACT_P_BOUND;
 		if (!(flags & TCA_ACT_FLAGS_REPLACE)) {
 			tcf_idr_release(*a, bind);
 			return -EEXIST;
@@ -296,6 +301,7 @@ static struct tc_action_ops act_gact_ops = {
 	.offload_act_setup =	tcf_gact_offload_act_setup,
 	.size		=	sizeof(struct tcf_gact),
 };
+MODULE_ALIAS_NET_ACT("gact");
 
 static __net_init int gact_init_net(struct net *net)
 {

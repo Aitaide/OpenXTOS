@@ -160,6 +160,18 @@ struct nfp_tun_mac_addr_offload {
 	u8 addr[ETH_ALEN];
 };
 
+/**
+ * struct nfp_neigh_update_work - update neighbour information to nfp
+ * @work:	Work queue for writing neigh to the nfp
+ * @n:		neighbour entry
+ * @app:	Back pointer to app
+ */
+struct nfp_neigh_update_work {
+	struct work_struct work;
+	struct neighbour *n;
+	struct nfp_app *app;
+};
+
 enum nfp_flower_mac_offload_cmd {
 	NFP_TUNNEL_MAC_OFFLOAD_ADD =		0,
 	NFP_TUNNEL_MAC_OFFLOAD_DEL =		1,
@@ -607,38 +619,30 @@ err:
 	nfp_flower_cmsg_warn(app, "Neighbour configuration failed.\n");
 }
 
-static int
-nfp_tun_neigh_event_handler(struct notifier_block *nb, unsigned long event,
-			    void *ptr)
+static void
+nfp_tun_release_neigh_update_work(struct nfp_neigh_update_work *update_work)
 {
-	struct nfp_flower_priv *app_priv;
-	struct netevent_redirect *redir;
-	struct neighbour *n;
+	neigh_release(update_work->n);
+	kfree(update_work);
+}
+
+static void nfp_tun_neigh_update(struct work_struct *work)
+{
+	struct nfp_neigh_update_work *update_work;
 	struct nfp_app *app;
+	struct neighbour *n;
 	bool neigh_invalid;
 	int err;
 
-	switch (event) {
-	case NETEVENT_REDIRECT:
-		redir = (struct netevent_redirect *)ptr;
-		n = redir->neigh;
-		break;
-	case NETEVENT_NEIGH_UPDATE:
-		n = (struct neighbour *)ptr;
-		break;
-	default:
-		return NOTIFY_DONE;
-	}
-
-	neigh_invalid = !(n->nud_state & NUD_VALID) || n->dead;
-
-	app_priv = container_of(nb, struct nfp_flower_priv, tun.neigh_nb);
-	app = app_priv->app;
+	update_work = container_of(work, struct nfp_neigh_update_work, work);
+	app = update_work->app;
+	n = update_work->n;
 
 	if (!nfp_flower_get_port_id_from_netdev(app, n->dev))
-		return NOTIFY_DONE;
+		goto out;
 
 #if IS_ENABLED(CONFIG_INET)
+	neigh_invalid = !(n->nud_state & NUD_VALID) || n->dead;
 	if (n->tbl->family == AF_INET6) {
 #if IS_ENABLED(CONFIG_IPV6)
 		struct flowi6 flow6 = {};
@@ -646,7 +650,7 @@ nfp_tun_neigh_event_handler(struct notifier_block *nb, unsigned long event,
 		flow6.daddr = *(struct in6_addr *)n->primary_key;
 		if (!neigh_invalid) {
 			struct dst_entry *dst;
-			/* Use ipv6_dst_lookup_flow to populate flow6->saddr
+			/* Use ip6_dst_lookup_flow to populate flow6->saddr
 			 * and other fields. This information is only needed
 			 * for new entries, lookup can be skipped when an entry
 			 * gets invalidated - as only the daddr is needed for
@@ -655,13 +659,11 @@ nfp_tun_neigh_event_handler(struct notifier_block *nb, unsigned long event,
 			dst = ip6_dst_lookup_flow(dev_net(n->dev), NULL,
 						  &flow6, NULL);
 			if (IS_ERR(dst))
-				return NOTIFY_DONE;
+				goto out;
 
 			dst_release(dst);
 		}
 		nfp_tun_write_neigh(n->dev, app, &flow6, n, true, false);
-#else
-		return NOTIFY_DONE;
 #endif /* CONFIG_IPV6 */
 	} else {
 		struct flowi4 flow4 = {};
@@ -678,17 +680,71 @@ nfp_tun_neigh_event_handler(struct notifier_block *nb, unsigned long event,
 			rt = ip_route_output_key(dev_net(n->dev), &flow4);
 			err = PTR_ERR_OR_ZERO(rt);
 			if (err)
-				return NOTIFY_DONE;
+				goto out;
 
 			ip_rt_put(rt);
 		}
 		nfp_tun_write_neigh(n->dev, app, &flow4, n, false, false);
 	}
-#else
-	return NOTIFY_DONE;
 #endif /* CONFIG_INET */
+out:
+	nfp_tun_release_neigh_update_work(update_work);
+}
 
-	return NOTIFY_OK;
+static struct nfp_neigh_update_work *
+nfp_tun_alloc_neigh_update_work(struct nfp_app *app, struct neighbour *n)
+{
+	struct nfp_neigh_update_work *update_work;
+
+	update_work = kzalloc_obj(*update_work, GFP_ATOMIC);
+	if (!update_work)
+		return NULL;
+
+	INIT_WORK(&update_work->work, nfp_tun_neigh_update);
+	neigh_hold(n);
+	update_work->n = n;
+	update_work->app = app;
+
+	return update_work;
+}
+
+static int
+nfp_tun_neigh_event_handler(struct notifier_block *nb, unsigned long event,
+			    void *ptr)
+{
+	struct nfp_neigh_update_work *update_work;
+	struct nfp_flower_priv *app_priv;
+	struct netevent_redirect *redir;
+	struct neighbour *n;
+	struct nfp_app *app;
+
+	switch (event) {
+	case NETEVENT_REDIRECT:
+		redir = (struct netevent_redirect *)ptr;
+		n = redir->neigh;
+		break;
+	case NETEVENT_NEIGH_UPDATE:
+		n = (struct neighbour *)ptr;
+		break;
+	default:
+		return NOTIFY_DONE;
+	}
+#if IS_ENABLED(CONFIG_IPV6)
+	if (n->tbl != &nd_tbl && n->tbl != &arp_tbl)
+#else
+	if (n->tbl != &arp_tbl)
+#endif
+		return NOTIFY_DONE;
+
+	app_priv = container_of(nb, struct nfp_flower_priv, tun.neigh_nb);
+	app = app_priv->app;
+	update_work = nfp_tun_alloc_neigh_update_work(app, n);
+	if (!update_work)
+		return NOTIFY_DONE;
+
+	queue_work(system_highpri_wq, &update_work->work);
+
+	return NOTIFY_DONE;
 }
 
 void nfp_tunnel_request_route_v4(struct nfp_app *app, struct sk_buff *skb)
@@ -706,6 +762,7 @@ void nfp_tunnel_request_route_v4(struct nfp_app *app, struct sk_buff *skb)
 	netdev = nfp_app_dev_get(app, be32_to_cpu(payload->ingress_port), NULL);
 	if (!netdev)
 		goto fail_rcu_unlock;
+	dev_hold(netdev);
 
 	flow.daddr = payload->ipv4_addr;
 	flow.flowi4_proto = IPPROTO_UDP;
@@ -725,13 +782,16 @@ void nfp_tunnel_request_route_v4(struct nfp_app *app, struct sk_buff *skb)
 	ip_rt_put(rt);
 	if (!n)
 		goto fail_rcu_unlock;
+	rcu_read_unlock();
+
 	nfp_tun_write_neigh(n->dev, app, &flow, n, false, true);
 	neigh_release(n);
-	rcu_read_unlock();
+	dev_put(netdev);
 	return;
 
 fail_rcu_unlock:
 	rcu_read_unlock();
+	dev_put(netdev);
 	nfp_flower_cmsg_warn(app, "Requested route not found.\n");
 }
 
@@ -749,13 +809,13 @@ void nfp_tunnel_request_route_v6(struct nfp_app *app, struct sk_buff *skb)
 	netdev = nfp_app_dev_get(app, be32_to_cpu(payload->ingress_port), NULL);
 	if (!netdev)
 		goto fail_rcu_unlock;
+	dev_hold(netdev);
 
 	flow.daddr = payload->ipv6_addr;
 	flow.flowi6_proto = IPPROTO_UDP;
 
 #if IS_ENABLED(CONFIG_INET) && IS_ENABLED(CONFIG_IPV6)
-	dst = ipv6_stub->ipv6_dst_lookup_flow(dev_net(netdev), NULL, &flow,
-					      NULL);
+	dst = ip6_dst_lookup_flow(dev_net(netdev), NULL, &flow, NULL);
 	if (IS_ERR(dst))
 		goto fail_rcu_unlock;
 #else
@@ -766,14 +826,16 @@ void nfp_tunnel_request_route_v6(struct nfp_app *app, struct sk_buff *skb)
 	dst_release(dst);
 	if (!n)
 		goto fail_rcu_unlock;
+	rcu_read_unlock();
 
 	nfp_tun_write_neigh(n->dev, app, &flow, n, true, true);
 	neigh_release(n);
-	rcu_read_unlock();
+	dev_put(netdev);
 	return;
 
 fail_rcu_unlock:
 	rcu_read_unlock();
+	dev_put(netdev);
 	nfp_flower_cmsg_warn(app, "Requested IPv6 route not found.\n");
 }
 
@@ -821,7 +883,7 @@ void nfp_tunnel_add_ipv4_off(struct nfp_app *app, __be32 ipv4)
 		}
 	}
 
-	entry = kmalloc(sizeof(*entry), GFP_KERNEL);
+	entry = kmalloc_obj(*entry);
 	if (!entry) {
 		mutex_unlock(&priv->tun.ipv4_off_lock);
 		nfp_flower_cmsg_warn(app, "Mem error when offloading IP address.\n");
@@ -896,7 +958,7 @@ nfp_tunnel_add_ipv6_off(struct nfp_app *app, struct in6_addr *ipv6)
 			return entry;
 		}
 
-	entry = kmalloc(sizeof(*entry), GFP_KERNEL);
+	entry = kmalloc_obj(*entry);
 	if (!entry) {
 		mutex_unlock(&priv->tun.ipv6_off_lock);
 		nfp_flower_cmsg_warn(app, "Mem error when offloading IP address.\n");
@@ -1021,7 +1083,7 @@ nfp_tunnel_add_shared_mac(struct nfp_app *app, struct net_device *netdev,
 	u16 nfp_mac_idx = 0;
 
 	entry = nfp_tunnel_lookup_offloaded_macs(app, netdev->dev_addr);
-	if (entry && nfp_tunnel_is_mac_idx_global(entry->index)) {
+	if (entry && (nfp_tunnel_is_mac_idx_global(entry->index) || netif_is_lag_port(netdev))) {
 		if (entry->bridge_count ||
 		    !nfp_flower_is_supported_bridge(netdev)) {
 			nfp_tunnel_offloaded_macs_inc_ref_and_link(entry,
@@ -1054,7 +1116,7 @@ nfp_tunnel_add_shared_mac(struct nfp_app *app, struct net_device *netdev,
 	}
 
 	if (!entry) {
-		entry = kzalloc(sizeof(*entry), GFP_KERNEL);
+		entry = kzalloc_obj(*entry);
 		if (!entry) {
 			err = -ENOMEM;
 			goto err_free_ida;

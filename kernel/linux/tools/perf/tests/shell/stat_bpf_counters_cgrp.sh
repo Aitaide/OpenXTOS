@@ -1,4 +1,4 @@
-#!/bin/sh
+#!/bin/bash
 # perf stat --bpf-counters --for-each-cgroup test
 # SPDX-License-Identifier: GPL-2.0
 
@@ -58,13 +58,15 @@ check_system_wide_counted()
 	fi
 }
 
-check_cpu_list_counted()
+# Missing flags in evlist__clone() resulted in different output.
+# Just check the number of output lines for simple verification.
+check_evlist_expand()
 {
-	check_cpu_list_counted_output=$(perf stat -C 0,1 --bpf-counters --for-each-cgroup ${test_cgroups} -e cpu-clock -x, taskset -c 1 sleep 1  2>&1)
-	if echo ${check_cpu_list_counted_output} | grep -q -F "<not "; then
-		echo "Some CPU events are not counted"
+	normal_output=$(perf stat -a -x, true 2>&1 | wc -l)
+	expand_output=$(perf stat -a -x, --bpf-counters --for-each-cgroup / true 2>&1 | wc -l)
+	if [ "${normal_output}" != "${expand_output}" ]; then
 		if [ "${verbose}" = "1" ]; then
-			echo ${check_cpu_list_counted_output}
+			echo "Normal output has ${normal_output} lines, but it now has ${expand_output}"
 		fi
 		exit 1
 	fi
@@ -74,6 +76,6 @@ check_bpf_counter
 find_cgroups
 
 check_system_wide_counted
-check_cpu_list_counted
+check_evlist_expand
 
 exit 0

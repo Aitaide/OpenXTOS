@@ -11,7 +11,6 @@
 #include <linux/err.h>
 #include <linux/i2c.h>
 #include <linux/leds.h>
-#include <linux/mod_devicetable.h>
 #include <linux/module.h>
 #include <linux/property.h>
 #include <linux/regmap.h>
@@ -98,7 +97,7 @@ struct is31fl319x_chip {
 		struct is31fl319x_chip  *chip;
 		struct led_classdev     cdev;
 		u32                     max_microamp;
-		bool                    configured;
+		struct fwnode_handle *fwnode;
 	} leds[IS31FL319X_MAX_LEDS];
 };
 
@@ -140,7 +139,7 @@ static const struct reg_default is31fl3190_reg_defaults[] = {
 	{ IS31FL3190_PWM(2), 0x00 },
 };
 
-static struct regmap_config is31fl3190_regmap_config = {
+static const struct regmap_config is31fl3190_regmap_config = {
 	.reg_bits = 8,
 	.val_bits = 8,
 	.max_register = IS31FL3190_RESET,
@@ -178,7 +177,7 @@ static const struct reg_default is31fl3196_reg_defaults[] = {
 	{ IS31FL3196_PWM(8), 0x00 },
 };
 
-static struct regmap_config is31fl3196_regmap_config = {
+static const struct regmap_config is31fl3196_regmap_config = {
 	.reg_bits = 8,
 	.val_bits = 8,
 	.max_register = IS31FL3196_REG_CNT,
@@ -363,36 +362,22 @@ static const struct of_device_id of_is31fl319x_match[] = {
 };
 MODULE_DEVICE_TABLE(of, of_is31fl319x_match);
 
-static int is31fl319x_parse_child_fw(const struct device *dev,
-				     const struct fwnode_handle *child,
-				     struct is31fl319x_led *led,
-				     struct is31fl319x_chip *is31)
+static void is31_free_fwnode(void *data)
 {
-	struct led_classdev *cdev = &led->cdev;
-	int ret;
+	struct is31fl319x_chip *is31 = data;
+	int i;
 
-	if (fwnode_property_read_string(child, "label", &cdev->name))
-		cdev->name = fwnode_get_name(child);
+	for (i = 0; i < is31->cdef->num_leds; i++) {
+		if (is31->leds[i].fwnode)
+			fwnode_handle_put(is31->leds[i].fwnode);
 
-	ret = fwnode_property_read_string(child, "linux,default-trigger", &cdev->default_trigger);
-	if (ret < 0 && ret != -EINVAL) /* is optional */
-		return ret;
-
-	led->max_microamp = is31->cdef->current_default;
-	ret = fwnode_property_read_u32(child, "led-max-microamp", &led->max_microamp);
-	if (!ret) {
-		if (led->max_microamp < is31->cdef->current_min)
-			return -EINVAL;	/* not supported */
-		led->max_microamp = min(led->max_microamp,
-					is31->cdef->current_max);
+		is31->leds[i].fwnode = NULL;
 	}
-
-	return 0;
 }
 
 static int is31fl319x_parse_fw(struct device *dev, struct is31fl319x_chip *is31)
 {
-	struct fwnode_handle *fwnode = dev_fwnode(dev), *child;
+	struct fwnode_handle *fwnode = dev_fwnode(dev);
 	int count;
 	int ret;
 
@@ -402,9 +387,15 @@ static int is31fl319x_parse_fw(struct device *dev, struct is31fl319x_chip *is31)
 				     "Failed to get shutdown gpio\n");
 
 	is31->cdef = device_get_match_data(dev);
+	if (!is31->cdef)
+		return -ENODEV;
+
+	ret = devm_add_action_or_reset(dev, is31_free_fwnode, is31);
+	if (ret)
+		return ret;
 
 	count = 0;
-	fwnode_for_each_available_child_node(fwnode, child)
+	device_for_each_child_node_scoped(dev, child)
 		count++;
 
 	dev_dbg(dev, "probing with %d leds defined in DT\n", count);
@@ -414,35 +405,33 @@ static int is31fl319x_parse_fw(struct device *dev, struct is31fl319x_chip *is31)
 				     "Number of leds defined must be between 1 and %u\n",
 				     is31->cdef->num_leds);
 
-	fwnode_for_each_available_child_node(fwnode, child) {
+	device_for_each_child_node_scoped(dev, child) {
 		struct is31fl319x_led *led;
 		u32 reg;
 
 		ret = fwnode_property_read_u32(child, "reg", &reg);
-		if (ret) {
-			ret = dev_err_probe(dev, ret, "Failed to read led 'reg' property\n");
-			goto put_child_node;
-		}
+		if (ret)
+			return dev_err_probe(dev, ret, "Failed to read led 'reg' property\n");
 
-		if (reg < 1 || reg > is31->cdef->num_leds) {
-			ret = dev_err_probe(dev, -EINVAL, "invalid led reg %u\n", reg);
-			goto put_child_node;
-		}
+		if (reg < 1 || reg > is31->cdef->num_leds)
+			return dev_err_probe(dev, -EINVAL, "invalid led reg %u\n", reg);
 
 		led = &is31->leds[reg - 1];
 
-		if (led->configured) {
-			ret = dev_err_probe(dev, -EINVAL, "led %u is already configured\n", reg);
-			goto put_child_node;
+		if (led->fwnode)
+			return dev_err_probe(dev, -EINVAL, "led %u is already configured\n", reg);
+
+		led->max_microamp = is31->cdef->current_default;
+		ret = fwnode_property_read_u32(child, "led-max-microamp", &led->max_microamp);
+		if (!ret) {
+			if (led->max_microamp < is31->cdef->current_min)
+				return dev_err_probe(dev, -EINVAL, "invalid maximum current\n");
+
+			led->max_microamp = min(led->max_microamp,
+						is31->cdef->current_max);
 		}
 
-		ret = is31fl319x_parse_child_fw(dev, child, led, is31);
-		if (ret) {
-			ret = dev_err_probe(dev, ret, "led %u DT parsing failed\n", reg);
-			goto put_child_node;
-		}
-
-		led->configured = true;
+		led->fwnode = fwnode_handle_get(child);
 	}
 
 	is31->audio_gain_db = 0;
@@ -454,10 +443,6 @@ static int is31fl319x_parse_fw(struct device *dev, struct is31fl319x_chip *is31)
 	}
 
 	return 0;
-
-put_child_node:
-	fwnode_handle_put(child);
-	return ret;
 }
 
 static inline int is31fl3190_microamp_to_cs(struct device *dev, u32 microamp)
@@ -495,11 +480,6 @@ static inline int is31fl3196_db_to_gain(u32 dezibel)
 	return dezibel / IS31FL3196_AUDIO_GAIN_DB_STEP;
 }
 
-static void is31f1319x_mutex_destroy(void *lock)
-{
-	mutex_destroy(lock);
-}
-
 static int is31fl319x_probe(struct i2c_client *client)
 {
 	struct is31fl319x_chip *is31;
@@ -515,8 +495,7 @@ static int is31fl319x_probe(struct i2c_client *client)
 	if (!is31)
 		return -ENOMEM;
 
-	mutex_init(&is31->lock);
-	err = devm_add_action_or_reset(dev, is31f1319x_mutex_destroy, &is31->lock);
+	err = devm_mutex_init(dev, &is31->lock);
 	if (err)
 		return err;
 
@@ -549,7 +528,7 @@ static int is31fl319x_probe(struct i2c_client *client)
 	 */
 	aggregated_led_microamp = is31->cdef->current_max;
 	for (i = 0; i < is31->cdef->num_leds; i++)
-		if (is31->leds[i].configured &&
+		if (is31->leds[i].fwnode &&
 		    is31->leds[i].max_microamp < aggregated_led_microamp)
 			aggregated_led_microamp = is31->leds[i].max_microamp;
 
@@ -563,14 +542,17 @@ static int is31fl319x_probe(struct i2c_client *client)
 
 	for (i = 0; i < is31->cdef->num_leds; i++) {
 		struct is31fl319x_led *led = &is31->leds[i];
+		struct led_init_data init_data = {};
 
-		if (!led->configured)
+		if (!led->fwnode)
 			continue;
+
+		init_data.fwnode = led->fwnode;
 
 		led->chip = is31;
 		led->cdev.brightness_set_blocking = is31->cdef->brightness_set;
 
-		err = devm_led_classdev_register(&client->dev, &led->cdev);
+		err = devm_led_classdev_register_ext(&client->dev, &led->cdev, &init_data);
 		if (err < 0)
 			return err;
 	}
@@ -583,17 +565,17 @@ static int is31fl319x_probe(struct i2c_client *client)
  * even though it is not used for DeviceTree based instantiation.
  */
 static const struct i2c_device_id is31fl319x_id[] = {
-	{ "is31fl3190" },
-	{ "is31fl3191" },
-	{ "is31fl3193" },
-	{ "is31fl3196" },
-	{ "is31fl3199" },
-	{ "sn3190" },
-	{ "sn3191" },
-	{ "sn3193" },
-	{ "sn3196" },
-	{ "sn3199" },
-	{},
+	{ .name = "is31fl3190" },
+	{ .name = "is31fl3191" },
+	{ .name = "is31fl3193" },
+	{ .name = "is31fl3196" },
+	{ .name = "is31fl3199" },
+	{ .name = "sn3190" },
+	{ .name = "sn3191" },
+	{ .name = "sn3193" },
+	{ .name = "sn3196" },
+	{ .name = "sn3199" },
+	{ }
 };
 MODULE_DEVICE_TABLE(i2c, is31fl319x_id);
 

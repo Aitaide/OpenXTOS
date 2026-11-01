@@ -90,22 +90,22 @@ static int test__perf_time_to_tsc(struct test_suite *test __maybe_unused, int su
 	struct mmap *md;
 
 
-	threads = thread_map__new(-1, getpid(), UINT_MAX);
+	threads = thread_map__new_by_tid(getpid());
 	CHECK_NOT_NULL__(threads);
 
-	cpus = perf_cpu_map__new(NULL);
+	cpus = perf_cpu_map__new_online_cpus();
 	CHECK_NOT_NULL__(cpus);
 
 	evlist = evlist__new();
 	CHECK_NOT_NULL__(evlist);
 
-	perf_evlist__set_maps(&evlist->core, cpus, threads);
+	perf_evlist__set_maps(evlist__core(evlist), cpus, threads);
 
-	CHECK__(parse_event(evlist, "cycles:u"));
+	CHECK__(parse_event(evlist, "cpu-cycles:u"));
 
 	evlist__config(evlist, &opts, NULL);
 
-	/* For hybrid "cycles:u", it creates two events */
+	/* For hybrid "cpu-cycles:u", it creates two events */
 	evlist__for_each_entry(evlist, evsel) {
 		evsel->core.attr.comm = 1;
 		evsel->core.attr.disabled = 1;
@@ -121,9 +121,9 @@ static int test__perf_time_to_tsc(struct test_suite *test __maybe_unused, int su
 		goto out_err;
 	}
 
-	CHECK__(evlist__mmap(evlist, UINT_MAX));
+	CHECK__(evlist__do_mmap(evlist, UINT_MAX));
 
-	pc = evlist->mmap[0].core.base;
+	pc = evlist__mmap(evlist)[0].core.base;
 	ret = perf_read_tsc_conversion(pc, &tc);
 	if (ret) {
 		if (ret == -EOPNOTSUPP) {
@@ -145,14 +145,15 @@ static int test__perf_time_to_tsc(struct test_suite *test __maybe_unused, int su
 
 	evlist__disable(evlist);
 
-	for (i = 0; i < evlist->core.nr_mmaps; i++) {
-		md = &evlist->mmap[i];
+	for (i = 0; i < evlist__core(evlist)->nr_mmaps; i++) {
+		md = &evlist__mmap(evlist)[i];
 		if (perf_mmap__read_init(&md->core) < 0)
 			continue;
 
 		while ((event = perf_mmap__read_event(&md->core)) != NULL) {
 			struct perf_sample sample;
 
+			perf_sample__init(&sample, /*all=*/false);
 			if (event->header.type != PERF_RECORD_COMM ||
 			    (pid_t)event->comm.pid != getpid() ||
 			    (pid_t)event->comm.tid != getpid())
@@ -170,6 +171,7 @@ static int test__perf_time_to_tsc(struct test_suite *test __maybe_unused, int su
 			}
 next_event:
 			perf_mmap__consume(&md->core);
+			perf_sample__exit(&sample);
 		}
 		perf_mmap__read_done(&md->core);
 	}
@@ -199,7 +201,7 @@ next_event:
 	err = TEST_OK;
 
 out_err:
-	evlist__delete(evlist);
+	evlist__put(evlist);
 	perf_cpu_map__put(cpus);
 	perf_thread_map__put(threads);
 	return err;

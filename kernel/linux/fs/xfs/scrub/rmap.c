@@ -3,7 +3,7 @@
  * Copyright (C) 2017-2023 Oracle.  All Rights Reserved.
  * Author: Darrick J. Wong <djwong@kernel.org>
  */
-#include "xfs.h"
+#include "xfs_platform.h"
 #include "xfs_fs.h"
 #include "xfs_shared.h"
 #include "xfs_format.h"
@@ -24,6 +24,8 @@
 #include "scrub/common.h"
 #include "scrub/btree.h"
 #include "scrub/bitmap.h"
+#include "scrub/agb_bitmap.h"
+#include "scrub/repair.h"
 
 /*
  * Set us up to scrub reverse mapping btrees.
@@ -34,6 +36,14 @@ xchk_setup_ag_rmapbt(
 {
 	if (xchk_need_intent_drain(sc))
 		xchk_fsgates_enable(sc, XCHK_FSGATES_DRAIN);
+
+	if (xchk_could_repair(sc)) {
+		int		error;
+
+		error = xrep_setup_ag_rmapbt(sc);
+		if (error)
+			return error;
+	}
 
 	return xchk_setup_ag_btree(sc, false);
 }
@@ -348,7 +358,7 @@ xchk_rmapbt_rec(
 	struct xfs_rmap_irec	irec;
 
 	if (xfs_rmap_btrec_to_irec(rec, &irec) != NULL ||
-	    xfs_rmap_check_irec(bs->cur, &irec) != NULL) {
+	    xfs_rmap_check_irec(to_perag(bs->cur->bc_group), &irec) != NULL) {
 		xchk_btree_set_corrupt(bs->sc, bs->cur, 0);
 		return 0;
 	}
@@ -400,7 +410,7 @@ xchk_rmapbt_walk_ag_metadata(
 		goto out;
 
 	/* OWN_LOG: Internal log */
-	if (xfs_ag_contains_log(mp, sc->sa.pag->pag_agno)) {
+	if (xfs_ag_contains_log(mp, pag_agno(sc->sa.pag))) {
 		error = xagb_bitmap_set(&cr->log_owned,
 				XFS_FSB_TO_AGBNO(mp, mp->m_sb.sb_logstart),
 				mp->m_sb.sb_logblocks);
@@ -411,8 +421,8 @@ xchk_rmapbt_walk_ag_metadata(
 	/* OWN_AG: bnobt, cntbt, rmapbt, and AGFL */
 	cur = sc->sa.bno_cur;
 	if (!cur)
-		cur = xfs_allocbt_init_cursor(sc->mp, sc->tp, sc->sa.agf_bp,
-				sc->sa.pag, XFS_BTNUM_BNO);
+		cur = xfs_bnobt_init_cursor(sc->mp, sc->tp, sc->sa.agf_bp,
+				sc->sa.pag);
 	error = xagb_bitmap_set_btblocks(&cr->ag_owned, cur);
 	if (cur != sc->sa.bno_cur)
 		xfs_btree_del_cursor(cur, error);
@@ -421,8 +431,8 @@ xchk_rmapbt_walk_ag_metadata(
 
 	cur = sc->sa.cnt_cur;
 	if (!cur)
-		cur = xfs_allocbt_init_cursor(sc->mp, sc->tp, sc->sa.agf_bp,
-				sc->sa.pag, XFS_BTNUM_CNT);
+		cur = xfs_cntbt_init_cursor(sc->mp, sc->tp, sc->sa.agf_bp,
+				sc->sa.pag);
 	error = xagb_bitmap_set_btblocks(&cr->ag_owned, cur);
 	if (cur != sc->sa.cnt_cur)
 		xfs_btree_del_cursor(cur, error);
@@ -446,8 +456,7 @@ xchk_rmapbt_walk_ag_metadata(
 	/* OWN_INOBT: inobt, finobt */
 	cur = sc->sa.ino_cur;
 	if (!cur)
-		cur = xfs_inobt_init_cursor(sc->sa.pag, sc->tp, sc->sa.agi_bp,
-				XFS_BTNUM_INO);
+		cur = xfs_inobt_init_cursor(sc->sa.pag, sc->tp, sc->sa.agi_bp);
 	error = xagb_bitmap_set_btblocks(&cr->inobt_owned, cur);
 	if (cur != sc->sa.ino_cur)
 		xfs_btree_del_cursor(cur, error);
@@ -457,8 +466,8 @@ xchk_rmapbt_walk_ag_metadata(
 	if (xfs_has_finobt(sc->mp)) {
 		cur = sc->sa.fino_cur;
 		if (!cur)
-			cur = xfs_inobt_init_cursor(sc->sa.pag, sc->tp,
-					sc->sa.agi_bp, XFS_BTNUM_FINO);
+			cur = xfs_finobt_init_cursor(sc->sa.pag, sc->tp,
+					sc->sa.agi_bp);
 		error = xagb_bitmap_set_btblocks(&cr->inobt_owned, cur);
 		if (cur != sc->sa.fino_cur)
 			xfs_btree_del_cursor(cur, error);
@@ -484,11 +493,18 @@ out:
 	 * If there's an error, set XFAIL and disable the bitmap
 	 * cross-referencing checks, but proceed with the scrub anyway.
 	 */
-	if (error)
-		xchk_btree_xref_process_error(sc, sc->sa.rmap_cur,
-				sc->sa.rmap_cur->bc_nlevels - 1, &error);
-	else
-		cr->bitmaps_complete = true;
+	if (error) {
+		if (!xchk_btree_xref_process_error(sc, sc->sa.rmap_cur,
+				sc->sa.rmap_cur->bc_nlevels - 1, &error)) {
+			/* only set incomplete if we didn't set xfail */
+			if (error)
+				xchk_set_incomplete(sc);
+		}
+
+		return 0;
+	}
+
+	cr->bitmaps_complete = true;
 	return 0;
 }
 
@@ -539,7 +555,7 @@ xchk_rmapbt(
 	struct xchk_rmap	*cr;
 	int			error;
 
-	cr = kzalloc(sizeof(struct xchk_rmap), XCHK_GFP_FLAGS);
+	cr = kzalloc_obj(struct xchk_rmap, XCHK_GFP_FLAGS);
 	if (!cr)
 		return -ENOMEM;
 
@@ -558,7 +574,8 @@ xchk_rmapbt(
 	if (error)
 		goto out;
 
-	xchk_rmapbt_check_bitmaps(sc, cr);
+	if (cr->bitmaps_complete)
+		xchk_rmapbt_check_bitmaps(sc, cr);
 
 out:
 	xagb_bitmap_destroy(&cr->refcbt_owned);

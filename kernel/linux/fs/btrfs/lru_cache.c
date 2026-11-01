@@ -9,7 +9,7 @@
  *
  * @cache:      The cache.
  * @max_size:   Maximum size (number of entries) for the cache.
- *              Use 0 for unlimited size, it's the user's responsability to
+ *              Use 0 for unlimited size, it's the user's responsibility to
  *              trim the cache in that case.
  */
 void btrfs_lru_cache_init(struct btrfs_lru_cache *cache, unsigned int max_size)
@@ -111,7 +111,7 @@ int btrfs_lru_cache_store(struct btrfs_lru_cache *cache,
 	struct list_head *head;
 	int ret;
 
-	head = kmalloc(sizeof(*head), gfp);
+	head = kmalloc_obj(*head, gfp);
 	if (!head)
 		return -ENOMEM;
 

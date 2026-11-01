@@ -10,7 +10,6 @@
  */
 
 #include <linux/mfd/max77620.h>
-#include <linux/mod_devicetable.h>
 #include <linux/module.h>
 #include <linux/platform_device.h>
 #include <linux/property.h>
@@ -88,7 +87,6 @@ struct max77620_pingroup {
 
 struct max77620_pin_info {
 	enum max77620_pin_ppdrv drv_type;
-	int pull_config;
 };
 
 struct max77620_fps_config {
@@ -104,7 +102,6 @@ struct max77620_pctrl_info {
 	struct device *dev;
 	struct pinctrl_dev *pctl;
 	struct regmap *rmap;
-	int pins_current_opt[MAX77620_GPIO_NR];
 	const struct max77620_pin_function *functions;
 	unsigned int num_functions;
 	const struct max77620_pingroup *pin_groups;
@@ -545,6 +542,10 @@ static struct pinctrl_desc max77620_pinctrl_desc = {
 	.pctlops = &max77620_pinctrl_ops,
 	.pmxops = &max77620_pinmux_ops,
 	.confops = &max77620_pinconf_ops,
+	.pins = max77620_pins_desc,
+	.npins = ARRAY_SIZE(max77620_pins_desc),
+	.num_custom_params = ARRAY_SIZE(max77620_cfg_params),
+	.custom_params = max77620_cfg_params,
 };
 
 static int max77620_pinctrl_probe(struct platform_device *pdev)
@@ -571,11 +572,6 @@ static int max77620_pinctrl_probe(struct platform_device *pdev)
 	platform_set_drvdata(pdev, mpci);
 
 	max77620_pinctrl_desc.name = dev_name(&pdev->dev);
-	max77620_pinctrl_desc.pins = max77620_pins_desc;
-	max77620_pinctrl_desc.npins = ARRAY_SIZE(max77620_pins_desc);
-	max77620_pinctrl_desc.num_custom_params =
-				ARRAY_SIZE(max77620_cfg_params);
-	max77620_pinctrl_desc.custom_params = max77620_cfg_params;
 
 	for (i = 0; i < MAX77620_PIN_NUM; ++i) {
 		mpci->fps_config[i].active_fps_src = -1;
@@ -648,9 +644,9 @@ static const struct dev_pm_ops max77620_pinctrl_pm_ops = {
 };
 
 static const struct platform_device_id max77620_pinctrl_devtype[] = {
-	{ .name = "max77620-pinctrl", },
-	{ .name = "max20024-pinctrl", },
-	{},
+	{ .name = "max77620-pinctrl" },
+	{ .name = "max20024-pinctrl" },
+	{ }
 };
 MODULE_DEVICE_TABLE(platform, max77620_pinctrl_devtype);
 

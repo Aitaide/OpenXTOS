@@ -96,6 +96,7 @@ struct pixel_clk_params {
 /*> de-spread info, relevant only for on-the-fly tune-up pixel rate*/
 	enum dc_pixel_encoding pixel_encoding;
 	struct pixel_clk_flags flags;
+	uint32_t dio_se_pix_per_cycle;
 };
 
 /**
@@ -169,10 +170,10 @@ struct clock_source_funcs {
 			struct clock_source *,
 			struct pixel_clk_params *,
 			struct pll_settings *);
-	bool (*get_pixel_clk_frequency_100hz)(
+	bool (*get_dp_dto_frequency_100hz)(
 			const struct clock_source *clock_source,
 			unsigned int inst,
-			unsigned int *pixel_clk_khz);
+			unsigned int *pixel_clk_100hz);
 	bool (*override_dp_pix_clk)(
 			struct clock_source *clock_source,
 			unsigned int inst,

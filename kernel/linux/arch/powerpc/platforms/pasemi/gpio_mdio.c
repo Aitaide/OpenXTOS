@@ -214,7 +214,7 @@ static int gpio_mdio_probe(struct platform_device *ofdev)
 	int err;
 
 	err = -ENOMEM;
-	priv = kzalloc(sizeof(struct gpio_priv), GFP_KERNEL);
+	priv = kzalloc_obj(struct gpio_priv);
 	if (!priv)
 		goto out;
 
@@ -260,7 +260,7 @@ out:
 }
 
 
-static int gpio_mdio_remove(struct platform_device *dev)
+static void gpio_mdio_remove(struct platform_device *dev)
 {
 	struct mii_bus *bus = dev_get_drvdata(&dev->dev);
 
@@ -271,8 +271,6 @@ static int gpio_mdio_remove(struct platform_device *dev)
 	kfree(bus->priv);
 	bus->priv = NULL;
 	mdiobus_free(bus);
-
-	return 0;
 }
 
 static const struct of_device_id gpio_mdio_match[] =

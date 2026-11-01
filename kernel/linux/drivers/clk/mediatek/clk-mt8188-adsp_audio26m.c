@@ -5,7 +5,6 @@
  */
 
 #include <linux/clk-provider.h>
-#include <linux/mod_devicetable.h>
 #include <linux/platform_device.h>
 
 #include <dt-bindings/clock/mediatek,mt8188-clk.h>
@@ -40,11 +39,13 @@ MODULE_DEVICE_TABLE(of, of_match_clk_mt8188_adsp_audio26m);
 
 static struct platform_driver clk_mt8188_adsp_audio26m_drv = {
 	.probe = mtk_clk_simple_probe,
-	.remove_new = mtk_clk_simple_remove,
+	.remove = mtk_clk_simple_remove,
 	.driver = {
 		.name = "clk-mt8188-adsp_audio26m",
 		.of_match_table = of_match_clk_mt8188_adsp_audio26m,
 	},
 };
 module_platform_driver(clk_mt8188_adsp_audio26m_drv);
+
+MODULE_DESCRIPTION("MediaTek MT8188 AudioDSP clocks driver");
 MODULE_LICENSE("GPL");

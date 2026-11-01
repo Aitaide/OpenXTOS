@@ -391,11 +391,8 @@ static int of_get_omap_rng_device_details(struct omap_rng_dev *priv,
 
 		err = devm_request_irq(dev, irq, omap4_rng_irq,
 				       IRQF_TRIGGER_NONE, dev_name(dev), priv);
-		if (err) {
-			dev_err(dev, "unable to request irq %d, err = %d\n",
-				irq, err);
+		if (err)
 			return err;
-		}
 
 		/*
 		 * On OMAP4, enabling the shutdown_oflo interrupt is
@@ -455,32 +452,40 @@ static int omap_rng_probe(struct platform_device *pdev)
 	ret = pm_runtime_resume_and_get(&pdev->dev);
 	if (ret < 0) {
 		dev_err(&pdev->dev, "Failed to runtime_get device: %d\n", ret);
-		goto err_ioremap;
+		goto err_pm_disable;
 	}
 
 	priv->clk = devm_clk_get(&pdev->dev, NULL);
-	if (PTR_ERR(priv->clk) == -EPROBE_DEFER)
-		return -EPROBE_DEFER;
+	if (PTR_ERR(priv->clk) == -EPROBE_DEFER) {
+		ret = -EPROBE_DEFER;
+		goto err_pm_put;
+	}
 	if (!IS_ERR(priv->clk)) {
 		ret = clk_prepare_enable(priv->clk);
 		if (ret) {
 			dev_err(&pdev->dev,
 				"Unable to enable the clk: %d\n", ret);
-			goto err_register;
+			goto err_pm_put;
 		}
+	} else {
+		priv->clk = NULL;
 	}
 
 	priv->clk_reg = devm_clk_get(&pdev->dev, "reg");
-	if (PTR_ERR(priv->clk_reg) == -EPROBE_DEFER)
-		return -EPROBE_DEFER;
+	if (PTR_ERR(priv->clk_reg) == -EPROBE_DEFER) {
+		ret = -EPROBE_DEFER;
+		goto err_clk;
+	}
 	if (!IS_ERR(priv->clk_reg)) {
 		ret = clk_prepare_enable(priv->clk_reg);
 		if (ret) {
 			dev_err(&pdev->dev,
 				"Unable to enable the register clk: %d\n",
 				ret);
-			goto err_register;
+			goto err_clk;
 		}
+	} else {
+		priv->clk_reg = NULL;
 	}
 
 	ret = (dev->of_node) ? of_get_omap_rng_device_details(priv, pdev) :
@@ -498,18 +503,20 @@ static int omap_rng_probe(struct platform_device *pdev)
 	return 0;
 
 err_register:
+	clk_disable_unprepare(priv->clk_reg);
+err_clk:
+	clk_disable_unprepare(priv->clk);
+err_pm_put:
 	priv->base = NULL;
 	pm_runtime_put_sync(&pdev->dev);
+err_pm_disable:
 	pm_runtime_disable(&pdev->dev);
-
-	clk_disable_unprepare(priv->clk_reg);
-	clk_disable_unprepare(priv->clk);
 err_ioremap:
 	dev_err(dev, "initialization failed.\n");
 	return ret;
 }
 
-static int omap_rng_remove(struct platform_device *pdev)
+static void omap_rng_remove(struct platform_device *pdev)
 {
 	struct omap_rng_dev *priv = platform_get_drvdata(pdev);
 
@@ -521,8 +528,6 @@ static int omap_rng_remove(struct platform_device *pdev)
 
 	clk_disable_unprepare(priv->clk);
 	clk_disable_unprepare(priv->clk_reg);
-
-	return 0;
 }
 
 static int __maybe_unused omap_rng_suspend(struct device *dev)
@@ -566,4 +571,5 @@ static struct platform_driver omap_rng_driver = {
 module_platform_driver(omap_rng_driver);
 MODULE_ALIAS("platform:omap_rng");
 MODULE_AUTHOR("Deepak Saxena (and others)");
+MODULE_DESCRIPTION("RNG driver for TI OMAP CPU family");
 MODULE_LICENSE("GPL");

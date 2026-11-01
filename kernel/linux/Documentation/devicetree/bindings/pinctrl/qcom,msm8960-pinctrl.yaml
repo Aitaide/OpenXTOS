@@ -8,7 +8,7 @@ title: Qualcomm MSM8960 TLMM pin controller
 
 maintainers:
   - Bjorn Andersson <andersson@kernel.org>
-  - Krzysztof Kozlowski <krzysztof.kozlowski@linaro.org>
+  - Krzysztof Kozlowski <krzk@kernel.org>
 
 description:
   Top Level Mode Multiplexer pin controller in Qualcomm MSM8960 SoC.
@@ -22,13 +22,6 @@ properties:
 
   interrupts:
     maxItems: 1
-
-  interrupt-controller: true
-  "#interrupt-cells": true
-  gpio-controller: true
-  "#gpio-cells": true
-  gpio-ranges: true
-  wakeup-parent: true
 
   gpio-reserved-ranges:
     minItems: 1
@@ -108,18 +101,18 @@ required:
   - compatible
   - reg
 
-additionalProperties: false
+unevaluatedProperties: false
 
 examples:
   - |
     #include <dt-bindings/interrupt-controller/arm-gic.h>
 
-    msmgpio: pinctrl@800000 {
+    tlmm: pinctrl@800000 {
         compatible = "qcom,msm8960-pinctrl";
         reg = <0x800000 0x4000>;
         #gpio-cells = <2>;
         gpio-controller;
-        gpio-ranges = <&msmgpio 0 0 152>;
+        gpio-ranges = <&tlmm 0 0 152>;
         interrupts = <GIC_SPI 16 IRQ_TYPE_LEVEL_HIGH>;
         interrupt-controller;
         #interrupt-cells = <2>;

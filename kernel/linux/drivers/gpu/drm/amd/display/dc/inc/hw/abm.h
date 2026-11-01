@@ -36,7 +36,7 @@ struct abm {
 };
 
 struct abm_funcs {
-	void (*abm_init)(struct abm *abm, uint32_t back_light);
+	void (*abm_init)(struct abm *abm, uint32_t back_light, uint32_t user_level);
 	bool (*set_abm_level)(struct abm *abm, unsigned int abm_level);
 	bool (*set_abm_immediate_disable)(struct abm *abm, unsigned int panel_inst);
 	bool (*set_pipe)(struct abm *abm, unsigned int controller_id, unsigned int panel_inst);
@@ -64,6 +64,10 @@ struct abm_funcs {
 	bool (*set_pipe_ex)(struct abm *abm,
 			unsigned int otg_inst,
 			unsigned int option,
+			unsigned int panel_inst,
+			unsigned int pwrseq_inst);
+	bool (*set_abm_event)(struct abm *abm, unsigned int full_screen, unsigned int trans_info,
+			unsigned int hdr_mode, unsigned int scaling_enable, unsigned int scaling_strength_map,
 			unsigned int panel_inst);
 };
 

@@ -298,7 +298,7 @@ static ssize_t k90_show_macro_mode(struct device *dev,
 		goto out;
 	}
 
-	ret = snprintf(buf, PAGE_SIZE, "%s\n", macro_mode);
+	ret = sysfs_emit(buf, "%s\n", macro_mode);
 out:
 	kfree(data);
 
@@ -367,7 +367,7 @@ static ssize_t k90_show_current_profile(struct device *dev,
 		goto out;
 	}
 
-	ret = snprintf(buf, PAGE_SIZE, "%d\n", current_profile);
+	ret = sysfs_emit(buf, "%d\n", current_profile);
 out:
 	kfree(data);
 
@@ -427,7 +427,7 @@ static int k90_init_backlight(struct hid_device *dev)
 	size_t name_sz;
 	char *name;
 
-	drvdata->backlight = kzalloc(sizeof(struct k90_led), GFP_KERNEL);
+	drvdata->backlight = kzalloc_obj(struct k90_led);
 	if (!drvdata->backlight) {
 		ret = -ENOMEM;
 		goto fail_backlight_alloc;
@@ -471,7 +471,7 @@ static int k90_init_macro_functions(struct hid_device *dev)
 	size_t name_sz;
 	char *name;
 
-	k90 = kzalloc(sizeof(struct k90_drvdata), GFP_KERNEL);
+	k90 = kzalloc_obj(struct k90_drvdata);
 	if (!k90) {
 		ret = -ENOMEM;
 		goto fail_drvdata;
@@ -524,8 +524,8 @@ static void k90_cleanup_backlight(struct hid_device *dev)
 
 	if (drvdata->backlight) {
 		drvdata->backlight->removed = true;
-		led_classdev_unregister(&drvdata->backlight->cdev);
 		cancel_work_sync(&drvdata->backlight->work);
+		led_classdev_unregister(&drvdata->backlight->cdev);
 		kfree(drvdata->backlight->cdev.name);
 		kfree(drvdata->backlight);
 	}
@@ -540,11 +540,12 @@ static void k90_cleanup_macro_functions(struct hid_device *dev)
 		sysfs_remove_group(&dev->dev.kobj, &k90_attr_group);
 
 		k90->record_led.removed = true;
-		led_classdev_unregister(&k90->record_led.cdev);
 		cancel_work_sync(&k90->record_led.work);
+		led_classdev_unregister(&k90->record_led.cdev);
 		kfree(k90->record_led.cdev.name);
 
 		kfree(k90);
+		drvdata->k90 = NULL;
 	}
 }
 
@@ -596,10 +597,10 @@ static int corsair_probe(struct hid_device *dev, const struct hid_device_id *id)
 
 static void corsair_remove(struct hid_device *dev)
 {
+	hid_hw_stop(dev);
+
 	k90_cleanup_macro_functions(dev);
 	k90_cleanup_backlight(dev);
-
-	hid_hw_stop(dev);
 }
 
 static int corsair_event(struct hid_device *dev, struct hid_field *field,
@@ -690,8 +691,8 @@ static int corsair_input_mapping(struct hid_device *dev,
  * - USB ID 1b1c:1b3e, sold as Scimitar RGB Pro Gaming mouse
  */
 
-static __u8 *corsair_mouse_report_fixup(struct hid_device *hdev, __u8 *rdesc,
-        unsigned int *rsize)
+static const __u8 *corsair_mouse_report_fixup(struct hid_device *hdev,
+	__u8 *rdesc, unsigned int *rsize)
 {
 	struct usb_interface *intf = to_usb_interface(hdev->dev.parent);
 

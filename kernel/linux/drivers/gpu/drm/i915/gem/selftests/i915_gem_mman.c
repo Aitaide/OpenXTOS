@@ -7,6 +7,8 @@
 #include <linux/highmem.h>
 #include <linux/prime_numbers.h>
 
+#include <drm/drm_print.h>
+
 #include "gem/i915_gem_internal.h"
 #include "gem/i915_gem_lmem.h"
 #include "gem/i915_gem_region.h"
@@ -630,14 +632,14 @@ static bool assert_mmap_offset(struct drm_i915_private *i915,
 static void disable_retire_worker(struct drm_i915_private *i915)
 {
 	i915_gem_driver_unregister__shrinker(i915);
-	intel_gt_pm_get(to_gt(i915));
+	intel_gt_pm_get_untracked(to_gt(i915));
 	cancel_delayed_work_sync(&to_gt(i915)->requests.retire_work);
 }
 
 static void restore_retire_worker(struct drm_i915_private *i915)
 {
 	igt_flush_test(i915);
-	intel_gt_pm_put(to_gt(i915));
+	intel_gt_pm_put_untracked(to_gt(i915));
 	i915_gem_driver_register__shrinker(i915);
 }
 
@@ -675,7 +677,7 @@ static int igt_mmap_offset_exhaustion(void *arg)
 	list_for_each_entry_safe(hole, next, &mm->hole_stack, hole_stack) {
 		struct drm_mm_node *resv;
 
-		resv = kzalloc(sizeof(*resv), GFP_NOWAIT);
+		resv = kzalloc_obj(*resv, GFP_NOWAIT);
 		if (!resv) {
 			err = -ENOMEM;
 			goto out_park;
@@ -778,6 +780,7 @@ err_obj:
 
 static int gtt_set(struct drm_i915_gem_object *obj)
 {
+	intel_wakeref_t wakeref;
 	struct i915_vma *vma;
 	void __iomem *map;
 	int err = 0;
@@ -786,7 +789,7 @@ static int gtt_set(struct drm_i915_gem_object *obj)
 	if (IS_ERR(vma))
 		return PTR_ERR(vma);
 
-	intel_gt_pm_get(vma->vm->gt);
+	wakeref = intel_gt_pm_get(vma->vm->gt);
 	map = i915_vma_pin_iomap(vma);
 	i915_vma_unpin(vma);
 	if (IS_ERR(map)) {
@@ -798,12 +801,13 @@ static int gtt_set(struct drm_i915_gem_object *obj)
 	i915_vma_unpin_iomap(vma);
 
 out:
-	intel_gt_pm_put(vma->vm->gt);
+	intel_gt_pm_put(vma->vm->gt, wakeref);
 	return err;
 }
 
 static int gtt_check(struct drm_i915_gem_object *obj)
 {
+	intel_wakeref_t wakeref;
 	struct i915_vma *vma;
 	void __iomem *map;
 	int err = 0;
@@ -812,7 +816,7 @@ static int gtt_check(struct drm_i915_gem_object *obj)
 	if (IS_ERR(vma))
 		return PTR_ERR(vma);
 
-	intel_gt_pm_get(vma->vm->gt);
+	wakeref = intel_gt_pm_get(vma->vm->gt);
 	map = i915_vma_pin_iomap(vma);
 	i915_vma_unpin(vma);
 	if (IS_ERR(map)) {
@@ -828,7 +832,7 @@ static int gtt_check(struct drm_i915_gem_object *obj)
 	i915_vma_unpin_iomap(vma);
 
 out:
-	intel_gt_pm_put(vma->vm->gt);
+	intel_gt_pm_put(vma->vm->gt, wakeref);
 	return err;
 }
 
@@ -1052,7 +1056,7 @@ static int igt_fill_mappable(struct intel_memory_region *mr,
 	int err;
 
 	total = 0;
-	size = mr->io_size;
+	size = resource_size(&mr->io);
 	do {
 		struct drm_i915_gem_object *obj;
 
@@ -1094,32 +1098,20 @@ static int ___igt_mmap_migrate(struct drm_i915_private *i915,
 			       unsigned long addr,
 			       bool unfaultable)
 {
-	struct vm_area_struct *area;
-	int err = 0, i;
+	int i;
 
 	pr_info("igt_mmap(%s, %d) @ %lx\n",
 		obj->mm.region->name, I915_MMAP_TYPE_FIXED, addr);
-
-	mmap_read_lock(current->mm);
-	area = vma_lookup(current->mm, addr);
-	mmap_read_unlock(current->mm);
-	if (!area) {
-		pr_err("%s: Did not create a vm_area_struct for the mmap\n",
-		       obj->mm.region->name);
-		err = -EINVAL;
-		goto out_unmap;
-	}
 
 	for (i = 0; i < obj->base.size / sizeof(u32); i++) {
 		u32 __user *ux = u64_to_user_ptr((u64)(addr + i * sizeof(*ux)));
 		u32 x;
 
 		if (get_user(x, ux)) {
-			err = -EFAULT;
 			if (!unfaultable) {
 				pr_err("%s: Unable to read from mmap, offset:%zd\n",
 				       obj->mm.region->name, i * sizeof(x));
-				goto out_unmap;
+				return -EFAULT;
 			}
 
 			continue;
@@ -1128,37 +1120,29 @@ static int ___igt_mmap_migrate(struct drm_i915_private *i915,
 		if (unfaultable) {
 			pr_err("%s: Faulted unmappable memory\n",
 			       obj->mm.region->name);
-			err = -EINVAL;
-			goto out_unmap;
+			return -EINVAL;
 		}
 
 		if (x != expand32(POISON_INUSE)) {
 			pr_err("%s: Read incorrect value from mmap, offset:%zd, found:%x, expected:%x\n",
 			       obj->mm.region->name,
 			       i * sizeof(x), x, expand32(POISON_INUSE));
-			err = -EINVAL;
-			goto out_unmap;
+			return -EINVAL;
 		}
 
 		x = expand32(POISON_FREE);
 		if (put_user(x, ux)) {
 			pr_err("%s: Unable to write to mmap, offset:%zd\n",
 			       obj->mm.region->name, i * sizeof(x));
-			err = -EFAULT;
-			goto out_unmap;
+			return -EFAULT;
 		}
 	}
 
-	if (unfaultable) {
-		if (err == -EFAULT)
-			err = 0;
-	} else {
-		obj->flags &= ~I915_BO_ALLOC_GPU_ONLY;
-		err = wc_check(obj);
-	}
-out_unmap:
-	vm_munmap(addr, obj->base.size);
-	return err;
+	if (unfaultable)
+		return 0;
+
+	obj->flags &= ~I915_BO_ALLOC_GPU_ONLY;
+	return wc_check(obj);
 }
 
 #define IGT_MMAP_MIGRATE_TOPDOWN     (1 << 0)
@@ -1174,6 +1158,8 @@ static int __igt_mmap_migrate(struct intel_memory_region **placements,
 	struct drm_i915_private *i915 = placements[0]->i915;
 	struct drm_i915_gem_object *obj;
 	struct i915_request *rq = NULL;
+	struct vm_area_struct *area;
+	struct file *mock_file;
 	unsigned long addr;
 	LIST_HEAD(objects);
 	u64 offset;
@@ -1193,32 +1179,51 @@ static int __igt_mmap_migrate(struct intel_memory_region **placements,
 		goto out_put;
 
 	/*
-	 * This will eventually create a GEM context, due to opening dummy drm
-	 * file, which needs a tiny amount of mappable device memory for the top
-	 * level paging structures(and perhaps scratch), so make sure we
-	 * allocate early, to avoid tears.
+	 * Pretend to open("/dev/dri/card0"), which will eventually create a GEM
+	 * context along with multiple GEM objects (for paging structures and
+	 * scratch) that are placed in mappable portion of GPU memory.
+	 * Calling fput() on the file places objects' cleanup routines in delayed
+	 * worqueues, which execute after unspecified amount of time.
+	 * Keep the file open until migration and page fault checks are done to
+	 * make sure object cleanup is not executed after igt_fill_mappable()
+	 * finishes and before migration is attempted - that would leave a gap
+	 * large enough for the migration to succeed, when we'd expect it to fail.
 	 */
-	addr = igt_mmap_offset(i915, offset, obj->base.size,
-			       PROT_WRITE, MAP_SHARED);
+	mock_file = mock_drm_getfile(i915->drm.primary, O_RDWR);
+	if (IS_ERR(mock_file))
+		return PTR_ERR(mock_file);
+
+	addr = igt_mmap_offset_with_file(i915, offset, obj->base.size,
+					 PROT_WRITE, MAP_SHARED, mock_file);
 	if (IS_ERR_VALUE(addr)) {
 		err = addr;
-		goto out_put;
+		goto out_fput;
+	}
+
+	mmap_read_lock(current->mm);
+	area = vma_lookup(current->mm, addr);
+	mmap_read_unlock(current->mm);
+	if (!area) {
+		pr_err("%s: Did not create a vm_area_struct for the mmap\n",
+		       obj->mm.region->name);
+		err = -EINVAL;
+		goto out_addr;
 	}
 
 	if (flags & IGT_MMAP_MIGRATE_FILL) {
 		err = igt_fill_mappable(placements[0], &objects);
 		if (err)
-			goto out_put;
+			goto out_addr;
 	}
 
 	err = i915_gem_object_lock(obj, NULL);
 	if (err)
-		goto out_put;
+		goto out_addr;
 
 	err = i915_gem_object_pin_pages(obj);
 	if (err) {
 		i915_gem_object_unlock(obj);
-		goto out_put;
+		goto out_addr;
 	}
 
 	err = intel_context_migrate_clear(to_gt(i915)->migrate.context, NULL,
@@ -1226,7 +1231,7 @@ static int __igt_mmap_migrate(struct intel_memory_region **placements,
 					  i915_gem_object_is_lmem(obj),
 					  expand32(POISON_INUSE), &rq);
 	i915_gem_object_unpin_pages(obj);
-	if (rq) {
+	if (rq && !err) {
 		err = dma_resv_reserve_fences(obj->base.resv, 1);
 		if (!err)
 			dma_resv_add_fence(obj->base.resv, &rq->fence,
@@ -1235,7 +1240,7 @@ static int __igt_mmap_migrate(struct intel_memory_region **placements,
 	}
 	i915_gem_object_unlock(obj);
 	if (err)
-		goto out_put;
+		goto out_addr;
 
 	if (flags & IGT_MMAP_MIGRATE_EVICTABLE)
 		igt_make_evictable(&objects);
@@ -1243,16 +1248,16 @@ static int __igt_mmap_migrate(struct intel_memory_region **placements,
 	if (flags & IGT_MMAP_MIGRATE_FAIL_GPU) {
 		err = i915_gem_object_lock(obj, NULL);
 		if (err)
-			goto out_put;
+			goto out_addr;
 
 		/*
-		 * Ensure we only simulate the gpu failuire when faulting the
+		 * Ensure we only simulate the gpu failure when faulting the
 		 * pages.
 		 */
 		err = i915_gem_object_wait_moving_fence(obj, true);
 		i915_gem_object_unlock(obj);
 		if (err)
-			goto out_put;
+			goto out_addr;
 		i915_ttm_migrate_set_failure_modes(true, false);
 	}
 
@@ -1296,6 +1301,12 @@ static int __igt_mmap_migrate(struct intel_memory_region **placements,
 		}
 	}
 
+out_addr:
+	vm_munmap(addr, obj->base.size);
+
+out_fput:
+	fput(mock_file);
+
 out_put:
 	i915_gem_object_put(obj);
 	igt_close_objects(i915, &objects);
@@ -1313,34 +1324,34 @@ static int igt_mmap_migrate(void *arg)
 		struct intel_memory_region *mixed[] = { mr, system };
 		struct intel_memory_region *single[] = { mr };
 		struct ttm_resource_manager *man = mr->region_private;
-		resource_size_t saved_io_size;
+		struct resource saved_io;
 		int err;
 
 		if (mr->private)
 			continue;
 
-		if (!mr->io_size)
+		if (!resource_size(&mr->io))
 			continue;
 
 		/*
 		 * For testing purposes let's force small BAR, if not already
 		 * present.
 		 */
-		saved_io_size = mr->io_size;
-		if (mr->io_size == mr->total) {
-			resource_size_t io_size = mr->io_size;
+		saved_io = mr->io;
+		if (resource_size(&mr->io) == mr->total) {
+			resource_size_t io_size = resource_size(&mr->io);
 
 			io_size = rounddown_pow_of_two(io_size >> 1);
 			if (io_size < PAGE_SIZE)
 				continue;
 
-			mr->io_size = io_size;
+			mr->io = DEFINE_RES_MEM(mr->io.start, io_size);
 			i915_ttm_buddy_man_force_visible_size(man,
 							      io_size >> PAGE_SHIFT);
 		}
 
 		/*
-		 * Allocate in the mappable portion, should be no suprises here.
+		 * Allocate in the mappable portion, should be no surprises here.
 		 */
 		err = __igt_mmap_migrate(mixed, ARRAY_SIZE(mixed), mr, 0);
 		if (err)
@@ -1394,9 +1405,9 @@ static int igt_mmap_migrate(void *arg)
 					 IGT_MMAP_MIGRATE_FAIL_GPU |
 					 IGT_MMAP_MIGRATE_UNFAULTABLE);
 out_io_size:
-		mr->io_size = saved_io_size;
+		mr->io = saved_io;
 		i915_ttm_buddy_man_force_visible_size(man,
-						      mr->io_size >> PAGE_SHIFT);
+						      resource_size(&mr->io) >> PAGE_SHIFT);
 		if (err)
 			return err;
 	}
@@ -1835,10 +1846,13 @@ static int igt_mmap_revoke(void *arg)
 
 int i915_gem_mman_live_selftests(struct drm_i915_private *i915)
 {
+	int ret;
 	static const struct i915_subtest tests[] = {
 		SUBTEST(igt_partial_tiling),
 		SUBTEST(igt_smoke_tiling),
 		SUBTEST(igt_mmap_offset_exhaustion),
+	};
+	static const struct i915_subtest vma_tests[] = {
 		SUBTEST(igt_mmap),
 		SUBTEST(igt_mmap_migrate),
 		SUBTEST(igt_mmap_access),
@@ -1846,5 +1860,14 @@ int i915_gem_mman_live_selftests(struct drm_i915_private *i915)
 		SUBTEST(igt_mmap_gpu),
 	};
 
-	return i915_live_subtests(tests, i915);
+	ret = i915_live_subtests(tests, i915);
+	if (ret)
+		return ret;
+
+	if (current->mm)
+		ret = i915_live_subtests(vma_tests, i915);
+	else
+		pr_warn("No current->mm to safely borrow userspace memory from. Skipping VMA tests.\n");
+
+	return ret;
 }

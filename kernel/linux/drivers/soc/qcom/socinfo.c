@@ -17,17 +17,9 @@
 #include <linux/sys_soc.h>
 #include <linux/types.h>
 
-#include <asm/unaligned.h>
+#include <linux/unaligned.h>
 
 #include <dt-bindings/arm/qcom,ids.h>
-
-/*
- * SoC version type with major number in the upper 16 bits and minor
- * number in the lower 16 bits.
- */
-#define SOCINFO_MAJOR(ver) (((ver) >> 16) & 0xffff)
-#define SOCINFO_MINOR(ver) ((ver) & 0xffff)
-#define SOCINFO_VERSION(maj, min)  ((((maj) & 0xffff) << 16)|((min) & 0xffff))
 
 /* Helper macros to create soc_id table */
 #define qcom_board_id(id) QCOM_ID_ ## id, __stringify(id)
@@ -45,26 +37,92 @@
  */
 #define SMEM_IMAGE_TABLE_BOOT_INDEX     0
 #define SMEM_IMAGE_TABLE_TZ_INDEX       1
+#define SMEM_IMAGE_TABLE_TZSECAPP_INDEX	2
 #define SMEM_IMAGE_TABLE_RPM_INDEX      3
+#define SMEM_IMAGE_TABLE_SDI_INDEX      4
+#define SMEM_IMAGE_TABLE_HYP_INDEX      5
+#define SMEM_IMAGE_TABLE_ADSP1_INDEX	6
+#define SMEM_IMAGE_TABLE_ADSP2_INDEX	7
+#define SMEM_IMAGE_TABLE_CDSP2_INDEX	8
+#define SMEM_IMAGE_TABLE_APPSBL_INDEX	9
 #define SMEM_IMAGE_TABLE_APPS_INDEX     10
 #define SMEM_IMAGE_TABLE_MPSS_INDEX     11
 #define SMEM_IMAGE_TABLE_ADSP_INDEX     12
 #define SMEM_IMAGE_TABLE_CNSS_INDEX     13
 #define SMEM_IMAGE_TABLE_VIDEO_INDEX    14
+#define SMEM_IMAGE_TABLE_DSPS_INDEX     15
+#define SMEM_IMAGE_TABLE_CDSP_INDEX     16
+#define SMEM_IMAGE_TABLE_NPU_INDEX	17
+#define SMEM_IMAGE_TABLE_WPSS_INDEX     18
+#define SMEM_IMAGE_TABLE_CDSP1_INDEX    19
+#define SMEM_IMAGE_TABLE_GPDSP_INDEX    20
+#define SMEM_IMAGE_TABLE_GPDSP1_INDEX   21
+#define SMEM_IMAGE_TABLE_SENSORPD_INDEX	22
+#define SMEM_IMAGE_TABLE_AUDIOPD_INDEX	23
+#define SMEM_IMAGE_TABLE_OEMPD_INDEX	24
+#define SMEM_IMAGE_TABLE_CHARGERPD_INDEX	25
+#define SMEM_IMAGE_TABLE_OISPD_INDEX	26
+#define SMEM_IMAGE_TABLE_SOCCP_INDEX	27
+#define SMEM_IMAGE_TABLE_TME_INDEX	28
+#define SMEM_IMAGE_TABLE_GEARVM_INDEX	29
+#define SMEM_IMAGE_TABLE_UEFI_INDEX	30
+#define SMEM_IMAGE_TABLE_CDSP3_INDEX	31
+#define SMEM_IMAGE_TABLE_AUDIOPD_ADSP1_INDEX	32
+#define SMEM_IMAGE_TABLE_AUDIOPD_ADSP2_INDEX	33
+#define SMEM_IMAGE_TABLE_DCP_INDEX	34
+#define SMEM_IMAGE_TABLE_OOBS_INDEX	35
+#define SMEM_IMAGE_TABLE_OOBNS_INDEX	36
+#define SMEM_IMAGE_TABLE_DEVCFG_INDEX	37
+#define SMEM_IMAGE_TABLE_BTPD_INDEX	38
+#define SMEM_IMAGE_TABLE_QECP_INDEX	39
+
 #define SMEM_IMAGE_VERSION_TABLE       469
+#define SMEM_IMAGE_VERSION_TABLE_2	667
 
 /*
  * SMEM Image table names
  */
 static const char *const socinfo_image_names[] = {
+	[SMEM_IMAGE_TABLE_ADSP1_INDEX] = "adsp1",
+	[SMEM_IMAGE_TABLE_ADSP2_INDEX] = "adsp2",
 	[SMEM_IMAGE_TABLE_ADSP_INDEX] = "adsp",
+	[SMEM_IMAGE_TABLE_APPSBL_INDEX] = "appsbl",
 	[SMEM_IMAGE_TABLE_APPS_INDEX] = "apps",
+	[SMEM_IMAGE_TABLE_AUDIOPD_INDEX] = "audiopd",
+	[SMEM_IMAGE_TABLE_AUDIOPD_ADSP1_INDEX] = "audiopd_adsp1",
+	[SMEM_IMAGE_TABLE_AUDIOPD_ADSP2_INDEX] = "audiopd_adsp2",
 	[SMEM_IMAGE_TABLE_BOOT_INDEX] = "boot",
+	[SMEM_IMAGE_TABLE_BTPD_INDEX] = "btpd",
+	[SMEM_IMAGE_TABLE_CDSP1_INDEX] = "cdsp1",
+	[SMEM_IMAGE_TABLE_CDSP2_INDEX] = "cdsp2",
+	[SMEM_IMAGE_TABLE_CDSP3_INDEX] = "cdsp3",
+	[SMEM_IMAGE_TABLE_CDSP_INDEX] = "cdsp",
+	[SMEM_IMAGE_TABLE_CHARGERPD_INDEX] = "chargerpd",
 	[SMEM_IMAGE_TABLE_CNSS_INDEX] = "cnss",
+	[SMEM_IMAGE_TABLE_DCP_INDEX] = "dcp",
+	[SMEM_IMAGE_TABLE_DEVCFG_INDEX] = "devcfg",
+	[SMEM_IMAGE_TABLE_DSPS_INDEX] = "dsps",
+	[SMEM_IMAGE_TABLE_GEARVM_INDEX] = "gearvm",
+	[SMEM_IMAGE_TABLE_GPDSP1_INDEX] = "gpdsp1",
+	[SMEM_IMAGE_TABLE_GPDSP_INDEX] = "gpdsp",
+	[SMEM_IMAGE_TABLE_HYP_INDEX] = "hyp",
 	[SMEM_IMAGE_TABLE_MPSS_INDEX] = "mpss",
+	[SMEM_IMAGE_TABLE_NPU_INDEX] = "npu",
+	[SMEM_IMAGE_TABLE_OEMPD_INDEX] = "oempd",
+	[SMEM_IMAGE_TABLE_OISPD_INDEX] = "oispd",
+	[SMEM_IMAGE_TABLE_OOBNS_INDEX] = "oobns",
+	[SMEM_IMAGE_TABLE_OOBS_INDEX] = "oobs",
+	[SMEM_IMAGE_TABLE_QECP_INDEX] = "qecp",
 	[SMEM_IMAGE_TABLE_RPM_INDEX] = "rpm",
+	[SMEM_IMAGE_TABLE_SDI_INDEX] = "sdi",
+	[SMEM_IMAGE_TABLE_SENSORPD_INDEX] = "sensorpd",
+	[SMEM_IMAGE_TABLE_SOCCP_INDEX] = "soccp",
+	[SMEM_IMAGE_TABLE_TME_INDEX] = "tme",
 	[SMEM_IMAGE_TABLE_TZ_INDEX] = "tz",
+	[SMEM_IMAGE_TABLE_TZSECAPP_INDEX] = "tzsecapp",
+	[SMEM_IMAGE_TABLE_UEFI_INDEX] = "uefi",
 	[SMEM_IMAGE_TABLE_VIDEO_INDEX] = "video",
+	[SMEM_IMAGE_TABLE_WPSS_INDEX] = "wpss",
 };
 
 static const char *const pmic_models[] = {
@@ -93,7 +151,7 @@ static const char *const pmic_models[] = {
 	[22] = "PM8821",
 	[23] = "PM8038",
 	[24] = "PM8005/PM8922",
-	[25] = "PM8917",
+	[25] = "PM8917/PM8937",
 	[26] = "PM660L",
 	[27] = "PM660",
 	[30] = "PM8150",
@@ -114,9 +172,35 @@ static const char *const pmic_models[] = {
 	[50] = "PM8350B",
 	[51] = "PMR735A",
 	[52] = "PMR735B",
-	[55] = "PM2250",
+	[54] = "PM6350",
+	[55] = "PM4125",
 	[58] = "PM8450",
 	[65] = "PM8010",
+	[69] = "PM8550VS",
+	[70] = "PM8550VE",
+	[71] = "PM8550B",
+	[72] = "PMR735D",
+	[73] = "PM8550",
+	[74] = "PMK8550",
+	[76] = "PM7550BA",
+	[78] = "PMM8650AU",
+	[79] = "PMM8650AU_PSAIL",
+	[80] = "PM7550",
+	[82] = "PMC8380",
+	[83] = "SMB2360",
+	[86] = "PM8750B",
+	[87] = "PMD8028",
+	[88] = "PMC1020H",
+	[89] = "PMIV0104",
+	[90] = "PMIV0102",
+	[91] = "PMIV0108",
+	[92] = "PMK8850",
+	[93] = "PMH0101",
+	[94] = "PMAU0102",
+	[95] = "SMB2370",
+	[96] = "PMH0104",
+	[97] = "PMH0110",
+	[98] = "PMCX0102",
 };
 
 struct socinfo_params {
@@ -142,6 +226,7 @@ struct socinfo_params {
 	u32 num_func_clusters;
 	u32 boot_cluster;
 	u32 boot_core;
+	u32 raw_package_type;
 };
 
 struct smem_image_version {
@@ -331,6 +416,7 @@ static const struct soc_id soc_id[] = {
 	{ qcom_board_id(SDA630) },
 	{ qcom_board_id(MSM8905) },
 	{ qcom_board_id(SDX202) },
+	{ qcom_board_id(SDM670) },
 	{ qcom_board_id(SDM450) },
 	{ qcom_board_id(SM8150) },
 	{ qcom_board_id(SDA845) },
@@ -339,6 +425,7 @@ static const struct soc_id soc_id[] = {
 	{ qcom_board_id(IPQ8078) },
 	{ qcom_board_id(SDM636) },
 	{ qcom_board_id(SDA636) },
+	{ qcom_board_id(SDM850) },
 	{ qcom_board_id(SDM632) },
 	{ qcom_board_id(SDA632) },
 	{ qcom_board_id(SDA450) },
@@ -349,6 +436,7 @@ static const struct soc_id soc_id[] = {
 	{ qcom_board_id(SDA439) },
 	{ qcom_board_id(SDA429) },
 	{ qcom_board_id(SM7150) },
+	{ qcom_board_id(SM7150P) },
 	{ qcom_board_id(IPQ8070) },
 	{ qcom_board_id(IPQ8071) },
 	{ qcom_board_id(QM215) },
@@ -359,6 +447,9 @@ static const struct soc_id soc_id[] = {
 	{ qcom_board_id(SM6125) },
 	{ qcom_board_id(IPQ8070A) },
 	{ qcom_board_id(IPQ8071A) },
+	{ qcom_board_id(IPQ8172) },
+	{ qcom_board_id(IPQ8173) },
+	{ qcom_board_id(IPQ8174) },
 	{ qcom_board_id(IPQ6018) },
 	{ qcom_board_id(IPQ6028) },
 	{ qcom_board_id(SDM429W) },
@@ -385,13 +476,18 @@ static const struct soc_id soc_id[] = {
 	{ qcom_board_id(SA8540P) },
 	{ qcom_board_id(QCM4290) },
 	{ qcom_board_id(QCS4290) },
+	{ qcom_board_id(SM7325) },
 	{ qcom_board_id_named(SM8450_2, "SM8450") },
 	{ qcom_board_id_named(SM8450_3, "SM8450") },
 	{ qcom_board_id(SC7280) },
 	{ qcom_board_id(SC7180P) },
+	{ qcom_board_id(QCM6490) },
+	{ qcom_board_id(QCS6490) },
+	{ qcom_board_id(SM7325P) },
 	{ qcom_board_id(IPQ5000) },
 	{ qcom_board_id(IPQ0509) },
 	{ qcom_board_id(IPQ0518) },
+	{ qcom_board_id(SM7450) },
 	{ qcom_board_id(SM6375) },
 	{ qcom_board_id(IPQ9514) },
 	{ qcom_board_id(IPQ9550) },
@@ -403,10 +499,20 @@ static const struct soc_id soc_id[] = {
 	{ qcom_board_id(IPQ9510) },
 	{ qcom_board_id(QRB4210) },
 	{ qcom_board_id(QRB2210) },
+	{ qcom_board_id(SAR2130P) },
+	{ qcom_board_id(SM8475) },
+	{ qcom_board_id(SM8475P) },
+	{ qcom_board_id(SA8255P) },
+	{ qcom_board_id(SA8650P) },
 	{ qcom_board_id(SA8775P) },
 	{ qcom_board_id(QRU1000) },
+	{ qcom_board_id(SM8475_2) },
 	{ qcom_board_id(QDU1000) },
+	{ qcom_board_id(SM7450P) },
+	{ qcom_board_id(X1E80100) },
+	{ qcom_board_id(SM8650) },
 	{ qcom_board_id(SM4450) },
+	{ qcom_board_id(SAR1130P) },
 	{ qcom_board_id(QDU1010) },
 	{ qcom_board_id(QRU1032) },
 	{ qcom_board_id(QRU1052) },
@@ -415,7 +521,42 @@ static const struct soc_id soc_id[] = {
 	{ qcom_board_id(IPQ5322) },
 	{ qcom_board_id(IPQ5312) },
 	{ qcom_board_id(IPQ5302) },
+	{ qcom_board_id(QCS8550) },
+	{ qcom_board_id(QCM8550) },
+	{ qcom_board_id(SM8750)  },
 	{ qcom_board_id(IPQ5300) },
+	{ qcom_board_id(SM7635) },
+	{ qcom_board_id(SM6650) },
+	{ qcom_board_id(SM6650P) },
+	{ qcom_board_id(IPQ5321) },
+	{ qcom_board_id(IPQ5424) },
+	{ qcom_board_id(QCM6690) },
+	{ qcom_board_id(QCS6690) },
+	{ qcom_board_id(SM7750) },
+	{ qcom_board_id(SM8850) },
+	{ qcom_board_id(IPQ5404) },
+	{ qcom_board_id(QCS9100) },
+	{ qcom_board_id(QCS8300) },
+	{ qcom_board_id(QCS8275) },
+	{ qcom_board_id(QCS9075) },
+	{ qcom_board_id(QCS615) },
+	{ qcom_board_id(SA8797P) },
+	{ qcom_board_id(CQ7790M) },
+	{ qcom_board_id(CQ7790S) },
+	{ qcom_board_id(CQ2390M) },
+	{ qcom_board_id(CQ2390S) },
+	{ qcom_board_id(IQ2390S) },
+	{ qcom_board_id(IPQ5200) },
+	{ qcom_board_id(IPQ5210) },
+	{ qcom_board_id(QCF2200) },
+	{ qcom_board_id(QCF3200) },
+	{ qcom_board_id(QCF3210) },
+	{ qcom_board_id(IPQ9620) },
+	{ qcom_board_id(IPQ9650) },
+	{ qcom_board_id(IPQ9610) },
+	{ qcom_board_id(IPQ9630) },
+	{ qcom_board_id(IPQ9640) },
+	{ qcom_board_id(IPQ9670) },
 };
 
 static const char *socinfo_machine(struct device *dev, unsigned int id)
@@ -558,7 +699,7 @@ static void socinfo_debugfs_init(struct qcom_socinfo *qcom_socinfo,
 	struct smem_image_version *versions;
 	struct dentry *dentry;
 	size_t size;
-	int i;
+	int i, j;
 	unsigned int num_pmics;
 	unsigned int pmic_array_offset;
 
@@ -570,6 +711,14 @@ static void socinfo_debugfs_init(struct qcom_socinfo *qcom_socinfo,
 			   &qcom_socinfo->info.fmt);
 
 	switch (qcom_socinfo->info.fmt) {
+	case SOCINFO_VERSION(0, 23):
+	case SOCINFO_VERSION(0, 22):
+	case SOCINFO_VERSION(0, 21):
+	case SOCINFO_VERSION(0, 20):
+		qcom_socinfo->info.raw_package_type = __le32_to_cpu(info->raw_package_type);
+		debugfs_create_u32("raw_package_type", 0444, qcom_socinfo->dbg_root,
+				   &qcom_socinfo->info.raw_package_type);
+		fallthrough;
 	case SOCINFO_VERSION(0, 19):
 		qcom_socinfo->info.num_func_clusters = __le32_to_cpu(info->num_func_clusters);
 		qcom_socinfo->info.boot_cluster = __le32_to_cpu(info->boot_cluster);
@@ -702,20 +851,31 @@ static void socinfo_debugfs_init(struct qcom_socinfo *qcom_socinfo,
 		break;
 	}
 
-	versions = qcom_smem_get(QCOM_SMEM_HOST_ANY, SMEM_IMAGE_VERSION_TABLE,
-				 &size);
-
-	for (i = 0; i < ARRAY_SIZE(socinfo_image_names); i++) {
+	for (i = 0, j = 0; i < ARRAY_SIZE(socinfo_image_names); i++, j++) {
 		if (!socinfo_image_names[i])
 			continue;
 
+		if (i == 0) {
+			versions = qcom_smem_get(QCOM_SMEM_HOST_ANY,
+						 SMEM_IMAGE_VERSION_TABLE,
+						 &size);
+		} else if (i == 32) {
+			versions = qcom_smem_get(QCOM_SMEM_HOST_ANY,
+						 SMEM_IMAGE_VERSION_TABLE_2,
+						 &size);
+			if (IS_ERR(versions))
+				break;
+
+			j = 0;
+		}
+
 		dentry = debugfs_create_dir(socinfo_image_names[i],
 					    qcom_socinfo->dbg_root);
-		debugfs_create_file("name", 0444, dentry, &versions[i],
+		debugfs_create_file("name", 0444, dentry, &versions[j],
 				    &qcom_image_name_ops);
-		debugfs_create_file("variant", 0444, dentry, &versions[i],
+		debugfs_create_file("variant", 0444, dentry, &versions[j],
 				    &qcom_image_variant_ops);
-		debugfs_create_file("oem", 0444, dentry, &versions[i],
+		debugfs_create_file("oem", 0444, dentry, &versions[j],
 				    &qcom_image_oem_ops);
 	}
 }
@@ -757,10 +917,16 @@ static int qcom_socinfo_probe(struct platform_device *pdev)
 	qs->attr.revision = devm_kasprintf(&pdev->dev, GFP_KERNEL, "%u.%u",
 					   SOCINFO_MAJOR(le32_to_cpu(info->ver)),
 					   SOCINFO_MINOR(le32_to_cpu(info->ver)));
-	if (offsetof(struct socinfo, serial_num) <= item_size)
+	if (!qs->attr.soc_id || !qs->attr.revision)
+		return -ENOMEM;
+
+	if (offsetofend(struct socinfo, serial_num) <= item_size) {
 		qs->attr.serial_number = devm_kasprintf(&pdev->dev, GFP_KERNEL,
 							"%u",
 							le32_to_cpu(info->serial_num));
+		if (!qs->attr.serial_number)
+			return -ENOMEM;
+	}
 
 	qs->soc_dev = soc_device_register(&qs->attr);
 	if (IS_ERR(qs->soc_dev))
@@ -776,15 +942,13 @@ static int qcom_socinfo_probe(struct platform_device *pdev)
 	return 0;
 }
 
-static int qcom_socinfo_remove(struct platform_device *pdev)
+static void qcom_socinfo_remove(struct platform_device *pdev)
 {
 	struct qcom_socinfo *qs = platform_get_drvdata(pdev);
 
 	soc_device_unregister(qs->soc_dev);
 
 	socinfo_debugfs_exit(qs);
-
-	return 0;
 }
 
 static struct platform_driver qcom_socinfo_driver = {

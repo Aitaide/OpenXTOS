@@ -15,7 +15,7 @@
 #include <linux/regulator/consumer.h>
 #include <linux/regmap.h>
 
-#include <asm/unaligned.h>
+#include <linux/unaligned.h>
 
 #define HY46XX_CHKSUM_CODE		0x1
 #define HY46XX_FINGER_NUM		0x2
@@ -181,18 +181,17 @@ static ssize_t hycon_hy46xx_setting_show(struct device *dev,
 	struct hycon_hy46xx_attribute *attr =
 			container_of(dattr, struct hycon_hy46xx_attribute, dattr);
 	u8 *field = (u8 *)tsdata + attr->field_offset;
-	size_t count = 0;
 	int error = 0;
 	int val;
 
-	mutex_lock(&tsdata->mutex);
+	guard(mutex)(&tsdata->mutex);
 
 	error = regmap_read(tsdata->regmap, attr->address, &val);
-	if (error < 0) {
+	if (error) {
 		dev_err(&tsdata->client->dev,
 			"Failed to fetch attribute %s, error %d\n",
 			dattr->attr.name, error);
-		goto out;
+		return error;
 	}
 
 	if (val != *field) {
@@ -202,11 +201,7 @@ static ssize_t hycon_hy46xx_setting_show(struct device *dev,
 		*field = val;
 	}
 
-	count = scnprintf(buf, PAGE_SIZE, "%d\n", val);
-
-out:
-	mutex_unlock(&tsdata->mutex);
-	return error ?: count;
+	return sysfs_emit(buf, "%d\n", val);
 }
 
 static ssize_t hycon_hy46xx_setting_store(struct device *dev,
@@ -221,29 +216,25 @@ static ssize_t hycon_hy46xx_setting_store(struct device *dev,
 	unsigned int val;
 	int error;
 
-	mutex_lock(&tsdata->mutex);
+	guard(mutex)(&tsdata->mutex);
 
 	error = kstrtouint(buf, 0, &val);
 	if (error)
-		goto out;
+		return error;
 
-	if (val < attr->limit_low || val > attr->limit_high) {
-		error = -ERANGE;
-		goto out;
-	}
+	if (val < attr->limit_low || val > attr->limit_high)
+		return -ERANGE;
 
 	error = regmap_write(tsdata->regmap, attr->address, val);
-	if (error < 0) {
+	if (error) {
 		dev_err(&tsdata->client->dev,
 			"Failed to update attribute %s, error: %d\n",
 			dattr->attr.name, error);
-		goto out;
+		return error;
 	}
 	*field = val;
 
-out:
-	mutex_unlock(&tsdata->mutex);
-	return error ?: count;
+	return count;
 }
 
 static HYCON_ATTR_U8(threshold, 0644, HY46XX_THRESHOLD, 0, 255);
@@ -274,10 +265,7 @@ static struct attribute *hycon_hy46xx_attrs[] = {
 	&hycon_hy46xx_attr_bootloader_version.dattr.attr,
 	NULL
 };
-
-static const struct attribute_group hycon_hy46xx_attr_group = {
-	.attrs = hycon_hy46xx_attrs,
-};
+ATTRIBUTE_GROUPS(hycon_hy46xx);
 
 static void hycon_hy46xx_get_defaults(struct device *dev, struct hycon_hy46xx_data *tsdata)
 {
@@ -535,10 +523,6 @@ static int hycon_hy46xx_probe(struct i2c_client *client)
 		return error;
 	}
 
-	error = devm_device_add_group(&client->dev, &hycon_hy46xx_attr_group);
-	if (error)
-		return error;
-
 	error = input_register_device(input);
 	if (error)
 		return error;
@@ -576,6 +560,7 @@ MODULE_DEVICE_TABLE(of, hycon_hy46xx_of_match);
 static struct i2c_driver hycon_hy46xx_driver = {
 	.driver = {
 		.name = "hycon_hy46xx",
+		.dev_groups = hycon_hy46xx_groups,
 		.of_match_table = hycon_hy46xx_of_match,
 		.probe_type = PROBE_PREFER_ASYNCHRONOUS,
 	},

@@ -137,6 +137,13 @@ static char *tegra_bpmp_powergate_get_name(struct tegra_bpmp *bpmp,
 	if (err < 0 || msg.rx.ret < 0)
 		return NULL;
 
+	if (response.get_name.name[0] == '\0')
+		return NULL;
+
+	if (dev_to_node(bpmp->dev) != NUMA_NO_NODE)
+		return kasprintf(GFP_KERNEL, "%d-%s", dev_to_node(bpmp->dev),
+				 response.get_name.name);
+
 	return kstrdup(response.get_name.name, GFP_KERNEL);
 }
 
@@ -184,6 +191,7 @@ tegra_powergate_add(struct tegra_bpmp *bpmp,
 	powergate->genpd.name = kstrdup(info->name, GFP_KERNEL);
 	powergate->genpd.power_on = tegra_powergate_power_on;
 	powergate->genpd.power_off = tegra_powergate_power_off;
+	powergate->genpd.flags = GENPD_FLAG_NO_STAY_ON;
 
 	err = pm_genpd_init(&powergate->genpd, NULL, off);
 	if (err < 0) {
@@ -225,7 +233,7 @@ tegra_bpmp_probe_powergates(struct tegra_bpmp *bpmp,
 
 	dev_dbg(bpmp->dev, "maximum powergate ID: %u\n", max_id);
 
-	powergates = kcalloc(max_id + 1, sizeof(*powergates), GFP_KERNEL);
+	powergates = kzalloc_objs(*powergates, max_id + 1);
 	if (!powergates)
 		return -ENOMEM;
 
@@ -233,7 +241,7 @@ tegra_bpmp_probe_powergates(struct tegra_bpmp *bpmp,
 		struct tegra_powergate_info *info = &powergates[count];
 
 		info->name = tegra_bpmp_powergate_get_name(bpmp, id);
-		if (!info->name || info->name[0] == '\0') {
+		if (!info->name) {
 			num_holes++;
 			continue;
 		}
@@ -259,7 +267,7 @@ static int tegra_bpmp_add_powergates(struct tegra_bpmp *bpmp,
 	unsigned int i;
 	int err;
 
-	domains = kcalloc(count, sizeof(*domains), GFP_KERNEL);
+	domains = kzalloc_objs(*domains, count);
 	if (!domains)
 		return -ENOMEM;
 
@@ -305,7 +313,7 @@ static void tegra_bpmp_remove_powergates(struct tegra_bpmp *bpmp)
 }
 
 static struct generic_pm_domain *
-tegra_powergate_xlate(struct of_phandle_args *spec, void *data)
+tegra_powergate_xlate(const struct of_phandle_args *spec, void *data)
 {
 	struct generic_pm_domain *domain = ERR_PTR(-ENOENT);
 	struct genpd_onecell_data *genpd = data;

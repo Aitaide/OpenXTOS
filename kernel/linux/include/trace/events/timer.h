@@ -46,22 +46,21 @@ DEFINE_EVENT(timer_class, timer_init,
 
 /**
  * timer_start - called when the timer is started
- * @timer:	pointer to struct timer_list
- * @expires:	the timers expiry time
- * @flags:	the timers flags
+ * @timer:		pointer to struct timer_list
+ * @bucket_expiry:	the bucket expiry time
  */
 TRACE_EVENT(timer_start,
 
 	TP_PROTO(struct timer_list *timer,
-		unsigned long expires,
-		unsigned int flags),
+		unsigned long bucket_expiry),
 
-	TP_ARGS(timer, expires, flags),
+	TP_ARGS(timer, bucket_expiry),
 
 	TP_STRUCT__entry(
 		__field( void *,	timer		)
 		__field( void *,	function	)
 		__field( unsigned long,	expires		)
+		__field( unsigned long,	bucket_expiry	)
 		__field( unsigned long,	now		)
 		__field( unsigned int,	flags		)
 	),
@@ -69,15 +68,16 @@ TRACE_EVENT(timer_start,
 	TP_fast_assign(
 		__entry->timer		= timer;
 		__entry->function	= timer->function;
-		__entry->expires	= expires;
+		__entry->expires	= timer->expires;
+		__entry->bucket_expiry	= bucket_expiry;
 		__entry->now		= jiffies;
-		__entry->flags		= flags;
+		__entry->flags		= timer->flags;
 	),
 
-	TP_printk("timer=%p function=%ps expires=%lu [timeout=%ld] cpu=%u idx=%u flags=%s",
+	TP_printk("timer=%p function=%ps expires=%lu [timeout=%ld] bucket_expiry=%lu cpu=%u idx=%u flags=%s",
 		  __entry->timer, __entry->function, __entry->expires,
 		  (long)__entry->expires - __entry->now,
-		  __entry->flags & TIMER_CPUMASK,
+		  __entry->bucket_expiry, __entry->flags & TIMER_CPUMASK,
 		  __entry->flags >> TIMER_ARRAYSHIFT,
 		  decode_timer_flags(__entry->flags & TIMER_TRACE_FLAGMASK))
 );
@@ -142,6 +142,26 @@ DEFINE_EVENT(timer_class, timer_cancel,
 	TP_ARGS(timer)
 );
 
+TRACE_EVENT(timer_base_idle,
+
+	TP_PROTO(bool is_idle, unsigned int cpu),
+
+	TP_ARGS(is_idle, cpu),
+
+	TP_STRUCT__entry(
+		__field( bool,		is_idle	)
+		__field( unsigned int,	cpu	)
+	),
+
+	TP_fast_assign(
+		__entry->is_idle	= is_idle;
+		__entry->cpu		= cpu;
+	),
+
+	TP_printk("is_idle=%d cpu=%d",
+		  __entry->is_idle, __entry->cpu)
+);
+
 #define decode_clockid(type)						\
 	__print_symbolic(type,						\
 		{ CLOCK_REALTIME,	"CLOCK_REALTIME"	},	\
@@ -165,12 +185,12 @@ DEFINE_EVENT(timer_class, timer_cancel,
 		{ HRTIMER_MODE_REL_PINNED_HARD,	"REL|PINNED|HARD" })
 
 /**
- * hrtimer_init - called when the hrtimer is initialized
+ * hrtimer_setup - called when the hrtimer is initialized
  * @hrtimer:	pointer to struct hrtimer
  * @clockid:	the hrtimers clock
  * @mode:	the hrtimers mode
  */
-TRACE_EVENT(hrtimer_init,
+TRACE_EVENT(hrtimer_setup,
 
 	TP_PROTO(struct hrtimer *hrtimer, clockid_t clockid,
 		 enum hrtimer_mode mode),
@@ -198,12 +218,13 @@ TRACE_EVENT(hrtimer_init,
  * hrtimer_start - called when the hrtimer is started
  * @hrtimer:	pointer to struct hrtimer
  * @mode:	the hrtimers mode
+ * @was_armed:	Was armed when hrtimer_start*() was invoked
  */
 TRACE_EVENT(hrtimer_start,
 
-	TP_PROTO(struct hrtimer *hrtimer, enum hrtimer_mode mode),
+	TP_PROTO(struct hrtimer *hrtimer, enum hrtimer_mode mode, bool was_armed),
 
-	TP_ARGS(hrtimer, mode),
+	TP_ARGS(hrtimer, mode, was_armed),
 
 	TP_STRUCT__entry(
 		__field( void *,	hrtimer		)
@@ -211,34 +232,35 @@ TRACE_EVENT(hrtimer_start,
 		__field( s64,		expires		)
 		__field( s64,		softexpires	)
 		__field( enum hrtimer_mode,	mode	)
+		__field( bool,		was_armed	)
 	),
 
 	TP_fast_assign(
 		__entry->hrtimer	= hrtimer;
-		__entry->function	= hrtimer->function;
+		__entry->function	= ACCESS_PRIVATE(hrtimer, function);
 		__entry->expires	= hrtimer_get_expires(hrtimer);
 		__entry->softexpires	= hrtimer_get_softexpires(hrtimer);
 		__entry->mode		= mode;
+		__entry->was_armed	= was_armed;
 	),
 
 	TP_printk("hrtimer=%p function=%ps expires=%llu softexpires=%llu "
-		  "mode=%s", __entry->hrtimer, __entry->function,
+		  "mode=%s was_armed=%d", __entry->hrtimer, __entry->function,
 		  (unsigned long long) __entry->expires,
 		  (unsigned long long) __entry->softexpires,
-		  decode_hrtimer_mode(__entry->mode))
+		  decode_hrtimer_mode(__entry->mode), __entry->was_armed)
 );
 
 /**
  * hrtimer_expire_entry - called immediately before the hrtimer callback
  * @hrtimer:	pointer to struct hrtimer
- * @now:	pointer to variable which contains current time of the
- *		timers base.
+ * @now:	variable which contains current time of the timers base.
  *
  * Allows to determine the timer latency.
  */
 TRACE_EVENT(hrtimer_expire_entry,
 
-	TP_PROTO(struct hrtimer *hrtimer, ktime_t *now),
+	TP_PROTO(struct hrtimer *hrtimer, ktime_t now),
 
 	TP_ARGS(hrtimer, now),
 
@@ -250,8 +272,8 @@ TRACE_EVENT(hrtimer_expire_entry,
 
 	TP_fast_assign(
 		__entry->hrtimer	= hrtimer;
-		__entry->now		= *now;
-		__entry->function	= hrtimer->function;
+		__entry->now		= now;
+		__entry->function	= ACCESS_PRIVATE(hrtimer, function);
 	),
 
 	TP_printk("hrtimer=%p function=%ps now=%llu",
@@ -277,6 +299,19 @@ DECLARE_EVENT_CLASS(hrtimer_class,
 );
 
 /**
+ * hrtimer_start_expired - Invoked when a expired timer was started
+ * @hrtimer:	pointer to struct hrtimer
+ *
+ * Preceded by a hrtimer_start tracepoint.
+ */
+DEFINE_EVENT(hrtimer_class, hrtimer_start_expired,
+
+	TP_PROTO(struct hrtimer *hrtimer),
+
+	TP_ARGS(hrtimer)
+);
+
+/**
  * hrtimer_expire_exit - called immediately after the hrtimer callback returns
  * @hrtimer:	pointer to struct hrtimer
  *
@@ -299,6 +334,30 @@ DEFINE_EVENT(hrtimer_class, hrtimer_cancel,
 	TP_PROTO(struct hrtimer *hrtimer),
 
 	TP_ARGS(hrtimer)
+);
+
+/**
+ * hrtimer_rearm - Invoked when the clockevent device is rearmed
+ * @next_event:	The next expiry time (CLOCK_MONOTONIC)
+ */
+TRACE_EVENT(hrtimer_rearm,
+
+	TP_PROTO(ktime_t next_event, bool deferred),
+
+	TP_ARGS(next_event, deferred),
+
+	TP_STRUCT__entry(
+		__field( s64,		next_event	)
+		__field( bool,		deferred	)
+	),
+
+	TP_fast_assign(
+		__entry->next_event	= next_event;
+		__entry->deferred	= deferred;
+	),
+
+	TP_printk("next_event=%llu deferred=%d",
+		  (unsigned long long) __entry->next_event, __entry->deferred)
 );
 
 /**

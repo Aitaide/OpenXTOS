@@ -5,8 +5,13 @@
 #include <engine/disp.h>
 #include <core/enum.h>
 struct nvkm_head;
+struct nvkm_head_func;
+struct nvkm_ior;
 struct nvkm_outp;
 struct dcb_output;
+
+int r535_disp_new(const struct nvkm_disp_func *, struct nvkm_device *, enum nvkm_subdev_type, int,
+		  struct nvkm_disp **);
 
 int nvkm_disp_ctor(const struct nvkm_disp_func *, struct nvkm_device *, enum nvkm_subdev_type, int,
 		   struct nvkm_disp *);
@@ -15,9 +20,10 @@ int nvkm_disp_new_(const struct nvkm_disp_func *, struct nvkm_device *, enum nvk
 void nvkm_disp_vblank(struct nvkm_disp *, int head);
 
 struct nvkm_disp_func {
+	void (*dtor)(struct nvkm_disp *);
 	int (*oneinit)(struct nvkm_disp *);
 	int (*init)(struct nvkm_disp *);
-	void (*fini)(struct nvkm_disp *);
+	void (*fini)(struct nvkm_disp *, bool suspend);
 	void (*intr)(struct nvkm_disp *);
 	void (*intr_error)(struct nvkm_disp *, int chid);
 
@@ -30,9 +36,23 @@ struct nvkm_disp_func {
 		int (*new)(struct nvkm_disp *, int id);
 	} wndw, head, dac, sor, pior;
 
+	/* Register programming that the GSP-RM display path (rm/r535) needs from
+	 * the chip, everything else on that path goes through RM. The hooks are
+	 * called unconditionally and the head table is handed to nvkm_head_new_().
+	 */
+	struct {
+		irqreturn_t (*intr)(struct nvkm_inth *);
+		/* Head-timing interrupts arrive on a second DISP vector. */
+		bool intr_low_latency;
+		const struct nvkm_head_func *head;
+		void (*hdmi_gcp)(struct nvkm_ior *, int head, bool enable);
+		void (*hdmi_infoframe_avi)(struct nvkm_ior *, int head, void *data, u32 size);
+		void (*hdmi_infoframe_vsi)(struct nvkm_ior *, int head, void *data, u32 size);
+	} gsp;
+
 	u16 ramht_size;
 
-	const struct nvkm_sclass root;
+	struct nvkm_sclass root;
 
 	struct nvkm_disp_user {
 		struct nvkm_sclass base;
@@ -44,7 +64,7 @@ struct nvkm_disp_func {
 
 int nv50_disp_oneinit(struct nvkm_disp *);
 int nv50_disp_init(struct nvkm_disp *);
-void nv50_disp_fini(struct nvkm_disp *);
+void nv50_disp_fini(struct nvkm_disp *, bool suspend);
 void nv50_disp_intr(struct nvkm_disp *);
 extern const struct nvkm_enum nv50_disp_intr_error_type[];
 void nv50_disp_super(struct work_struct *);
@@ -56,18 +76,19 @@ void nv50_disp_super_2_2(struct nvkm_disp *, struct nvkm_head *);
 void nv50_disp_super_3_0(struct nvkm_disp *, struct nvkm_head *);
 
 int gf119_disp_init(struct nvkm_disp *);
-void gf119_disp_fini(struct nvkm_disp *);
+void gf119_disp_fini(struct nvkm_disp *, bool suspend);
 void gf119_disp_intr(struct nvkm_disp *);
 void gf119_disp_super(struct work_struct *);
 void gf119_disp_intr_error(struct nvkm_disp *, int);
 
-void gv100_disp_fini(struct nvkm_disp *);
+void gv100_disp_fini(struct nvkm_disp *, bool suspend);
 void gv100_disp_intr(struct nvkm_disp *);
 void gv100_disp_super(struct work_struct *);
 int gv100_disp_wndw_cnt(struct nvkm_disp *, unsigned long *);
 int gv100_disp_caps_new(const struct nvkm_oclass *, void *, u32, struct nvkm_object **);
 
 int tu102_disp_init(struct nvkm_disp *);
+irqreturn_t tu102_disp_intr(struct nvkm_inth *);
 
 void nv50_disp_dptmds_war_2(struct nvkm_disp *, struct dcb_output *);
 void nv50_disp_dptmds_war_3(struct nvkm_disp *, struct dcb_output *);

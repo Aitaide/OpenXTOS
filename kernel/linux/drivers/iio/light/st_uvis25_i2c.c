@@ -9,7 +9,6 @@
 
 #include <linux/kernel.h>
 #include <linux/module.h>
-#include <linux/mod_devicetable.h>
 #include <linux/i2c.h>
 #include <linux/slab.h>
 #include <linux/regmap.h>
@@ -41,13 +40,13 @@ static int st_uvis25_i2c_probe(struct i2c_client *client)
 
 static const struct of_device_id st_uvis25_i2c_of_match[] = {
 	{ .compatible = "st,uvis25", },
-	{},
+	{ }
 };
 MODULE_DEVICE_TABLE(of, st_uvis25_i2c_of_match);
 
 static const struct i2c_device_id st_uvis25_i2c_id_table[] = {
-	{ ST_UVIS25_DEV_NAME },
-	{},
+	{ .name = ST_UVIS25_DEV_NAME },
+	{ }
 };
 MODULE_DEVICE_TABLE(i2c, st_uvis25_i2c_id_table);
 
@@ -65,4 +64,4 @@ module_i2c_driver(st_uvis25_driver);
 MODULE_AUTHOR("Lorenzo Bianconi <lorenzo.bianconi83@gmail.com>");
 MODULE_DESCRIPTION("STMicroelectronics uvis25 i2c driver");
 MODULE_LICENSE("GPL v2");
-MODULE_IMPORT_NS(IIO_UVIS25);
+MODULE_IMPORT_NS("IIO_UVIS25");

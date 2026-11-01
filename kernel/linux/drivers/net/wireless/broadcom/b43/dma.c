@@ -837,19 +837,19 @@ struct b43_dmaring *b43_setup_dmaring(struct b43_wldev *dev,
 	struct b43_dmaring *ring;
 	int i, err;
 	dma_addr_t dma_test;
+	size_t nr_slots;
 
-	ring = kzalloc(sizeof(*ring), GFP_KERNEL);
+	if (for_tx)
+		nr_slots = B43_TXRING_SLOTS;
+	else
+		nr_slots = B43_RXRING_SLOTS;
+
+	ring = kzalloc_flex(*ring, meta, nr_slots);
 	if (!ring)
 		goto out;
 
-	ring->nr_slots = B43_RXRING_SLOTS;
-	if (for_tx)
-		ring->nr_slots = B43_TXRING_SLOTS;
+	ring->nr_slots = nr_slots;
 
-	ring->meta = kcalloc(ring->nr_slots, sizeof(struct b43_dmadesc_meta),
-			     GFP_KERNEL);
-	if (!ring->meta)
-		goto err_kfree_ring;
 	for (i = 0; i < ring->nr_slots; i++)
 		ring->meta->skb = B43_DMA_PTR_POISON;
 
@@ -944,8 +944,6 @@ struct b43_dmaring *b43_setup_dmaring(struct b43_wldev *dev,
       err_kfree_txhdr_cache:
 	kfree(ring->txhdr_cache);
       err_kfree_meta:
-	kfree(ring->meta);
-      err_kfree_ring:
 	kfree(ring);
 	ring = NULL;
 	goto out;
@@ -1005,7 +1003,6 @@ static void b43_destroy_dmaring(struct b43_dmaring *ring,
 	free_ringmemory(ring);
 
 	kfree(ring->txhdr_cache);
-	kfree(ring->meta);
 	kfree(ring);
 }
 
@@ -1399,7 +1396,7 @@ int b43_dma_tx(struct b43_wldev *dev, struct sk_buff *skb)
 	    should_inject_overflow(ring)) {
 		/* This TX ring is full. */
 		unsigned int skb_mapping = skb_get_queue_mapping(skb);
-		ieee80211_stop_queue(dev->wl->hw, skb_mapping);
+		b43_stop_queue(dev, skb_mapping);
 		dev->wl->tx_queue_stopped[skb_mapping] = true;
 		ring->stopped = true;
 		if (b43_debug(dev, B43_DBG_DMAVERBOSE)) {
@@ -1531,9 +1528,9 @@ void b43_dma_handle_txstatus(struct b43_wldev *dev,
 				ring->nr_failed_tx_packets++;
 			ring->nr_total_packet_tries += status->frame_count;
 #endif /* DEBUG */
-			ieee80211_tx_status(dev->wl->hw, meta->skb);
+			ieee80211_tx_status_skb(dev->wl->hw, meta->skb);
 
-			/* skb will be freed by ieee80211_tx_status().
+			/* skb will be freed by ieee80211_tx_status_skb().
 			 * Poison our pointer. */
 			meta->skb = B43_DMA_PTR_POISON;
 		} else {
@@ -1570,7 +1567,7 @@ void b43_dma_handle_txstatus(struct b43_wldev *dev,
 	} else {
 		/* If the driver queue is running wake the corresponding
 		 * mac80211 queue. */
-		ieee80211_wake_queue(dev->wl->hw, ring->queue_prio);
+		b43_wake_queue(dev, ring->queue_prio);
 		if (b43_debug(dev, B43_DBG_DMAVERBOSE)) {
 			b43dbg(dev->wl, "Woke up TX ring %d\n", ring->index);
 		}

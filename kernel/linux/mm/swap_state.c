@@ -10,35 +10,46 @@
 #include <linux/mm.h>
 #include <linux/gfp.h>
 #include <linux/kernel_stat.h>
+#include <linux/mempolicy.h>
 #include <linux/swap.h>
-#include <linux/swapops.h>
+#include <linux/leafops.h>
 #include <linux/init.h>
 #include <linux/pagemap.h>
+#include <linux/folio_batch.h>
 #include <linux/backing-dev.h>
-#include <linux/blkdev.h>
+#include <linux/blk_plug.h>
 #include <linux/migrate.h>
 #include <linux/vmalloc.h>
-#include <linux/swap_slots.h>
 #include <linux/huge_mm.h>
 #include <linux/shmem_fs.h>
+#include <linux/sysctl.h>
+#include <linux/swap_ops.h>
 #include "internal.h"
+#include "swap_table.h"
 #include "swap.h"
+
+/* Swap readahead cluster size, as a power of 2 pages. */
+static int page_cluster;
+static const int page_cluster_max = 31;
 
 /*
  * swapper_space is a fiction, retained to simplify the path through
- * vmscan's shrink_page_list.
+ * vmscan's shrink_folio_list.
  */
 static const struct address_space_operations swap_aops = {
-	.writepage	= swap_writepage,
 	.dirty_folio	= noop_dirty_folio,
 #ifdef CONFIG_MIGRATION
 	.migrate_folio	= migrate_folio,
 #endif
 };
 
-struct address_space *swapper_spaces[MAX_SWAPFILES] __read_mostly;
-static unsigned int nr_swapper_spaces[MAX_SWAPFILES] __read_mostly;
+struct address_space swap_space __read_mostly = {
+	.a_ops = &swap_aops,
+};
+
 static bool enable_vma_readahead __read_mostly = true;
+
+#define SWAP_RA_ORDER_CEILING	5
 
 #define SWAP_RA_WIN_SHIFT	(PAGE_SHIFT / 2)
 #define SWAP_RA_HITS_MASK	((1UL << SWAP_RA_WIN_SHIFT) - 1)
@@ -67,210 +78,467 @@ void show_swap_cache_info(void)
 	printk("Total swap = %lukB\n", K(total_swap_pages));
 }
 
-void *get_shadow_from_swap_cache(swp_entry_t entry)
+/**
+ * swap_cache_get_folio - Looks up a folio in the swap cache.
+ * @entry: swap entry used for the lookup.
+ *
+ * A found folio will be returned unlocked and with its refcount increased.
+ *
+ * Context: Caller must ensure @entry is valid and protect the swap device
+ * with reference count or locks.
+ * Return: Returns the found folio on success, NULL otherwise. The caller
+ * must lock and check if the folio still matches the swap entry before
+ * use (e.g., folio_matches_swap_entry).
+ */
+struct folio *swap_cache_get_folio(swp_entry_t entry)
 {
-	struct address_space *address_space = swap_address_space(entry);
-	pgoff_t idx = swp_offset(entry);
-	struct page *page;
+	unsigned long swp_tb;
+	struct folio *folio;
 
-	page = xa_load(&address_space->i_pages, idx);
-	if (xa_is_value(page))
-		return page;
+	for (;;) {
+		swp_tb = swap_table_get(__swap_entry_to_cluster(entry),
+					swp_cluster_offset(entry));
+		if (!swp_tb_is_folio(swp_tb))
+			return NULL;
+		folio = swp_tb_to_folio(swp_tb);
+		if (likely(folio_try_get(folio)))
+			return folio;
+	}
+
 	return NULL;
 }
 
-/*
- * add_to_swap_cache resembles filemap_add_folio on swapper_space,
- * but sets SwapCache flag and private instead of mapping and index.
+/**
+ * swap_cache_has_folio - Check if a swap slot has cache.
+ * @entry: swap entry indicating the slot.
+ *
+ * Context: Caller must ensure @entry is valid and protect the swap
+ * device with reference count or locks.
  */
-int add_to_swap_cache(struct folio *folio, swp_entry_t entry,
-			gfp_t gfp, void **shadowp)
+bool swap_cache_has_folio(swp_entry_t entry)
 {
-	struct address_space *address_space = swap_address_space(entry);
-	pgoff_t idx = swp_offset(entry);
-	XA_STATE_ORDER(xas, &address_space->i_pages, idx, folio_order(folio));
-	unsigned long i, nr = folio_nr_pages(folio);
-	void *old;
+	unsigned long swp_tb;
 
-	xas_set_update(&xas, workingset_update_node);
-
-	VM_BUG_ON_FOLIO(!folio_test_locked(folio), folio);
-	VM_BUG_ON_FOLIO(folio_test_swapcache(folio), folio);
-	VM_BUG_ON_FOLIO(!folio_test_swapbacked(folio), folio);
-
-	folio_ref_add(folio, nr);
-	folio_set_swapcache(folio);
-	folio->swap = entry;
-
-	do {
-		xas_lock_irq(&xas);
-		xas_create_range(&xas);
-		if (xas_error(&xas))
-			goto unlock;
-		for (i = 0; i < nr; i++) {
-			VM_BUG_ON_FOLIO(xas.xa_index != idx + i, folio);
-			old = xas_load(&xas);
-			if (xa_is_value(old)) {
-				if (shadowp)
-					*shadowp = old;
-			}
-			xas_store(&xas, folio);
-			xas_next(&xas);
-		}
-		address_space->nrpages += nr;
-		__node_stat_mod_folio(folio, NR_FILE_PAGES, nr);
-		__lruvec_stat_mod_folio(folio, NR_SWAPCACHE, nr);
-unlock:
-		xas_unlock_irq(&xas);
-	} while (xas_nomem(&xas, gfp));
-
-	if (!xas_error(&xas))
-		return 0;
-
-	folio_clear_swapcache(folio);
-	folio_ref_sub(folio, nr);
-	return xas_error(&xas);
-}
-
-/*
- * This must be called only on folios that have
- * been verified to be in the swap cache.
- */
-void __delete_from_swap_cache(struct folio *folio,
-			swp_entry_t entry, void *shadow)
-{
-	struct address_space *address_space = swap_address_space(entry);
-	int i;
-	long nr = folio_nr_pages(folio);
-	pgoff_t idx = swp_offset(entry);
-	XA_STATE(xas, &address_space->i_pages, idx);
-
-	xas_set_update(&xas, workingset_update_node);
-
-	VM_BUG_ON_FOLIO(!folio_test_locked(folio), folio);
-	VM_BUG_ON_FOLIO(!folio_test_swapcache(folio), folio);
-	VM_BUG_ON_FOLIO(folio_test_writeback(folio), folio);
-
-	for (i = 0; i < nr; i++) {
-		void *entry = xas_store(&xas, shadow);
-		VM_BUG_ON_PAGE(entry != folio, entry);
-		xas_next(&xas);
-	}
-	folio->swap.val = 0;
-	folio_clear_swapcache(folio);
-	address_space->nrpages -= nr;
-	__node_stat_mod_folio(folio, NR_FILE_PAGES, -nr);
-	__lruvec_stat_mod_folio(folio, NR_SWAPCACHE, -nr);
+	swp_tb = swap_table_get(__swap_entry_to_cluster(entry),
+				swp_cluster_offset(entry));
+	return swp_tb_is_folio(swp_tb);
 }
 
 /**
- * add_to_swap - allocate swap space for a folio
- * @folio: folio we want to move to swap
+ * swap_cache_get_shadow - Looks up a shadow in the swap cache.
+ * @entry: swap entry used for the lookup.
  *
- * Allocate swap space for the folio and add the folio to the
- * swap cache.
- *
- * Context: Caller needs to hold the folio lock.
- * Return: Whether the folio was added to the swap cache.
+ * Context: Caller must ensure @entry is valid and protect the swap device
+ * with reference count or locks.
+ * Return: Returns either NULL or an XA_VALUE (shadow).
  */
-bool add_to_swap(struct folio *folio)
+void *swap_cache_get_shadow(swp_entry_t entry)
 {
-	swp_entry_t entry;
-	int err;
+	unsigned long swp_tb;
 
-	VM_BUG_ON_FOLIO(!folio_test_locked(folio), folio);
-	VM_BUG_ON_FOLIO(!folio_test_uptodate(folio), folio);
-
-	entry = folio_alloc_swap(folio);
-	if (!entry.val)
-		return false;
-
-	/*
-	 * XArray node allocations from PF_MEMALLOC contexts could
-	 * completely exhaust the page allocator. __GFP_NOMEMALLOC
-	 * stops emergency reserves from being allocated.
-	 *
-	 * TODO: this could cause a theoretical memory reclaim
-	 * deadlock in the swap out path.
-	 */
-	/*
-	 * Add it to the swap cache.
-	 */
-	err = add_to_swap_cache(folio, entry,
-			__GFP_HIGH|__GFP_NOMEMALLOC|__GFP_NOWARN, NULL);
-	if (err)
-		/*
-		 * add_to_swap_cache() doesn't return -EEXIST, so we can safely
-		 * clear SWAP_HAS_CACHE flag.
-		 */
-		goto fail;
-	/*
-	 * Normally the folio will be dirtied in unmap because its
-	 * pte should be dirty. A special case is MADV_FREE page. The
-	 * page's pte could have dirty bit cleared but the folio's
-	 * SwapBacked flag is still set because clearing the dirty bit
-	 * and SwapBacked flag has no lock protected. For such folio,
-	 * unmap will not set dirty bit for it, so folio reclaim will
-	 * not write the folio out. This can cause data corruption when
-	 * the folio is swapped in later. Always setting the dirty flag
-	 * for the folio solves the problem.
-	 */
-	folio_mark_dirty(folio);
-
-	return true;
-
-fail:
-	put_swap_folio(folio, entry);
-	return false;
+	swp_tb = swap_table_get(__swap_entry_to_cluster(entry),
+				swp_cluster_offset(entry));
+	if (swp_tb_is_shadow(swp_tb))
+		return swp_tb_to_shadow(swp_tb);
+	return NULL;
 }
 
-/*
- * This must be called only on folios that have
- * been verified to be in the swap cache and locked.
- * It will never put the folio into the free list,
- * the caller has a reference on the folio.
+/**
+ * __swap_cache_add_check - Check if a range is suitable for adding a folio.
+ * @ci: The locked swap cluster
+ * @targ_entry: The target swap entry to check, will be rounded down by @nr
+ * @nr: Number of slots to check, must be a power of 2
+ * @shadowp: Returns the shadow value if one exists in the range
+ * @memcg_id: Returns the memory cgroup id, NULL to ignore cgroup check
+ *
+ * Check if all slots covered by given range have a swap count >= 1.
+ * Retrieves the shadow if there is one. If @memcg_id is not NULL, also
+ * checks if all slots belong to the same cgroup and return the cgroup
+ * private id.
+ *
+ * Context: Caller must lock the cluster.
+ * Return: 0 if success, error code if failed.
  */
-void delete_from_swap_cache(struct folio *folio)
+static int __swap_cache_add_check(struct swap_cluster_info *ci,
+				  swp_entry_t targ_entry,
+				  unsigned long nr, void **shadowp,
+				  unsigned short *memcg_id)
 {
+	unsigned int ci_off, ci_end;
+	unsigned long old_tb;
+	bool is_zero;
+
+	lockdep_assert_held(&ci->lock);
+
+	/*
+	 * If the target slot is not swapped out or already cached, return
+	 * -ENOENT or -EEXIST. If the batch is not suitable, could be a
+	 * race with concurrent free or cache add, return -EBUSY.
+	 */
+	if (unlikely(!ci->table))
+		return -ENOENT;
+	ci_off = swp_cluster_offset(targ_entry);
+	old_tb = __swap_table_get(ci, ci_off);
+	if (swp_tb_is_folio(old_tb))
+		return -EEXIST;
+	if (!__swp_tb_get_count(old_tb))
+		return -ENOENT;
+	if (shadowp && swp_tb_is_shadow(old_tb))
+		*shadowp = swp_tb_to_shadow(old_tb);
+	if (memcg_id)
+		*memcg_id = __swap_cgroup_get(ci, ci_off);
+
+	if (nr == 1)
+		return 0;
+
+	is_zero = __swap_table_test_zero(ci, ci_off);
+	ci_off = round_down(ci_off, nr);
+	ci_end = ci_off + nr;
+	do {
+		old_tb = __swap_table_get(ci, ci_off);
+		if (unlikely(swp_tb_is_folio(old_tb) ||
+			     !__swp_tb_get_count(old_tb) ||
+			     is_zero != __swap_table_test_zero(ci, ci_off) ||
+			     (memcg_id && *memcg_id != __swap_cgroup_get(ci, ci_off))))
+			return -EBUSY;
+	} while (++ci_off < ci_end);
+
+	return 0;
+}
+
+static void __swap_cache_do_add_folio(struct swap_cluster_info *ci,
+				      struct folio *folio, swp_entry_t entry)
+{
+	unsigned int ci_off = swp_cluster_offset(entry), ci_end;
+	unsigned long nr_pages = folio_nr_pages(folio);
+	unsigned long pfn = folio_pfn(folio);
+	unsigned long old_tb;
+
+	VM_WARN_ON_ONCE_FOLIO(!folio_test_locked(folio), folio);
+	VM_WARN_ON_ONCE_FOLIO(folio_test_swapcache(folio), folio);
+	VM_WARN_ON_ONCE_FOLIO(!folio_test_swapbacked(folio), folio);
+
+	ci_end = ci_off + nr_pages;
+	do {
+		old_tb = __swap_table_get(ci, ci_off);
+		VM_WARN_ON_ONCE(swp_tb_is_folio(old_tb));
+		__swap_table_set(ci, ci_off, pfn_to_swp_tb(pfn, __swp_tb_get_flags(old_tb)));
+	} while (++ci_off < ci_end);
+
+	folio_ref_add(folio, nr_pages);
+	folio_set_swapcache(folio);
+	folio->swap = entry;
+}
+
+/**
+ * __swap_cache_add_folio - Add a folio to the swap cache and update stats.
+ * @ci: The locked swap cluster.
+ * @folio: The folio to be added.
+ * @entry: The swap entry corresponding to the folio.
+ *
+ * Unconditionally add a folio to the swap cache. The caller must ensure
+ * all slots are usable and have no conflicts. This assigns entry to
+ * @folio->swap, increases folio refcount by the number of pages, and
+ * updates swap cache stats.
+ *
+ * Context: Caller must ensure the folio is locked and lock the cluster
+ * that holds the entries.
+ */
+void __swap_cache_add_folio(struct swap_cluster_info *ci,
+			    struct folio *folio, swp_entry_t entry)
+{
+	unsigned long nr_pages = folio_nr_pages(folio);
+
+	__swap_cache_do_add_folio(ci, folio, entry);
+	node_stat_mod_folio(folio, NR_FILE_PAGES, nr_pages);
+	lruvec_stat_mod_folio(folio, NR_SWAPCACHE, nr_pages);
+}
+
+static void __swap_cache_do_del_folio(struct swap_cluster_info *ci,
+				      struct folio *folio,
+				      swp_entry_t entry, void *shadow)
+{
+	unsigned long old_tb;
+	struct swap_info_struct *si;
+	unsigned int ci_start, ci_off, ci_end;
+	bool folio_swapped = false, need_free = false;
+	unsigned long nr_pages = folio_nr_pages(folio);
+
+	VM_WARN_ON_ONCE(__swap_entry_to_cluster(entry) != ci);
+	VM_WARN_ON_ONCE_FOLIO(!folio_test_locked(folio), folio);
+	VM_WARN_ON_ONCE_FOLIO(!folio_test_swapcache(folio), folio);
+	VM_WARN_ON_ONCE_FOLIO(folio_test_writeback(folio), folio);
+
+	si = __swap_entry_to_info(entry);
+	ci_start = swp_cluster_offset(entry);
+	ci_end = ci_start + nr_pages;
+	ci_off = ci_start;
+	do {
+		old_tb = __swap_table_get(ci, ci_off);
+		WARN_ON_ONCE(!swp_tb_is_folio(old_tb) ||
+			     swp_tb_to_folio(old_tb) != folio);
+		if (__swp_tb_get_count(old_tb))
+			folio_swapped = true;
+		else
+			need_free = true;
+		/* If shadow is NULL, we set an empty shadow. */
+		__swap_table_set(ci, ci_off, shadow_to_swp_tb(shadow,
+				 __swp_tb_get_flags(old_tb)));
+	} while (++ci_off < ci_end);
+
+	folio->swap.val = 0;
+	folio_clear_swapcache(folio);
+
+	if (!folio_swapped) {
+		__swap_cluster_free_entries(si, ci, ci_start, nr_pages);
+	} else if (need_free) {
+		ci_off = ci_start;
+		do {
+			if (!__swp_tb_get_count(__swap_table_get(ci, ci_off)))
+				__swap_cluster_free_entries(si, ci, ci_off, 1);
+		} while (++ci_off < ci_end);
+	}
+}
+
+/**
+ * __swap_cache_del_folio - Removes a folio from the swap cache.
+ * @ci: The locked swap cluster.
+ * @folio: The folio.
+ * @entry: The first swap entry that the folio corresponds to.
+ * @shadow: shadow value to be filled in the swap cache.
+ *
+ * Removes a folio from the swap cache and fills a shadow in place.
+ * This won't put the folio's refcount. The caller has to do that.
+ *
+ * Context: Caller must ensure the folio is locked and in the swap cache
+ * using the index of @entry, and lock the cluster that holds the entries.
+ */
+void __swap_cache_del_folio(struct swap_cluster_info *ci, struct folio *folio,
+			    swp_entry_t entry, void *shadow)
+{
+	unsigned long nr_pages = folio_nr_pages(folio);
+
+	__swap_cache_do_del_folio(ci, folio, entry, shadow);
+	node_stat_mod_folio(folio, NR_FILE_PAGES, -nr_pages);
+	lruvec_stat_mod_folio(folio, NR_SWAPCACHE, -nr_pages);
+}
+
+/**
+ * swap_cache_del_folio - Removes a folio from the swap cache.
+ * @folio: The folio.
+ *
+ * Same as __swap_cache_del_folio, but handles lock and refcount. The
+ * caller must ensure the folio is either clean or has a swap count
+ * equal to zero, or it may cause data loss.
+ *
+ * Context: Caller must ensure the folio is locked and in the swap cache.
+ */
+void swap_cache_del_folio(struct folio *folio)
+{
+	struct swap_cluster_info *ci;
 	swp_entry_t entry = folio->swap;
-	struct address_space *address_space = swap_address_space(entry);
 
-	xa_lock_irq(&address_space->i_pages);
-	__delete_from_swap_cache(folio, entry, NULL);
-	xa_unlock_irq(&address_space->i_pages);
+	ci = swap_cluster_lock(__swap_entry_to_info(entry), swp_offset(entry));
+	__swap_cache_del_folio(ci, folio, entry, NULL);
+	swap_cluster_unlock(ci);
 
-	put_swap_folio(folio, entry);
 	folio_ref_sub(folio, folio_nr_pages(folio));
 }
 
-void clear_shadow_from_swap_cache(int type, unsigned long begin,
-				unsigned long end)
+/**
+ * __swap_cache_replace_folio - Replace a folio in the swap cache.
+ * @ci: The locked swap cluster.
+ * @old: The old folio to be replaced.
+ * @new: The new folio.
+ *
+ * Replace an existing folio in the swap cache with a new folio. The
+ * caller is responsible for setting up the new folio's flag and swap
+ * entries. Replacement will take the new folio's swap entry value as
+ * the starting offset to override all slots covered by the new folio.
+ *
+ * Context: Caller must ensure both folios are locked, and lock the
+ * cluster that holds the old folio to be replaced.
+ */
+void __swap_cache_replace_folio(struct swap_cluster_info *ci,
+				struct folio *old, struct folio *new)
 {
-	unsigned long curr = begin;
-	void *old;
+	swp_entry_t entry = new->swap;
+	unsigned long nr_pages = folio_nr_pages(new);
+	unsigned int ci_off = swp_cluster_offset(entry);
+	unsigned int ci_end = ci_off + nr_pages;
+	unsigned long pfn = folio_pfn(new);
+	unsigned long old_tb;
 
-	for (;;) {
-		swp_entry_t entry = swp_entry(type, curr);
-		struct address_space *address_space = swap_address_space(entry);
-		XA_STATE(xas, &address_space->i_pages, curr);
+	VM_WARN_ON_ONCE(!folio_test_swapcache(old) || !folio_test_swapcache(new));
+	VM_WARN_ON_ONCE(!folio_test_locked(old) || !folio_test_locked(new));
+	VM_WARN_ON_ONCE(!entry.val);
 
-		xas_set_update(&xas, workingset_update_node);
+	/* Swap cache still stores N entries instead of a high-order entry */
+	do {
+		old_tb = __swap_table_get(ci, ci_off);
+		WARN_ON_ONCE(!swp_tb_is_folio(old_tb) || swp_tb_to_folio(old_tb) != old);
+		__swap_table_set(ci, ci_off, pfn_to_swp_tb(pfn, __swp_tb_get_flags(old_tb)));
+	} while (++ci_off < ci_end);
 
-		xa_lock_irq(&address_space->i_pages);
-		xas_for_each(&xas, old, end) {
-			if (!xa_is_value(old))
-				continue;
-			xas_store(&xas, NULL);
-		}
-		xa_unlock_irq(&address_space->i_pages);
-
-		/* search the next swapcache until we meet end */
-		curr >>= SWAP_ADDRESS_SPACE_SHIFT;
-		curr++;
-		curr <<= SWAP_ADDRESS_SPACE_SHIFT;
-		if (curr > end)
-			break;
+	/*
+	 * If the old folio is partially replaced (e.g., splitting a large
+	 * folio, the old folio is shrunk, and new split sub folios replace
+	 * the shrunk part), ensure the new folio doesn't overlap it.
+	 */
+	if (IS_ENABLED(CONFIG_DEBUG_VM) &&
+	    folio_order(old) != folio_order(new)) {
+		ci_off = swp_cluster_offset(old->swap);
+		ci_end = ci_off + folio_nr_pages(old);
+		while (ci_off++ < ci_end)
+			WARN_ON_ONCE(swp_tb_to_folio(__swap_table_get(ci, ci_off)) != old);
 	}
+}
+
+/*
+ * Try to allocate a folio of given order in the swap cache.
+ *
+ * This helper resolves the potential races of swap allocation
+ * and prepares a folio to be used for swap IO. May return following
+ * value:
+ *
+ * -ENOMEM / -EBUSY: Order is too large or in conflict with sub slot,
+ *                   caller should shrink the order and retry
+ * -ENOENT / -EEXIST: Target swap entry is unavailable or cached, the caller
+ *                    should abort or try to use the cached folio instead
+ */
+static struct folio *__swap_cache_alloc(struct swap_cluster_info *ci,
+					swp_entry_t targ_entry, gfp_t gfp,
+					unsigned int order, struct vm_fault *vmf,
+					struct mempolicy *mpol, pgoff_t ilx)
+{
+	int err;
+	swp_entry_t entry;
+	struct folio *folio;
+	void *shadow = NULL;
+	unsigned short memcg_id;
+	unsigned long address, nr_pages = 1UL << order;
+	struct vm_area_struct *vma = vmf ? vmf->vma : NULL;
+
+	VM_WARN_ON_ONCE(nr_pages > SWAPFILE_CLUSTER);
+	entry.val = round_down(targ_entry.val, nr_pages);
+
+	/* Check if the slot and range are available, skip allocation if not */
+	spin_lock(&ci->lock);
+	err = __swap_cache_add_check(ci, targ_entry, nr_pages, NULL, NULL);
+	spin_unlock(&ci->lock);
+	if (unlikely(err))
+		return ERR_PTR(err);
+
+	/*
+	 * Limit THP gfp. The limitation is a no-op for typical
+	 * GFP_HIGHUSER_MOVABLE but matters for shmem.
+	 */
+	if (order)
+		gfp = thp_shmem_limit_gfp_mask(vma_thp_gfp_mask(vma), gfp);
+
+	if (mpol || !vmf) {
+		folio = folio_alloc_mpol(gfp, order, mpol, ilx, numa_node_id());
+	} else {
+		address = round_down(vmf->address, PAGE_SIZE << order);
+		folio = vma_alloc_folio(gfp, order, vmf->vma, address);
+	}
+	if (unlikely(!folio))
+		return ERR_PTR(-ENOMEM);
+
+	/* Double check the range is still not in conflict */
+	spin_lock(&ci->lock);
+	err = __swap_cache_add_check(ci, targ_entry, nr_pages, &shadow, &memcg_id);
+	if (unlikely(err)) {
+		spin_unlock(&ci->lock);
+		folio_put(folio);
+		return ERR_PTR(err);
+	}
+
+	__folio_set_locked(folio);
+	__folio_set_swapbacked(folio);
+	__swap_cache_do_add_folio(ci, folio, entry);
+	spin_unlock(&ci->lock);
+
+	if (mem_cgroup_swapin_charge_folio(folio, memcg_id,
+					   vmf ? vmf->vma->vm_mm : NULL, gfp)) {
+		spin_lock(&ci->lock);
+		__swap_cache_do_del_folio(ci, folio, entry, shadow);
+		spin_unlock(&ci->lock);
+		folio_unlock(folio);
+		/* nr_pages refs from swap cache, 1 from allocation */
+		folio_put_refs(folio, nr_pages + 1);
+		count_mthp_stat(order, MTHP_STAT_SWPIN_FALLBACK_CHARGE);
+		return ERR_PTR(-ENOMEM);
+	}
+
+	if (order > 1 && folio_memcg_alloc_deferred(folio)) {
+		spin_lock(&ci->lock);
+		__swap_cache_do_del_folio(ci, folio, entry, shadow);
+		spin_unlock(&ci->lock);
+		folio_unlock(folio);
+		/* nr_pages refs from swap cache, 1 from allocation */
+		folio_put_refs(folio, nr_pages + 1);
+		return ERR_PTR(-ENOMEM);
+	}
+
+	/* memsw uncharges swap when folio is added to swap cache */
+	memcg1_swapin(folio);
+	if (shadow)
+		workingset_refault(folio, shadow);
+
+	node_stat_mod_folio(folio, NR_FILE_PAGES, nr_pages);
+	lruvec_stat_mod_folio(folio, NR_SWAPCACHE, nr_pages);
+
+	/* Caller will initiate read into locked new_folio */
+	folio_add_lru(folio);
+	return folio;
+}
+
+/**
+ * swap_cache_alloc_folio - Allocate folio for swapped out slot in swap cache.
+ * @targ_entry: swap entry indicating the target slot
+ * @gfp: memory allocation flags
+ * @orders: allocation orders, must be non zero
+ * @vmf: fault information
+ * @mpol: NUMA memory allocation policy to be applied
+ * @ilx: NUMA interleave index, for use only when MPOL_INTERLEAVE
+ *
+ * Allocate a folio in the swap cache for one swap slot, typically before
+ * doing IO (e.g. swap in or zswap writeback). The swap slot indicated by
+ * @targ_entry must have a non-zero swap count (swapped out).
+ *
+ * Context: Caller must protect the swap device with reference count or locks.
+ * Return: Returns the folio if allocation succeeded and folio is in the swap
+ * cache. Returns error code if failed due to race, OOM or invalid arguments.
+ */
+struct folio *swap_cache_alloc_folio(swp_entry_t targ_entry, gfp_t gfp,
+				     unsigned long orders, struct vm_fault *vmf,
+				     struct mempolicy *mpol, pgoff_t ilx)
+{
+	int order, err;
+	struct folio *ret;
+	struct swap_cluster_info *ci;
+
+	ci = __swap_entry_to_cluster(targ_entry);
+	order = highest_order(orders);
+
+	/* orders must be non-zero, and must not exceed cluster size. */
+	if (WARN_ON_ONCE(!orders || (1UL << order) > SWAPFILE_CLUSTER))
+		return ERR_PTR(-EINVAL);
+
+	do {
+		ret = __swap_cache_alloc(ci, targ_entry, gfp, order,
+					 vmf, mpol, ilx);
+		if (!IS_ERR(ret))
+			break;
+		err = PTR_ERR(ret);
+		if (!order || (err && err != -EBUSY && err != -ENOMEM))
+			break;
+		count_mthp_stat(order, MTHP_STAT_SWPIN_FALLBACK);
+		order = next_order(&orders, order);
+	} while (orders);
+
+	return ret;
 }
 
 /*
@@ -281,10 +549,8 @@ void clear_shadow_from_swap_cache(int type, unsigned long begin,
  * folio_free_swap() _with_ the lock.
  * 					- Marcelo
  */
-void free_swap_cache(struct page *page)
+void free_swap_cache(struct folio *folio)
 {
-	struct folio *folio = page_folio(page);
-
 	if (folio_test_swapcache(folio) && !folio_mapped(folio) &&
 	    folio_trylock(folio)) {
 		folio_free_swap(folio);
@@ -293,14 +559,14 @@ void free_swap_cache(struct page *page)
 }
 
 /*
- * Perform a free_page(), also freeing any swap cache associated with
- * this page if it is the last user of the page.
+ * Freeing a folio and also freeing any swap cache associated with
+ * this folio if it is the last user.
  */
-void free_page_and_swap_cache(struct page *page)
+void free_folio_and_swap_cache(struct folio *folio)
 {
-	free_swap_cache(page);
-	if (!is_huge_zero_page(page))
-		put_page(page);
+	free_swap_cache(folio);
+	if (!is_huge_zero_folio(folio))
+		folio_put(folio);
 }
 
 /*
@@ -309,10 +575,24 @@ void free_page_and_swap_cache(struct page *page)
  */
 void free_pages_and_swap_cache(struct encoded_page **pages, int nr)
 {
-	lru_add_drain();
-	for (int i = 0; i < nr; i++)
-		free_swap_cache(encoded_page_ptr(pages[i]));
-	release_pages(pages, nr);
+	struct folio_batch folios;
+	unsigned int refs[FOLIO_BATCH_SIZE];
+
+	folio_batch_init(&folios);
+	for (int i = 0; i < nr; i++) {
+		struct folio *folio = page_folio(encoded_page_ptr(pages[i]));
+
+		free_swap_cache(folio);
+		refs[folios.nr] = 1;
+		if (unlikely(encoded_page_flags(pages[i]) &
+			     ENCODED_PAGE_BIT_NR_PAGES_NEXT))
+			refs[folios.nr] = encoded_nr_pages(pages[++i]);
+
+		if (folio_batch_add(&folios, folio) == 0)
+			folios_put_refs(&folios, refs);
+	}
+	if (folios.nr)
+		folios_put_refs(&folios, refs);
 }
 
 static inline bool swap_use_vma_readahead(void)
@@ -320,198 +600,105 @@ static inline bool swap_use_vma_readahead(void)
 	return READ_ONCE(enable_vma_readahead) && !atomic_read(&nr_rotate_swap);
 }
 
-/*
- * Lookup a swap entry in the swap cache. A found folio will be returned
- * unlocked and with its refcount incremented - we rely on the kernel
- * lock getting page table operations atomic even if we drop the folio
- * lock before returning.
- *
- * Caller must lock the swap device or hold a reference to keep it valid.
+/**
+ * swap_update_readahead - Update the readahead statistics of VMA or globally.
+ * @folio: the swap cache folio that just got hit.
+ * @vma: the VMA that should be updated, could be NULL for global update.
+ * @addr: the addr that triggered the swapin, ignored if @vma is NULL.
  */
-struct folio *swap_cache_get_folio(swp_entry_t entry,
-		struct vm_area_struct *vma, unsigned long addr)
+void swap_update_readahead(struct folio *folio, struct vm_area_struct *vma,
+			   unsigned long addr)
+{
+	bool readahead, vma_ra = swap_use_vma_readahead();
+
+	/*
+	 * At the moment, we don't support PG_readahead for anon THP
+	 * so let's bail out rather than confusing the readahead stat.
+	 */
+	if (unlikely(folio_test_large(folio)))
+		return;
+
+	readahead = folio_test_clear_readahead(folio);
+	if (vma && vma_ra) {
+		unsigned long ra_val;
+		int win, hits;
+
+		ra_val = GET_SWAP_RA_VAL(vma);
+		win = SWAP_RA_WIN(ra_val);
+		hits = SWAP_RA_HITS(ra_val);
+		if (readahead)
+			hits = min_t(int, hits + 1, SWAP_RA_HITS_MAX);
+		atomic_long_set(&vma->swap_readahead_info,
+				SWAP_RA_VAL(addr, win, hits));
+	}
+
+	if (readahead) {
+		count_vm_event(SWAP_RA_HIT);
+		if (!vma || !vma_ra)
+			atomic_inc(&swapin_readahead_hits);
+	}
+}
+
+static struct folio *swap_cache_read_folio(struct swap_io_ctx *ctx,
+		swp_entry_t entry, gfp_t gfp, struct mempolicy *mpol,
+		pgoff_t ilx, bool readahead)
 {
 	struct folio *folio;
 
-	folio = filemap_get_folio(swap_address_space(entry), swp_offset(entry));
-	if (!IS_ERR(folio)) {
-		bool vma_ra = swap_use_vma_readahead();
-		bool readahead;
-
-		/*
-		 * At the moment, we don't support PG_readahead for anon THP
-		 * so let's bail out rather than confusing the readahead stat.
-		 */
-		if (unlikely(folio_test_large(folio)))
+	do {
+		folio = swap_cache_get_folio(entry);
+		if (folio)
 			return folio;
+		folio = swap_cache_alloc_folio(entry, gfp, BIT(0), NULL, mpol, ilx);
+	} while (PTR_ERR(folio) == -EEXIST);
 
-		readahead = folio_test_clear_readahead(folio);
-		if (vma && vma_ra) {
-			unsigned long ra_val;
-			int win, hits;
+	if (IS_ERR_OR_NULL(folio))
+		return NULL;
 
-			ra_val = GET_SWAP_RA_VAL(vma);
-			win = SWAP_RA_WIN(ra_val);
-			hits = SWAP_RA_HITS(ra_val);
-			if (readahead)
-				hits = min_t(int, hits + 1, SWAP_RA_HITS_MAX);
-			atomic_long_set(&vma->swap_readahead_info,
-					SWAP_RA_VAL(addr, win, hits));
-		}
-
-		if (readahead) {
-			count_vm_event(SWAP_RA_HIT);
-			if (!vma || !vma_ra)
-				atomic_inc(&swapin_readahead_hits);
-		}
-	} else {
-		folio = NULL;
+	swap_read_folio(ctx, folio);
+	if (readahead) {
+		folio_set_readahead(folio);
+		count_vm_event(SWAP_RA);
 	}
 
 	return folio;
 }
 
 /**
- * filemap_get_incore_folio - Find and get a folio from the page or swap caches.
- * @mapping: The address_space to search.
- * @index: The page cache index.
+ * swapin_sync - swap-in one or multiple entries skipping readahead.
+ * @entry: swap entry indicating the target slot
+ * @gfp: memory allocation flags
+ * @orders: allocation orders
+ * @vmf: fault information
+ * @mpol: NUMA memory allocation policy to be applied
+ * @ilx: NUMA interleave index, for use only when MPOL_INTERLEAVE
  *
- * This differs from filemap_get_folio() in that it will also look for the
- * folio in the swap cache.
+ * This allocates a folio suitable for given @orders, or returns the
+ * existing folio in the swap cache for @entry. This initiates the IO, too,
+ * if needed. @entry is rounded down if @orders allow large allocation.
  *
- * Return: The found folio or %NULL.
+ * Context: Caller must ensure @entry is valid and pin the swap device with refcount.
+ * Return: Returns the folio on success, error code if failed.
  */
-struct folio *filemap_get_incore_folio(struct address_space *mapping,
-		pgoff_t index)
+struct folio *swapin_sync(swp_entry_t entry, gfp_t gfp, unsigned long orders,
+			   struct vm_fault *vmf, struct mempolicy *mpol, pgoff_t ilx)
 {
-	swp_entry_t swp;
-	struct swap_info_struct *si;
-	struct folio *folio = filemap_get_entry(mapping, index);
-
-	if (!folio)
-		return ERR_PTR(-ENOENT);
-	if (!xa_is_value(folio))
-		return folio;
-	if (!shmem_mapping(mapping))
-		return ERR_PTR(-ENOENT);
-
-	swp = radix_to_swp_entry(folio);
-	/* There might be swapin error entries in shmem mapping. */
-	if (non_swap_entry(swp))
-		return ERR_PTR(-ENOENT);
-	/* Prevent swapoff from happening to us */
-	si = get_swap_device(swp);
-	if (!si)
-		return ERR_PTR(-ENOENT);
-	index = swp_offset(swp);
-	folio = filemap_get_folio(swap_address_space(swp), index);
-	put_swap_device(si);
-	return folio;
-}
-
-struct page *__read_swap_cache_async(swp_entry_t entry, gfp_t gfp_mask,
-			struct vm_area_struct *vma, unsigned long addr,
-			bool *new_page_allocated)
-{
-	struct swap_info_struct *si;
+	struct swap_io_ctx ctx = {};
 	struct folio *folio;
-	struct page *page;
-	void *shadow = NULL;
 
-	*new_page_allocated = false;
-	si = get_swap_device(entry);
-	if (!si)
-		return NULL;
+	do {
+		folio = swap_cache_get_folio(entry);
+		if (folio)
+			return folio;
+		folio = swap_cache_alloc_folio(entry, gfp, orders, vmf, mpol, ilx);
+	} while (PTR_ERR(folio) == -EEXIST);
 
-	for (;;) {
-		int err;
-		/*
-		 * First check the swap cache.  Since this is normally
-		 * called after swap_cache_get_folio() failed, re-calling
-		 * that would confuse statistics.
-		 */
-		folio = filemap_get_folio(swap_address_space(entry),
-						swp_offset(entry));
-		if (!IS_ERR(folio)) {
-			page = folio_file_page(folio, swp_offset(entry));
-			goto got_page;
-		}
+	if (IS_ERR(folio))
+		return folio;
 
-		/*
-		 * Just skip read ahead for unused swap slot.
-		 * During swap_off when swap_slot_cache is disabled,
-		 * we have to handle the race between putting
-		 * swap entry in swap cache and marking swap slot
-		 * as SWAP_HAS_CACHE.  That's done in later part of code or
-		 * else swap_off will be aborted if we return NULL.
-		 */
-		if (!swap_swapcount(si, entry) && swap_slot_cache_enabled)
-			goto fail_put_swap;
-
-		/*
-		 * Get a new page to read into from swap.  Allocate it now,
-		 * before marking swap_map SWAP_HAS_CACHE, when -EEXIST will
-		 * cause any racers to loop around until we add it to cache.
-		 */
-		folio = vma_alloc_folio(gfp_mask, 0, vma, addr, false);
-		if (!folio)
-                        goto fail_put_swap;
-
-		/*
-		 * Swap entry may have been freed since our caller observed it.
-		 */
-		err = swapcache_prepare(entry);
-		if (!err)
-			break;
-
-		folio_put(folio);
-		if (err != -EEXIST)
-			goto fail_put_swap;
-
-		/*
-		 * We might race against __delete_from_swap_cache(), and
-		 * stumble across a swap_map entry whose SWAP_HAS_CACHE
-		 * has not yet been cleared.  Or race against another
-		 * __read_swap_cache_async(), which has set SWAP_HAS_CACHE
-		 * in swap_map, but not yet added its page to swap cache.
-		 */
-		schedule_timeout_uninterruptible(1);
-	}
-
-	/*
-	 * The swap entry is ours to swap in. Prepare the new page.
-	 */
-
-	__folio_set_locked(folio);
-	__folio_set_swapbacked(folio);
-
-	if (mem_cgroup_swapin_charge_folio(folio, NULL, gfp_mask, entry))
-		goto fail_unlock;
-
-	/* May fail (-ENOMEM) if XArray node allocation failed. */
-	if (add_to_swap_cache(folio, entry, gfp_mask & GFP_RECLAIM_MASK, &shadow))
-		goto fail_unlock;
-
-	mem_cgroup_swapin_uncharge_swap(entry);
-
-	if (shadow)
-		workingset_refault(folio, shadow);
-
-	/* Caller will initiate read into locked folio */
-	folio_add_lru(folio);
-	*new_page_allocated = true;
-	page = &folio->page;
-got_page:
-	put_swap_device(si);
-	return page;
-
-fail_unlock:
-	put_swap_folio(folio, entry);
-	folio_unlock(folio);
-	folio_put(folio);
-fail_put_swap:
-	put_swap_device(si);
-	return NULL;
+	swap_read_folio(&ctx, folio);
+	swap_read_submit(&ctx);
+	return folio;
 }
 
 /*
@@ -519,23 +706,36 @@ fail_put_swap:
  * and reading the disk if it is not already cached.
  * A failure return means that either the page allocation failed or that
  * the swap entry is no longer in use.
- *
- * get/put_swap_device() aren't needed to call this function, because
- * __read_swap_cache_async() call them and swap_readpage() holds the
- * swap cache folio lock.
  */
-struct page *read_swap_cache_async(swp_entry_t entry, gfp_t gfp_mask,
-				   struct vm_area_struct *vma,
-				   unsigned long addr, struct swap_iocb **plug)
+struct folio *read_swap_cache_async(struct swap_io_ctx *ctx, swp_entry_t entry,
+		gfp_t gfp_mask, struct vm_area_struct *vma, unsigned long addr)
 {
-	bool page_was_allocated;
-	struct page *retpage = __read_swap_cache_async(entry, gfp_mask,
-			vma, addr, &page_was_allocated);
+	struct swap_info_struct *si;
+	struct mempolicy *mpol;
+	pgoff_t ilx;
+	struct folio *folio;
 
-	if (page_was_allocated)
-		swap_readpage(retpage, false, plug);
+	si = get_swap_device(entry);
+	if (!si)
+		return NULL;
 
-	return retpage;
+	mpol = get_vma_policy(vma, addr, 0, &ilx);
+	folio = swap_cache_read_folio(ctx, entry, gfp_mask, mpol, ilx, false);
+	mpol_cond_put(mpol);
+
+	put_swap_device(si);
+	return folio;
+}
+
+static struct folio *swap_cache_read_folio_sync(swp_entry_t entry, gfp_t gfp,
+		struct mempolicy *mpol, pgoff_t ilx)
+{
+	struct swap_io_ctx ctx = {};
+	struct folio *folio;
+
+	folio = swap_cache_read_folio(&ctx, entry, gfp, mpol, ilx, false);
+	swap_read_submit(&ctx);
+	return folio;
 }
 
 static unsigned int __swapin_nr_pages(unsigned long prev_offset,
@@ -603,34 +803,32 @@ static unsigned long swapin_nr_pages(unsigned long offset)
  * swap_cluster_readahead - swap in pages in hope we need them soon
  * @entry: swap entry of this memory
  * @gfp_mask: memory allocation flags
- * @vmf: fault information
+ * @mpol: NUMA memory allocation policy to be applied
+ * @ilx: NUMA interleave index, for use only when MPOL_INTERLEAVE
  *
- * Returns the struct page for entry and addr, after queueing swapin.
+ * Returns the struct folio for entry and addr, after queueing swapin.
  *
  * Primitive swap readahead code. We simply read an aligned block of
  * (1 << page_cluster) entries in the swap area. This method is chosen
  * because it doesn't cost us any seek time.  We also make sure to queue
  * the 'original' request together with the readahead ones...
  *
- * This has been extended to use the NUMA policies from the mm triggering
- * the readahead.
- *
- * Caller must hold read mmap_lock if vmf->vma is not NULL.
+ * Note: it is intentional that the same NUMA policy and interleave index
+ * are used for every page of the readahead: neighbouring pages on swap
+ * are fairly likely to have been swapped out from the same node.
  */
-struct page *swap_cluster_readahead(swp_entry_t entry, gfp_t gfp_mask,
-				struct vm_fault *vmf)
+struct folio *swap_cluster_readahead(swp_entry_t entry, gfp_t gfp_mask,
+				     struct mempolicy *mpol, pgoff_t ilx)
 {
-	struct page *page;
+	struct folio *folio;
 	unsigned long entry_offset = swp_offset(entry);
 	unsigned long offset = entry_offset;
 	unsigned long start_offset, end_offset;
 	unsigned long mask;
-	struct swap_info_struct *si = swp_swap_info(entry);
+	struct swap_info_struct *si = __swap_entry_to_info(entry);
+	struct swap_io_ctx ctx = {};
 	struct blk_plug plug;
-	struct swap_iocb *splug = NULL;
-	bool page_allocated;
-	struct vm_area_struct *vma = vmf->vma;
-	unsigned long addr = vmf->address;
+	swp_entry_t ra_entry;
 
 	mask = swapin_nr_pages(offset) - 1;
 	if (!mask)
@@ -647,129 +845,66 @@ struct page *swap_cluster_readahead(swp_entry_t entry, gfp_t gfp_mask,
 	blk_start_plug(&plug);
 	for (offset = start_offset; offset <= end_offset ; offset++) {
 		/* Ok, do the async read-ahead now */
-		page = __read_swap_cache_async(
-			swp_entry(swp_type(entry), offset),
-			gfp_mask, vma, addr, &page_allocated);
-		if (!page)
+		ra_entry = swp_entry(swp_type(entry), offset);
+		folio = swap_cache_read_folio(&ctx, ra_entry, gfp_mask, mpol,
+				ilx, offset != entry_offset);
+		if (!folio)
 			continue;
-		if (page_allocated) {
-			swap_readpage(page, false, &splug);
-			if (offset != entry_offset) {
-				SetPageReadahead(page);
-				count_vm_event(SWAP_RA);
-			}
-		}
-		put_page(page);
+		folio_put(folio);
 	}
 	blk_finish_plug(&plug);
-	swap_read_unplug(splug);
-
-	lru_add_drain();	/* Push any new pages onto the LRU now */
+	swap_read_submit(&ctx);
 skip:
-	/* The page was likely read above, so no need for plugging here */
-	return read_swap_cache_async(entry, gfp_mask, vma, addr, NULL);
+	return swap_cache_read_folio_sync(entry, gfp_mask, mpol, ilx);
 }
 
-int init_swap_address_space(unsigned int type, unsigned long nr_pages)
-{
-	struct address_space *spaces, *space;
-	unsigned int i, nr;
-
-	nr = DIV_ROUND_UP(nr_pages, SWAP_ADDRESS_SPACE_PAGES);
-	spaces = kvcalloc(nr, sizeof(struct address_space), GFP_KERNEL);
-	if (!spaces)
-		return -ENOMEM;
-	for (i = 0; i < nr; i++) {
-		space = spaces + i;
-		xa_init_flags(&space->i_pages, XA_FLAGS_LOCK_IRQ);
-		atomic_set(&space->i_mmap_writable, 0);
-		space->a_ops = &swap_aops;
-		/* swap cache doesn't use writeback related tags */
-		mapping_set_no_writeback_tags(space);
-	}
-	nr_swapper_spaces[type] = nr;
-	swapper_spaces[type] = spaces;
-
-	return 0;
-}
-
-void exit_swap_address_space(unsigned int type)
-{
-	int i;
-	struct address_space *spaces = swapper_spaces[type];
-
-	for (i = 0; i < nr_swapper_spaces[type]; i++)
-		VM_WARN_ON_ONCE(!mapping_empty(&spaces[i]));
-	kvfree(spaces);
-	nr_swapper_spaces[type] = 0;
-	swapper_spaces[type] = NULL;
-}
-
-#define SWAP_RA_ORDER_CEILING	5
-
-struct vma_swap_readahead {
-	unsigned short win;
-	unsigned short offset;
-	unsigned short nr_pte;
-};
-
-static void swap_ra_info(struct vm_fault *vmf,
-			 struct vma_swap_readahead *ra_info)
+static int swap_vma_ra_win(struct vm_fault *vmf, unsigned long *start,
+			   unsigned long *end)
 {
 	struct vm_area_struct *vma = vmf->vma;
 	unsigned long ra_val;
-	unsigned long faddr, pfn, fpfn, lpfn, rpfn;
-	unsigned long start, end;
+	unsigned long faddr, prev_faddr, left, right;
 	unsigned int max_win, hits, prev_win, win;
 
-	max_win = 1 << min_t(unsigned int, READ_ONCE(page_cluster),
-			     SWAP_RA_ORDER_CEILING);
-	if (max_win == 1) {
-		ra_info->win = 1;
-		return;
-	}
+	max_win = 1 << min(READ_ONCE(page_cluster), SWAP_RA_ORDER_CEILING);
+	if (max_win == 1)
+		return 1;
 
 	faddr = vmf->address;
-	fpfn = PFN_DOWN(faddr);
 	ra_val = GET_SWAP_RA_VAL(vma);
-	pfn = PFN_DOWN(SWAP_RA_ADDR(ra_val));
+	prev_faddr = SWAP_RA_ADDR(ra_val);
 	prev_win = SWAP_RA_WIN(ra_val);
 	hits = SWAP_RA_HITS(ra_val);
-	ra_info->win = win = __swapin_nr_pages(pfn, fpfn, hits,
-					       max_win, prev_win);
-	atomic_long_set(&vma->swap_readahead_info,
-			SWAP_RA_VAL(faddr, win, 0));
+	win = __swapin_nr_pages(PFN_DOWN(prev_faddr), PFN_DOWN(faddr), hits,
+				max_win, prev_win);
+	atomic_long_set(&vma->swap_readahead_info, SWAP_RA_VAL(faddr, win, 0));
 	if (win == 1)
-		return;
+		return 1;
 
-	if (fpfn == pfn + 1) {
-		lpfn = fpfn;
-		rpfn = fpfn + win;
-	} else if (pfn == fpfn + 1) {
-		lpfn = fpfn - win + 1;
-		rpfn = fpfn + 1;
-	} else {
-		unsigned int left = (win - 1) / 2;
+	if (faddr == prev_faddr + PAGE_SIZE)
+		left = faddr;
+	else if (prev_faddr == faddr + PAGE_SIZE)
+		left = faddr - (win << PAGE_SHIFT) + PAGE_SIZE;
+	else
+		left = faddr - (((win - 1) / 2) << PAGE_SHIFT);
+	right = left + (win << PAGE_SHIFT);
+	if ((long)left < 0)
+		left = 0;
+	*start = max3(left, vma->vm_start, faddr & PMD_MASK);
+	*end = min3(right, vma->vm_end, (faddr & PMD_MASK) + PMD_SIZE);
 
-		lpfn = fpfn - left;
-		rpfn = fpfn + win - left;
-	}
-	start = max3(lpfn, PFN_DOWN(vma->vm_start),
-		     PFN_DOWN(faddr & PMD_MASK));
-	end = min3(rpfn, PFN_DOWN(vma->vm_end),
-		   PFN_DOWN((faddr & PMD_MASK) + PMD_SIZE));
-
-	ra_info->nr_pte = end - start;
-	ra_info->offset = fpfn - start;
+	return win;
 }
 
 /**
  * swap_vma_readahead - swap in pages in hope we need them soon
- * @fentry: swap entry of this memory
+ * @targ_entry: swap entry of the targeted memory
  * @gfp_mask: memory allocation flags
+ * @mpol: NUMA memory allocation policy to be applied
+ * @targ_ilx: NUMA interleave index, for use only when MPOL_INTERLEAVE
  * @vmf: fault information
  *
- * Returns the struct page for entry and addr, after queueing swapin.
+ * Returns the struct folio for entry and addr, after queueing swapin.
  *
  * Primitive swap readahead code. We simply read in a few pages whose
  * virtual addresses are around the fault address in the same vma.
@@ -777,65 +912,64 @@ static void swap_ra_info(struct vm_fault *vmf,
  * Caller must hold read mmap_lock if vmf->vma is not NULL.
  *
  */
-static struct page *swap_vma_readahead(swp_entry_t fentry, gfp_t gfp_mask,
-				       struct vm_fault *vmf)
+static struct folio *swap_vma_readahead(swp_entry_t targ_entry, gfp_t gfp_mask,
+		struct mempolicy *mpol, pgoff_t targ_ilx, struct vm_fault *vmf)
 {
+	struct swap_io_ctx ctx = {};
 	struct blk_plug plug;
-	struct swap_iocb *splug = NULL;
-	struct vm_area_struct *vma = vmf->vma;
-	struct page *page;
+	struct folio *folio;
 	pte_t *pte = NULL, pentry;
-	unsigned long addr;
-	swp_entry_t entry;
-	unsigned int i;
-	bool page_allocated;
-	struct vma_swap_readahead ra_info = {
-		.win = 1,
-	};
+	int win;
+	unsigned long start, end, addr;
+	pgoff_t ilx = targ_ilx;
 
-	swap_ra_info(vmf, &ra_info);
-	if (ra_info.win == 1)
+	win = swap_vma_ra_win(vmf, &start, &end);
+	if (win == 1)
 		goto skip;
 
-	addr = vmf->address - (ra_info.offset * PAGE_SIZE);
+	ilx = targ_ilx - PFN_DOWN(vmf->address - start);
 
 	blk_start_plug(&plug);
-	for (i = 0; i < ra_info.nr_pte; i++, addr += PAGE_SIZE) {
+	for (addr = start; addr < end; ilx++, addr += PAGE_SIZE) {
+		struct swap_info_struct *si = NULL;
+		softleaf_t entry;
+
 		if (!pte++) {
 			pte = pte_offset_map(vmf->pmd, addr);
 			if (!pte)
 				break;
 		}
 		pentry = ptep_get_lockless(pte);
-		if (!is_swap_pte(pentry))
-			continue;
-		entry = pte_to_swp_entry(pentry);
-		if (unlikely(non_swap_entry(entry)))
+		entry = softleaf_from_pte(pentry);
+
+		if (!softleaf_is_swap(entry))
 			continue;
 		pte_unmap(pte);
 		pte = NULL;
-		page = __read_swap_cache_async(entry, gfp_mask, vma,
-					       addr, &page_allocated);
-		if (!page)
-			continue;
-		if (page_allocated) {
-			swap_readpage(page, false, &splug);
-			if (i != ra_info.offset) {
-				SetPageReadahead(page);
-				count_vm_event(SWAP_RA);
-			}
+		/*
+		 * Readahead entry may come from a device that we are not
+		 * holding a reference to, try to grab a reference, or skip.
+		 */
+		if (swp_type(entry) != swp_type(targ_entry)) {
+			si = get_swap_device(entry);
+			if (!si)
+				continue;
 		}
-		put_page(page);
+		folio = swap_cache_read_folio(&ctx, entry, gfp_mask, mpol, ilx,
+					      addr != vmf->address);
+		if (si)
+			put_swap_device(si);
+		if (!folio)
+			continue;
+		folio_put(folio);
 	}
 	if (pte)
 		pte_unmap(pte);
 	blk_finish_plug(&plug);
-	swap_read_unplug(splug);
-	lru_add_drain();
+	swap_read_submit(&ctx);
 skip:
-	/* The page was likely read above, so no need for plugging here */
-	return read_swap_cache_async(fentry, gfp_mask, vma, vmf->address,
-				     NULL);
+	/* The folio was likely read above, so no need for plugging here */
+	return swap_cache_read_folio_sync(targ_entry, gfp_mask, mpol, targ_ilx);
 }
 
 /**
@@ -844,26 +978,62 @@ skip:
  * @gfp_mask: memory allocation flags
  * @vmf: fault information
  *
- * Returns the struct page for entry and addr, after queueing swapin.
+ * Returns the struct folio for entry and addr, after queueing swapin.
  *
  * It's a main entry function for swap readahead. By the configuration,
  * it will read ahead blocks by cluster-based(ie, physical disk based)
  * or vma-based(ie, virtual address based on faulty address) readahead.
  */
-struct page *swapin_readahead(swp_entry_t entry, gfp_t gfp_mask,
+struct folio *swapin_readahead(swp_entry_t entry, gfp_t gfp_mask,
 				struct vm_fault *vmf)
 {
-	return swap_use_vma_readahead() ?
-			swap_vma_readahead(entry, gfp_mask, vmf) :
-			swap_cluster_readahead(entry, gfp_mask, vmf);
+	struct mempolicy *mpol;
+	pgoff_t ilx;
+	struct folio *folio;
+
+	mpol = get_vma_policy(vmf->vma, vmf->address, 0, &ilx);
+	folio = swap_use_vma_readahead() ?
+		swap_vma_readahead(entry, gfp_mask, mpol, ilx, vmf) :
+		swap_cluster_readahead(entry, gfp_mask, mpol, ilx);
+	mpol_cond_put(mpol);
+
+	return folio;
+}
+
+static const struct ctl_table swap_readahead_sysctl_table[] = {
+	{
+		.procname	= "page-cluster",
+		.data		= &page_cluster,
+		.maxlen		= sizeof(int),
+		.mode		= 0644,
+		.proc_handler	= proc_dointvec_minmax,
+		.extra1		= SYSCTL_ZERO,
+		.extra2		= (void *)&page_cluster_max,
+	}
+};
+
+static void __init swap_readahead_setup(void)
+{
+	unsigned long megs = PAGES_TO_MB(totalram_pages());
+
+	/* Use a smaller cluster for small-memory machines */
+	if (megs < 16)
+		page_cluster = 2;
+	else
+		page_cluster = 3;
+	/*
+	 * Right now other parts of the system means that we
+	 * _really_ don't want to cluster much more
+	 */
+
+	register_sysctl_init("vm", swap_readahead_sysctl_table);
 }
 
 #ifdef CONFIG_SYSFS
 static ssize_t vma_ra_enabled_show(struct kobject *kobj,
 				     struct kobj_attribute *attr, char *buf)
 {
-	return sysfs_emit(buf, "%s\n",
-			  enable_vma_readahead ? "true" : "false");
+	return sysfs_emit(buf, "%s\n", str_true_false(enable_vma_readahead));
 }
 static ssize_t vma_ra_enabled_store(struct kobject *kobj,
 				      struct kobj_attribute *attr,
@@ -888,7 +1058,7 @@ static const struct attribute_group swap_attr_group = {
 	.attrs = swap_attrs,
 };
 
-static int __init swap_init_sysfs(void)
+static int __init swap_sysfs_init(void)
 {
 	int err;
 	struct kobject *swap_kobj;
@@ -903,11 +1073,25 @@ static int __init swap_init_sysfs(void)
 		pr_err("failed to register swap group\n");
 		goto delete_obj;
 	}
+	/* Swap cache writeback is LRU based, no tags for it */
+	mapping_set_no_writeback_tags(&swap_space);
 	return 0;
 
 delete_obj:
 	kobject_put(swap_kobj);
 	return err;
 }
-subsys_initcall(swap_init_sysfs);
+#else
+static int __init swap_sysfs_init(void)
+{
+	return 0;
+}
 #endif
+
+static int __init swap_init(void)
+{
+	swap_readahead_setup();
+
+	return swap_sysfs_init();
+}
+subsys_initcall(swap_init);

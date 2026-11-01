@@ -64,7 +64,7 @@ config GREYBUS_HID
 
 config GREYBUS_LIGHT
 	tristate "Greybus LED Class driver"
-	depends on LEDS_CLASS
+	depends on LEDS_CLASS_FLASH
 	help
 	  Select this option if you have a device that follows the
 	  Greybus LED Class specification.
@@ -123,7 +123,7 @@ menuconfig GREYBUS_BRIDGED_PHY
 	help
 	  Select this option to pick from a variety of Greybus Bridged
 	  PHY class drivers.  These drivers emulate a number of
-	  different "traditional" busses by tunneling them over Greybus.
+	  different "traditional" buses by tunneling them over Greybus.
 	  Examples of this include serial, SPI, USB, and others.
 
 	  To compile this code as a module, chose M here: the module

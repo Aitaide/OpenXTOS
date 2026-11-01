@@ -92,6 +92,11 @@ Target arguments:
 		allowed. This mode is useful for data recovery if the
 		device cannot be activated in any of the other standard
 		modes.
+	I - inline mode - in this mode, dm-integrity will store integrity
+		data directly in the underlying device sectors.
+		The underlying device must have an integrity profile that
+		allows storing user integrity data and provides enough
+		space for the selected integrity tag.
 
 5. the number of additional arguments
 
@@ -184,6 +189,19 @@ bitmap_flush_interval:number
 allow_discards
 	Allow block discard requests (a.k.a. TRIM) for the integrity device.
 	Discards are only allowed to devices using internal hash.
+
+	A discarded block is marked with a constant filler tag that anyone
+	with raw write access to the backing device can forge without the
+	key. Use allow_discards_keyed instead on new volumes.
+
+allow_discards_keyed
+	Like allow_discards, but marks a discarded block with a keyed
+	checksum of the sector number, HMAC_key(salt || sector), instead of
+	the constant filler tag, so it can't be forged without the
+	integrity key.
+
+	Not compatible with volumes that already have discarded blocks
+	marked the old way; only use on a freshly formatted volume.
 
 fix_padding
 	Use a smaller padding of the tag area that is more

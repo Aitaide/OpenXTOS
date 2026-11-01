@@ -1,15 +1,16 @@
 // SPDX-License-Identifier: BSD-3-Clause-Clear
 /*
  * Copyright (c) 2018-2019 The Linux Foundation. All rights reserved.
- * Copyright (c) 2022-2023 Qualcomm Innovation Center, Inc. All rights reserved.
+ * Copyright (c) Qualcomm Technologies, Inc. and/or its subsidiaries.
  */
 
 #include <linux/module.h>
 #include <linux/platform_device.h>
+#include <linux/property.h>
 #include <linux/of_device.h>
 #include <linux/of.h>
+#include <linux/of_reserved_mem.h>
 #include <linux/dma-mapping.h>
-#include <linux/of_address.h>
 #include <linux/iommu.h>
 #include "ahb.h"
 #include "debug.h"
@@ -396,7 +397,7 @@ static void ath11k_ahb_stop(struct ath11k_base *ab)
 		ath11k_ahb_ce_irqs_disable(ab);
 	ath11k_ahb_sync_ce_irqs(ab);
 	ath11k_ahb_kill_tasklets(ab);
-	del_timer_sync(&ab->rx_replenish_retry);
+	timer_delete_sync(&ab->rx_replenish_retry);
 	ath11k_ce_cleanup_pipes(ab);
 }
 
@@ -412,7 +413,7 @@ static int ath11k_ahb_power_up(struct ath11k_base *ab)
 	return ret;
 }
 
-static void ath11k_ahb_power_down(struct ath11k_base *ab)
+static void ath11k_ahb_power_down(struct ath11k_base *ab, bool is_suspend)
 {
 	struct ath11k_ahb *ab_ahb = ath11k_ahb_priv(ab);
 
@@ -430,35 +431,44 @@ static void ath11k_ahb_init_qmi_ce_config(struct ath11k_base *ab)
 	ab->qmi.service_ins_id = ab->hw_params.qmi_service_ins_id;
 }
 
-static void ath11k_ahb_free_ext_irq(struct ath11k_base *ab)
+static void ath11k_ahb_free_ext_irq_grp(struct ath11k_base *ab,
+					struct ath11k_ext_irq_grp *irq_grp)
 {
-	int i, j;
+	int j;
 
-	for (i = 0; i < ATH11K_EXT_IRQ_GRP_NUM_MAX; i++) {
-		struct ath11k_ext_irq_grp *irq_grp = &ab->ext_irq_grp[i];
+	for (j = 0; j < irq_grp->num_irq; j++)
+		free_irq(ab->irq_num[irq_grp->irqs[j]], irq_grp);
 
-		for (j = 0; j < irq_grp->num_irq; j++)
-			free_irq(ab->irq_num[irq_grp->irqs[j]], irq_grp);
-
-		netif_napi_del(&irq_grp->napi);
-	}
+	netif_napi_del(&irq_grp->napi);
+	free_netdev(irq_grp->napi_ndev);
 }
 
-static void ath11k_ahb_free_irq(struct ath11k_base *ab)
+static void ath11k_ahb_free_ext_irq(struct ath11k_base *ab)
 {
-	int irq_idx;
 	int i;
 
-	if (ab->hw_params.hybrid_bus_type)
-		return ath11k_pcic_free_irq(ab);
+	for (i = 0; i < ATH11K_EXT_IRQ_GRP_NUM_MAX; i++)
+		ath11k_ahb_free_ext_irq_grp(ab, &ab->ext_irq_grp[i]);
+}
 
-	for (i = 0; i < ab->hw_params.ce_count; i++) {
+static void ath11k_ahb_free_ce_irqs(struct ath11k_base *ab, int max_idx)
+{
+	int irq_idx, i;
+
+	for (i = 0; i < max_idx; i++) {
 		if (ath11k_ce_get_attr_flags(ab, i) & CE_ATTR_DIS_INTR)
 			continue;
 		irq_idx = ATH11K_IRQ_CE0_OFFSET + i;
 		free_irq(ab->irq_num[irq_idx], &ab->ce.ce_pipe[i]);
 	}
+}
 
+static void ath11k_ahb_free_irq(struct ath11k_base *ab)
+{
+	if (ab->hw_params.hybrid_bus_type)
+		return ath11k_pcic_free_irq(ab);
+
+	ath11k_ahb_free_ce_irqs(ab, ab->hw_params.ce_count);
 	ath11k_ahb_free_ext_irq(ab);
 }
 
@@ -522,18 +532,27 @@ static irqreturn_t ath11k_ahb_ext_interrupt_handler(int irq, void *arg)
 static int ath11k_ahb_config_ext_irq(struct ath11k_base *ab)
 {
 	struct ath11k_hw_params *hw = &ab->hw_params;
+	struct ath11k_ext_irq_grp *irq_grp;
 	int i, j;
 	int irq;
 	int ret;
 
 	for (i = 0; i < ATH11K_EXT_IRQ_GRP_NUM_MAX; i++) {
-		struct ath11k_ext_irq_grp *irq_grp = &ab->ext_irq_grp[i];
 		u32 num_irq = 0;
+
+		irq_grp = &ab->ext_irq_grp[i];
 
 		irq_grp->ab = ab;
 		irq_grp->grp_id = i;
-		init_dummy_netdev(&irq_grp->napi_ndev);
-		netif_napi_add(&irq_grp->napi_ndev, &irq_grp->napi,
+
+		irq_grp->napi_ndev = alloc_netdev_dummy(0);
+		if (!irq_grp->napi_ndev) {
+			ret = -ENOMEM;
+			irq_grp->num_irq = 0;
+			goto err_request_irq;
+		}
+
+		netif_napi_add(irq_grp->napi_ndev, &irq_grp->napi,
 			       ath11k_ahb_ext_grp_napi_poll);
 
 		for (j = 0; j < ATH11K_EXT_IRQ_NUM_MAX; j++) {
@@ -579,14 +598,11 @@ static int ath11k_ahb_config_ext_irq(struct ath11k_base *ab)
 				}
 			}
 		}
-		irq_grp->num_irq = num_irq;
-
-		for (j = 0; j < irq_grp->num_irq; j++) {
+		for (j = 0; j < num_irq; j++) {
 			int irq_idx = irq_grp->irqs[j];
 
 			irq = platform_get_irq_byname(ab->pdev,
 						      irq_name[irq_idx]);
-			ab->irq_num[irq_idx] = irq;
 			irq_set_status_flags(irq, IRQ_NOAUTOEN | IRQ_DISABLE_UNLAZY);
 			ret = request_irq(irq, ath11k_ahb_ext_interrupt_handler,
 					  IRQF_TRIGGER_RISING,
@@ -594,11 +610,24 @@ static int ath11k_ahb_config_ext_irq(struct ath11k_base *ab)
 			if (ret) {
 				ath11k_err(ab, "failed request_irq for %d\n",
 					   irq);
+				irq_grp->num_irq = j;
+				ath11k_ahb_free_ext_irq_grp(ab, irq_grp);
+				goto err_request_irq;
 			}
+			ab->irq_num[irq_idx] = irq;
 		}
+
+		irq_grp->num_irq = num_irq;
 	}
 
 	return 0;
+
+err_request_irq:
+	for (i--; i >= 0; i--) {
+		irq_grp = &ab->ext_irq_grp[i];
+		ath11k_ahb_free_ext_irq_grp(ab, irq_grp);
+	}
+	return ret;
 }
 
 static int ath11k_ahb_config_irq(struct ath11k_base *ab)
@@ -623,16 +652,24 @@ static int ath11k_ahb_config_irq(struct ath11k_base *ab)
 		ret = request_irq(irq, ath11k_ahb_ce_interrupt_handler,
 				  IRQF_TRIGGER_RISING, irq_name[irq_idx],
 				  ce_pipe);
-		if (ret)
+		if (ret) {
+			ath11k_err(ab, "failed request_irq for %d\n", irq);
+			ath11k_ahb_free_ce_irqs(ab, i);
 			return ret;
+		}
 
 		ab->irq_num[irq_idx] = irq;
 	}
 
 	/* Configure external interrupts */
 	ret = ath11k_ahb_config_ext_irq(ab);
+	if (ret) {
+		ath11k_err(ab, "failed to configure ext irq: %d\n", ret);
+		ath11k_ahb_free_ce_irqs(ab, ab->hw_params.ce_count);
+		return ret;
+	}
 
-	return ret;
+	return 0;
 }
 
 static int ath11k_ahb_map_service_to_pipe(struct ath11k_base *ab, u16 service_id,
@@ -801,10 +838,8 @@ static int ath11k_core_get_rproc(struct ath11k_base *ab)
 	}
 
 	prproc = rproc_get_by_phandle(rproc_phandle);
-	if (!prproc) {
-		ath11k_err(ab, "failed to get rproc\n");
-		return -EINVAL;
-	}
+	if (!prproc)
+		return dev_err_probe(&ab->pdev->dev, -EPROBE_DEFER, "failed to get rproc\n");
 	ab_ahb->tgt_rproc = prproc;
 
 	return 0;
@@ -913,16 +948,10 @@ static int ath11k_ahb_setup_msa_resources(struct ath11k_base *ab)
 {
 	struct ath11k_ahb *ab_ahb = ath11k_ahb_priv(ab);
 	struct device *dev = ab->dev;
-	struct device_node *node;
 	struct resource r;
 	int ret;
 
-	node = of_parse_phandle(dev->of_node, "memory-region", 0);
-	if (!node)
-		return -ENOENT;
-
-	ret = of_address_to_resource(node, 0, &r);
-	of_node_put(node);
+	ret = of_reserved_mem_region_to_resource(dev->of_node, 0, &r);
 	if (ret) {
 		dev_err(dev, "failed to resolve msa fixed region\n");
 		return ret;
@@ -931,12 +960,7 @@ static int ath11k_ahb_setup_msa_resources(struct ath11k_base *ab)
 	ab_ahb->fw.msa_paddr = r.start;
 	ab_ahb->fw.msa_size = resource_size(&r);
 
-	node = of_parse_phandle(dev->of_node, "memory-region", 1);
-	if (!node)
-		return -ENOENT;
-
-	ret = of_address_to_resource(node, 0, &r);
-	of_node_put(node);
+	ret = of_reserved_mem_region_to_resource(dev->of_node, 1, &r);
 	if (ret) {
 		dev_err(dev, "failed to resolve ce fixed region\n");
 		return ret;
@@ -948,11 +972,41 @@ static int ath11k_ahb_setup_msa_resources(struct ath11k_base *ab)
 	return 0;
 }
 
+static int ath11k_ahb_ce_remap(struct ath11k_base *ab)
+{
+	const struct ce_remap *ce_remap = ab->hw_params.ce_remap;
+	struct platform_device *pdev = ab->pdev;
+
+	if (!ce_remap) {
+		/* no separate CE register space */
+		ab->mem_ce = ab->mem;
+		return 0;
+	}
+
+	/* ce register space is moved out of wcss unlike ipq8074 or ipq6018
+	 * and the space is not contiguous, hence remapping the CE registers
+	 * to a new space for accessing them.
+	 */
+	ab->mem_ce = ioremap(ce_remap->base, ce_remap->size);
+	if (!ab->mem_ce) {
+		dev_err(&pdev->dev, "ce ioremap error\n");
+		return -ENOMEM;
+	}
+
+	return 0;
+}
+
+static void ath11k_ahb_ce_unmap(struct ath11k_base *ab)
+{
+	if (ab->hw_params.ce_remap)
+		iounmap(ab->mem_ce);
+}
+
 static int ath11k_ahb_fw_resources_init(struct ath11k_base *ab)
 {
 	struct ath11k_ahb *ab_ahb = ath11k_ahb_priv(ab);
 	struct device *host_dev = ab->dev;
-	struct platform_device_info info = {0};
+	struct platform_device_info info = {};
 	struct iommu_domain *iommu_dom;
 	struct platform_device *pdev;
 	struct device_node *node;
@@ -964,16 +1018,17 @@ static int ath11k_ahb_fw_resources_init(struct ath11k_base *ab)
 	if (!ab->hw_params.fixed_fw_mem)
 		return 0;
 
-	ret = ath11k_ahb_setup_msa_resources(ab);
-	if (ret) {
-		ath11k_err(ab, "failed to setup msa resources\n");
-		return ret;
-	}
-
 	node = of_get_child_by_name(host_dev->of_node, "wifi-firmware");
 	if (!node) {
 		ab_ahb->fw.use_tz = true;
 		return 0;
+	}
+
+	ret = ath11k_ahb_setup_msa_resources(ab);
+	if (ret) {
+		ath11k_err(ab, "failed to setup msa resources\n");
+		of_node_put(node);
+		return ret;
 	}
 
 	info.fwnode = &node->fwnode;
@@ -995,10 +1050,10 @@ static int ath11k_ahb_fw_resources_init(struct ath11k_base *ab)
 
 	ab_ahb->fw.dev = &pdev->dev;
 
-	iommu_dom = iommu_domain_alloc(&platform_bus_type);
-	if (!iommu_dom) {
+	iommu_dom = iommu_paging_domain_alloc(ab_ahb->fw.dev);
+	if (IS_ERR(iommu_dom)) {
 		ath11k_err(ab, "failed to allocate iommu domain\n");
-		ret = -ENOMEM;
+		ret = PTR_ERR(iommu_dom);
 		goto err_unregister;
 	}
 
@@ -1084,19 +1139,12 @@ static int ath11k_ahb_fw_resource_deinit(struct ath11k_base *ab)
 static int ath11k_ahb_probe(struct platform_device *pdev)
 {
 	struct ath11k_base *ab;
-	const struct of_device_id *of_id;
 	const struct ath11k_hif_ops *hif_ops;
 	const struct ath11k_pci_ops *pci_ops;
 	enum ath11k_hw_rev hw_rev;
 	int ret;
 
-	of_id = of_match_device(ath11k_ahb_of_match, &pdev->dev);
-	if (!of_id) {
-		dev_err(&pdev->dev, "failed to find matching device tree id\n");
-		return -EINVAL;
-	}
-
-	hw_rev = (uintptr_t)of_id->data;
+	hw_rev = (uintptr_t)device_get_match_data(&pdev->dev);
 
 	switch (hw_rev) {
 	case ATH11K_HW_IPQ8074:
@@ -1147,25 +1195,13 @@ static int ath11k_ahb_probe(struct platform_device *pdev)
 	if (ret)
 		goto err_core_free;
 
-	ab->mem_ce = ab->mem;
-
-	if (ab->hw_params.ce_remap) {
-		const struct ce_remap *ce_remap = ab->hw_params.ce_remap;
-		/* ce register space is moved out of wcss unlike ipq8074 or ipq6018
-		 * and the space is not contiguous, hence remapping the CE registers
-		 * to a new space for accessing them.
-		 */
-		ab->mem_ce = ioremap(ce_remap->base, ce_remap->size);
-		if (!ab->mem_ce) {
-			dev_err(&pdev->dev, "ce ioremap error\n");
-			ret = -ENOMEM;
-			goto err_core_free;
-		}
-	}
+	ret = ath11k_ahb_ce_remap(ab);
+	if (ret)
+		goto err_core_free;
 
 	ret = ath11k_ahb_fw_resources_init(ab);
 	if (ret)
-		goto err_core_free;
+		goto err_ce_unmap;
 
 	ret = ath11k_ahb_setup_smp2p_handle(ab);
 	if (ret)
@@ -1184,10 +1220,8 @@ static int ath11k_ahb_probe(struct platform_device *pdev)
 	ath11k_ahb_init_qmi_ce_config(ab);
 
 	ret = ath11k_core_get_rproc(ab);
-	if (ret) {
-		ath11k_err(ab, "failed to get rproc: %d\n", ret);
+	if (ret)
 		goto err_ce_free;
-	}
 
 	ret = ath11k_core_init(ab);
 	if (ret) {
@@ -1216,6 +1250,9 @@ err_release_smp2p_handle:
 
 err_fw_deinit:
 	ath11k_ahb_fw_resource_deinit(ab);
+
+err_ce_unmap:
+	ath11k_ahb_ce_unmap(ab);
 
 err_core_free:
 	ath11k_core_free(ab);
@@ -1249,20 +1286,18 @@ static void ath11k_ahb_free_resources(struct ath11k_base *ab)
 	ath11k_ahb_release_smp2p_handle(ab);
 	ath11k_ahb_fw_resource_deinit(ab);
 	ath11k_ce_free_pipes(ab);
-
-	if (ab->hw_params.ce_remap)
-		iounmap(ab->mem_ce);
+	ath11k_ahb_ce_unmap(ab);
 
 	ath11k_core_free(ab);
 	platform_set_drvdata(pdev, NULL);
 }
 
-static int ath11k_ahb_remove(struct platform_device *pdev)
+static void ath11k_ahb_remove(struct platform_device *pdev)
 {
 	struct ath11k_base *ab = platform_get_drvdata(pdev);
 
 	if (test_bit(ATH11K_FLAG_QMI_FAIL, &ab->dev_flags)) {
-		ath11k_ahb_power_down(ab);
+		ath11k_ahb_power_down(ab, false);
 		ath11k_debugfs_soc_destroy(ab);
 		ath11k_qmi_deinit_service(ab);
 		goto qmi_fail;
@@ -1272,9 +1307,8 @@ static int ath11k_ahb_remove(struct platform_device *pdev)
 	ath11k_core_deinit(ab);
 
 qmi_fail:
+	ath11k_fw_destroy(ab);
 	ath11k_ahb_free_resources(ab);
-
-	return 0;
 }
 
 static void ath11k_ahb_shutdown(struct platform_device *pdev)
@@ -1293,15 +1327,16 @@ static void ath11k_ahb_shutdown(struct platform_device *pdev)
 	ath11k_core_deinit(ab);
 
 free_resources:
+	ath11k_fw_destroy(ab);
 	ath11k_ahb_free_resources(ab);
 }
 
 static struct platform_driver ath11k_ahb_driver = {
-	.driver         = {
-		.name   = "ath11k",
+	.driver = {
+		.name = "ath11k",
 		.of_match_table = ath11k_ahb_of_match,
 	},
-	.probe  = ath11k_ahb_probe,
+	.probe = ath11k_ahb_probe,
 	.remove = ath11k_ahb_remove,
 	.shutdown = ath11k_ahb_shutdown,
 };

@@ -8,7 +8,6 @@
  */
 #include <linux/interrupt.h>
 #include <linux/module.h>
-#include <linux/mod_devicetable.h>
 #include <linux/mmc/sdio_func.h>
 #include <linux/mmc/sdio_ids.h>
 #include <linux/platform_device.h>
@@ -204,7 +203,7 @@ static int wl1251_sdio_probe(struct sdio_func *func,
 
 	wl = hw->priv;
 
-	wl_sdio = kzalloc(sizeof(*wl_sdio), GFP_KERNEL);
+	wl_sdio = kzalloc_obj(*wl_sdio);
 	if (wl_sdio == NULL) {
 		ret = -ENOMEM;
 		goto out_free_hw;
@@ -233,8 +232,8 @@ static int wl1251_sdio_probe(struct sdio_func *func,
 	}
 
 	if (wl->irq) {
-		irq_set_status_flags(wl->irq, IRQ_NOAUTOEN);
-		ret = request_irq(wl->irq, wl1251_line_irq, 0, "wl1251", wl);
+		ret = request_irq(wl->irq, wl1251_line_irq, IRQF_NO_AUTOEN,
+				  "wl1251", wl);
 		if (ret < 0) {
 			wl1251_error("request_irq() failed: %d", ret);
 			goto disable;
@@ -323,25 +322,8 @@ static struct sdio_driver wl1251_sdio_driver = {
 	.remove		= wl1251_sdio_remove,
 	.drv.pm		= &wl1251_sdio_pm_ops,
 };
+module_sdio_driver(wl1251_sdio_driver);
 
-static int __init wl1251_sdio_init(void)
-{
-	int err;
-
-	err = sdio_register_driver(&wl1251_sdio_driver);
-	if (err)
-		wl1251_error("failed to register sdio driver: %d", err);
-	return err;
-}
-
-static void __exit wl1251_sdio_exit(void)
-{
-	sdio_unregister_driver(&wl1251_sdio_driver);
-	wl1251_notice("unloaded");
-}
-
-module_init(wl1251_sdio_init);
-module_exit(wl1251_sdio_exit);
-
+MODULE_DESCRIPTION("TI WL1251 SDIO helpers");
 MODULE_LICENSE("GPL");
 MODULE_AUTHOR("Kalle Valo <kvalo@adurom.com>");

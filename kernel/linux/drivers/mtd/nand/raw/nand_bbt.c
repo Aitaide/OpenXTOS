@@ -3,7 +3,7 @@
  *  Overview:
  *   Bad block table support for the NAND driver
  *
- *  Copyright © 2004 Thomas Gleixner (tglx@linutronix.de)
+ *  Copyright © 2004 Thomas Gleixner (tglx@kernel.org)
  *
  * Description:
  *
@@ -576,7 +576,6 @@ static int search_bbt(struct nand_chip *this, uint8_t *buf,
 		startblock &= bbtblocks - 1;
 	} else {
 		chips = 1;
-		bbtblocks = mtd->size >> this->bbt_erase_shift;
 	}
 
 	for (i = 0; i < chips; i++) {
@@ -1376,7 +1375,7 @@ static int nand_create_badblock_pattern(struct nand_chip *this)
 		pr_warn("Bad block pattern already allocated; not replacing\n");
 		return -EINVAL;
 	}
-	bd = kzalloc(sizeof(*bd), GFP_KERNEL);
+	bd = kzalloc_obj(*bd);
 	if (!bd)
 		return -ENOMEM;
 	bd->options = this->bbt_options & BADBLOCK_SCAN_MASK;

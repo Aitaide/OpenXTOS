@@ -1,36 +1,43 @@
 # XTOS sched_class 生命周期审查矩阵
 
-状态：审查矩阵，未进入 M2。
+状态：审查矩阵，未进入 M2。M0/M1 物理目标机 go/no-go 未通过，禁止提前实施专用调度类。
+
+本次为 `source_inspection_only`：仅检查源码和文档，不代表 build、guest 或 physical 验收。PREEMPT_RT 已内置；不依赖 `localversion-rt` 或旧 RT patch。链接段次序为 stop > dl > rt > fair > ext > idle；ext 是否存在于产物及是否参与运行须分别核对配置和 readback。
 
 判定值只有 `PASS`、`FAIL`、`BLOCKED`。当前每一行均为 `BLOCKED`，因为 M0 真实任务门尚未关闭，RFC 尚未获内核 scheduler/PREEMPT_RT reviewer 批准。实现者不得用“代码已编译”替代生命周期证据。
 
-覆盖基线：仓库当前 vendored Linux 6.6.0-rt15 的 `kernel/linux/kernel/sched/sched.h` 中 `struct sched_class`。自动断言由 `tests/test_sched_class_hooks.py` 读取该结构的 callback 字段，并要求 RFC 与本矩阵均逐项列出。更新内核基线时必须重跑覆盖测试并复核新字段；本矩阵不声称涵盖未来 kernel callbacks。
+覆盖基线：仓库当前 vendored Linux 7.3.1 的 `kernel/linux/kernel/sched/sched.h` 中 `struct sched_class`。自动断言由 `tests/test_sched_class_hooks.py` 读取该结构的 callback 字段，并要求 RFC 与本矩阵均逐项列出。更新内核基线时必须重跑覆盖测试并复核新字段；本矩阵不声称涵盖未来 kernel callbacks。
+
+历史 6.6 的 pick_next_task 生命周期要求仍须追踪；7.3.1 的调度类选择入口为下表 pick_task，不能把旧 callback 名称当成当前结构字段。core scheduling 的选择、重试、空队列和预算语义继续属于该入口的审查范围，不能因接口改名而删除验证要求。
 
 | Callback | 编译条件 | 必须定义的行为 | 锁/上下文风险 | 最低测试与证据 | 当前判定 | 负责人 |
 |---|---|---|---|---|---|---|
 | `enqueue_task` | always | runnable 入队恰好一次，wake/preempt 语义 | rq lock、IRQ 禁止睡眠 | queue invariant、wake stress、lockdep | BLOCKED | scheduler reviewer |
-| `dequeue_task` | always | dequeue 对 sleep/exit/migrate 可重复安全 | rq lock、计数不下溢 | state transition、exit race | BLOCKED | scheduler reviewer |
+| `dequeue_task` | always | bool 返回值及 sleep/exit/migrate 出队结果 | rq lock、计数不下溢 | state transition、exit race | BLOCKED | scheduler reviewer |
 | `yield_task` | always | yield 后公平位置和预算规则 | rq lock、yield/抢占相互作用 | yield KUnit | BLOCKED | scheduler reviewer |
 | `yield_to_task` | always | 目标 task 合法性及拒绝条件 | task lifetime、rq lock | valid/invalid target tests | BLOCKED | scheduler reviewer |
-| `check_preempt_curr` | always | 相对 dl/rt/XTOS/fair 的抢占关系 | rq lock、class order | mixed-class preempt matrix | BLOCKED | scheduler reviewer |
-| `pick_next_task` | always | 选择下一个任务和空队列回退 | rq lock、core fast path | exact guest readback、empty queue | BLOCKED | scheduler reviewer |
-| `put_prev_task` | always | 保存执行状态/剩余 budget | rq lock、current task 生命周期 | switch-out state tests | BLOCKED | scheduler reviewer |
+| `wakeup_preempt` | always | 相对 dl/rt/XTOS/fair/ext 的唤醒抢占关系 | rq lock、class order | mixed-class preempt matrix | BLOCKED | scheduler reviewer |
+| `put_prev_task` | always | 接收 next task，保存执行状态/剩余 budget | rq lock、current task 生命周期 | switch-out state tests | BLOCKED | scheduler reviewer |
 | `set_next_task` | always | 初始化/续用 task 执行状态 | rq lock、first 标记语义 | switch-in/requeue tests | BLOCKED | scheduler reviewer |
-| `balance` | `CONFIG_SMP` | 是否禁止跨分区 balance及返回语义 | rq lock、rq_flags、IPI | SMP balance on/off tests | BLOCKED | SMP reviewer |
-| `select_task_rq` | `CONFIG_SMP` | CPU 选择、固定分区和拒绝策略 | affinity/task_cpu 竞态 | allowed-mask/hotplug tests | BLOCKED | SMP reviewer |
-| `pick_task` | `CONFIG_SMP` | core-sched 查询与 pick_next 一致 | rq lock、core scheduling | SCHED_CORE on/off tests | BLOCKED | scheduler reviewer |
-| `migrate_task_rq` | `CONFIG_SMP` | migration 时队列/时间状态更新 | 双 rq 锁、task_cpu 竞态 | migration/CPU-offline tests | BLOCKED | SMP reviewer |
-| `task_woken` | `CONFIG_SMP` | remote wake/负载唤醒行为 | remote rq、IPI、抢占 | remote wake tests | BLOCKED | SMP reviewer |
-| `set_cpus_allowed` | `CONFIG_SMP` | mask 更新及无法满足分区时的拒绝 | affinity_context、双 rq 锁 | concurrent affinity tests | BLOCKED | SMP reviewer |
-| `rq_online` | `CONFIG_SMP` | CPU 上线时本地队列初始化 | hotplug serialization | CPU online loop | BLOCKED | SMP reviewer |
-| `rq_offline` | `CONFIG_SMP` | CPU 下线前 drain/拒绝 runnable task | hotplug lock、rq drain | offline with runnable tasks | BLOCKED | SMP reviewer |
-| `find_lock_rq` | `CONFIG_SMP` | 迁移目标 rq 定位/锁转移 | rq lock handoff、死锁 | lockdep migration tests | BLOCKED | SMP reviewer |
+| `balance` | always | 是否禁止跨分区 balance及返回语义 | rq lock、rq_flags、IPI | SMP balance on/off tests | BLOCKED | SMP reviewer |
+| `select_task_rq` | always | CPU 选择、固定分区和拒绝策略 | affinity/task_cpu 竞态 | allowed-mask/hotplug tests | BLOCKED | SMP reviewer |
+| `pick_task` | always | 普通与 core-sched 选择、空队列回退、rq_flags 和 RETRY_TASK 重试 | rq lock、core scheduling | SCHED_CORE on/off tests | BLOCKED | scheduler reviewer |
+| `migrate_task_rq` | always | migration 时队列/时间状态更新 | 双 rq 锁、task_cpu 竞态 | migration/CPU-offline tests | BLOCKED | SMP reviewer |
+| `task_woken` | always | remote wake/负载唤醒行为 | remote rq、IPI、抢占 | remote wake tests | BLOCKED | SMP reviewer |
+| `set_cpus_allowed` | always | mask 更新及无法满足分区时的拒绝 | affinity_context、双 rq 锁 | concurrent affinity tests | BLOCKED | SMP reviewer |
+| `rq_online` | always | CPU 上线时本地队列初始化 | hotplug serialization | CPU online loop | BLOCKED | SMP reviewer |
+| `rq_offline` | always | CPU 下线前 drain/拒绝 runnable task | hotplug lock、rq drain | offline with runnable tasks | BLOCKED | SMP reviewer |
+| `find_lock_rq` | always | 迁移目标 rq 定位/锁转移 | rq lock handoff、死锁 | lockdep migration tests | BLOCKED | SMP reviewer |
 | `task_tick` | always | tick accounting、RR quantum或预算更新 | IRQ/tick context、不得睡眠 | tick/budget exhaustion tests | BLOCKED | RT reviewer |
 | `task_fork` | always | 子 task policy/reset-on-fork/私有状态 | task init 生命周期 | fork/reset-on-fork tests | BLOCKED | UAPI reviewer |
 | `task_dead` | always | task 退出时队列/计时器/引用释放 | 不能残留 timer/task ref | exit storm/leak check | BLOCKED | scheduler reviewer |
-| `switched_from` | always | 切出本类后的状态回收 | rq lock 可被放下；pi_lock 串行 | policy-switch race | BLOCKED | scheduler reviewer |
+| `switching_from` | always | sched_change 切出前状态准备 | task_rq_lock、转换顺序 | policy-switch race | BLOCKED | scheduler reviewer |
+| `switching_to` | always | sched_change 切入前状态准备 | task_rq_lock、转换顺序 | policy-switch race | BLOCKED | scheduler reviewer |
+| `get_prio` | always | 返回 u64 类内优先级供变更前后比较 | rq lock、sched_change | priority snapshot | BLOCKED | UAPI reviewer |
+| `reweight_task` | always | 依据 load_weight 更新权重 | task_rq_lock、sched_change | nice/weight transitions | BLOCKED | scheduler reviewer |
+| `switched_from` | always | 切出本类后的状态回收 | sched_change 转换锁约束 | policy-switch race | BLOCKED | scheduler reviewer |
 | `switched_to` | always | 切入本类后的运行状态初始化 | rq/PI lock 顺序 | policy-switch/readback tests | BLOCKED | scheduler reviewer |
-| `prio_changed` | always | 参数变更后的队列重排/抢占 | rq lock、PI 竞态 | concurrent priority update | BLOCKED | UAPI reviewer |
+| `prio_changed` | always | u64 oldprio 参数及变更后的队列重排/抢占 | rq lock、PI 竞态 | concurrent priority update | BLOCKED | UAPI reviewer |
 | `get_rr_interval` | always | 返回一致 RR interval，或明确不适用 | read-only contract | API readback test | BLOCKED | UAPI reviewer |
 | `update_curr` | always | 墙钟/CPU time、budget 精确扣减 | rq lock、tickless accounting | exact budget boundary | BLOCKED | RT reviewer |
 | `task_change_group` | `CONFIG_FAIR_GROUP_SCHED` | group/cgroup 变更是否支持/拒绝 | css/task lifetime | group move tests | BLOCKED | kernel reviewer |
@@ -50,7 +57,7 @@
 ## 交付前强制附件
 
 - RFC 评审意见和签字人身份
-- Linux 6.6.0-rt15 精确源码/patch/config 哈希
+- Linux 7.3.1 精确源码/source-pin/XTOS patch/config 哈希；历史 6.6.0-rt15 baseline 原字节见 `history/scheduler-class-baseline-6.6.0-rt15.json`
 - 默认关闭和 opt-in 的 exact build
 - KUnit、lockdep、KASAN/KCSAN（可用时）原始日志
 - x86_64 QEMU 启动和策略 readback 证据

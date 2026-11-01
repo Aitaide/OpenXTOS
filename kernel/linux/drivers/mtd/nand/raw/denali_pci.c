@@ -19,8 +19,8 @@
 
 /* List of platforms this NAND controller has be integrated into */
 static const struct pci_device_id denali_pci_ids[] = {
-	{ PCI_VDEVICE(INTEL, 0x0701), INTEL_CE4100 },
-	{ PCI_VDEVICE(INTEL, 0x0809), INTEL_MRST },
+	{ PCI_VDEVICE(INTEL, 0x0701), .driver_data = INTEL_CE4100 },
+	{ PCI_VDEVICE(INTEL, 0x0809), .driver_data = INTEL_MRST },
 	{ /* end: all zeroes */ }
 };
 MODULE_DEVICE_TABLE(pci, denali_pci_ids);
@@ -68,7 +68,7 @@ static int denali_pci_probe(struct pci_dev *dev, const struct pci_device_id *id)
 	denali->clk_rate = 50000000;		/* 50 MHz */
 	denali->clk_x_rate = 200000000;		/* 200 MHz */
 
-	ret = pci_request_regions(dev, DENALI_NAND_NAME);
+	ret = pcim_request_all_regions(dev, DENALI_NAND_NAME);
 	if (ret) {
 		dev_err(&dev->dev, "Spectra: Unable to request memory regions\n");
 		return ret;

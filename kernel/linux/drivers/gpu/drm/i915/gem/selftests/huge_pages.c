@@ -88,7 +88,7 @@ static int get_huge_pages(struct drm_i915_gem_object *obj)
 	if (overflows_type(obj->base.size >> PAGE_SHIFT, unsigned int))
 		return -E2BIG;
 
-	st = kmalloc(sizeof(*st), GFP);
+	st = kmalloc_obj(*st, GFP);
 	if (!st)
 		return -ENOMEM;
 
@@ -115,7 +115,7 @@ static int get_huge_pages(struct drm_i915_gem_object *obj)
 		do {
 			struct page *page;
 
-			GEM_BUG_ON(order > MAX_ORDER);
+			GEM_BUG_ON(order > MAX_PAGE_ORDER);
 			page = alloc_pages(GFP | __GFP_ZERO, order);
 			if (!page)
 				goto err;
@@ -220,7 +220,7 @@ static int fake_get_huge_pages(struct drm_i915_gem_object *obj)
 	if (overflows_type(obj->base.size >> PAGE_SHIFT, unsigned int))
 		return -E2BIG;
 
-	st = kmalloc(sizeof(*st), GFP);
+	st = kmalloc_obj(*st, GFP);
 	if (!st)
 		return -ENOMEM;
 
@@ -270,7 +270,7 @@ static int fake_get_huge_pages_single(struct drm_i915_gem_object *obj)
 	struct scatterlist *sg;
 	unsigned int page_size;
 
-	st = kmalloc(sizeof(*st), GFP);
+	st = kmalloc_obj(*st, GFP);
 	if (!st)
 		return -ENOMEM;
 
@@ -713,7 +713,7 @@ static int igt_ppgtt_huge_fill(void *arg)
 {
 	struct drm_i915_private *i915 = arg;
 	unsigned int supported = RUNTIME_INFO(i915)->page_sizes;
-	bool has_pte64 = GRAPHICS_VER_FULL(i915) >= IP_VER(12, 50);
+	bool has_pte64 = GRAPHICS_VER_FULL(i915) >= IP_VER(12, 55);
 	struct i915_address_space *vm;
 	struct i915_gem_context *ctx;
 	unsigned long max_pages;
@@ -857,7 +857,7 @@ out:
 static int igt_ppgtt_64K(void *arg)
 {
 	struct drm_i915_private *i915 = arg;
-	bool has_pte64 = GRAPHICS_VER_FULL(i915) >= IP_VER(12, 50);
+	bool has_pte64 = GRAPHICS_VER_FULL(i915) >= IP_VER(12, 55);
 	struct drm_i915_gem_object *obj;
 	struct i915_address_space *vm;
 	struct i915_gem_context *ctx;
@@ -1082,7 +1082,7 @@ __cpu_check_shmem(struct drm_i915_gem_object *obj, u32 dword, u32 val)
 		goto err_unlock;
 
 	for (n = 0; n < obj->base.size >> PAGE_SHIFT; ++n) {
-		u32 *ptr = kmap_atomic(i915_gem_object_get_page(obj, n));
+		u32 *ptr = kmap_local_page(i915_gem_object_get_page(obj, n));
 
 		if (needs_flush & CLFLUSH_BEFORE)
 			drm_clflush_virt_range(ptr, PAGE_SIZE);
@@ -1090,12 +1090,12 @@ __cpu_check_shmem(struct drm_i915_gem_object *obj, u32 dword, u32 val)
 		if (ptr[dword] != val) {
 			pr_err("n=%lu ptr[%u]=%u, val=%u\n",
 			       n, dword, ptr[dword], val);
-			kunmap_atomic(ptr);
+			kunmap_local(ptr);
 			err = -EINVAL;
 			break;
 		}
 
-		kunmap_atomic(ptr);
+		kunmap_local(ptr);
 	}
 
 	i915_gem_object_finish_access(obj);
@@ -1316,7 +1316,7 @@ typedef struct drm_i915_gem_object *
 
 static inline bool igt_can_allocate_thp(struct drm_i915_private *i915)
 {
-	return i915->mm.gemfs && has_transparent_hugepage();
+	return !!drm_gem_get_huge_mnt(&i915->drm);
 }
 
 static struct drm_i915_gem_object *
@@ -1761,7 +1761,6 @@ static int igt_tmpfs_fallback(void *arg)
 	struct drm_i915_private *i915 = arg;
 	struct i915_address_space *vm;
 	struct i915_gem_context *ctx;
-	struct vfsmount *gemfs = i915->mm.gemfs;
 	struct drm_i915_gem_object *obj;
 	struct i915_vma *vma;
 	struct file *file;
@@ -1779,15 +1778,8 @@ static int igt_tmpfs_fallback(void *arg)
 	}
 	vm = i915_gem_context_get_eb_vm(ctx);
 
-	/*
-	 * Make sure that we don't burst into a ball of flames upon falling back
-	 * to tmpfs, which we rely on if on the off-chance we encouter a failure
-	 * when setting up gemfs.
-	 */
-
-	i915->mm.gemfs = NULL;
-
-	obj = i915_gem_object_create_shmem(i915, PAGE_SIZE);
+	obj = i915_gem_object_create_region(i915->mm.regions[INTEL_REGION_SMEM],
+					    PAGE_SIZE, 0, I915_BO_ALLOC_NOTHP);
 	if (IS_ERR(obj)) {
 		err = PTR_ERR(obj);
 		goto out_restore;
@@ -1819,7 +1811,6 @@ static int igt_tmpfs_fallback(void *arg)
 out_put:
 	i915_gem_object_put(obj);
 out_restore:
-	i915->mm.gemfs = gemfs;
 
 	i915_vm_put(vm);
 out:
@@ -1969,19 +1960,19 @@ int i915_gem_huge_page_mock_selftests(void)
 		SUBTEST(igt_mock_memory_region_huge_pages),
 		SUBTEST(igt_mock_ppgtt_misaligned_dma),
 	};
-	struct drm_i915_private *dev_priv;
+	struct drm_i915_private *i915;
 	struct i915_ppgtt *ppgtt;
 	int err;
 
-	dev_priv = mock_gem_device();
-	if (!dev_priv)
+	i915 = mock_gem_device();
+	if (!i915)
 		return -ENOMEM;
 
 	/* Pretend to be a device which supports the 48b PPGTT */
-	RUNTIME_INFO(dev_priv)->ppgtt_type = INTEL_PPGTT_FULL;
-	RUNTIME_INFO(dev_priv)->ppgtt_size = 48;
+	RUNTIME_INFO(i915)->ppgtt_type = INTEL_PPGTT_FULL;
+	RUNTIME_INFO(i915)->ppgtt_size = 48;
 
-	ppgtt = i915_ppgtt_create(to_gt(dev_priv), 0);
+	ppgtt = i915_ppgtt_create(to_gt(i915), 0);
 	if (IS_ERR(ppgtt)) {
 		err = PTR_ERR(ppgtt);
 		goto out_unlock;
@@ -2005,7 +1996,7 @@ int i915_gem_huge_page_mock_selftests(void)
 out_put:
 	i915_vm_put(&ppgtt->vm);
 out_unlock:
-	mock_destroy_device(dev_priv);
+	mock_destroy_device(i915);
 	return err;
 }
 

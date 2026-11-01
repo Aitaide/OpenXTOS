@@ -19,13 +19,14 @@
 #include <linux/cc_platform.h>
 
 #include <asm/hypervisor.h>
+#include <asm/timer.h>
 #include <asm/x86_init.h>
 #include <asm/kvmclock.h>
 
 static int kvmclock __initdata = 1;
 static int kvmclock_vsyscall __initdata = 1;
-static int msr_kvm_system_time __ro_after_init = MSR_KVM_SYSTEM_TIME;
-static int msr_kvm_wall_clock __ro_after_init = MSR_KVM_WALL_CLOCK;
+static int msr_kvm_system_time __ro_after_init;
+static int msr_kvm_wall_clock __ro_after_init;
 static u64 kvm_sched_clock_offset __ro_after_init;
 
 static int __init parse_no_kvmclock(char *arg)
@@ -42,7 +43,7 @@ static int __init parse_no_kvmclock_vsyscall(char *arg)
 }
 early_param("no-kvmclock-vsyscall", parse_no_kvmclock_vsyscall);
 
-/* Aligned to page sizes to match whats mapped via vsyscalls to userspace */
+/* Aligned to page sizes to match what's mapped via vsyscalls to userspace */
 #define HVC_BOOT_ARRAY_SIZE \
 	(PAGE_SIZE / sizeof(struct pvclock_vsyscall_time_info))
 
@@ -60,7 +61,7 @@ EXPORT_PER_CPU_SYMBOL_GPL(hv_clock_per_cpu);
  */
 static void kvm_get_wallclock(struct timespec64 *now)
 {
-	wrmsrl(msr_kvm_wall_clock, slow_virt_to_phys(&wall_clock));
+	wrmsrq(msr_kvm_wall_clock, slow_virt_to_phys(&wall_clock));
 	preempt_disable();
 	pvclock_read_wallclock(&wall_clock, this_cpu_pvti(), now);
 	preempt_enable();
@@ -84,6 +85,27 @@ static u64 kvm_clock_read(void)
 static u64 kvm_clock_get_cycles(struct clocksource *cs)
 {
 	return kvm_clock_read();
+}
+
+static u64 kvm_clock_get_cycles_snapshot(struct clocksource *cs,
+					 struct clocksource_hw_snapshot *chs)
+{
+	struct pvclock_vcpu_time_info *src;
+	unsigned version;
+	u64 ret, tsc;
+
+	preempt_disable_notrace();
+	src = this_cpu_pvti();
+	do {
+		version = pvclock_read_begin(src);
+		tsc = rdtsc_ordered();
+		ret = __pvclock_read_cycles(src, tsc);
+	} while (pvclock_read_retry(src, version));
+	preempt_enable_notrace();
+
+	chs->hw_cycles = tsc;
+	chs->hw_csid = CSID_X86_TSC;
+	return ret;
 }
 
 static noinstr u64 kvm_sched_clock_read(void)
@@ -154,15 +176,16 @@ static int kvm_cs_enable(struct clocksource *cs)
 	return 0;
 }
 
-struct clocksource kvm_clock = {
-	.name	= "kvm-clock",
-	.read	= kvm_clock_get_cycles,
-	.rating	= 400,
-	.mask	= CLOCKSOURCE_MASK(64),
-	.flags	= CLOCK_SOURCE_IS_CONTINUOUS,
-	.enable	= kvm_cs_enable,
+static struct clocksource kvm_clock = {
+	.name		= "kvm-clock",
+	.read		= kvm_clock_get_cycles,
+	.read_snapshot	= kvm_clock_get_cycles_snapshot,
+	.rating		= 400,
+	.mask		= CLOCKSOURCE_MASK(64),
+	.flags		= CLOCK_SOURCE_IS_CONTINUOUS,
+	.id		= CSID_X86_KVM_CLK,
+	.enable		= kvm_cs_enable,
 };
-EXPORT_SYMBOL_GPL(kvm_clock);
 
 static void kvm_register_clock(char *txt)
 {
@@ -173,7 +196,7 @@ static void kvm_register_clock(char *txt)
 		return;
 
 	pa = slow_virt_to_phys(&src->pvti) | 0x01ULL;
-	wrmsrl(msr_kvm_system_time, pa);
+	wrmsrq(msr_kvm_system_time, pa);
 	pr_debug("kvm-clock: cpu %d, msr %llx, %s", smp_processor_id(), pa, txt);
 }
 
@@ -195,7 +218,8 @@ static void kvm_setup_secondary_clock(void)
 
 void kvmclock_disable(void)
 {
-	native_write_msr(msr_kvm_system_time, 0, 0);
+	if (msr_kvm_system_time)
+		native_write_msr(msr_kvm_system_time, 0);
 }
 
 static void __init kvmclock_init_mem(void)
@@ -294,7 +318,10 @@ void __init kvmclock_init(void)
 	if (kvm_para_has_feature(KVM_FEATURE_CLOCKSOURCE2)) {
 		msr_kvm_system_time = MSR_KVM_SYSTEM_TIME_NEW;
 		msr_kvm_wall_clock = MSR_KVM_WALL_CLOCK_NEW;
-	} else if (!kvm_para_has_feature(KVM_FEATURE_CLOCKSOURCE)) {
+	} else if (kvm_para_has_feature(KVM_FEATURE_CLOCKSOURCE)) {
+		msr_kvm_system_time = MSR_KVM_SYSTEM_TIME;
+		msr_kvm_wall_clock = MSR_KVM_WALL_CLOCK;
+	} else {
 		return;
 	}
 

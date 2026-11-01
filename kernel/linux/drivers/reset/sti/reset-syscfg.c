@@ -7,10 +7,11 @@
  */
 #include <linux/kernel.h>
 #include <linux/platform_device.h>
+#include <linux/property.h>
 #include <linux/module.h>
 #include <linux/err.h>
 #include <linux/types.h>
-#include <linux/of_device.h>
+#include <linux/of.h>
 #include <linux/regmap.h>
 #include <linux/mfd/syscon.h>
 
@@ -40,7 +41,7 @@ struct syscfg_reset_channel {
 struct syscfg_reset_controller {
 	struct reset_controller_dev rst;
 	bool active_low;
-	struct syscfg_reset_channel *channels;
+	struct syscfg_reset_channel channels[];
 };
 
 #define to_syscfg_reset_controller(_rst) \
@@ -134,13 +135,8 @@ static int syscfg_reset_controller_register(struct device *dev,
 	struct syscfg_reset_controller *rc;
 	int i, err;
 
-	rc = devm_kzalloc(dev, sizeof(*rc), GFP_KERNEL);
+	rc = devm_kzalloc(dev, struct_size(rc, channels, data->nr_channels), GFP_KERNEL);
 	if (!rc)
-		return -ENOMEM;
-
-	rc->channels = devm_kcalloc(dev, data->nr_channels,
-				    sizeof(*rc->channels), GFP_KERNEL);
-	if (!rc->channels)
 		return -ENOMEM;
 
 	rc->rst.ops = &syscfg_reset_ops;
@@ -183,14 +179,14 @@ static int syscfg_reset_controller_register(struct device *dev,
 int syscfg_reset_probe(struct platform_device *pdev)
 {
 	struct device *dev = pdev ? &pdev->dev : NULL;
-	const struct of_device_id *match;
+	const void *data;
 
 	if (!dev || !dev->driver)
 		return -ENODEV;
 
-	match = of_match_device(dev->driver->of_match_table, dev);
-	if (!match || !match->data)
+	data = device_get_match_data(&pdev->dev);
+	if (!data)
 		return -EINVAL;
 
-	return syscfg_reset_controller_register(dev, match->data);
+	return syscfg_reset_controller_register(dev, data);
 }

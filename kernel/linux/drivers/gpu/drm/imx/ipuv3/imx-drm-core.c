@@ -13,10 +13,13 @@
 
 #include <video/imx-ipu-v3.h>
 
+#include <drm/clients/drm_client_setup.h>
 #include <drm/drm_atomic.h>
 #include <drm/drm_atomic_helper.h>
 #include <drm/drm_drv.h>
+#include <drm/drm_dumb_buffers.h>
 #include <drm/drm_fbdev_dma.h>
+#include <drm/drm_fourcc.h>
 #include <drm/drm_gem_dma_helper.h>
 #include <drm/drm_gem_framebuffer_helper.h>
 #include <drm/drm_managed.h>
@@ -34,15 +37,8 @@ module_param(legacyfb_depth, int, 0444);
 
 DEFINE_DRM_GEM_DMA_FOPS(imx_drm_driver_fops);
 
-void imx_drm_connector_destroy(struct drm_connector *connector)
-{
-	drm_connector_unregister(connector);
-	drm_connector_cleanup(connector);
-}
-EXPORT_SYMBOL_GPL(imx_drm_connector_destroy);
-
 static int imx_drm_atomic_check(struct drm_device *dev,
-				struct drm_atomic_state *state)
+				struct drm_atomic_commit *state)
 {
 	int ret;
 
@@ -72,7 +68,7 @@ static const struct drm_mode_config_funcs imx_drm_mode_config_funcs = {
 	.atomic_commit = drm_atomic_helper_commit,
 };
 
-static void imx_drm_atomic_commit_tail(struct drm_atomic_state *state)
+static void imx_drm_atomic_commit_tail(struct drm_atomic_commit *state)
 {
 	struct drm_device *dev = state->dev;
 	struct drm_plane *plane;
@@ -147,28 +143,45 @@ static int imx_drm_dumb_create(struct drm_file *file_priv,
 			       struct drm_device *drm,
 			       struct drm_mode_create_dumb *args)
 {
-	u32 width = args->width;
+	u32 fourcc;
+	u64 pitch_align;
 	int ret;
 
-	args->width = ALIGN(width, 8);
+	/*
+	 * Hardware requires the framebuffer width to be aligned to
+	 * multiples of 8. The mode-setting code handles this, but
+	 * the buffer pitch has to be aligned as well. Set the pitch
+	 * alignment accordingly, so that the each scanline fits into
+	 * the allocated buffer.
+	 */
+	fourcc = drm_driver_color_mode_format(drm, args->bpp);
+	if (fourcc != DRM_FORMAT_INVALID) {
+		const struct drm_format_info *info = drm_format_info(fourcc);
 
-	ret = drm_gem_dma_dumb_create(file_priv, drm, args);
+		if (!info)
+			return -EINVAL;
+		pitch_align = drm_format_info_min_pitch(info, 0, 8);
+	} else {
+		pitch_align = DIV_ROUND_UP(args->bpp, SZ_8) * 8;
+	}
+	if (!pitch_align || pitch_align > U32_MAX)
+		return -EINVAL;
+	ret = drm_mode_size_dumb(drm, args, pitch_align, 0);
 	if (ret)
 		return ret;
 
-	args->width = width;
-	return ret;
+	return drm_gem_dma_dumb_create(file_priv, drm, args);
 }
 
 static const struct drm_driver imx_drm_driver = {
 	.driver_features	= DRIVER_MODESET | DRIVER_GEM | DRIVER_ATOMIC,
 	DRM_GEM_DMA_DRIVER_OPS_WITH_DUMB_CREATE(imx_drm_dumb_create),
+	DRM_FBDEV_DMA_DRIVER_OPS,
 	.ioctls			= imx_drm_ioctls,
 	.num_ioctls		= ARRAY_SIZE(imx_drm_ioctls),
 	.fops			= &imx_drm_driver_fops,
 	.name			= "imx-drm",
 	.desc			= "i.MX DRM graphics",
-	.date			= "20120507",
 	.major			= 1,
 	.minor			= 0,
 	.patchlevel		= 0,
@@ -249,7 +262,7 @@ static int imx_drm_bind(struct device *dev)
 	if (ret)
 		goto err_poll_fini;
 
-	drm_fbdev_dma_setup(drm, legacyfb_depth);
+	drm_client_setup_with_color_mode(drm, legacyfb_depth);
 
 	return 0;
 
@@ -257,6 +270,7 @@ err_poll_fini:
 	drm_kms_helper_poll_fini(drm);
 	component_unbind_all(drm->dev, drm);
 err_kms:
+	dev_set_drvdata(dev, NULL);
 	drm_dev_put(drm);
 
 	return ret;
@@ -269,6 +283,7 @@ static void imx_drm_unbind(struct device *dev)
 	drm_dev_unregister(drm);
 
 	drm_kms_helper_poll_fini(drm);
+	drm_atomic_helper_shutdown(drm);
 
 	component_unbind_all(drm->dev, drm);
 
@@ -292,10 +307,14 @@ static int imx_drm_platform_probe(struct platform_device *pdev)
 	return ret;
 }
 
-static int imx_drm_platform_remove(struct platform_device *pdev)
+static void imx_drm_platform_remove(struct platform_device *pdev)
 {
 	component_master_del(&pdev->dev, &imx_drm_ops);
-	return 0;
+}
+
+static void imx_drm_platform_shutdown(struct platform_device *pdev)
+{
+	drm_atomic_helper_shutdown(platform_get_drvdata(pdev));
 }
 
 #ifdef CONFIG_PM_SLEEP
@@ -325,6 +344,7 @@ MODULE_DEVICE_TABLE(of, imx_drm_dt_ids);
 static struct platform_driver imx_drm_pdrv = {
 	.probe		= imx_drm_platform_probe,
 	.remove		= imx_drm_platform_remove,
+	.shutdown	= imx_drm_platform_shutdown,
 	.driver		= {
 		.name	= "imx-drm",
 		.pm	= &imx_drm_pm_ops,

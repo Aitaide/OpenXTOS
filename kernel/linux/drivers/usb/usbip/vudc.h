@@ -38,7 +38,6 @@ struct vep {
 
 struct vrequest {
 	struct usb_request req;
-	struct vudc *udc;
 	struct list_head req_entry; /* Request queue */
 };
 
@@ -173,6 +172,6 @@ struct vudc_device *alloc_vudc_device(int devid);
 void put_vudc_device(struct vudc_device *udc_dev);
 
 int vudc_probe(struct platform_device *pdev);
-int vudc_remove(struct platform_device *pdev);
+void vudc_remove(struct platform_device *pdev);
 
 #endif /* __USBIP_VUDC_H */

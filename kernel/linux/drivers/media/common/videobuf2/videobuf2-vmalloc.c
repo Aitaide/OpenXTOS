@@ -39,7 +39,7 @@ static void *vb2_vmalloc_alloc(struct vb2_buffer *vb, struct device *dev,
 {
 	struct vb2_vmalloc_buf *buf;
 
-	buf = kzalloc(sizeof(*buf), GFP_KERNEL | vb->vb2_queue->gfp_flags);
+	buf = kzalloc_obj(*buf, GFP_KERNEL | vb->vb2_queue->gfp_flags);
 	if (!buf)
 		return ERR_PTR(-ENOMEM);
 
@@ -78,7 +78,7 @@ static void *vb2_vmalloc_get_userptr(struct vb2_buffer *vb, struct device *dev,
 	int n_pages, offset, i;
 	int ret = -ENOMEM;
 
-	buf = kzalloc(sizeof(*buf), GFP_KERNEL);
+	buf = kzalloc_obj(*buf);
 	if (!buf)
 		return ERR_PTR(-ENOMEM);
 
@@ -133,13 +133,15 @@ static void vb2_vmalloc_put_userptr(void *buf_priv)
 
 	if (!buf->vec->is_pfns) {
 		n_pages = frame_vector_count(buf->vec);
-		pages = frame_vector_pages(buf->vec);
 		if (vaddr)
 			vm_unmap_ram((void *)vaddr, n_pages);
 		if (buf->dma_dir == DMA_FROM_DEVICE ||
-		    buf->dma_dir == DMA_BIDIRECTIONAL)
-			for (i = 0; i < n_pages; i++)
-				set_page_dirty_lock(pages[i]);
+		    buf->dma_dir == DMA_BIDIRECTIONAL) {
+			pages = frame_vector_pages(buf->vec);
+			if (!WARN_ON_ONCE(IS_ERR(pages)))
+				for (i = 0; i < n_pages; i++)
+					set_page_dirty_lock(pages[i]);
+		}
 	} else {
 		iounmap((__force void __iomem *)buf->vaddr);
 	}
@@ -219,7 +221,7 @@ static int vb2_vmalloc_dmabuf_ops_attach(struct dma_buf *dbuf,
 	int ret;
 	int i;
 
-	attach = kzalloc(sizeof(*attach), GFP_KERNEL);
+	attach = kzalloc_obj(*attach);
 	if (!attach)
 		return -ENOMEM;
 
@@ -407,7 +409,7 @@ static void *vb2_vmalloc_attach_dmabuf(struct vb2_buffer *vb,
 	if (dbuf->size < size)
 		return ERR_PTR(-EFAULT);
 
-	buf = kzalloc(sizeof(*buf), GFP_KERNEL);
+	buf = kzalloc_obj(*buf);
 	if (!buf)
 		return ERR_PTR(-ENOMEM);
 
@@ -440,4 +442,4 @@ EXPORT_SYMBOL_GPL(vb2_vmalloc_memops);
 MODULE_DESCRIPTION("vmalloc memory handling routines for videobuf2");
 MODULE_AUTHOR("Pawel Osciak <pawel@osciak.com>");
 MODULE_LICENSE("GPL");
-MODULE_IMPORT_NS(DMA_BUF);
+MODULE_IMPORT_NS("DMA_BUF");

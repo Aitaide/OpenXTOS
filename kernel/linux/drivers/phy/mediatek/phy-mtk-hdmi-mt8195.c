@@ -9,6 +9,8 @@
 #include <linux/module.h>
 #include <linux/phy/phy.h>
 #include <linux/platform_device.h>
+#include <linux/regulator/driver.h>
+#include <linux/regulator/of_regulator.h>
 #include <linux/types.h>
 #include <linux/units.h>
 #include <linux/nvmem-consumer.h>
@@ -34,7 +36,7 @@ mtk_phy_tmds_clk_ratio(struct mtk_hdmi_phy *hdmi_phy, bool enable)
 	 * clock bit ratio 1:40, under 3.4Gbps, clock bit ratio 1:10
 	 */
 	if (enable)
-		mtk_phy_update_field(regs + HDMI20_CLK_CFG, REG_TXC_DIV, 3);
+		mtk_phy_update_field(regs + HDMI20_CLK_CFG, REG_TXC_DIV, VAL_TXC_DIV4);
 	else
 		mtk_phy_clear_bits(regs + HDMI20_CLK_CFG, REG_TXC_DIV);
 }
@@ -288,7 +290,7 @@ static int mtk_hdmi_pll_calc(struct mtk_hdmi_phy *hdmi_phy, struct clk_hw *hw,
 	posdiv2 = 1;
 
 	/* Digital clk divider, max /32 */
-	digital_div = div_u64(ns_hdmipll_ck, posdiv1 * posdiv2 * pixel_clk);
+	digital_div = div64_u64(ns_hdmipll_ck, posdiv1 * posdiv2 * pixel_clk);
 	if (!(digital_div <= 32 && digital_div >= 1))
 		return -EINVAL;
 
@@ -416,13 +418,13 @@ static int mtk_hdmi_pll_set_rate(struct clk_hw *hw, unsigned long rate,
 	return mtk_hdmi_pll_calc(hdmi_phy, hw, rate, parent_rate);
 }
 
-static long mtk_hdmi_pll_round_rate(struct clk_hw *hw, unsigned long rate,
-				    unsigned long *parent_rate)
+static int mtk_hdmi_pll_determine_rate(struct clk_hw *hw,
+				       struct clk_rate_request *req)
 {
 	struct mtk_hdmi_phy *hdmi_phy = to_mtk_hdmi_phy(hw);
 
-	hdmi_phy->pll_rate = rate;
-	return rate;
+	hdmi_phy->pll_rate = req->rate;
+	return 0;
 }
 
 static unsigned long mtk_hdmi_pll_recalc_rate(struct clk_hw *hw,
@@ -437,7 +439,7 @@ static const struct clk_ops mtk_hdmi_pll_ops = {
 	.prepare = mtk_hdmi_pll_prepare,
 	.unprepare = mtk_hdmi_pll_unprepare,
 	.set_rate = mtk_hdmi_pll_set_rate,
-	.round_rate = mtk_hdmi_pll_round_rate,
+	.determine_rate = mtk_hdmi_pll_determine_rate,
 	.recalc_rate = mtk_hdmi_pll_recalc_rate,
 };
 
@@ -478,8 +480,50 @@ static int mtk_hdmi_phy_configure(struct phy *phy, union phy_configure_opts *opt
 	return ret;
 }
 
+static int mtk_hdmi_phy_pwr5v_enable(struct regulator_dev *rdev)
+{
+	struct mtk_hdmi_phy *hdmi_phy = rdev_get_drvdata(rdev);
+
+	mtk_phy_set_bits(hdmi_phy->regs + HDMI_CTL_1, RG_HDMITX_PWR5V_O);
+
+	return 0;
+}
+
+static int mtk_hdmi_phy_pwr5v_disable(struct regulator_dev *rdev)
+{
+	struct mtk_hdmi_phy *hdmi_phy = rdev_get_drvdata(rdev);
+
+	mtk_phy_clear_bits(hdmi_phy->regs + HDMI_CTL_1, RG_HDMITX_PWR5V_O);
+
+	return 0;
+}
+
+static int mtk_hdmi_phy_pwr5v_is_enabled(struct regulator_dev *rdev)
+{
+	struct mtk_hdmi_phy *hdmi_phy = rdev_get_drvdata(rdev);
+
+	return !!(readl(hdmi_phy->regs + HDMI_CTL_1) & RG_HDMITX_PWR5V_O);
+}
+
+static const struct regulator_ops mtk_hdmi_pwr5v_regulator_ops = {
+	.enable = mtk_hdmi_phy_pwr5v_enable,
+	.disable = mtk_hdmi_phy_pwr5v_disable,
+	.is_enabled = mtk_hdmi_phy_pwr5v_is_enabled
+};
+
+static const struct regulator_desc mtk_hdmi_phy_pwr5v_desc = {
+	.name = "hdmi-pwr5v",
+	.id = -1,
+	.n_voltages = 1,
+	.fixed_uV = 5000000,
+	.ops = &mtk_hdmi_pwr5v_regulator_ops,
+	.type = REGULATOR_VOLTAGE,
+	.owner = THIS_MODULE,
+};
+
 struct mtk_hdmi_phy_conf mtk_hdmi_phy_8195_conf = {
 	.flags = CLK_SET_RATE_PARENT | CLK_SET_RATE_GATE,
+	.hdmi_phy_regulator_desc = &mtk_hdmi_phy_pwr5v_desc,
 	.hdmi_phy_clk_ops = &mtk_hdmi_pll_ops,
 	.hdmi_phy_enable_tmds = mtk_hdmi_phy_enable_tmds,
 	.hdmi_phy_disable_tmds = mtk_hdmi_phy_disable_tmds,

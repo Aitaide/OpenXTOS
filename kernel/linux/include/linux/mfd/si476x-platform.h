@@ -10,7 +10,7 @@
 #ifndef __SI476X_PLATFORM_H__
 #define __SI476X_PLATFORM_H__
 
-/* It is possible to select one of the four adresses using pins A0
+/* It is possible to select one of the four addresses using pins A0
  * and A1 on SI476x */
 #define SI476X_I2C_ADDR_1	0x60
 #define SI476X_I2C_ADDR_2	0x61
@@ -246,8 +246,6 @@ enum si476x_phase_diversity_mode {
  * Platform dependent definition
  */
 struct si476x_platform_data {
-	int gpio_reset; /* < 0 if not used */
-
 	struct si476x_power_up_args power_up_parameters;
 	enum si476x_phase_diversity_mode diversity_mode;
 

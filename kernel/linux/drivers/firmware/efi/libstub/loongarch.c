@@ -8,6 +8,7 @@
 #include <asm/efi.h>
 #include <asm/addrspace.h>
 #include "efistub.h"
+#include "loongarch-stub.h"
 
 typedef void __noreturn (*kernel_entry_t)(bool efi, unsigned long cmdline,
 					  unsigned long systab);
@@ -15,6 +16,27 @@ typedef void __noreturn (*kernel_entry_t)(bool efi, unsigned long cmdline,
 efi_status_t check_platform_features(void)
 {
 	return EFI_SUCCESS;
+}
+
+void efi_cache_sync_image(unsigned long image_base, unsigned long alloc_size)
+{
+	asm volatile ("ibar 0" ::: "memory");
+}
+
+unsigned long efi_get_kimg_kaslr_address(void)
+{
+	unsigned int random_offset = 0;
+
+#ifdef CONFIG_RANDOMIZE_BASE
+	if (!efi_nokaslr) {
+		efi_get_random_bytes(sizeof(random_offset), (u8 *)&random_offset);
+		random_offset ^= (random_get_entropy() << 16);
+		random_offset &= (CONFIG_RANDOMIZE_BASE_MAX_OFFSET - 1);
+		random_offset = ALIGN(random_offset + SZ_64K, SZ_64K);
+	}
+#endif
+
+	return PHYSADDR(VMLINUX_LOAD_ADDRESS) + random_offset;
 }
 
 struct exit_boot_struct {
@@ -37,9 +59,10 @@ static efi_status_t exit_boot_func(struct efi_boot_memmap *map, void *priv)
 	return EFI_SUCCESS;
 }
 
-unsigned long __weak kernel_entry_address(void)
+unsigned long __weak kernel_entry_address(unsigned long kernel_addr,
+		efi_loaded_image_t *image)
 {
-	return *(unsigned long *)(PHYSADDR(VMLINUX_LOAD_ADDRESS) + 8);
+	return *(unsigned long *)(kernel_addr + 8) - PHYSADDR(VMLINUX_LOAD_ADDRESS) + kernel_addr;
 }
 
 efi_status_t efi_boot_kernel(void *handle, efi_loaded_image_t *image,
@@ -70,10 +93,12 @@ efi_status_t efi_boot_kernel(void *handle, efi_loaded_image_t *image,
 		    desc_ver, priv.runtime_map);
 
 	/* Config Direct Mapping */
-	csr_write64(CSR_DMW0_INIT, LOONGARCH_CSR_DMWIN0);
-	csr_write64(CSR_DMW1_INIT, LOONGARCH_CSR_DMWIN1);
+	csr_write(CSR_DMW0_INIT, LOONGARCH_CSR_DMWIN0);
+	csr_write(CSR_DMW1_INIT, LOONGARCH_CSR_DMWIN1);
+	csr_write(CSR_DMW2_INIT, LOONGARCH_CSR_DMWIN2);
+	csr_write(CSR_DMW3_INIT, LOONGARCH_CSR_DMWIN3);
 
-	real_kernel_entry = (void *)kernel_entry_address();
+	real_kernel_entry = (void *)kernel_entry_address(kernel_addr, image);
 
 	real_kernel_entry(true, (unsigned long)cmdline_ptr,
 			  (unsigned long)efi_system_table);

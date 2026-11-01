@@ -34,6 +34,13 @@ struct qcom_rproc_ssr {
 	struct qcom_ssr_subsystem *info;
 };
 
+struct qcom_rproc_pdm {
+	struct rproc_subdev subdev;
+	struct device *dev;
+	int index;
+	struct auxiliary_device *adev;
+};
+
 void qcom_minidump(struct rproc *rproc, unsigned int minidump_id,
 			void (*rproc_dumpfn_t)(struct rproc *rproc,
 				struct rproc_dump_segment *segment, void *dest, size_t offset,
@@ -52,12 +59,16 @@ void qcom_add_ssr_subdev(struct rproc *rproc, struct qcom_rproc_ssr *ssr,
 			 const char *ssr_name);
 void qcom_remove_ssr_subdev(struct rproc *rproc, struct qcom_rproc_ssr *ssr);
 
+void qcom_add_pdm_subdev(struct rproc *rproc, struct qcom_rproc_pdm *pdm);
+void qcom_remove_pdm_subdev(struct rproc *rproc, struct qcom_rproc_pdm *pdm);
+
 #if IS_ENABLED(CONFIG_QCOM_SYSMON)
 struct qcom_sysmon *qcom_add_sysmon_subdev(struct rproc *rproc,
 					   const char *name,
 					   int ssctl_instance);
 void qcom_remove_sysmon_subdev(struct qcom_sysmon *sysmon);
 bool qcom_sysmon_shutdown_acked(struct qcom_sysmon *sysmon);
+bool qcom_sysmon_shutdown_irq_state(struct qcom_sysmon *sysmon);
 #else
 static inline struct qcom_sysmon *qcom_add_sysmon_subdev(struct rproc *rproc,
 							 const char *name,
@@ -71,6 +82,11 @@ static inline void qcom_remove_sysmon_subdev(struct qcom_sysmon *sysmon)
 }
 
 static inline bool qcom_sysmon_shutdown_acked(struct qcom_sysmon *sysmon)
+{
+	return false;
+}
+
+static inline bool qcom_sysmon_shutdown_irq_state(struct qcom_sysmon *sysmon)
 {
 	return false;
 }

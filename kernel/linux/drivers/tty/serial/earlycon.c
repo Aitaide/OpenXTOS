@@ -75,19 +75,12 @@ static void __init earlycon_print_info(struct earlycon_device *device)
 {
 	struct console *earlycon = device->con;
 	struct uart_port *port = &device->port;
+	char ioinfos[64];
 
-	if (port->iotype == UPIO_MEM || port->iotype == UPIO_MEM16 ||
-	    port->iotype == UPIO_MEM32 || port->iotype == UPIO_MEM32BE)
-		pr_info("%s%d at MMIO%s %pa (options '%s')\n",
-			earlycon->name, earlycon->index,
-			(port->iotype == UPIO_MEM) ? "" :
-			(port->iotype == UPIO_MEM16) ? "16" :
-			(port->iotype == UPIO_MEM32) ? "32" : "32be",
-			&port->mapbase, device->options);
-	else
-		pr_info("%s%d at I/O port 0x%lx (options '%s')\n",
-			earlycon->name, earlycon->index,
-			port->iobase, device->options);
+	uart_get_ioinfos(port, ioinfos, sizeof(ioinfos));
+
+	pr_info("%s%d%s (options '%s')\n", earlycon->name, earlycon->index,
+		ioinfos, device->options);
 }
 
 static int __init parse_options(struct earlycon_device *device, char *options)
@@ -247,6 +240,29 @@ static int __init param_setup_earlycon(char *buf)
 	return err;
 }
 early_param("earlycon", param_setup_earlycon);
+
+/*
+ * The `console` parameter is overloaded. It's handled here as an early param
+ * and in `printk.c` as a late param. It's possible to specify an early
+ * `bootconsole` using `earlycon=uartXXXX` (handled above), or via
+ * the `console=uartXXX` alias. See the comment in `8250_early.c`.
+ */
+static int __init param_setup_earlycon_console_alias(char *buf)
+{
+	/*
+	 * A plain `console` parameter must not enable the SPCR `bootconsole`
+	 * like a plain `earlycon` does.
+	 *
+	 * A `console=` parameter that specifies an empty value is used to
+	 * disable the `console`, not the `earlycon` `bootconsole`. The
+	 * disabling of the `console` is handled by `printk.c`.
+	 */
+	if (!buf || !buf[0])
+		return 0;
+
+	return param_setup_earlycon(buf);
+}
+early_param("console", param_setup_earlycon_console_alias);
 
 #ifdef CONFIG_OF_EARLY_FLATTREE
 

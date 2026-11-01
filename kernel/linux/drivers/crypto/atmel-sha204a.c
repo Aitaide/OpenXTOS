@@ -15,8 +15,16 @@
 #include <linux/module.h>
 #include <linux/scatterlist.h>
 #include <linux/slab.h>
+#include <linux/string.h>
+#include <linux/sysfs.h>
 #include <linux/workqueue.h>
 #include "atmel-i2c.h"
+
+/*
+ * According to review by Bill Cox [1], the ATSHA204 has very low entropy.
+ * [1] https://www.metzdowd.com/pipermail/cryptography/2014-December/023858.html
+ */
+static const unsigned short atsha204_quality = 1;
 
 static void atmel_sha204a_rng_done(struct atmel_i2c_work_data *work_data,
 				   void *areq, int status)
@@ -24,10 +32,14 @@ static void atmel_sha204a_rng_done(struct atmel_i2c_work_data *work_data,
 	struct atmel_i2c_client_priv *i2c_priv = work_data->ctx;
 	struct hwrng *rng = areq;
 
-	if (status)
+	if (status) {
 		dev_warn_ratelimited(&i2c_priv->client->dev,
 				     "i2c transaction failed (%d)\n",
 				     status);
+		kfree_sensitive(work_data);
+		atomic_dec(&i2c_priv->tfm_count);
+		return;
+	}
 
 	rng->priv = (unsigned long)work_data;
 	atomic_dec(&i2c_priv->tfm_count);
@@ -47,14 +59,15 @@ static int atmel_sha204a_rng_read_nonblocking(struct hwrng *rng, void *data,
 
 	if (rng->priv) {
 		work_data = (struct atmel_i2c_work_data *)rng->priv;
-		max = min(sizeof(work_data->cmd.data), max);
-		memcpy(data, &work_data->cmd.data, max);
+		max = min(RANDOM_RSP_SIZE - CMD_OVERHEAD_SIZE, max);
+		memcpy(data, &work_data->cmd.data[RSP_DATA_IDX], max);
 		rng->priv = 0;
 	} else {
-		work_data = kmalloc(sizeof(*work_data), GFP_ATOMIC);
-		if (!work_data)
+		work_data = kmalloc_obj(*work_data, GFP_ATOMIC);
+		if (!work_data) {
+			atomic_dec(&i2c_priv->tfm_count);
 			return -ENOMEM;
-
+		}
 		work_data->ctx = i2c_priv;
 		work_data->client = i2c_priv->client;
 
@@ -83,17 +96,83 @@ static int atmel_sha204a_rng_read(struct hwrng *rng, void *data, size_t max,
 
 	ret = atmel_i2c_send_receive(i2c_priv->client, &cmd);
 	if (ret)
-		return ret;
+		goto out;
 
-	max = min(sizeof(cmd.data), max);
-	memcpy(data, cmd.data, max);
+	max = min(RANDOM_RSP_SIZE - CMD_OVERHEAD_SIZE, max);
+	memcpy(data, &cmd.data[RSP_DATA_IDX], max);
+	ret = max;
 
-	return max;
+out:
+	memzero_explicit(&cmd, sizeof(cmd));
+	return ret;
 }
+
+static int atmel_sha204a_otp_read(struct i2c_client *client, u16 addr, u8 *otp)
+{
+	struct atmel_i2c_cmd cmd;
+	int ret;
+
+	ret = atmel_i2c_init_read_otp_cmd(&cmd, addr);
+	if (ret < 0) {
+		dev_err(&client->dev, "failed, invalid otp address %04X\n",
+			addr);
+		return ret;
+	}
+
+	ret = atmel_i2c_send_receive(client, &cmd);
+	if (ret < 0) {
+		dev_err(&client->dev, "failed to read otp at %04X\n", addr);
+		return ret;
+	}
+
+	if (cmd.data[0] == 0xff) {
+		dev_err(&client->dev, "failed, device not ready\n");
+		return -EIO;
+	}
+
+	memcpy(otp, cmd.data+1, 4);
+
+	return ret;
+}
+
+static ssize_t otp_show(struct device *dev,
+			struct device_attribute *attr, char *buf)
+{
+	u16 addr;
+	u8 otp[OTP_ZONE_SIZE];
+	struct i2c_client *client = to_i2c_client(dev);
+	ssize_t len = 0;
+	int i, ret;
+
+	for (addr = 0; addr < OTP_ZONE_SIZE / 4; addr++) {
+		ret = atmel_sha204a_otp_read(client, addr, otp + addr * 4);
+		if (ret < 0) {
+			dev_err(dev, "failed to read otp zone\n");
+			return ret;
+		}
+	}
+
+	for (i = 0; i < OTP_ZONE_SIZE; i++)
+		len += sysfs_emit_at(buf, len, "%02X", otp[i]);
+	len += sysfs_emit_at(buf, len, "\n");
+	return len;
+}
+static DEVICE_ATTR_RO(otp);
+
+static struct attribute *atmel_sha204a_attrs[] = {
+	&dev_attr_otp.attr,
+	NULL
+};
+
+static const struct attribute_group atmel_sha204a_groups = {
+	.name = "atsha204a",
+	.attrs = atmel_sha204a_attrs,
+};
 
 static int atmel_sha204a_probe(struct i2c_client *client)
 {
 	struct atmel_i2c_client_priv *i2c_priv;
+	const unsigned short *quality;
 	int ret;
 
 	ret = atmel_i2c_probe(client);
@@ -107,9 +186,21 @@ static int atmel_sha204a_probe(struct i2c_client *client)
 	i2c_priv->hwrng.name = dev_name(&client->dev);
 	i2c_priv->hwrng.read = atmel_sha204a_rng_read;
 
+	quality = i2c_get_match_data(client);
+	if (quality)
+		i2c_priv->hwrng.quality = *quality;
+
 	ret = devm_hwrng_register(&client->dev, &i2c_priv->hwrng);
-	if (ret)
-		dev_warn(&client->dev, "failed to register RNG (%d)\n", ret);
+	if (ret) {
+		dev_err(&client->dev, "failed to register RNG (%d)\n", ret);
+		return ret;
+	}
+
+	ret = sysfs_create_group(&client->dev.kobj, &atmel_sha204a_groups);
+	if (ret) {
+		dev_err(&client->dev, "failed to create sysfs group (%d)\n", ret);
+		return ret;
+	}
 
 	return ret;
 }
@@ -118,25 +209,24 @@ static void atmel_sha204a_remove(struct i2c_client *client)
 {
 	struct atmel_i2c_client_priv *i2c_priv = i2c_get_clientdata(client);
 
-	if (atomic_read(&i2c_priv->tfm_count)) {
-		dev_emerg(&client->dev, "Device is busy, will remove it anyhow\n");
-		return;
-	}
+	sysfs_remove_group(&client->dev.kobj, &atmel_sha204a_groups);
+	devm_hwrng_unregister(&client->dev, &i2c_priv->hwrng);
+	atmel_i2c_flush_queue();
 
-	kfree((void *)i2c_priv->hwrng.priv);
+	kfree_sensitive((void *)i2c_priv->hwrng.priv);
 }
 
-static const struct of_device_id atmel_sha204a_dt_ids[] __maybe_unused = {
-	{ .compatible = "atmel,atsha204", },
-	{ .compatible = "atmel,atsha204a", },
-	{ /* sentinel */ }
+static const struct of_device_id atmel_sha204a_dt_ids[] = {
+	{ .compatible = "atmel,atsha204" },
+	{ .compatible = "atmel,atsha204a" },
+	{ }
 };
 MODULE_DEVICE_TABLE(of, atmel_sha204a_dt_ids);
 
 static const struct i2c_device_id atmel_sha204a_id[] = {
-	{ "atsha204", 0 },
-	{ "atsha204a", 0 },
-	{ /* sentinel */ }
+	{ .name = "atsha204", .driver_data = (kernel_ulong_t)&atsha204_quality },
+	{ .name = "atsha204a", .driver_data = (kernel_ulong_t)NULL },
+	{ }
 };
 MODULE_DEVICE_TABLE(i2c, atmel_sha204a_id);
 
@@ -146,7 +236,7 @@ static struct i2c_driver atmel_sha204a_driver = {
 	.id_table		= atmel_sha204a_id,
 
 	.driver.name		= "atmel-sha204a",
-	.driver.of_match_table	= of_match_ptr(atmel_sha204a_dt_ids),
+	.driver.of_match_table	= atmel_sha204a_dt_ids,
 };
 
 static int __init atmel_sha204a_init(void)
@@ -164,4 +254,5 @@ module_init(atmel_sha204a_init);
 module_exit(atmel_sha204a_exit);
 
 MODULE_AUTHOR("Ard Biesheuvel <ard.biesheuvel@linaro.org>");
+MODULE_DESCRIPTION("Microchip / Atmel SHA204A (I2C) driver");
 MODULE_LICENSE("GPL v2");

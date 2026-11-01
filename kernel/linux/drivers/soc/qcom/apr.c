@@ -41,7 +41,7 @@ struct packet_router {
 struct apr_rx_buf {
 	struct list_head node;
 	int len;
-	uint8_t buf[];
+	uint8_t buf[] __counted_by(len);
 };
 
 /**
@@ -95,7 +95,7 @@ gpr_port_t *gpr_alloc_port(struct apr_device *gdev, struct device *dev,
 	struct pkt_router_svc *svc;
 	int id;
 
-	port = kzalloc(sizeof(*port), GFP_KERNEL);
+	port = kzalloc_obj(*port);
 	if (!port)
 		return ERR_PTR(-ENOMEM);
 
@@ -123,10 +123,10 @@ gpr_port_t *gpr_alloc_port(struct apr_device *gdev, struct device *dev,
 }
 EXPORT_SYMBOL_GPL(gpr_alloc_port);
 
-static int pkt_router_send_svc_pkt(struct pkt_router_svc *svc, struct gpr_pkt *pkt)
+static int pkt_router_send_svc_pkt(struct pkt_router_svc *svc, const struct gpr_pkt *pkt)
 {
 	struct packet_router *pr = svc->pr;
-	struct gpr_hdr *hdr;
+	const struct gpr_hdr *hdr;
 	unsigned long flags;
 	int ret;
 
@@ -139,13 +139,13 @@ static int pkt_router_send_svc_pkt(struct pkt_router_svc *svc, struct gpr_pkt *p
 	return ret ? ret : hdr->pkt_size;
 }
 
-int gpr_send_pkt(struct apr_device *gdev, struct gpr_pkt *pkt)
+int gpr_send_pkt(struct apr_device *gdev, const struct gpr_pkt *pkt)
 {
 	return pkt_router_send_svc_pkt(&gdev->svc, pkt);
 }
 EXPORT_SYMBOL_GPL(gpr_send_pkt);
 
-int gpr_send_port_pkt(gpr_port_t *port, struct gpr_pkt *pkt)
+int gpr_send_port_pkt(gpr_port_t *port, const struct gpr_pkt *pkt)
 {
 	return pkt_router_send_svc_pkt(port, pkt);
 }
@@ -171,7 +171,7 @@ static int apr_callback(struct rpmsg_device *rpdev, void *buf,
 		return -EINVAL;
 	}
 
-	abuf = kzalloc(sizeof(*abuf) + len, GFP_ATOMIC);
+	abuf = kzalloc_flex(*abuf, buf, len, GFP_ATOMIC);
 	if (!abuf)
 		return -ENOMEM;
 
@@ -338,10 +338,10 @@ static void apr_rxwq(struct work_struct *work)
 	}
 }
 
-static int apr_device_match(struct device *dev, struct device_driver *drv)
+static int apr_device_match(struct device *dev, const struct device_driver *drv)
 {
 	struct apr_device *adev = to_apr_device(dev);
-	struct apr_driver *adrv = to_apr_driver(drv);
+	const struct apr_driver *adrv = to_apr_driver(drv);
 	const struct apr_device_id *id = adrv->id_table;
 
 	/* Attempt an OF style match first */
@@ -399,7 +399,7 @@ static int apr_uevent(const struct device *dev, struct kobj_uevent_env *env)
 	return add_uevent_var(env, "MODALIAS=apr:%s", adev->name);
 }
 
-struct bus_type aprbus = {
+const struct bus_type aprbus = {
 	.name		= "aprbus",
 	.match		= apr_device_match,
 	.probe		= apr_device_probe,
@@ -416,7 +416,7 @@ static int apr_add_device(struct device *dev, struct device_node *np,
 	struct pkt_router_svc *svc;
 	int ret;
 
-	adev = kzalloc(sizeof(*adev), GFP_KERNEL);
+	adev = kzalloc_obj(*adev);
 	if (!adev)
 		return -ENOMEM;
 
@@ -485,11 +485,10 @@ static int of_apr_add_pd_lookups(struct device *dev)
 {
 	const char *service_name, *service_path;
 	struct packet_router *apr = dev_get_drvdata(dev);
-	struct device_node *node;
 	struct pdr_service *pds;
 	int ret;
 
-	for_each_child_of_node(dev->of_node, node) {
+	for_each_child_of_node_scoped(dev->of_node, node) {
 		ret = of_property_read_string_index(node, "qcom,protection-domain",
 						    0, &service_name);
 		if (ret < 0)
@@ -499,14 +498,12 @@ static int of_apr_add_pd_lookups(struct device *dev)
 						    1, &service_path);
 		if (ret < 0) {
 			dev_err(dev, "pdr service path missing: %d\n", ret);
-			of_node_put(node);
 			return ret;
 		}
 
 		pds = pdr_add_lookup(apr->pdr, service_name, service_path);
 		if (IS_ERR(pds) && PTR_ERR(pds) != -EALREADY) {
 			dev_err(dev, "pdr add lookup failed: %ld\n", PTR_ERR(pds));
-			of_node_put(node);
 			return PTR_ERR(pds);
 		}
 	}

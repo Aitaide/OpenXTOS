@@ -13,7 +13,6 @@
 #include <linux/mmc/mmc.h>
 #include <linux/module.h>
 #include <linux/of.h>
-#include <linux/of_gpio.h>
 #include <linux/pinctrl/consumer.h>
 #include <linux/platform_device.h>
 #include <linux/pm_runtime.h>
@@ -239,13 +238,17 @@ static inline void _sdhci_sprd_set_clock(struct sdhci_host *host,
 	div = ((div & 0x300) >> 2) | ((div & 0xFF) << 8);
 	sdhci_enable_clk(host, div);
 
+	val = sdhci_readl(host, SDHCI_SPRD_REG_32_BUSY_POSI);
+	mask = SDHCI_SPRD_BIT_OUTR_CLK_AUTO_EN | SDHCI_SPRD_BIT_INNR_CLK_AUTO_EN;
 	/* Enable CLK_AUTO when the clock is greater than 400K. */
 	if (clk > 400000) {
-		val = sdhci_readl(host, SDHCI_SPRD_REG_32_BUSY_POSI);
-		mask = SDHCI_SPRD_BIT_OUTR_CLK_AUTO_EN |
-			SDHCI_SPRD_BIT_INNR_CLK_AUTO_EN;
 		if (mask != (val & mask)) {
 			val |= mask;
+			sdhci_writel(host, val, SDHCI_SPRD_REG_32_BUSY_POSI);
+		}
+	} else {
+		if (val & mask) {
+			val &= ~mask;
 			sdhci_writel(host, val, SDHCI_SPRD_REG_32_BUSY_POSI);
 		}
 	}
@@ -416,12 +419,33 @@ static void sdhci_sprd_request_done(struct sdhci_host *host,
 	mmc_request_done(host->mmc, mrq);
 }
 
-static struct sdhci_ops sdhci_sprd_ops = {
+static void sdhci_sprd_set_power(struct sdhci_host *host, unsigned char mode,
+				 unsigned short vdd)
+{
+	struct mmc_host *mmc = host->mmc;
+
+	switch (mode) {
+	case MMC_POWER_OFF:
+		mmc_regulator_set_ocr(host->mmc, mmc->supply.vmmc, 0);
+
+		mmc_regulator_disable_vqmmc(mmc);
+		break;
+	case MMC_POWER_ON:
+		mmc_regulator_enable_vqmmc(mmc);
+		break;
+	case MMC_POWER_UP:
+		mmc_regulator_set_ocr(host->mmc, mmc->supply.vmmc, vdd);
+		break;
+	}
+}
+
+static const struct sdhci_ops sdhci_sprd_ops = {
 	.read_l = sdhci_sprd_readl,
 	.write_l = sdhci_sprd_writel,
 	.write_w = sdhci_sprd_writew,
 	.write_b = sdhci_sprd_writeb,
 	.set_clock = sdhci_sprd_set_clock,
+	.set_power = sdhci_sprd_set_power,
 	.get_max_clock = sdhci_sprd_get_max_clock,
 	.get_min_clock = sdhci_sprd_get_min_clock,
 	.set_bus_width = sdhci_set_bus_width,
@@ -740,7 +764,7 @@ static int sdhci_sprd_probe(struct platform_device *pdev)
 
 	ret = mmc_of_parse(host->mmc);
 	if (ret)
-		goto pltfm_free;
+		return ret;
 
 	if (!mmc_card_is_removable(host->mmc))
 		host->mmc_host_ops.request_atomic = sdhci_sprd_request_atomic;
@@ -754,34 +778,26 @@ static int sdhci_sprd_probe(struct platform_device *pdev)
 	if (!IS_ERR(sprd_host->pinctrl)) {
 		sprd_host->pins_uhs =
 			pinctrl_lookup_state(sprd_host->pinctrl, "state_uhs");
-		if (IS_ERR(sprd_host->pins_uhs)) {
-			ret = PTR_ERR(sprd_host->pins_uhs);
-			goto pltfm_free;
-		}
+		if (IS_ERR(sprd_host->pins_uhs))
+			return PTR_ERR(sprd_host->pins_uhs);
 
 		sprd_host->pins_default =
 			pinctrl_lookup_state(sprd_host->pinctrl, "default");
-		if (IS_ERR(sprd_host->pins_default)) {
-			ret = PTR_ERR(sprd_host->pins_default);
-			goto pltfm_free;
-		}
+		if (IS_ERR(sprd_host->pins_default))
+			return PTR_ERR(sprd_host->pins_default);
 	}
 
 	clk = devm_clk_get(&pdev->dev, "sdio");
-	if (IS_ERR(clk)) {
-		ret = PTR_ERR(clk);
-		goto pltfm_free;
-	}
+	if (IS_ERR(clk))
+		return PTR_ERR(clk);
 	sprd_host->clk_sdio = clk;
 	sprd_host->base_rate = clk_get_rate(sprd_host->clk_sdio);
 	if (!sprd_host->base_rate)
 		sprd_host->base_rate = SDHCI_SPRD_CLK_DEF_RATE;
 
 	clk = devm_clk_get(&pdev->dev, "enable");
-	if (IS_ERR(clk)) {
-		ret = PTR_ERR(clk);
-		goto pltfm_free;
-	}
+	if (IS_ERR(clk))
+		return PTR_ERR(clk);
 	sprd_host->clk_enable = clk;
 
 	clk = devm_clk_get(&pdev->dev, "2x_enable");
@@ -790,7 +806,7 @@ static int sdhci_sprd_probe(struct platform_device *pdev)
 
 	ret = clk_prepare_enable(sprd_host->clk_sdio);
 	if (ret)
-		goto pltfm_free;
+		return ret;
 
 	ret = clk_prepare_enable(sprd_host->clk_enable);
 	if (ret)
@@ -823,6 +839,10 @@ static int sdhci_sprd_probe(struct platform_device *pdev)
 	host->caps1 &= ~(SDHCI_SUPPORT_SDR50 | SDHCI_SUPPORT_SDR104 |
 			 SDHCI_SUPPORT_DDR50);
 
+	ret = mmc_regulator_get_supply(host->mmc);
+	if (ret)
+		goto pm_runtime_disable;
+
 	ret = sdhci_setup_host(host);
 	if (ret)
 		goto pm_runtime_disable;
@@ -843,7 +863,6 @@ static int sdhci_sprd_probe(struct platform_device *pdev)
 	if (ret)
 		goto err_cleanup_host;
 
-	pm_runtime_mark_last_busy(&pdev->dev);
 	pm_runtime_put_autosuspend(&pdev->dev);
 
 	return 0;
@@ -863,9 +882,6 @@ clk_disable2:
 
 clk_disable:
 	clk_disable_unprepare(sprd_host->clk_sdio);
-
-pltfm_free:
-	sdhci_pltfm_free(pdev);
 	return ret;
 }
 
@@ -874,13 +890,15 @@ static void sdhci_sprd_remove(struct platform_device *pdev)
 	struct sdhci_host *host = platform_get_drvdata(pdev);
 	struct sdhci_sprd_host *sprd_host = TO_SPRD_HOST(host);
 
+	pm_runtime_get_sync(&pdev->dev);
+	pm_runtime_disable(&pdev->dev);
+	pm_runtime_put_noidle(&pdev->dev);
+
 	sdhci_remove_host(host, 0);
 
 	clk_disable_unprepare(sprd_host->clk_sdio);
 	clk_disable_unprepare(sprd_host->clk_enable);
 	clk_disable_unprepare(sprd_host->clk_2x_enable);
-
-	sdhci_pltfm_free(pdev);
 }
 
 static const struct of_device_id sdhci_sprd_of_match[] = {
@@ -889,7 +907,6 @@ static const struct of_device_id sdhci_sprd_of_match[] = {
 };
 MODULE_DEVICE_TABLE(of, sdhci_sprd_of_match);
 
-#ifdef CONFIG_PM
 static int sdhci_sprd_runtime_suspend(struct device *dev)
 {
 	struct sdhci_host *host = dev_get_drvdata(dev);
@@ -936,23 +953,20 @@ clk_2x_disable:
 
 	return ret;
 }
-#endif
 
 static const struct dev_pm_ops sdhci_sprd_pm_ops = {
-	SET_SYSTEM_SLEEP_PM_OPS(pm_runtime_force_suspend,
-				pm_runtime_force_resume)
-	SET_RUNTIME_PM_OPS(sdhci_sprd_runtime_suspend,
-			   sdhci_sprd_runtime_resume, NULL)
+	SYSTEM_SLEEP_PM_OPS(pm_runtime_force_suspend, pm_runtime_force_resume)
+	RUNTIME_PM_OPS(sdhci_sprd_runtime_suspend, sdhci_sprd_runtime_resume, NULL)
 };
 
 static struct platform_driver sdhci_sprd_driver = {
 	.probe = sdhci_sprd_probe,
-	.remove_new = sdhci_sprd_remove,
+	.remove = sdhci_sprd_remove,
 	.driver = {
 		.name = "sdhci_sprd_r11",
 		.probe_type = PROBE_PREFER_ASYNCHRONOUS,
 		.of_match_table = sdhci_sprd_of_match,
-		.pm = &sdhci_sprd_pm_ops,
+		.pm = pm_ptr(&sdhci_sprd_pm_ops),
 	},
 };
 module_platform_driver(sdhci_sprd_driver);

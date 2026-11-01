@@ -3,6 +3,7 @@
 #define __NET_DST_METADATA_H 1
 
 #include <linux/skbuff.h>
+#include <net/ip.h>
 #include <net/ip_tunnels.h>
 #include <net/macsec.h>
 #include <net/dst.h>
@@ -163,8 +164,11 @@ static inline struct metadata_dst *tun_dst_unclone(struct sk_buff *skb)
 	if (!new_md)
 		return ERR_PTR(-ENOMEM);
 
-	memcpy(&new_md->u.tun_info, &md_dst->u.tun_info,
-	       sizeof(struct ip_tunnel_info) + md_size);
+	/* Copy in two stages to keep the __counted_by happy. */
+	new_md->u.tun_info = md_dst->u.tun_info;
+	memcpy(ip_tunnel_info_opts(&new_md->u.tun_info),
+	       ip_tunnel_info_opts(&md_dst->u.tun_info), md_size);
+
 #ifdef CONFIG_DST_CACHE
 	/* Unclone the dst cache if there is one */
 	if (new_md->u.tun_info.dst_cache.cache) {
@@ -198,7 +202,7 @@ static inline struct metadata_dst *__ip_tun_set_dst(__be32 saddr,
 						    __be32 daddr,
 						    __u8 tos, __u8 ttl,
 						    __be16 tp_dst,
-						    __be16 flags,
+						    const unsigned long *flags,
 						    __be64 tunnel_id,
 						    int md_size)
 {
@@ -215,14 +219,20 @@ static inline struct metadata_dst *__ip_tun_set_dst(__be32 saddr,
 }
 
 static inline struct metadata_dst *ip_tun_rx_dst(struct sk_buff *skb,
-						 __be16 flags,
+						 const unsigned long *flags,
 						 __be64 tunnel_id,
 						 int md_size)
 {
 	const struct iphdr *iph = ip_hdr(skb);
+	struct metadata_dst *tun_dst;
 
-	return __ip_tun_set_dst(iph->saddr, iph->daddr, iph->tos, iph->ttl,
-				0, flags, tunnel_id, md_size);
+	tun_dst = __ip_tun_set_dst(iph->saddr, iph->daddr, iph->tos, iph->ttl,
+				   0, flags, tunnel_id, md_size);
+
+	if (tun_dst && (iph->frag_off & htons(IP_DF)))
+		__set_bit(IP_TUNNEL_DONT_FRAGMENT_BIT,
+			  tun_dst->u.tun_info.key.tun_flags);
+	return tun_dst;
 }
 
 static inline struct metadata_dst *__ipv6_tun_set_dst(const struct in6_addr *saddr,
@@ -230,7 +240,7 @@ static inline struct metadata_dst *__ipv6_tun_set_dst(const struct in6_addr *sad
 						      __u8 tos, __u8 ttl,
 						      __be16 tp_dst,
 						      __be32 label,
-						      __be16 flags,
+						      const unsigned long *flags,
 						      __be64 tunnel_id,
 						      int md_size)
 {
@@ -243,7 +253,7 @@ static inline struct metadata_dst *__ipv6_tun_set_dst(const struct in6_addr *sad
 
 	info = &tun_dst->u.tun_info;
 	info->mode = IP_TUNNEL_INFO_IPV6;
-	info->key.tun_flags = flags;
+	ip_tunnel_flags_copy(info->key.tun_flags, flags);
 	info->key.tun_id = tunnel_id;
 	info->key.tp_src = 0;
 	info->key.tp_dst = tp_dst;
@@ -259,7 +269,7 @@ static inline struct metadata_dst *__ipv6_tun_set_dst(const struct in6_addr *sad
 }
 
 static inline struct metadata_dst *ipv6_tun_rx_dst(struct sk_buff *skb,
-						   __be16 flags,
+						   const unsigned long *flags,
 						   __be64 tunnel_id,
 						   int md_size)
 {

@@ -146,7 +146,7 @@ static int mv88e6352_g2_scratch_gpio_set_data(struct mv88e6xxx_chip *chip,
  * @chip: chip private data
  * @pin: gpio index
  *
- * Return: 0 for output, 1 for input (same as GPIOF_DIR_XXX).
+ * Return: 0 for output, 1 for input.
  */
 static int mv88e6352_g2_scratch_gpio_get_dir(struct mv88e6xxx_chip *chip,
 					     unsigned int pin)
@@ -240,7 +240,7 @@ const struct mv88e6xxx_gpio_ops mv88e6352_gpio_ops = {
 };
 
 /**
- * mv88e6xxx_g2_scratch_gpio_set_smi - set gpio muxing for external smi
+ * mv88e6390_g2_scratch_gpio_set_smi - set gpio muxing for external smi
  * @chip: chip private data
  * @external: set mux for external smi, or free for gpio usage
  *
@@ -248,7 +248,7 @@ const struct mv88e6xxx_gpio_ops mv88e6352_gpio_ops = {
  * an external SMI interface, or they may be made free for other
  * GPIO uses.
  */
-int mv88e6xxx_g2_scratch_gpio_set_smi(struct mv88e6xxx_chip *chip,
+int mv88e6390_g2_scratch_gpio_set_smi(struct mv88e6xxx_chip *chip,
 				      bool external)
 {
 	int misc_cfg = MV88E6352_G2_SCRATCH_MISC_CFG;
@@ -291,18 +291,50 @@ int mv88e6xxx_g2_scratch_gpio_set_smi(struct mv88e6xxx_chip *chip,
 }
 
 /**
- * mv88e6352_g2_scratch_port_has_serdes - indicate if a port can have a serdes
+ * mv88e6393x_g2_scratch_gpio_set_smi - set gpio muxing for external smi
  * @chip: chip private data
- * @port: port number to check for serdes
+ * @external: set mux for external smi, or free for gpio usage
  *
- * Indicates whether the port may have a serdes attached according to the
- * pin strapping. Returns negative error number, 0 if the port is not
- * configured to have a serdes, and 1 if the port is configured to have a
- * serdes attached.
+ * MV88E6191X/6193X/6393X GPIO pins 9 and 10 can be configured as an
+ * external SMI interface or as regular GPIO-s.
+ *
+ * They however have a different register layout then the existing
+ * function.
  */
-int mv88e6352_g2_scratch_port_has_serdes(struct mv88e6xxx_chip *chip, int port)
+
+int mv88e6393x_g2_scratch_gpio_set_smi(struct mv88e6xxx_chip *chip,
+				       bool external)
 {
-	u8 config3, p;
+	int misc_cfg = MV88E6352_G2_SCRATCH_MISC_CFG;
+	int err;
+	u8 val;
+
+	err = mv88e6xxx_g2_scratch_read(chip, misc_cfg, &val);
+	if (err)
+		return err;
+
+	if (external)
+		val &= ~MV88E6352_G2_SCRATCH_MISC_CFG_NORMALSMI;
+	else
+		val |= MV88E6352_G2_SCRATCH_MISC_CFG_NORMALSMI;
+
+	return mv88e6xxx_g2_scratch_write(chip, misc_cfg, val);
+}
+
+/**
+ * mv88e6352_g2_cache_global_scratch_config3 - caches G2 CONFIG3 value
+ * @chip: chip private data
+ *
+ * Reads and stores config3 value of global2 scratch registers, which
+ * can be used to determine if the port is attached to a serdes. The
+ * value does not change once the switch is released from reset and
+ * represents the value of the pin strapping.
+ *
+ * Return: negative error number if the register read fails; otherwise, 0
+ */
+int mv88e6352_g2_cache_global_scratch_config3(struct mv88e6xxx_chip *chip)
+{
+	u8 config3;
 	int err;
 
 	err = mv88e6xxx_g2_scratch_read(chip, MV88E6352_G2_SCRATCH_CONFIG_DATA3,
@@ -310,7 +342,26 @@ int mv88e6352_g2_scratch_port_has_serdes(struct mv88e6xxx_chip *chip, int port)
 	if (err)
 		return err;
 
-	if (config3 & MV88E6352_G2_SCRATCH_CONFIG_DATA3_S_SEL)
+	chip->g2_scratch_config3 = config3;
+
+	return 0;
+}
+
+/**
+ * mv88e6352_g2_scratch_port_has_serdes - indicate if a port has serdes
+ * @chip: chip private data
+ * @port: port number to check for serdes
+ *
+ * Indicates whether the port may have a serdes attached according to the
+ * pin strapping, which is cached at reset (scratch config3). Returns 0 if
+ * the port is not configured to have a serdes, and 1 if the port is
+ * configured to have a serdes attached.
+ */
+int mv88e6352_g2_scratch_port_has_serdes(struct mv88e6xxx_chip *chip, int port)
+{
+	u8 p;
+
+	if (chip->g2_scratch_config3 & MV88E6352_G2_SCRATCH_CONFIG_DATA3_S_SEL)
 		p = 5;
 	else
 		p = 4;

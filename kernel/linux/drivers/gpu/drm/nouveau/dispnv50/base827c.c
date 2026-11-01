@@ -28,7 +28,7 @@
 static int
 base827c_image_set(struct nv50_wndw *wndw, struct nv50_wndw_atom *asyw)
 {
-	struct nvif_push *push = wndw->wndw.push;
+	struct nvif_push *push = &wndw->wndw.push;
 	int ret;
 
 	if ((ret = PUSH_WAIT(push, 13)))
@@ -93,6 +93,7 @@ base827c = {
 	.image_set = base827c_image_set,
 	.image_clr = base507c_image_clr,
 	.update = base507c_update,
+	.blend_modes = BASE_BLEND_MODES,
 };
 
 int

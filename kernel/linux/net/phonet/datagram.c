@@ -34,10 +34,10 @@ static int pn_ioctl(struct sock *sk, int cmd, int *karg)
 
 	switch (cmd) {
 	case SIOCINQ:
-		lock_sock(sk);
+		spin_lock_bh(&sk->sk_receive_queue.lock);
 		skb = skb_peek(&sk->sk_receive_queue);
 		*karg = skb ? skb->len : 0;
-		release_sock(sk);
+		spin_unlock_bh(&sk->sk_receive_queue.lock);
 		return 0;
 
 	case SIOCPNADDRESOURCE:
@@ -109,7 +109,7 @@ static int pn_sendmsg(struct sock *sk, struct msghdr *msg, size_t len)
 }
 
 static int pn_recvmsg(struct sock *sk, struct msghdr *msg, size_t len,
-		      int flags, int *addr_len)
+		      int flags)
 {
 	struct sk_buff *skb = NULL;
 	struct sockaddr_pn sa;
@@ -143,7 +143,7 @@ static int pn_recvmsg(struct sock *sk, struct msghdr *msg, size_t len,
 	if (msg->msg_name != NULL) {
 		__sockaddr_check_size(sizeof(sa));
 		memcpy(msg->msg_name, &sa, sizeof(sa));
-		*addr_len = sizeof(sa);
+		msg->msg_namelen = sizeof(sa);
 	}
 
 out:

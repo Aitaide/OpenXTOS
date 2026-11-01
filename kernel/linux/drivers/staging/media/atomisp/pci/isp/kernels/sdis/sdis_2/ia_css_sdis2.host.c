@@ -2,15 +2,6 @@
 /*
  * Support for Intel Camera Imaging ISP subsystem.
  * Copyright (c) 2015, Intel Corporation.
- *
- * This program is free software; you can redistribute it and/or modify it
- * under the terms and conditions of the GNU General Public License,
- * version 2, as published by the Free Software Foundation.
- *
- * This program is distributed in the hope it will be useful, but WITHOUT
- * ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
- * FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License for
- * more details.
  */
 
 #include "hmm.h"
@@ -173,10 +164,9 @@ void ia_css_sdis2_clear_coefficients(
 	dvs2_coefs->ver_coefs.even_imag = NULL;
 }
 
-int
-ia_css_get_dvs2_statistics(
-    struct ia_css_dvs2_statistics          *host_stats,
-    const struct ia_css_isp_dvs_statistics *isp_stats) {
+int ia_css_get_dvs2_statistics(struct ia_css_dvs2_statistics *host_stats,
+			       const struct ia_css_isp_dvs_statistics *isp_stats)
+{
 	struct ia_css_isp_dvs_statistics_map *map;
 	int ret = 0;
 
@@ -186,13 +176,11 @@ ia_css_get_dvs2_statistics(
 	assert(isp_stats);
 
 	map = ia_css_isp_dvs_statistics_map_allocate(isp_stats, NULL);
-	if (map)
-	{
+	if (map) {
 		hmm_load(isp_stats->data_ptr, map->data_ptr, isp_stats->size);
 		ia_css_translate_dvs2_statistics(host_stats, map);
 		ia_css_isp_dvs_statistics_map_free(map);
-	} else
-	{
+	} else {
 		IA_CSS_ERROR("out of memory");
 		ret = -ENOMEM;
 	}
@@ -283,7 +271,7 @@ ia_css_isp_dvs2_statistics_allocate(
 	if (!grid->enable)
 		return NULL;
 
-	me = kvcalloc(1, sizeof(*me), GFP_KERNEL);
+	me = kvzalloc_objs(*me, 1);
 	if (!me)
 		goto err;
 

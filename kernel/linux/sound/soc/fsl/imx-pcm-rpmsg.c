@@ -16,7 +16,7 @@
 #include "fsl_rpmsg.h"
 #include "imx-pcm-rpmsg.h"
 
-static struct snd_pcm_hardware imx_rpmsg_pcm_hardware = {
+static const struct snd_pcm_hardware imx_rpmsg_pcm_hardware = {
 	.info = SNDRV_PCM_INFO_INTERLEAVED |
 		SNDRV_PCM_INFO_BLOCK_TRANSFER |
 		SNDRV_PCM_INFO_BATCH |
@@ -39,10 +39,9 @@ static int imx_rpmsg_pcm_send_message(struct rpmsg_msg *msg,
 	struct rpmsg_device *rpdev = info->rpdev;
 	int ret = 0;
 
-	mutex_lock(&info->msg_lock);
+	guard(mutex)(&info->msg_lock);
 	if (!rpdev) {
 		dev_err(info->dev, "rpmsg channel not ready\n");
-		mutex_unlock(&info->msg_lock);
 		return -EINVAL;
 	}
 
@@ -55,15 +54,12 @@ static int imx_rpmsg_pcm_send_message(struct rpmsg_msg *msg,
 			 sizeof(struct rpmsg_s_msg));
 	if (ret) {
 		dev_err(&rpdev->dev, "rpmsg_send failed: %d\n", ret);
-		mutex_unlock(&info->msg_lock);
 		return ret;
 	}
 
 	/* No receive msg for TYPE_C command */
-	if (msg->s_msg.header.type == MSG_TYPE_C) {
-		mutex_unlock(&info->msg_lock);
+	if (msg->s_msg.header.type == MSG_TYPE_C)
 		return 0;
-	}
 
 	/* wait response from rpmsg */
 	ret = wait_for_completion_timeout(&info->cmd_complete,
@@ -71,7 +67,6 @@ static int imx_rpmsg_pcm_send_message(struct rpmsg_msg *msg,
 	if (!ret) {
 		dev_err(&rpdev->dev, "rpmsg_send cmd %d timeout!\n",
 			msg->s_msg.header.cmd);
-		mutex_unlock(&info->msg_lock);
 		return -ETIMEDOUT;
 	}
 
@@ -100,8 +95,6 @@ static int imx_rpmsg_pcm_send_message(struct rpmsg_msg *msg,
 	dev_dbg(&rpdev->dev, "cmd:%d, resp %d\n", msg->s_msg.header.cmd,
 		info->r_msg.param.resp);
 
-	mutex_unlock(&info->msg_lock);
-
 	return 0;
 }
 
@@ -109,14 +102,13 @@ static int imx_rpmsg_insert_workqueue(struct snd_pcm_substream *substream,
 				      struct rpmsg_msg *msg,
 				      struct rpmsg_info *info)
 {
-	unsigned long flags;
 	int ret = 0;
 
 	/*
 	 * Queue the work to workqueue.
 	 * If the queue is full, drop the message.
 	 */
-	spin_lock_irqsave(&info->wq_lock, flags);
+	guard(spinlock_irqsave)(&info->wq_lock);
 	if (info->work_write_index != info->work_read_index) {
 		int index = info->work_write_index;
 
@@ -130,7 +122,6 @@ static int imx_rpmsg_insert_workqueue(struct snd_pcm_substream *substream,
 		info->msg_drop_count[substream->stream]++;
 		ret = -EPIPE;
 	}
-	spin_unlock_irqrestore(&info->wq_lock, flags);
 
 	return ret;
 }
@@ -209,7 +200,7 @@ static snd_pcm_uframes_t imx_rpmsg_pcm_pointer(struct snd_soc_component *compone
 static void imx_rpmsg_timer_callback(struct timer_list *t)
 {
 	struct stream_timer  *stream_timer =
-			from_timer(stream_timer, t, timer);
+			timer_container_of(stream_timer, t, timer);
 	struct snd_pcm_substream *substream = stream_timer->substream;
 	struct rpmsg_info *info = stream_timer->info;
 	struct rpmsg_msg *msg;
@@ -229,8 +220,8 @@ static int imx_rpmsg_pcm_open(struct snd_soc_component *component,
 			      struct snd_pcm_substream *substream)
 {
 	struct rpmsg_info *info = dev_get_drvdata(component->dev);
-	struct snd_soc_pcm_runtime *rtd = asoc_substream_to_rtd(substream);
-	struct snd_soc_dai *cpu_dai = asoc_rtd_to_cpu(rtd, 0);
+	struct snd_soc_pcm_runtime *rtd = snd_soc_substream_to_rtd(substream);
+	struct snd_soc_dai *cpu_dai = snd_soc_rtd_to_cpu(rtd, 0);
 	struct fsl_rpmsg *rpmsg = dev_get_drvdata(cpu_dai->dev);
 	struct snd_pcm_hardware pcm_hardware;
 	struct rpmsg_msg *msg;
@@ -261,7 +252,7 @@ static int imx_rpmsg_pcm_open(struct snd_soc_component *component,
 	info->send_message(msg, info);
 
 	pcm_hardware = imx_rpmsg_pcm_hardware;
-	pcm_hardware.buffer_bytes_max = rpmsg->buffer_size;
+	pcm_hardware.buffer_bytes_max = rpmsg->buffer_size[substream->stream];
 	pcm_hardware.period_bytes_max = pcm_hardware.buffer_bytes_max / 2;
 
 	snd_soc_set_runtime_hwparams(substream, &pcm_hardware);
@@ -284,7 +275,7 @@ static int imx_rpmsg_pcm_open(struct snd_soc_component *component,
 static int imx_rpmsg_pcm_close(struct snd_soc_component *component,
 			       struct snd_pcm_substream *substream)
 {
-	struct snd_soc_pcm_runtime *rtd = asoc_substream_to_rtd(substream);
+	struct snd_soc_pcm_runtime *rtd = snd_soc_substream_to_rtd(substream);
 	struct rpmsg_info *info = dev_get_drvdata(component->dev);
 	struct rpmsg_msg *msg;
 
@@ -301,7 +292,7 @@ static int imx_rpmsg_pcm_close(struct snd_soc_component *component,
 
 	info->send_message(msg, info);
 
-	del_timer(&info->stream_timer[substream->stream].timer);
+	timer_delete(&info->stream_timer[substream->stream].timer);
 
 	rtd->dai_link->ignore_suspend = 0;
 
@@ -316,8 +307,8 @@ static int imx_rpmsg_pcm_prepare(struct snd_soc_component *component,
 				 struct snd_pcm_substream *substream)
 {
 	struct snd_pcm_runtime *runtime = substream->runtime;
-	struct snd_soc_pcm_runtime *rtd = substream->private_data;
-	struct snd_soc_dai *cpu_dai = asoc_rtd_to_cpu(rtd, 0);
+	struct snd_soc_pcm_runtime *rtd = snd_soc_substream_to_rtd(substream);
+	struct snd_soc_dai *cpu_dai = snd_soc_rtd_to_cpu(rtd, 0);
 	struct fsl_rpmsg *rpmsg = dev_get_drvdata(cpu_dai->dev);
 
 	/*
@@ -452,7 +443,7 @@ static int imx_rpmsg_terminate_all(struct snd_soc_component *component,
 		info->msg[RX_POINTER].r_msg.param.buffer_offset = 0;
 	}
 
-	del_timer(&info->stream_timer[substream->stream].timer);
+	timer_delete(&info->stream_timer[substream->stream].timer);
 
 	return imx_rpmsg_insert_workqueue(substream, msg, info);
 }
@@ -461,8 +452,8 @@ static int imx_rpmsg_pcm_trigger(struct snd_soc_component *component,
 				 struct snd_pcm_substream *substream, int cmd)
 {
 	struct snd_pcm_runtime *runtime = substream->runtime;
-	struct snd_soc_pcm_runtime *rtd = substream->private_data;
-	struct snd_soc_dai *cpu_dai = asoc_rtd_to_cpu(rtd, 0);
+	struct snd_soc_pcm_runtime *rtd = snd_soc_substream_to_rtd(substream);
+	struct snd_soc_dai *cpu_dai = snd_soc_rtd_to_cpu(rtd, 0);
 	struct fsl_rpmsg *rpmsg = dev_get_drvdata(cpu_dai->dev);
 	int ret = 0;
 
@@ -515,15 +506,14 @@ static int imx_rpmsg_pcm_ack(struct snd_soc_component *component,
 			     struct snd_pcm_substream *substream)
 {
 	struct snd_pcm_runtime *runtime = substream->runtime;
-	struct snd_soc_pcm_runtime *rtd = substream->private_data;
-	struct snd_soc_dai *cpu_dai = asoc_rtd_to_cpu(rtd, 0);
+	struct snd_soc_pcm_runtime *rtd = snd_soc_substream_to_rtd(substream);
+	struct snd_soc_dai *cpu_dai = snd_soc_rtd_to_cpu(rtd, 0);
 	struct fsl_rpmsg *rpmsg = dev_get_drvdata(cpu_dai->dev);
 	struct rpmsg_info *info = dev_get_drvdata(component->dev);
 	snd_pcm_uframes_t period_size = runtime->period_size;
 	snd_pcm_sframes_t avail;
 	struct timer_list *timer;
 	struct rpmsg_msg *msg;
-	unsigned long flags;
 	int buffer_tail = 0;
 	int written_num;
 
@@ -553,11 +543,11 @@ static int imx_rpmsg_pcm_ack(struct snd_soc_component *component,
 		msg->s_msg.param.buffer_tail = buffer_tail;
 
 		/* The notification message is updated to latest */
-		spin_lock_irqsave(&info->lock[substream->stream], flags);
-		memcpy(&info->notify[substream->stream], msg,
-		       sizeof(struct rpmsg_s_msg));
-		info->notify_updated[substream->stream] = true;
-		spin_unlock_irqrestore(&info->lock[substream->stream], flags);
+		scoped_guard(spinlock_irqsave, &info->lock[substream->stream]) {
+			memcpy(&info->notify[substream->stream], msg,
+			       sizeof(struct rpmsg_s_msg));
+			info->notify_updated[substream->stream] = true;
+		}
 
 		if (substream->stream == SNDRV_PCM_STREAM_PLAYBACK)
 			avail = snd_pcm_playback_hw_avail(runtime);
@@ -595,21 +585,36 @@ static int imx_rpmsg_pcm_new(struct snd_soc_component *component,
 {
 	struct snd_card *card = rtd->card->snd_card;
 	struct snd_pcm *pcm = rtd->pcm;
-	struct snd_soc_dai *cpu_dai = asoc_rtd_to_cpu(rtd, 0);
+	struct snd_soc_dai *cpu_dai = snd_soc_rtd_to_cpu(rtd, 0);
 	struct fsl_rpmsg *rpmsg = dev_get_drvdata(cpu_dai->dev);
+	struct snd_pcm_substream *substream;
 	int ret;
 
 	ret = dma_coerce_mask_and_coherent(card->dev, DMA_BIT_MASK(32));
 	if (ret)
 		return ret;
 
-	return snd_pcm_set_fixed_buffer_all(pcm, SNDRV_DMA_TYPE_DEV_WC,
-					    pcm->card->dev, rpmsg->buffer_size);
+	substream = pcm->streams[SNDRV_PCM_STREAM_PLAYBACK].substream;
+	if (substream) {
+		ret = snd_pcm_set_fixed_buffer(substream, SNDRV_DMA_TYPE_DEV_WC, pcm->card->dev,
+					       rpmsg->buffer_size[SNDRV_PCM_STREAM_PLAYBACK]);
+		if (ret < 0)
+			return ret;
+	}
+	substream = pcm->streams[SNDRV_PCM_STREAM_CAPTURE].substream;
+	if (substream) {
+		ret = snd_pcm_set_fixed_buffer(substream, SNDRV_DMA_TYPE_DEV_WC, pcm->card->dev,
+					       rpmsg->buffer_size[SNDRV_PCM_STREAM_CAPTURE]);
+		if (ret < 0)
+			return ret;
+	}
+
+	return ret;
 }
 
 static const struct snd_soc_component_driver imx_rpmsg_soc_component = {
 	.name		= IMX_PCM_DRV_NAME,
-	.pcm_construct	= imx_rpmsg_pcm_new,
+	.pcm_new	= imx_rpmsg_pcm_new,
 	.open		= imx_rpmsg_pcm_open,
 	.close		= imx_rpmsg_pcm_close,
 	.hw_params	= imx_rpmsg_pcm_hw_params,
@@ -617,6 +622,7 @@ static const struct snd_soc_component_driver imx_rpmsg_soc_component = {
 	.pointer	= imx_rpmsg_pcm_pointer,
 	.ack		= imx_rpmsg_pcm_ack,
 	.prepare	= imx_rpmsg_pcm_prepare,
+	.debugfs_prefix	= "rpmsg",
 };
 
 static void imx_rpmsg_pcm_work(struct work_struct *work)
@@ -625,7 +631,7 @@ static void imx_rpmsg_pcm_work(struct work_struct *work)
 	bool is_notification = false;
 	struct rpmsg_info *info;
 	struct rpmsg_msg msg;
-	unsigned long flags;
+	bool updated;
 
 	work_of_rpmsg = container_of(work, struct work_of_rpmsg, work);
 	info = work_of_rpmsg->info;
@@ -636,25 +642,26 @@ static void imx_rpmsg_pcm_work(struct work_struct *work)
 	 * enough data in M core side, need to let M core know
 	 * data is updated immediately.
 	 */
-	spin_lock_irqsave(&info->lock[TX], flags);
-	if (info->notify_updated[TX]) {
-		memcpy(&msg, &info->notify[TX], sizeof(struct rpmsg_s_msg));
-		info->notify_updated[TX] = false;
-		spin_unlock_irqrestore(&info->lock[TX], flags);
-		info->send_message(&msg, info);
-	} else {
-		spin_unlock_irqrestore(&info->lock[TX], flags);
+	scoped_guard(spinlock_irqsave, &info->lock[TX]) {
+		updated = info->notify_updated[TX];
+		if (updated) {
+			memcpy(&msg, &info->notify[TX], sizeof(struct rpmsg_s_msg));
+			info->notify_updated[TX] = false;
+		}
 	}
+	if (updated)
+		info->send_message(&msg, info);
 
-	spin_lock_irqsave(&info->lock[RX], flags);
-	if (info->notify_updated[RX]) {
-		memcpy(&msg, &info->notify[RX], sizeof(struct rpmsg_s_msg));
-		info->notify_updated[RX] = false;
-		spin_unlock_irqrestore(&info->lock[RX], flags);
-		info->send_message(&msg, info);
-	} else {
-		spin_unlock_irqrestore(&info->lock[RX], flags);
+	scoped_guard(spinlock_irqsave, &info->lock[RX]) {
+		updated = info->notify_updated[RX];
+		if (updated) {
+			memcpy(&msg, &info->notify[RX], sizeof(struct rpmsg_s_msg));
+			info->notify_updated[RX] = false;
+		}
 	}
+	if (updated)
+		info->send_message(&msg, info);
+
 
 	/* Skip the notification message for it has been processed above */
 	if (work_of_rpmsg->msg.s_msg.header.type == MSG_TYPE_C &&
@@ -666,15 +673,14 @@ static void imx_rpmsg_pcm_work(struct work_struct *work)
 		info->send_message(&work_of_rpmsg->msg, info);
 
 	/* update read index */
-	spin_lock_irqsave(&info->wq_lock, flags);
-	info->work_read_index++;
-	info->work_read_index %= WORK_MAX_NUM;
-	spin_unlock_irqrestore(&info->wq_lock, flags);
+	scoped_guard(spinlock_irqsave, &info->wq_lock) {
+		info->work_read_index++;
+		info->work_read_index %= WORK_MAX_NUM;
+	}
 }
 
 static int imx_rpmsg_pcm_probe(struct platform_device *pdev)
 {
-	struct snd_soc_component *component;
 	struct rpmsg_info *info;
 	int ret, i;
 
@@ -726,19 +732,6 @@ static int imx_rpmsg_pcm_probe(struct platform_device *pdev)
 	if (ret)
 		goto fail;
 
-	component = snd_soc_lookup_component(&pdev->dev, NULL);
-	if (!component) {
-		ret = -EINVAL;
-		goto fail;
-	}
-
-	/* platform component name is used by machine driver to link with */
-	component->name = info->rpdev->id.name;
-
-#ifdef CONFIG_DEBUG_FS
-	component->debugfs_prefix = "rpmsg";
-#endif
-
 	return 0;
 
 fail:
@@ -756,7 +749,6 @@ static void imx_rpmsg_pcm_remove(struct platform_device *pdev)
 		destroy_workqueue(info->rpmsg_wq);
 }
 
-#ifdef CONFIG_PM
 static int imx_rpmsg_pcm_runtime_resume(struct device *dev)
 {
 	struct rpmsg_info *info = dev_get_drvdata(dev);
@@ -774,9 +766,7 @@ static int imx_rpmsg_pcm_runtime_suspend(struct device *dev)
 
 	return 0;
 }
-#endif
 
-#ifdef CONFIG_PM_SLEEP
 static int imx_rpmsg_pcm_suspend(struct device *dev)
 {
 	struct rpmsg_info *info = dev_get_drvdata(dev);
@@ -812,22 +802,27 @@ static int imx_rpmsg_pcm_resume(struct device *dev)
 
 	return 0;
 }
-#endif /* CONFIG_PM_SLEEP */
 
 static const struct dev_pm_ops imx_rpmsg_pcm_pm_ops = {
-	SET_RUNTIME_PM_OPS(imx_rpmsg_pcm_runtime_suspend,
-			   imx_rpmsg_pcm_runtime_resume,
-			   NULL)
-	SET_SYSTEM_SLEEP_PM_OPS(imx_rpmsg_pcm_suspend,
-				imx_rpmsg_pcm_resume)
+	RUNTIME_PM_OPS(imx_rpmsg_pcm_runtime_suspend,
+		       imx_rpmsg_pcm_runtime_resume, NULL)
+	SYSTEM_SLEEP_PM_OPS(imx_rpmsg_pcm_suspend, imx_rpmsg_pcm_resume)
 };
+
+static const struct platform_device_id imx_rpmsg_pcm_id_table[] = {
+	{ .name = "rpmsg-audio-channel" },
+	{ .name = "rpmsg-micfil-channel" },
+	{ }
+};
+MODULE_DEVICE_TABLE(platform, imx_rpmsg_pcm_id_table);
 
 static struct platform_driver imx_pcm_rpmsg_driver = {
 	.probe  = imx_rpmsg_pcm_probe,
-	.remove_new = imx_rpmsg_pcm_remove,
+	.remove = imx_rpmsg_pcm_remove,
+	.id_table = imx_rpmsg_pcm_id_table,
 	.driver = {
 		.name = IMX_PCM_DRV_NAME,
-		.pm = &imx_rpmsg_pcm_pm_ops,
+		.pm = pm_ptr(&imx_rpmsg_pcm_pm_ops),
 	},
 };
 module_platform_driver(imx_pcm_rpmsg_driver);

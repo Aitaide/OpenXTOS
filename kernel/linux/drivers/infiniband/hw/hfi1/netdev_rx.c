@@ -78,7 +78,6 @@ static int hfi1_netdev_allocate_ctxt(struct hfi1_devdata *dd,
 	uctxt->fast_handler = handle_receive_interrupt_napi_fp;
 	uctxt->slow_handler = handle_receive_interrupt_napi_sp;
 	hfi1_set_seq_cnt(uctxt, 1);
-	uctxt->is_vnic = true;
 
 	hfi1_stats.sps_ctxts++;
 
@@ -188,7 +187,7 @@ static int hfi1_netdev_rxq_init(struct hfi1_netdev_rx *rx)
 	int i;
 	int rc;
 	struct hfi1_devdata *dd = rx->dd;
-	struct net_device *dev = &rx->rx_napi;
+	struct net_device *dev = rx->rx_napi;
 
 	rx->num_rx_q = dd->num_netdev_contexts;
 	rx->rxq = kcalloc_node(rx->num_rx_q, sizeof(*rx->rxq),
@@ -360,7 +359,11 @@ int hfi1_alloc_rx(struct hfi1_devdata *dd)
 	if (!rx)
 		return -ENOMEM;
 	rx->dd = dd;
-	init_dummy_netdev(&rx->rx_napi);
+	rx->rx_napi = alloc_netdev_dummy(0);
+	if (!rx->rx_napi) {
+		kfree(rx);
+		return -ENOMEM;
+	}
 
 	xa_init(&rx->dev_tbl);
 	atomic_set(&rx->enabled, 0);
@@ -374,6 +377,7 @@ void hfi1_free_rx(struct hfi1_devdata *dd)
 {
 	if (dd->netdev_rx) {
 		dd_dev_info(dd, "hfi1 rx freed\n");
+		free_netdev(dd->netdev_rx->rx_napi);
 		kfree(dd->netdev_rx);
 		dd->netdev_rx = NULL;
 	}
@@ -422,7 +426,7 @@ void hfi1_netdev_disable_queues(struct hfi1_devdata *dd)
 
 /**
  * hfi1_netdev_add_data - Registers data with unique identifier
- * to be requested later this is needed for VNIC and IPoIB VLANs
+ * to be requested later this is needed for IPoIB VLANs
  * implementations.
  * This call is protected by mutex idr_lock.
  *

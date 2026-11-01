@@ -71,10 +71,10 @@ static void hmc5843_i2c_remove(struct i2c_client *client)
 }
 
 static const struct i2c_device_id hmc5843_id[] = {
-	{ "hmc5843", HMC5843_ID },
-	{ "hmc5883", HMC5883_ID },
-	{ "hmc5883l", HMC5883L_ID },
-	{ "hmc5983", HMC5983_ID },
+	{ .name = "hmc5843", .driver_data = HMC5843_ID },
+	{ .name = "hmc5883", .driver_data = HMC5883_ID },
+	{ .name = "hmc5883l", .driver_data = HMC5883L_ID },
+	{ .name = "hmc5983", .driver_data = HMC5983_ID },
 	{ }
 };
 MODULE_DEVICE_TABLE(i2c, hmc5843_id);
@@ -84,7 +84,7 @@ static const struct of_device_id hmc5843_of_match[] = {
 	{ .compatible = "honeywell,hmc5883", .data = (void *)HMC5883_ID },
 	{ .compatible = "honeywell,hmc5883l", .data = (void *)HMC5883L_ID },
 	{ .compatible = "honeywell,hmc5983", .data = (void *)HMC5983_ID },
-	{}
+	{ }
 };
 MODULE_DEVICE_TABLE(of, hmc5843_of_match);
 
@@ -103,4 +103,4 @@ module_i2c_driver(hmc5843_driver);
 MODULE_AUTHOR("Josef Gajdusek <atx@atx.name>");
 MODULE_DESCRIPTION("HMC5843/5883/5883L/5983 i2c driver");
 MODULE_LICENSE("GPL");
-MODULE_IMPORT_NS(IIO_HMC5843);
+MODULE_IMPORT_NS("IIO_HMC5843");

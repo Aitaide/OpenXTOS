@@ -502,8 +502,8 @@ static int pem_probe(struct i2c_client *client)
 }
 
 static const struct i2c_device_id pem_id[] = {
-	{"lineage_pem", 0},
-	{}
+	{ .name = "lineage_pem" },
+	{ }
 };
 MODULE_DEVICE_TABLE(i2c, pem_id);
 

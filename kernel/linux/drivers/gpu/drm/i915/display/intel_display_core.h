@@ -19,15 +19,17 @@
 #include "intel_cdclk.h"
 #include "intel_display_device.h"
 #include "intel_display_limits.h"
+#include "intel_display_params.h"
 #include "intel_display_power.h"
+#include "intel_dmc_wl.h"
 #include "intel_dpll_mgr.h"
 #include "intel_fbc.h"
 #include "intel_global_state.h"
 #include "intel_gmbus.h"
 #include "intel_opregion.h"
+#include "intel_pch.h"
 #include "intel_wm_types.h"
 
-struct drm_i915_private;
 struct drm_property;
 struct drm_property_blob;
 struct i915_audio_component;
@@ -39,14 +41,17 @@ struct intel_cdclk_vals;
 struct intel_color_funcs;
 struct intel_crtc;
 struct intel_crtc_state;
+struct intel_display_parent_interface;
 struct intel_dmc;
-struct intel_dpll_funcs;
+struct intel_dpll_global_funcs;
 struct intel_dpll_mgr;
 struct intel_fbdev;
 struct intel_fdi_funcs;
-struct intel_hotplug_funcs;
+struct intel_hotplug_irq_funcs;
 struct intel_initial_plane_config;
+struct intel_opregion;
 struct intel_overlay;
+struct task_struct;
 
 /* Amount of SAGV/QGV points, BSpec precisely defines this */
 #define I915_NUM_QGV_POINTS 8
@@ -54,7 +59,7 @@ struct intel_overlay;
 /* Amount of PSF GV points, BSpec precisely defines this */
 #define I915_NUM_PSF_GV_POINTS 3
 
-struct intel_display_funcs {
+struct intel_modeset_funcs {
 	/*
 	 * Returns the active state of the crtc, and if the crtc is active,
 	 * fills out the pipe-config with the hw state.
@@ -63,6 +68,8 @@ struct intel_display_funcs {
 				struct intel_crtc_state *);
 	void (*get_initial_plane_config)(struct intel_crtc *,
 					 struct intel_initial_plane_config *);
+	bool (*fixup_initial_plane_config)(struct intel_crtc *crtc,
+					   const struct intel_initial_plane_config *plane_config);
 	void (*crtc_enable)(struct intel_atomic_state *state,
 			    struct intel_crtc *crtc);
 	void (*crtc_disable)(struct intel_atomic_state *state,
@@ -73,11 +80,9 @@ struct intel_display_funcs {
 /* functions used for watermark calcs for display. */
 struct intel_wm_funcs {
 	/* update_wm is for legacy wm management */
-	void (*update_wm)(struct drm_i915_private *dev_priv);
-	int (*compute_pipe_wm)(struct intel_atomic_state *state,
-			       struct intel_crtc *crtc);
-	int (*compute_intermediate_wm)(struct intel_atomic_state *state,
-				       struct intel_crtc *crtc);
+	void (*update_wm)(struct intel_display *display);
+	int (*compute_watermarks)(struct intel_atomic_state *state,
+				  struct intel_crtc *crtc);
 	void (*initial_watermarks)(struct intel_atomic_state *state,
 				   struct intel_crtc *crtc);
 	void (*atomic_update_watermarks)(struct intel_atomic_state *state,
@@ -85,15 +90,21 @@ struct intel_wm_funcs {
 	void (*optimize_watermarks)(struct intel_atomic_state *state,
 				    struct intel_crtc *crtc);
 	int (*compute_global_watermarks)(struct intel_atomic_state *state);
-	void (*get_hw_state)(struct drm_i915_private *i915);
+	void (*get_hw_state)(struct intel_display *display);
+	void (*sanitize)(struct intel_display *display);
 };
 
 struct intel_audio_state {
 	struct intel_encoder *encoder;
 	u8 eld[MAX_ELD_BYTES];
+	/* MST, or SST on UHBR link */
+	bool needs_cpu_transcoder_id;
 };
 
 struct intel_audio {
+	/* internal display audio functions */
+	const struct intel_audio_funcs *funcs;
+
 	/* hda/i915 audio component */
 	struct i915_audio_component *component;
 	bool component_registered;
@@ -117,11 +128,14 @@ struct intel_audio {
  * intel_{prepare,enable,disable}_shared_dpll.  Must be global rather than per
  * dpll, because on some platforms plls share registers.
  */
-struct intel_dpll {
+struct intel_dpll_global {
+	/* internal dpll functions */
+	const struct intel_dpll_global_funcs *funcs;
+
 	struct mutex lock;
 
-	int num_shared_dpll;
-	struct intel_shared_dpll shared_dplls[I915_NUM_PLLS];
+	int num_dpll;
+	struct intel_dpll dplls[I915_NUM_PLLS];
 	const struct intel_dpll_mgr *mgr;
 
 	struct {
@@ -136,17 +150,19 @@ struct intel_dpll {
 };
 
 struct intel_frontbuffer_tracking {
+	/* protects busy_bits */
 	spinlock_t lock;
 
 	/*
-	 * Tracking bits for delayed frontbuffer flushing du to gpu activity or
-	 * scheduled flips.
+	 * Tracking bits for delayed frontbuffer flushing due to gpu activity.
 	 */
 	unsigned busy_bits;
-	unsigned flip_bits;
 };
 
 struct intel_hotplug {
+	/* internal hotplug irq functions */
+	const struct intel_hotplug_irq_funcs *funcs;
+
 	struct delayed_work hotplug_work;
 
 	const u32 *hpd, *pch_hpd;
@@ -154,6 +170,7 @@ struct intel_hotplug {
 	struct {
 		unsigned long last_jiffies;
 		int count;
+		int blocked_count;
 		enum {
 			HPD_ENABLED = 0,
 			HPD_DISABLED = 1,
@@ -164,16 +181,25 @@ struct intel_hotplug {
 	u32 retry_bits;
 	struct delayed_work reenable_work;
 
-	u32 long_port_mask;
-	u32 short_port_mask;
+	u32 long_hpd_pin_mask;
+	u32 short_hpd_pin_mask;
 	struct work_struct dig_port_work;
 
 	struct work_struct poll_init_work;
 	bool poll_enabled;
 
+	/*
+	 * Queuing of hotplug_work, reenable_work and poll_init_work is
+	 * enabled. Protected by intel_display::irq::lock.
+	 */
+	bool detection_work_enabled;
+
 	unsigned int hpd_storm_threshold;
 	/* Whether or not to count short HPD IRQs in HPD storms */
 	u8 hpd_short_storm_enabled;
+
+	/* Last state reported by oob_hotplug_event for each encoder */
+	unsigned long oob_hotplug_last_state;
 
 	/*
 	 * if we get a HPD irq from DP and a HPD irq from non-DP
@@ -221,7 +247,7 @@ struct intel_vbt_data {
 	struct sdvo_device_mapping {
 		u8 initialized;
 		u8 dvo_port;
-		u8 slave_addr;
+		u8 target_addr;
 		u8 dvo_wiring;
 		u8 i2c_pin;
 		u8 ddc_pin;
@@ -229,6 +255,9 @@ struct intel_vbt_data {
 };
 
 struct intel_wm {
+	/* internal watermark functions */
+	const struct intel_wm_funcs *funcs;
+
 	/*
 	 * Raw watermark latency values:
 	 * in 0.1us units for WM0,
@@ -267,38 +296,25 @@ struct intel_wm {
 };
 
 struct intel_display {
-	/* Display functions */
+	/* drm device backpointer */
+	struct drm_device *drm;
+
+	/* Platform (and subplatform, if any) identification */
+	struct intel_display_platforms platform;
+
+	/* Intel PCH: where the south display engine lives */
+	enum intel_pch pch_type;
+
+	/* Parent, or core, driver functions exposed to display */
+	const struct intel_display_parent_interface *parent;
+
+	/* list of all intel_crtcs sorted by pipe */
+	struct list_head pipe_list;
+
 	struct {
-		/* Top level crtc-ish functions */
-		const struct intel_display_funcs *display;
-
-		/* Display CDCLK functions */
-		const struct intel_cdclk_funcs *cdclk;
-
-		/* Display pll funcs */
-		const struct intel_dpll_funcs *dpll;
-
-		/* irq display functions */
-		const struct intel_hotplug_funcs *hotplug;
-
-		/* pm display functions */
-		const struct intel_wm_funcs *wm;
-
-		/* fdi display functions */
-		const struct intel_fdi_funcs *fdi;
-
-		/* Display internal color functions */
-		const struct intel_color_funcs *color;
-
-		/* Display internal audio functions */
-		const struct intel_audio_funcs *audio;
-	} funcs;
-
-	/* Grouping using anonymous structs. Keep sorted. */
-	struct intel_atomic_helper {
-		struct llist_head free_list;
-		struct work_struct free_work;
-	} atomic_helper;
+		bool any_task_allowed;
+		struct task_struct *allowed_task;
+	} access;
 
 	struct {
 		/* backlight registers and fields in struct intel_panel */
@@ -311,17 +327,20 @@ struct intel_display {
 		struct intel_bw_info {
 			/* for each QGV point */
 			unsigned int deratedbw[I915_NUM_QGV_POINTS];
-			/* for each PSF GV point */
-			unsigned int psf_bw[I915_NUM_PSF_GV_POINTS];
-			/* Peak BW for each QGV point */
-			unsigned int peakbw[I915_NUM_QGV_POINTS];
-			u8 num_qgv_points;
-			u8 num_psf_gv_points;
 			u8 num_planes;
 		} max[6];
+		/* for each PSF GV point */
+		unsigned int psf_bw[I915_NUM_PSF_GV_POINTS];
+		/* Peak BW for each QGV point */
+		unsigned int peakbw[I915_NUM_QGV_POINTS];
+		u8 num_qgv_points;
+		u8 num_psf_gv_points;
 	} bw;
 
 	struct {
+		/* Internal CDCLK functions */
+		const struct intel_cdclk_funcs *funcs;
+
 		/* The current hardware cdclk configuration */
 		struct intel_cdclk_config hw;
 
@@ -331,9 +350,14 @@ struct intel_display {
 		struct intel_global_obj obj;
 
 		unsigned int max_cdclk_freq;
+		unsigned int max_dotclk_freq;
+		unsigned int skl_preferred_vco_freq;
 	} cdclk;
 
 	struct {
+		/* internal color functions */
+		const struct intel_color_funcs *funcs;
+
 		struct drm_property_blob *glk_linear_degamma_lut;
 	} color;
 
@@ -345,13 +369,8 @@ struct intel_display {
 	} dbuf;
 
 	struct {
-		wait_queue_head_t waitqueue;
-
-		/* mutex to protect pmdemand programming sequence */
-		struct mutex lock;
-
 		struct intel_global_obj obj;
-	} pmdemand;
+	} dbuf_bw;
 
 	struct {
 		/*
@@ -363,7 +382,7 @@ struct intel_display {
 
 	struct {
 		struct intel_dmc *dmc;
-		intel_wakeref_t wakeref;
+		struct ref_tracker *wakeref;
 	} dmc;
 
 	struct {
@@ -372,12 +391,29 @@ struct intel_display {
 	} dsi;
 
 	struct {
+		const struct dram_info *info;
+	} dram;
+
+	struct {
+		struct intel_fbc *instances[I915_MAX_FBCS];
+
+		/* xe3p_lpd+: FBC instance utilizing the system cache */
+		struct sys_cache_cfg {
+			/* Protect concurrecnt access to system cache configuration */
+			struct mutex lock;
+			enum intel_fbc_id id;
+		} sys_cache;
+	} fbc;
+
+	struct {
 		/* list of fbdev register on this device */
 		struct intel_fbdev *fbdev;
-		struct work_struct suspend_work;
 	} fbdev;
 
 	struct {
+		/* internal fdi functions */
+		const struct intel_fdi_funcs *funcs;
+
 		unsigned int pll_freq;
 		u32 rx_config;
 	} fdi;
@@ -413,7 +449,7 @@ struct intel_display {
 		 * reused when sending message to gsc cs.
 		 * this is only populated post Meteorlake
 		 */
-		struct intel_hdcp_gsc_message *hdcp_message;
+		struct intel_hdcp_gsc_context *gsc_context;
 		/* Mutex to protect the above hdcp related values. */
 		struct mutex hdcp_mutex;
 	} hdcp;
@@ -441,7 +477,71 @@ struct intel_display {
 	} ips;
 
 	struct {
+		/* internal display irq functions */
+		const struct intel_display_irq_funcs *funcs;
+
+		/* protects the irq masks */
+		spinlock_t lock;
+
+		/*
+		 * Most platforms treat the display irq block as an always-on
+		 * power domain. vlv/chv can disable it at runtime and need
+		 * special care to avoid writing any of the display block
+		 * registers outside of the power domain. We defer setting up
+		 * the display irqs in this case to the runtime pm.
+		 */
+		bool vlv_display_irqs_enabled;
+
+		/* For i915gm/i945gm vblank irq workaround */
+		u8 vblank_enabled;
+
+		int vblank_enable_count;
+		bool vblank_status_last_notified;
+
+		struct work_struct vblank_notify_work;
+
+		/*
+		 * Cached value of VLV/CHV IMR to avoid reads in updating the
+		 * bitfield.
+		 */
+		u32 vlv_imr_mask;
+		/*
+		 * Cached value of gen 5-7 DE IMR to avoid reads in updating the
+		 * bitfield.
+		 */
+		u32 ilk_de_imr_mask;
+		/*
+		 * Cached value of BDW+ DE pipe IMR to avoid reads in updating
+		 * the bitfield.
+		 */
+		u32 de_pipe_imr_mask[I915_MAX_PIPES];
+		u32 pipestat_irq_mask[I915_MAX_PIPES];
+	} irq;
+
+	struct {
+		/* Top level crtc-ish functions */
+		const struct intel_modeset_funcs *funcs;
+	} modeset;
+
+	struct {
+		/* protected by wm.wm_mutex */
+		u16 linetime[I915_MAX_PIPES];
+		bool disable[I915_MAX_PIPES];
+	} pkgc;
+
+	struct {
+		wait_queue_head_t waitqueue;
+
+		/* mutex to protect pmdemand programming sequence */
+		struct mutex lock;
+
+		struct intel_global_obj obj;
+	} pmdemand;
+
+	struct {
 		struct i915_power_domains domains;
+		/* DC3CO state */
+		struct intel_dc3co_state dc3co;
 
 		/* Shadow for DISPLAY_PHY_CONTROL which can't be safely read */
 		u32 chv_phy_control;
@@ -467,9 +567,19 @@ struct intel_display {
 	} quirks;
 
 	struct {
+		u32 count;
+	} reset;
+
+	struct {
 		/* restore state for suspend/resume and display reset */
-		struct drm_atomic_state *modeset_state;
+		struct drm_atomic_commit *modeset_state;
 		struct drm_modeset_acquire_ctx reset_ctx;
+		/* modeset stuck tracking for reset */
+		u32 saveDSPARB;
+		u32 saveSWF0[16];
+		u32 saveSWF1[16];
+		u32 saveSWF3[3];
+		u16 saveGCDGMBUS;
 	} restore;
 
 	struct {
@@ -482,6 +592,11 @@ struct intel_display {
 
 		u32 block_time_us;
 	} sagv;
+
+	struct {
+		/* LPT/WPT IOSF sideband protection */
+		struct mutex lock;
+	} sbi;
 
 	struct {
 		/*
@@ -502,23 +617,38 @@ struct intel_display {
 	} state;
 
 	struct {
+		unsigned int hpll_freq;
+		unsigned int czclk_freq;
+	} vlv_clock;
+
+	struct {
 		/* ordered wq for modesets */
 		struct workqueue_struct *modeset;
 
 		/* unbound hipri wq for page flips/plane updates */
 		struct workqueue_struct *flip;
+
+		/* hipri wq for commit cleanups */
+		struct workqueue_struct *cleanup;
+
+		/* unordered workqueue for all display unordered work */
+		struct workqueue_struct *unordered;
 	} wq;
 
 	/* Grouping using named structs. Keep sorted. */
+	struct drm_dp_tunnel_mgr *dp_tunnel_mgr;
 	struct intel_audio audio;
-	struct intel_dpll dpll;
-	struct intel_fbc *fbc[I915_MAX_FBCS];
+	struct intel_dpll_global dpll;
 	struct intel_frontbuffer_tracking fb_tracking;
 	struct intel_hotplug hotplug;
-	struct intel_opregion opregion;
+	struct intel_opregion *opregion;
 	struct intel_overlay *overlay;
+	struct intel_display_params params;
 	struct intel_vbt_data vbt;
+	struct intel_dmc_wl wl;
 	struct intel_wm wm;
+
+	struct work_struct psr_dc5_dc6_wa_work;
 };
 
 #endif /* __INTEL_DISPLAY_CORE_H__ */

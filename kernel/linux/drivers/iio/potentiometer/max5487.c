@@ -6,7 +6,6 @@
  */
 #include <linux/module.h>
 #include <linux/spi/spi.h>
-#include <linux/acpi.h>
 
 #include <linux/iio/sysfs.h>
 #include <linux/iio/iio.h>
@@ -126,9 +125,9 @@ static void max5487_spi_remove(struct spi_device *spi)
 }
 
 static const struct spi_device_id max5487_id[] = {
-	{ "MAX5487", 10 },
-	{ "MAX5488", 50 },
-	{ "MAX5489", 100 },
+	{ .name = "MAX5487", .driver_data = 10 },
+	{ .name = "MAX5488", .driver_data = 50 },
+	{ .name = "MAX5489", .driver_data = 100 },
 	{ }
 };
 MODULE_DEVICE_TABLE(spi, max5487_id);
@@ -137,14 +136,14 @@ static const struct acpi_device_id max5487_acpi_match[] = {
 	{ "MAX5487", 10 },
 	{ "MAX5488", 50 },
 	{ "MAX5489", 100 },
-	{ },
+	{ }
 };
 MODULE_DEVICE_TABLE(acpi, max5487_acpi_match);
 
 static struct spi_driver max5487_driver = {
 	.driver = {
 		.name = "max5487",
-		.acpi_match_table = ACPI_PTR(max5487_acpi_match),
+		.acpi_match_table = max5487_acpi_match,
 	},
 	.id_table = max5487_id,
 	.probe = max5487_spi_probe,

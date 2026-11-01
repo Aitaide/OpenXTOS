@@ -27,7 +27,7 @@
 #include <errno.h>
 #include <linux/bitmap.h>
 #include <linux/time64.h>
-#include <traceevent/event-parse.h>
+#include <event-parse.h>
 
 #include <stdbool.h>
 /* perl needs the following define, right after including stdbool.h */
@@ -257,7 +257,6 @@ static void define_event_symbols(struct tep_event *event,
 }
 
 static SV *perl_process_callchain(struct perf_sample *sample,
-				  struct evsel *evsel,
 				  struct addr_location *al)
 {
 	struct callchain_cursor *cursor;
@@ -272,7 +271,7 @@ static SV *perl_process_callchain(struct perf_sample *sample,
 
 	cursor = get_tls_callchain_cursor();
 
-	if (thread__resolve_callchain(al->thread, cursor, evsel,
+	if (thread__resolve_callchain(al->thread, cursor,
 				      sample, NULL, NULL, scripting_max_stack) != 0) {
 		pr_err("Failed to resolve callchain. Skipping\n");
 		goto exit;
@@ -304,7 +303,7 @@ static SV *perl_process_callchain(struct perf_sample *sample,
 			}
 			if (!hv_stores(sym, "start",   newSVuv(node->ms.sym->start)) ||
 			    !hv_stores(sym, "end",     newSVuv(node->ms.sym->end)) ||
-			    !hv_stores(sym, "binding", newSVuv(node->ms.sym->binding)) ||
+			    !hv_stores(sym, "binding", newSVuv(symbol__binding(node->ms.sym))) ||
 			    !hv_stores(sym, "name",    newSVpvn(node->ms.sym->name,
 								node->ms.sym->namelen)) ||
 			    !hv_stores(elem, "sym",    newRV_noinc((SV*)sym))) {
@@ -320,10 +319,10 @@ static SV *perl_process_callchain(struct perf_sample *sample,
 			const char *dsoname = "[unknown]";
 
 			if (dso) {
-				if (symbol_conf.show_kernel_path && dso->long_name)
-					dsoname = dso->long_name;
+				if (symbol_conf.show_kernel_path && dso__long_name(dso))
+					dsoname = dso__long_name(dso);
 				else
-					dsoname = dso->name;
+					dsoname = dso__name(dso);
 			}
 			if (!hv_stores(elem, "dso", newSVpv(dsoname,0))) {
 				hv_undef(elem);
@@ -340,11 +339,10 @@ exit:
 }
 
 static void perl_process_tracepoint(struct perf_sample *sample,
-				    struct evsel *evsel,
 				    struct addr_location *al)
 {
 	struct thread *thread = al->thread;
-	struct tep_event *event = evsel->tp_format;
+	struct tep_event *event;
 	struct tep_format_field *field;
 	static char handler[256];
 	unsigned long long val;
@@ -355,6 +353,7 @@ static void perl_process_tracepoint(struct perf_sample *sample,
 	unsigned long long nsecs = sample->time;
 	const char *comm = thread__comm_str(thread);
 	DECLARE_BITMAP(events_defined, TRACE_EVENT_TYPE_MAX);
+	struct evsel *evsel = sample->evsel;
 
 	bitmap_zero(events_defined, TRACE_EVENT_TYPE_MAX);
 	dSP;
@@ -362,6 +361,7 @@ static void perl_process_tracepoint(struct perf_sample *sample,
 	if (evsel->core.attr.type != PERF_TYPE_TRACEPOINT)
 		return;
 
+	event = evsel__tp_format(evsel);
 	if (!event) {
 		pr_debug("ug! no event found for type %" PRIu64, (u64)evsel->core.attr.config);
 		return;
@@ -388,7 +388,7 @@ static void perl_process_tracepoint(struct perf_sample *sample,
 	XPUSHs(sv_2mortal(newSVuv(ns)));
 	XPUSHs(sv_2mortal(newSViv(pid)));
 	XPUSHs(sv_2mortal(newSVpv(comm, 0)));
-	XPUSHs(sv_2mortal(perl_process_callchain(sample, evsel, al)));
+	XPUSHs(sv_2mortal(perl_process_callchain(sample, al)));
 
 	/* common fields other than pid can be accessed via xsub fns */
 
@@ -425,7 +425,7 @@ static void perl_process_tracepoint(struct perf_sample *sample,
 		XPUSHs(sv_2mortal(newSVuv(nsecs)));
 		XPUSHs(sv_2mortal(newSViv(pid)));
 		XPUSHs(sv_2mortal(newSVpv(comm, 0)));
-		XPUSHs(sv_2mortal(perl_process_callchain(sample, evsel, al)));
+		XPUSHs(sv_2mortal(perl_process_callchain(sample, al)));
 		call_pv("main::trace_unhandled", G_SCALAR);
 	}
 	SPAGAIN;
@@ -434,9 +434,7 @@ static void perl_process_tracepoint(struct perf_sample *sample,
 	LEAVE;
 }
 
-static void perl_process_event_generic(union perf_event *event,
-				       struct perf_sample *sample,
-				       struct evsel *evsel)
+static void perl_process_event_generic(union perf_event *event, struct perf_sample *sample)
 {
 	dSP;
 
@@ -447,7 +445,8 @@ static void perl_process_event_generic(union perf_event *event,
 	SAVETMPS;
 	PUSHMARK(SP);
 	XPUSHs(sv_2mortal(newSVpvn((const char *)event, event->header.size)));
-	XPUSHs(sv_2mortal(newSVpvn((const char *)&evsel->core.attr, sizeof(evsel->core.attr))));
+	XPUSHs(sv_2mortal(newSVpvn((const char *)&sample->evsel->core.attr,
+				   sizeof(sample->evsel->core.attr))));
 	XPUSHs(sv_2mortal(newSVpvn((const char *)sample, sizeof(*sample))));
 	XPUSHs(sv_2mortal(newSVpvn((const char *)sample->raw_data, sample->raw_size)));
 	PUTBACK;
@@ -460,13 +459,12 @@ static void perl_process_event_generic(union perf_event *event,
 
 static void perl_process_event(union perf_event *event,
 			       struct perf_sample *sample,
-			       struct evsel *evsel,
 			       struct addr_location *al,
 			       struct addr_location *addr_al)
 {
-	scripting_context__update(scripting_context, event, sample, evsel, al, addr_al);
-	perl_process_tracepoint(sample, evsel, al);
-	perl_process_event_generic(event, sample, evsel);
+	scripting_context__update(scripting_context, event, sample, al, addr_al);
+	perl_process_tracepoint(sample, al);
+	perl_process_event_generic(event, sample);
 }
 
 static void run_start_sub(void)
@@ -490,6 +488,9 @@ static int perl_start_script(const char *script, int argc, const char **argv,
 	scripting_context->session = session;
 
 	command_line = malloc((argc + 2) * sizeof(const char *));
+	if (!command_line)
+		return -ENOMEM;
+
 	command_line[0] = "";
 	command_line[1] = script;
 	for (i = 2; i < argc + 2; i++)

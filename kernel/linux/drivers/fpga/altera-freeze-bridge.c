@@ -7,7 +7,6 @@
 #include <linux/delay.h>
 #include <linux/io.h>
 #include <linux/kernel.h>
-#include <linux/mod_devicetable.h>
 #include <linux/module.h>
 #include <linux/platform_device.h>
 #include <linux/fpga/fpga-bridge.h>
@@ -253,13 +252,11 @@ static int altera_freeze_br_probe(struct platform_device *pdev)
 	return 0;
 }
 
-static int altera_freeze_br_remove(struct platform_device *pdev)
+static void altera_freeze_br_remove(struct platform_device *pdev)
 {
 	struct fpga_bridge *br = platform_get_drvdata(pdev);
 
 	fpga_bridge_unregister(br);
-
-	return 0;
 }
 
 static struct platform_driver altera_freeze_br_driver = {

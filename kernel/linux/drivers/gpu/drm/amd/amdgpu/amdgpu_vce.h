@@ -51,11 +51,14 @@ struct amdgpu_vce {
 	struct drm_sched_entity	entity;
 	uint32_t                srbm_soft_reset;
 	unsigned		num_rings;
+	uint32_t		keyselect;
+	struct drm_mm_node	gart_node;
 };
 
+int amdgpu_vce_early_init(struct amdgpu_device *adev);
 int amdgpu_vce_sw_init(struct amdgpu_device *adev, unsigned long size);
 int amdgpu_vce_sw_fini(struct amdgpu_device *adev);
-int amdgpu_vce_entity_init(struct amdgpu_device *adev);
+int amdgpu_vce_entity_init(struct amdgpu_device *adev, struct amdgpu_ring *ring);
 int amdgpu_vce_suspend(struct amdgpu_device *adev);
 int amdgpu_vce_resume(struct amdgpu_device *adev);
 void amdgpu_vce_free_handles(struct amdgpu_device *adev, struct drm_file *filp);

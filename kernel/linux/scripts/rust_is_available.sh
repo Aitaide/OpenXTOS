@@ -117,14 +117,6 @@ if [ "$rust_compiler_cversion" -lt "$rust_compiler_min_cversion" ]; then
 	echo >&2 "***"
 	exit 1
 fi
-if [ "$rust_compiler_cversion" -gt "$rust_compiler_min_cversion" ]; then
-	echo >&2 "***"
-	echo >&2 "*** Rust compiler '$RUSTC' is too new. This may or may not work."
-	echo >&2 "***   Your version:     $rust_compiler_version"
-	echo >&2 "***   Expected version: $rust_compiler_min_version"
-	echo >&2 "***"
-	warning=1
-fi
 
 # Check that the Rust bindings generator is suitable.
 #
@@ -164,14 +156,6 @@ if [ "$rust_bindings_generator_cversion" -lt "$rust_bindings_generator_min_cvers
 	echo >&2 "***   Minimum version: $rust_bindings_generator_min_version"
 	echo >&2 "***"
 	exit 1
-fi
-if [ "$rust_bindings_generator_cversion" -gt "$rust_bindings_generator_min_cversion" ]; then
-	echo >&2 "***"
-	echo >&2 "*** Rust bindings generator '$BINDGEN' is too new. This may or may not work."
-	echo >&2 "***   Your version:     $rust_bindings_generator_version"
-	echo >&2 "***   Expected version: $rust_bindings_generator_min_version"
-	echo >&2 "***"
-	warning=1
 fi
 
 # Check that the `libclang` used by the Rust bindings generator is suitable.
@@ -222,6 +206,20 @@ if [ "$bindgen_libclang_cversion" -lt "$bindgen_libclang_min_cversion" ]; then
 	echo >&2 "***   Minimum version: $bindgen_libclang_min_version"
 	echo >&2 "***"
 	exit 1
+fi
+
+if [ "$bindgen_libclang_cversion" -ge 2200000 ] &&
+	[ "$rust_bindings_generator_cversion" -lt 7201 ]; then
+	# Distributions may have patched the issue.
+	if ! "$BINDGEN" $(dirname $0)/rust_is_available_bindgen_libclang_22.h | grep -q 'pub foo'; then
+		echo >&2 "***"
+		echo >&2 "*** Rust bindings generator '$BINDGEN' < 0.72.1 together with libclang >= 22"
+		echo >&2 "*** may not work due to a bug (https://github.com/rust-lang/rust-bindgen/pull/3278)."
+		echo >&2 "***   Your bindgen version:  $rust_bindings_generator_version"
+		echo >&2 "***   Your libclang version: $bindgen_libclang_version"
+		echo >&2 "***"
+		warning=1
+	fi
 fi
 
 # If the C compiler is Clang, then we can also check whether its version

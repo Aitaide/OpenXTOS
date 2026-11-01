@@ -20,18 +20,18 @@ MODULE_PARM_DESC(polling_pipe, "polling pipe (0: ctl, 1: bulk)");
 
 static const struct mfd_cell rtsx_usb_cells[] = {
 	[RTSX_USB_SD_CARD] = {
-		.name = "rtsx_usb_sdmmc",
+		.name = DRV_NAME_RTSX_USB_SDMMC,
 		.pdata_size = 0,
 	},
 	[RTSX_USB_MS_CARD] = {
-		.name = "rtsx_usb_ms",
+		.name = DRV_NAME_RTSX_USB_MS,
 		.pdata_size = 0,
 	},
 };
 
 static void rtsx_usb_sg_timed_out(struct timer_list *t)
 {
-	struct rtsx_ucr *ucr = from_timer(ucr, t, sg_timer);
+	struct rtsx_ucr *ucr = timer_container_of(ucr, t, sg_timer);
 
 	dev_dbg(&ucr->pusb_intf->dev, "%s: sg transfer timed out", __func__);
 	usb_sg_cancel(&ucr->current_sg);
@@ -53,7 +53,7 @@ static int rtsx_usb_bulk_transfer_sglist(struct rtsx_ucr *ucr,
 	ucr->sg_timer.expires = jiffies + msecs_to_jiffies(timeout);
 	add_timer(&ucr->sg_timer);
 	usb_sg_wait(&ucr->current_sg);
-	if (!del_timer_sync(&ucr->sg_timer))
+	if (!timer_delete_sync(&ucr->sg_timer))
 		ret = -ETIMEDOUT;
 	else
 		ret = ucr->current_sg.status;
@@ -312,6 +312,9 @@ int rtsx_usb_get_card_status(struct rtsx_ucr *ucr, u16 *status)
 	if (ret < 0)
 		return ret;
 
+	ucr->card_status_cache = *status;
+	ucr->card_status_valid = true;
+
 	return 0;
 }
 EXPORT_SYMBOL_GPL(rtsx_usb_get_card_status);
@@ -552,6 +555,10 @@ static int rtsx_usb_reset_chip(struct rtsx_ucr *ucr)
 	ret = rtsx_usb_send_cmd(ucr, MODE_C, 100);
 	if (ret)
 		return ret;
+	/* config OCP */
+	rtsx_usb_write_register(ucr, OCPCTL, MS_OCP_DETECT_EN, MS_OCP_DETECT_EN);
+	rtsx_usb_write_register(ucr, OCPPARA1, 0xF0, 0x50);
+	rtsx_usb_write_register(ucr, OCPPARA2, 0x7, 0x3);
 
 	/* config non-crystal mode */
 	rtsx_usb_read_register(ucr, CFG_MODE, &val);
@@ -619,6 +626,7 @@ static int rtsx_usb_probe(struct usb_interface *intf,
 {
 	struct usb_device *usb_dev = interface_to_usbdev(intf);
 	struct rtsx_ucr *ucr;
+	u16 status;
 	int ret;
 
 	dev_dbg(&intf->dev,
@@ -654,6 +662,9 @@ static int rtsx_usb_probe(struct usb_interface *intf,
 	ret = rtsx_usb_init_chip(ucr);
 	if (ret)
 		goto out_init_fail;
+
+	/* Prime cached status for runtime autosuspend decisions. */
+	rtsx_usb_get_card_status(ucr, &status);
 
 	/* initialize USB SG transfer timer */
 	timer_setup(&ucr->sg_timer, rtsx_usb_sg_timed_out, 0);
@@ -698,35 +709,47 @@ static void rtsx_usb_disconnect(struct usb_interface *intf)
 }
 
 #ifdef CONFIG_PM
+static int rtsx_usb_resume_child(struct device *dev, void *data)
+{
+	pm_request_resume(dev);
+	return 0;
+}
+
 static int rtsx_usb_suspend(struct usb_interface *intf, pm_message_t message)
 {
 	struct rtsx_ucr *ucr =
 		(struct rtsx_ucr *)usb_get_intfdata(intf);
 	u16 val = 0;
+	bool valid = false;
 
 	dev_dbg(&intf->dev, "%s called with pm message 0x%04x\n",
 			__func__, message.event);
 
 	if (PMSG_IS_AUTO(message)) {
 		if (mutex_trylock(&ucr->dev_mutex)) {
-			rtsx_usb_get_card_status(ucr, &val);
+			valid = ucr->card_status_valid;
+			if (valid)
+				val = ucr->card_status_cache;
 			mutex_unlock(&ucr->dev_mutex);
 
-			/* Defer the autosuspend if card exists */
-			if (val & (SD_CD | MS_CD))
+			/*
+			 * Do not issue USB commands from runtime autosuspend.
+			 * Raw SD_CD is not authoritative on tray-based readers,
+			 * while a real SD card is protected by the SD/MMC child
+			 * runtime-PM reference once the card is powered. Keep
+			 * the historical Memory Stick autosuspend deferral when
+			 * the cached status says MS media is present.
+			 */
+			if (valid && (val & MS_CD)) {
+				device_for_each_child(&intf->dev, NULL, rtsx_usb_resume_child);
 				return -EAGAIN;
+			}
 		} else {
 			/* There is an ongoing operation*/
 			return -EAGAIN;
 		}
 	}
 
-	return 0;
-}
-
-static int rtsx_usb_resume_child(struct device *dev, void *data)
-{
-	pm_request_resume(dev);
 	return 0;
 }
 
@@ -780,7 +803,7 @@ static const struct usb_device_id rtsx_usb_usb_ids[] = {
 MODULE_DEVICE_TABLE(usb, rtsx_usb_usb_ids);
 
 static struct usb_driver rtsx_usb_driver = {
-	.name			= "rtsx_usb",
+	.name			= DRV_NAME_RTSX_USB,
 	.probe			= rtsx_usb_probe,
 	.disconnect		= rtsx_usb_disconnect,
 	.suspend		= rtsx_usb_suspend,

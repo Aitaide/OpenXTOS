@@ -16,7 +16,6 @@
 #define _MASTER_FILE
 #include "global.h"
 
-static char *viafb_name = "Via";
 static u32 pseudo_pal[17];
 
 /* video mode */
@@ -144,7 +143,7 @@ static void viafb_setup_fixinfo(struct fb_fix_screeninfo *fix,
 	struct viafb_par *viaparinfo)
 {
 	memset(fix, 0, sizeof(struct fb_fix_screeninfo));
-	strcpy(fix->id, viafb_name);
+	strcpy(fix->id, "Via");
 
 	fix->smem_start = viaparinfo->fbmem;
 	fix->smem_len = viaparinfo->fbmem_free;
@@ -574,7 +573,7 @@ static int viafb_ioctl(struct fb_info *info, u_int cmd, u_long arg)
 		break;
 
 	case VIAFB_SET_GAMMA_LUT:
-		viafb_gamma_table = memdup_user(argp, 256 * sizeof(u32));
+		viafb_gamma_table = memdup_array_user(argp, 256, sizeof(u32));
 		if (IS_ERR(viafb_gamma_table))
 			return PTR_ERR(viafb_gamma_table);
 		viafb_set_gamma_table(viafb_bpp, viafb_gamma_table);
@@ -840,7 +839,7 @@ static int viafb_cursor(struct fb_info *info, struct fb_cursor *cursor)
 		struct {
 			u8 data[CURSOR_SIZE];
 			u32 bak[CURSOR_SIZE / 4];
-		} *cr_data = kzalloc(sizeof(*cr_data), GFP_ATOMIC);
+		} *cr_data = kzalloc_obj(*cr_data, GFP_ATOMIC);
 		int size = ((cursor->image.width + 7) >> 3) *
 			cursor->image.height;
 
@@ -2054,6 +2053,7 @@ static struct fb_ops viafb_ops = {
 	.owner = THIS_MODULE,
 	.fb_open = viafb_open,
 	.fb_release = viafb_release,
+	__FB_DEFAULT_IOMEM_OPS_RDWR,
 	.fb_check_var = viafb_check_var,
 	.fb_set_par = viafb_set_par,
 	.fb_setcolreg = viafb_setcolreg,
@@ -2065,6 +2065,7 @@ static struct fb_ops viafb_ops = {
 	.fb_cursor = viafb_cursor,
 	.fb_ioctl = viafb_ioctl,
 	.fb_sync = viafb_sync,
+	__FB_DEFAULT_IOMEM_OPS_MMAP,
 };
 
 
@@ -2142,5 +2143,6 @@ MODULE_PARM_DESC(viafb_lcd_port, "Specify LCD output port.");
 module_param(viafb_dvi_port, charp, S_IRUSR);
 MODULE_PARM_DESC(viafb_dvi_port, "Specify DVI output port.");
 
+MODULE_DESCRIPTION("VIA UniChrome (Pro) and Chrome9 display driver");
 MODULE_LICENSE("GPL");
 #endif

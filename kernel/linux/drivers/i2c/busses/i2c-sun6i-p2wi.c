@@ -10,7 +10,7 @@
  * The P2WI controller looks like an SMBus controller which only supports byte
  * data transfers. But, it differs from standard SMBus protocol on several
  * aspects:
- * - it supports only one slave device, and thus drop the address field
+ * - it supports only one target device, and thus drop the address field
  * - it adds a parity bit every 8bits of data
  * - only one read access is required to read a byte (instead of a write
  *   followed by a read access in standard SMBus protocol)
@@ -88,7 +88,7 @@ struct p2wi {
 	void __iomem *regs;
 	struct clk *clk;
 	struct reset_control *rstc;
-	int slave_addr;
+	int target_addr;
 };
 
 static irqreturn_t p2wi_interrupt(int irq, void *dev_id)
@@ -121,7 +121,7 @@ static int p2wi_smbus_xfer(struct i2c_adapter *adap, u16 addr,
 	struct p2wi *p2wi = i2c_get_adapdata(adap);
 	unsigned long dlen = P2WI_DLEN_DATA_LENGTH(1);
 
-	if (p2wi->slave_addr >= 0 && addr != p2wi->slave_addr) {
+	if (p2wi->target_addr >= 0 && addr != p2wi->target_addr) {
 		dev_err(&adap->dev, "invalid P2WI address\n");
 		return -EINVAL;
 	}
@@ -188,46 +188,43 @@ static int p2wi_probe(struct platform_device *pdev)
 	unsigned long parent_clk_freq;
 	u32 clk_freq = I2C_MAX_STANDARD_MODE_FREQ;
 	struct p2wi *p2wi;
-	u32 slave_addr;
+	u32 target_addr;
 	int clk_div;
 	int irq;
 	int ret;
 
 	of_property_read_u32(np, "clock-frequency", &clk_freq);
-	if (clk_freq > P2WI_MAX_FREQ) {
-		dev_err(dev,
-			"required clock-frequency (%u Hz) is too high (max = 6MHz)",
-			clk_freq);
-		return -EINVAL;
-	}
+	if (clk_freq > P2WI_MAX_FREQ)
+		return dev_err_probe(dev, -EINVAL,
+				     "required clock-frequency (%u Hz) is too high (max = 6MHz)",
+				     clk_freq);
 
-	if (of_get_child_count(np) > 1) {
-		dev_err(dev, "P2WI only supports one slave device\n");
-		return -EINVAL;
-	}
+	if (clk_freq == 0)
+		return dev_err_probe(dev, -EINVAL, "clock-frequency is set to 0 in DT\n");
+
+	if (of_get_child_count(np) > 1)
+		return dev_err_probe(dev, -EINVAL, "P2WI only supports one target device\n");
 
 	p2wi = devm_kzalloc(dev, sizeof(struct p2wi), GFP_KERNEL);
 	if (!p2wi)
 		return -ENOMEM;
 
-	p2wi->slave_addr = -1;
+	p2wi->target_addr = -1;
 
 	/*
 	 * Authorize a p2wi node without any children to be able to use an
 	 * i2c-dev from userpace.
-	 * In this case the slave_addr is set to -1 and won't be checked when
+	 * In this case the target_addr is set to -1 and won't be checked when
 	 * launching a P2WI transfer.
 	 */
 	childnp = of_get_next_available_child(np, NULL);
 	if (childnp) {
-		ret = of_property_read_u32(childnp, "reg", &slave_addr);
-		if (ret) {
-			dev_err(dev, "invalid slave address on node %pOF\n",
-				childnp);
-			return -EINVAL;
-		}
+		ret = of_property_read_u32(childnp, "reg", &target_addr);
+		if (ret)
+			return dev_err_probe(dev, -EINVAL,
+					     "invalid target address on node %pOF\n", childnp);
 
-		p2wi->slave_addr = slave_addr;
+		p2wi->target_addr = target_addr;
 	}
 
 	p2wi->regs = devm_platform_ioremap_resource(pdev, 0);
@@ -240,26 +237,20 @@ static int p2wi_probe(struct platform_device *pdev)
 		return irq;
 
 	p2wi->clk = devm_clk_get_enabled(dev, NULL);
-	if (IS_ERR(p2wi->clk)) {
-		ret = PTR_ERR(p2wi->clk);
-		dev_err(dev, "failed to enable clk: %d\n", ret);
-		return ret;
-	}
+	if (IS_ERR(p2wi->clk))
+		return dev_err_probe(dev, PTR_ERR(p2wi->clk),
+				     "failed to enable clk\n");
 
 	parent_clk_freq = clk_get_rate(p2wi->clk);
 
 	p2wi->rstc = devm_reset_control_get_exclusive(dev, NULL);
-	if (IS_ERR(p2wi->rstc)) {
-		dev_err(dev, "failed to retrieve reset controller: %pe\n",
-			p2wi->rstc);
-		return PTR_ERR(p2wi->rstc);
-	}
+	if (IS_ERR(p2wi->rstc))
+		return dev_err_probe(dev, PTR_ERR(p2wi->rstc),
+				     "failed to retrieve reset controller\n");
 
 	ret = reset_control_deassert(p2wi->rstc);
-	if (ret) {
-		dev_err(dev, "failed to deassert reset line: %d\n", ret);
-		return ret;
-	}
+	if (ret)
+		return dev_err_probe(dev, ret, "failed to deassert reset line\n");
 
 	init_completion(&p2wi->complete);
 	p2wi->adapter.dev.parent = dev;
@@ -270,11 +261,8 @@ static int p2wi_probe(struct platform_device *pdev)
 	i2c_set_adapdata(&p2wi->adapter, p2wi);
 
 	ret = devm_request_irq(dev, irq, p2wi_interrupt, 0, pdev->name, p2wi);
-	if (ret) {
-		dev_err(dev, "can't register interrupt handler irq%d: %d\n",
-			irq, ret);
+	if (ret)
 		goto err_reset_assert;
-	}
 
 	writel(P2WI_CTRL_SOFT_RST, p2wi->regs + P2WI_CTRL);
 
@@ -314,7 +302,7 @@ static void p2wi_remove(struct platform_device *dev)
 
 static struct platform_driver p2wi_driver = {
 	.probe	= p2wi_probe,
-	.remove_new = p2wi_remove,
+	.remove = p2wi_remove,
 	.driver	= {
 		.name = "i2c-sunxi-p2wi",
 		.of_match_table = p2wi_of_match_table,

@@ -470,7 +470,7 @@ static int _wm8993_set_fll(struct snd_soc_component *component, int fll_id, int 
 	struct i2c_client *i2c = to_i2c_client(component->dev);
 	u16 reg1, reg4, reg5;
 	struct _fll_div fll_div;
-	unsigned int timeout;
+	unsigned long time_left;
 	int ret;
 
 	/* Any change? */
@@ -543,19 +543,19 @@ static int _wm8993_set_fll(struct snd_soc_component *component, int fll_id, int 
 
 	/* If we've got an interrupt wired up make sure we get it */
 	if (i2c->irq)
-		timeout = msecs_to_jiffies(20);
+		time_left = msecs_to_jiffies(20);
 	else if (Fref < 1000000)
-		timeout = msecs_to_jiffies(3);
+		time_left = msecs_to_jiffies(3);
 	else
-		timeout = msecs_to_jiffies(1);
+		time_left = msecs_to_jiffies(1);
 
 	try_wait_for_completion(&wm8993->fll_lock);
 
 	/* Enable the FLL */
 	snd_soc_component_write(component, WM8993_FLL_CONTROL_1, reg1 | WM8993_FLL_ENA);
 
-	timeout = wait_for_completion_timeout(&wm8993->fll_lock, timeout);
-	if (i2c->irq && !timeout)
+	time_left = wait_for_completion_timeout(&wm8993->fll_lock, time_left);
+	if (i2c->irq && !time_left)
 		dev_warn(component->dev, "Timed out waiting for FLL\n");
 
 	dev_dbg(component->dev, "FLL enabled at %dHz->%dHz\n", Fref, Fout);
@@ -973,6 +973,7 @@ static int wm8993_set_bias_level(struct snd_soc_component *component,
 				 enum snd_soc_bias_level level)
 {
 	struct wm8993_priv *wm8993 = snd_soc_component_get_drvdata(component);
+	struct snd_soc_dapm_context *dapm = snd_soc_component_to_dapm(component);
 	int ret;
 
 	wm_hubs_set_bias_level(component, level);
@@ -988,7 +989,7 @@ static int wm8993_set_bias_level(struct snd_soc_component *component,
 		break;
 
 	case SND_SOC_BIAS_STANDBY:
-		if (snd_soc_component_get_bias_level(component) == SND_SOC_BIAS_OFF) {
+		if (snd_soc_dapm_get_bias_level(dapm) == SND_SOC_BIAS_OFF) {
 			ret = regulator_bulk_enable(ARRAY_SIZE(wm8993->supplies),
 						    wm8993->supplies);
 			if (ret != 0)
@@ -1098,18 +1099,18 @@ static int wm8993_set_dai_fmt(struct snd_soc_dai *dai,
 	aif4 &= ~WM8993_LRCLK_DIR;
 
 	switch (fmt & SND_SOC_DAIFMT_MASTER_MASK) {
-	case SND_SOC_DAIFMT_CBS_CFS:
+	case SND_SOC_DAIFMT_CBC_CFC:
 		wm8993->master = 0;
 		break;
-	case SND_SOC_DAIFMT_CBS_CFM:
+	case SND_SOC_DAIFMT_CBC_CFP:
 		aif4 |= WM8993_LRCLK_DIR;
 		wm8993->master = 1;
 		break;
-	case SND_SOC_DAIFMT_CBM_CFS:
+	case SND_SOC_DAIFMT_CBP_CFC:
 		aif1 |= WM8993_BCLK_DIR;
 		wm8993->master = 1;
 		break;
-	case SND_SOC_DAIFMT_CBM_CFM:
+	case SND_SOC_DAIFMT_CBP_CFP:
 		aif1 |= WM8993_BCLK_DIR;
 		aif4 |= WM8993_LRCLK_DIR;
 		wm8993->master = 1;
@@ -1482,7 +1483,7 @@ static struct snd_soc_dai_driver wm8993_dai = {
 static int wm8993_probe(struct snd_soc_component *component)
 {
 	struct wm8993_priv *wm8993 = snd_soc_component_get_drvdata(component);
-	struct snd_soc_dapm_context *dapm = snd_soc_component_get_dapm(component);
+	struct snd_soc_dapm_context *dapm = snd_soc_component_to_dapm(component);
 
 	wm8993->hubs_data.hp_startup_mode = 1;
 	wm8993->hubs_data.dcs_codes_l = -2;
@@ -1536,7 +1537,7 @@ static int wm8993_probe(struct snd_soc_component *component)
 	 * VMID as an output and can disable it.
 	 */
 	if (wm8993->pdata.lineout1_diff && wm8993->pdata.lineout2_diff)
-		dapm->idle_bias_off = 1;
+		snd_soc_dapm_set_idle_bias(dapm, false);
 
 	return 0;
 
@@ -1546,6 +1547,7 @@ static int wm8993_probe(struct snd_soc_component *component)
 static int wm8993_suspend(struct snd_soc_component *component)
 {
 	struct wm8993_priv *wm8993 = snd_soc_component_get_drvdata(component);
+	struct snd_soc_dapm_context *dapm = snd_soc_component_to_dapm(component);
 	int fll_fout = wm8993->fll_fout;
 	int fll_fref  = wm8993->fll_fref;
 	int ret;
@@ -1560,7 +1562,7 @@ static int wm8993_suspend(struct snd_soc_component *component)
 	wm8993->fll_fout = fll_fout;
 	wm8993->fll_fref = fll_fref;
 
-	snd_soc_component_force_bias_level(component, SND_SOC_BIAS_OFF);
+	snd_soc_dapm_force_bias_level(dapm, SND_SOC_BIAS_OFF);
 
 	return 0;
 }
@@ -1568,9 +1570,10 @@ static int wm8993_suspend(struct snd_soc_component *component)
 static int wm8993_resume(struct snd_soc_component *component)
 {
 	struct wm8993_priv *wm8993 = snd_soc_component_get_drvdata(component);
+	struct snd_soc_dapm_context *dapm = snd_soc_component_to_dapm(component);
 	int ret;
 
-	snd_soc_component_force_bias_level(component, SND_SOC_BIAS_STANDBY);
+	snd_soc_dapm_force_bias_level(dapm, SND_SOC_BIAS_STANDBY);
 
 	/* Restart the FLL? */
 	if (wm8993->fll_fout) {
@@ -1732,7 +1735,7 @@ static void wm8993_i2c_remove(struct i2c_client *i2c)
 }
 
 static const struct i2c_device_id wm8993_i2c_id[] = {
-	{ "wm8993", 0 },
+	{ .name = "wm8993" },
 	{ }
 };
 MODULE_DEVICE_TABLE(i2c, wm8993_i2c_id);

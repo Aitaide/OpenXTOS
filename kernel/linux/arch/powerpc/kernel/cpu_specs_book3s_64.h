@@ -60,6 +60,14 @@
 				 PPC_FEATURE2_ISEL | PPC_FEATURE2_TAR | \
 				 PPC_FEATURE2_VEC_CRYPTO)
 
+#define COMMON_USER_POWER11	COMMON_USER_POWER10
+#define COMMON_USER2_POWER11	COMMON_USER2_POWER10
+
+#define COMMON_USER_POWER12	COMMON_USER_POWER10
+#define COMMON_USER2_POWER12	(COMMON_USER2_POWER10 | \
+				 PPC_FEATURE2_ARCH_3_2)
+
+
 static struct cpu_spec cpu_specs[] __initdata = {
 	{	/* PPC970 */
 		.pvr_mask		= 0xffff0000,
@@ -238,6 +246,21 @@ static struct cpu_spec cpu_specs[] __initdata = {
 		.machine_check_early	= __machine_check_early_realmode_p8,
 		.platform		= "power8",
 	},
+	{	/* 2.07-compliant processor, HeXin C2000 processor */
+		.pvr_mask		= 0xffff0000,
+		.pvr_value		= 0x00660000,
+		.cpu_name		= "HX-C2000",
+		.cpu_features		= CPU_FTRS_POWER8,
+		.cpu_user_features	= COMMON_USER_POWER8,
+		.cpu_user_features2	= COMMON_USER2_POWER8,
+		.mmu_features		= MMU_FTRS_POWER8,
+		.icache_bsize		= 128,
+		.dcache_bsize		= 128,
+		.cpu_setup		= __setup_cpu_power8,
+		.cpu_restore		= __restore_cpu_power8,
+		.machine_check_early	= __machine_check_early_realmode_p8,
+		.platform		= "power8",
+	},
 	{	/* 3.00-compliant processor, i.e. Power9 "architected" mode */
 		.pvr_mask		= 0xffffffff,
 		.pvr_value		= 0x0f000005,
@@ -265,6 +288,34 @@ static struct cpu_spec cpu_specs[] __initdata = {
 		.cpu_setup		= __setup_cpu_power10,
 		.cpu_restore		= __restore_cpu_power10,
 		.platform		= "power10",
+	},
+	{	/* 3.1-compliant processor, i.e. Power11 "architected" mode */
+		.pvr_mask		= 0xffffffff,
+		.pvr_value		= 0x0f000007,
+		.cpu_name		= "Power11 (architected)",
+		.cpu_features		= CPU_FTRS_POWER11,
+		.cpu_user_features	= COMMON_USER_POWER11,
+		.cpu_user_features2	= COMMON_USER2_POWER11,
+		.mmu_features		= MMU_FTRS_POWER11,
+		.icache_bsize		= 128,
+		.dcache_bsize		= 128,
+		.cpu_setup		= __setup_cpu_power10,
+		.cpu_restore		= __restore_cpu_power10,
+		.platform		= "power11",
+	},
+	{	/* 3.2-compliant processor, i.e. Power12 "architected" mode */
+		.pvr_mask		= 0xffffffff,
+		.pvr_value		= 0x0f000008,
+		.cpu_name		= "Power12 (architected)",
+		.cpu_features		= CPU_FTRS_POWER12,
+		.cpu_user_features	= COMMON_USER_POWER12,
+		.cpu_user_features2	= COMMON_USER2_POWER12,
+		.mmu_features		= MMU_FTRS_POWER12,
+		.icache_bsize		= 128,
+		.dcache_bsize		= 128,
+		.cpu_setup		= __setup_cpu_power12,
+		.cpu_restore		= __restore_cpu_power12,
+		.platform		= "power12",
 	},
 	{	/* Power7 */
 		.pvr_mask		= 0xffff0000,
@@ -435,6 +486,40 @@ static struct cpu_spec cpu_specs[] __initdata = {
 		.cpu_restore		= __restore_cpu_power10,
 		.machine_check_early	= __machine_check_early_realmode_p10,
 		.platform		= "power10",
+	},
+	{	/* Power11 */
+		.pvr_mask		= 0xffff0000,
+		.pvr_value		= 0x00820000,
+		.cpu_name		= "Power11 (raw)",
+		.cpu_features		= CPU_FTRS_POWER11,
+		.cpu_user_features	= COMMON_USER_POWER11,
+		.cpu_user_features2	= COMMON_USER2_POWER11,
+		.mmu_features		= MMU_FTRS_POWER11,
+		.icache_bsize		= 128,
+		.dcache_bsize		= 128,
+		.num_pmcs		= 6,
+		.pmc_type		= PPC_PMC_IBM,
+		.cpu_setup		= __setup_cpu_power10,
+		.cpu_restore		= __restore_cpu_power10,
+		.machine_check_early	= __machine_check_early_realmode_p10,
+		.platform		= "power11",
+	},
+	{	/* Power12 */
+		.pvr_mask		= 0xffff0000,
+		.pvr_value		= 0x00830000,
+		.cpu_name		= "Power12 (raw)",
+		.cpu_features		= CPU_FTRS_POWER12,
+		.cpu_user_features	= COMMON_USER_POWER12,
+		.cpu_user_features2	= COMMON_USER2_POWER12,
+		.mmu_features		= MMU_FTRS_POWER12,
+		.icache_bsize		= 128,
+		.dcache_bsize		= 128,
+		.num_pmcs		= 6,
+		.pmc_type		= PPC_PMC_IBM,
+		.cpu_setup		= __setup_cpu_power12,
+		.cpu_restore		= __restore_cpu_power12,
+		.machine_check_early	= __machine_check_early_realmode_p10,
+		.platform		= "power12",
 	},
 	{	/* Cell Broadband Engine */
 		.pvr_mask		= 0xffff0000,

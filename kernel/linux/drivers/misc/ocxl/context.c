@@ -10,7 +10,7 @@ int ocxl_context_alloc(struct ocxl_context **context, struct ocxl_afu *afu,
 	int pasid;
 	struct ocxl_context *ctx;
 
-	ctx = kzalloc(sizeof(*ctx), GFP_KERNEL);
+	ctx = kzalloc_obj(*ctx);
 	if (!ctx)
 		return -ENOMEM;
 
@@ -55,7 +55,7 @@ EXPORT_SYMBOL_GPL(ocxl_context_alloc);
  */
 static void xsl_fault_error(void *data, u64 addr, u64 dsisr)
 {
-	struct ocxl_context *ctx = (struct ocxl_context *) data;
+	struct ocxl_context *ctx = data;
 
 	mutex_lock(&ctx->xsl_error_lock);
 	ctx->xsl_error.addr = addr;

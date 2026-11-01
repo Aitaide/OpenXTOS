@@ -25,9 +25,16 @@
 #include <asm/tls.h>
 #include <asm/system_info.h>
 #include <asm/uaccess-asm.h>
+#include <asm/kasan_def.h>
 
 #include "entry-header.S"
 #include <asm/probes.h>
+
+#ifdef CONFIG_HAVE_LD_DEAD_CODE_DATA_ELIMINATION
+#define RELOC_TEXT_NONE .reloc  .text, R_ARM_NONE, .
+#else
+#define RELOC_TEXT_NONE
+#endif
 
 /*
  * Interrupt handling.
@@ -550,11 +557,25 @@ ENTRY(__switch_to)
 	ldmia	r4, {r4 - sl, fp, ip, lr}	@ Load all regs saved previously
 #ifdef CONFIG_VMAP_STACK
 	@
-	@ Do a dummy read from the new stack while running from the old one so
-	@ that we can rely on do_translation_fault() to fix up any stale PMD
-	@ entries covering the vmalloc region.
+	@ For a non-lazy mm switch, check_vmalloc_seq() has ensured that
+	@ that the active mm's page tables have mappings for the prev
+	@ task's stack and the next task's stack.
+	@
+	@ For a lazy mm switch the active mm's page tables have mappings
+	@ for the prev task's stack but might not have mappings for the
+	@ new task's stack. Do a dummy read from the new stack while
+	@ running from the old stack so that we can rely on
+	@ do_translation_fault() to populate missing PMD entries covering the
+	@ new task's stack in the old task's page tables.
 	@
 	ldr	r2, [ip]
+#ifdef CONFIG_KASAN_VMALLOC
+	@ Also dummy read from the KASAN shadow memory for the new stack if we
+	@ are using KASAN
+	mov_l	r2, KASAN_SHADOW_OFFSET
+	add	r2, r2, ip, lsr #KASAN_SHADOW_SCALE_SHIFT
+	ldrb	r2, [r2]
+#endif
 #endif
 
 	@ When CONFIG_THREAD_INFO_IN_TASK=n, the update of SP itself is what
@@ -1065,6 +1086,7 @@ vector_addrexcptn:
 	.globl	vector_fiq
 
 	.section .vectors, "ax", %progbits
+	RELOC_TEXT_NONE
 	W(b)	vector_rst
 	W(b)	vector_und
 ARM(	.reloc	., R_ARM_LDR_PC_G0, .L__vector_swi		)
@@ -1078,6 +1100,7 @@ THUMB(	.reloc	., R_ARM_THM_PC12, .L__vector_swi		)
 
 #ifdef CONFIG_HARDEN_BRANCH_HISTORY
 	.section .vectors.bhb.loop8, "ax", %progbits
+	RELOC_TEXT_NONE
 	W(b)	vector_rst
 	W(b)	vector_bhb_loop8_und
 ARM(	.reloc	., R_ARM_LDR_PC_G0, .L__vector_bhb_loop8_swi	)
@@ -1090,6 +1113,7 @@ THUMB(	.reloc	., R_ARM_THM_PC12, .L__vector_bhb_loop8_swi	)
 	W(b)	vector_bhb_loop8_fiq
 
 	.section .vectors.bhb.bpiall, "ax", %progbits
+	RELOC_TEXT_NONE
 	W(b)	vector_rst
 	W(b)	vector_bhb_bpiall_und
 ARM(	.reloc	., R_ARM_LDR_PC_G0, .L__vector_bhb_bpiall_swi	)

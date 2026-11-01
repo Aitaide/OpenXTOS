@@ -24,7 +24,7 @@ isofs_export_iget(struct super_block *sb,
 {
 	struct inode *inode;
 
-	if (block == 0)
+	if (block == 0 || block >= ISOFS_SB(sb)->s_nzones)
 		return ERR_PTR(-ESTALE);
 	inode = isofs_iget(sb, block, offset);
 	if (IS_ERR(inode))
@@ -83,13 +83,21 @@ static struct dentry *isofs_export_get_parent(struct dentry *child)
 
 	/* This is the "." entry. */
 	de = (struct iso_directory_record*)bh->b_data;
+	if (!isofs_dir_record_valid(de, 0, child_inode->i_sb->s_blocksize) ||
+	    isonum_711(de->name_len) != 1 || de->name[0] != 0) {
+		printk(KERN_ERR "isofs: Unable to find the \".\" directory for NFS.\n");
+		rv = ERR_PTR(-EACCES);
+		goto out;
+	}
 
 	/* The ".." entry is always the second entry. */
 	parent_offset = (unsigned long)isonum_711(de->length);
 	de = (struct iso_directory_record*)(bh->b_data + parent_offset);
 
 	/* Verify it is in fact the ".." entry. */
-	if ((isonum_711(de->name_len) != 1) || (de->name[0] != 1)) {
+	if (!isofs_dir_record_valid(de, parent_offset,
+				    child_inode->i_sb->s_blocksize) ||
+	    isonum_711(de->name_len) != 1 || de->name[0] != 1) {
 		printk(KERN_ERR "isofs: Unable to find the \"..\" "
 		       "directory for NFS.\n");
 		rv = ERR_PTR(-EACCES);
@@ -180,7 +188,7 @@ static struct dentry *isofs_fh_to_parent(struct super_block *sb,
 		return NULL;
 
 	return isofs_export_iget(sb,
-			fh_len > 2 ? ifid->parent_block : 0,
+			fh_len > 3 ? ifid->parent_block : 0,
 			ifid->parent_offset,
 			fh_len > 4 ? ifid->parent_generation : 0);
 }

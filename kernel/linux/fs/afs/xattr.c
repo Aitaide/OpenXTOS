@@ -75,7 +75,7 @@ static bool afs_make_acl(struct afs_operation *op,
 {
 	struct afs_acl *acl;
 
-	acl = kmalloc(sizeof(*acl) + size, GFP_KERNEL);
+	acl = kmalloc_flex(*acl, data, size);
 	if (!acl) {
 		afs_op_nomem(op);
 		return false;
@@ -157,7 +157,7 @@ static int afs_xattr_get_yfs(const struct xattr_handler *handler,
 	else
 		return -EOPNOTSUPP;
 
-	yacl = kzalloc(sizeof(struct yfs_acl), GFP_KERNEL);
+	yacl = kzalloc_obj(struct yfs_acl);
 	if (!yacl)
 		goto error;
 
@@ -353,7 +353,7 @@ static const struct xattr_handler afs_xattr_afs_volume_handler = {
 	.get	= afs_xattr_get_volume,
 };
 
-const struct xattr_handler *afs_xattr_handlers[] = {
+const struct xattr_handler * const afs_xattr_handlers[] = {
 	&afs_xattr_afs_acl_handler,
 	&afs_xattr_afs_cell_handler,
 	&afs_xattr_afs_fid_handler,

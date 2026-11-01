@@ -210,12 +210,13 @@ static void set_display_state(struct panel_drv_data *ddata, int enabled)
 
 static int panel_enabled(struct panel_drv_data *ddata)
 {
+	__be32 disp_status_be;
 	u32 disp_status;
 	int enabled;
 
 	acx565akm_read(ddata, MIPID_CMD_READ_DISP_STATUS,
-			(u8 *)&disp_status, 4);
-	disp_status = __be32_to_cpu(disp_status);
+			(u8 *)&disp_status_be, 4);
+	disp_status = __be32_to_cpu(disp_status_be);
 	enabled = (disp_status & (1 << 17)) && (disp_status & (1 << 10));
 	dev_dbg(&ddata->spi->dev,
 		"LCD panel %senabled by bootloader (status 0x%04x)\n",
@@ -340,11 +341,7 @@ static int acx565akm_bl_update_status(struct backlight_device *dev)
 
 	dev_dbg(&ddata->spi->dev, "%s\n", __func__);
 
-	if (dev->props.fb_blank == FB_BLANK_UNBLANK &&
-			dev->props.power == FB_BLANK_UNBLANK)
-		level = dev->props.brightness;
-	else
-		level = 0;
+	level = backlight_get_brightness(dev);
 
 	if (ddata->has_bc)
 		acx565akm_set_brightness(ddata, level);
@@ -363,8 +360,7 @@ static int acx565akm_bl_get_intensity(struct backlight_device *dev)
 	if (!ddata->has_bc)
 		return -ENODEV;
 
-	if (dev->props.fb_blank == FB_BLANK_UNBLANK &&
-			dev->props.power == FB_BLANK_UNBLANK) {
+	if (!backlight_is_blank(dev)) {
 		if (ddata->has_bc)
 			return acx565akm_get_actual_brightness(ddata);
 		else
@@ -471,19 +467,20 @@ static ssize_t show_cabc_available_modes(struct device *dev,
 		char *buf)
 {
 	struct panel_drv_data *ddata = dev_get_drvdata(dev);
-	int len;
+	int len = 0;
 	int i;
 
 	if (!ddata->has_cabc)
 		return sysfs_emit(buf, "%s\n", cabc_modes[0]);
 
-	for (i = 0, len = 0;
-	     len < PAGE_SIZE && i < ARRAY_SIZE(cabc_modes); i++)
-		len += snprintf(&buf[len], PAGE_SIZE - len, "%s%s%s",
-			i ? " " : "", cabc_modes[i],
-			i == ARRAY_SIZE(cabc_modes) - 1 ? "\n" : "");
+	for (i = 0; i < ARRAY_SIZE(cabc_modes); i++)
+		len += sysfs_emit_at(buf, len, "%s ", cabc_modes[i]);
 
-	return len < PAGE_SIZE ? len : PAGE_SIZE - 1;
+	/* Remove the trailing space */
+	if (len)
+		buf[len - 1] = '\n';
+
+	return len;
 }
 
 static DEVICE_ATTR(cabc_mode, S_IRUGO | S_IWUSR,
@@ -758,8 +755,7 @@ static int acx565akm_probe(struct spi_device *spi)
 	}
 
 	memset(&props, 0, sizeof(props));
-	props.fb_blank = FB_BLANK_UNBLANK;
-	props.power = FB_BLANK_UNBLANK;
+	props.power = BACKLIGHT_POWER_ON;
 	props.type = BACKLIGHT_RAW;
 
 	bldev = backlight_device_register("acx565akm", &ddata->spi->dev,

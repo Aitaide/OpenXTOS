@@ -332,7 +332,7 @@ static int at76_dfu_get_status(struct usb_device *udev,
 
 	ret = usb_control_msg(udev, usb_rcvctrlpipe(udev, 0), DFU_GETSTATUS,
 			      USB_TYPE_CLASS | USB_DIR_IN | USB_RECIP_INTERFACE,
-			      0, 0, status, sizeof(struct dfu_status),
+			      0, 0, status, sizeof(*status),
 			      USB_CTRL_GET_TIMEOUT);
 	return ret;
 }
@@ -366,7 +366,7 @@ static int at76_usbdfu_download(struct usb_device *udev, u8 *buf, u32 size,
 	u32 dfu_timeout = 0;
 	int bsize = 0;
 	int blockno = 0;
-	struct dfu_status *dfu_stat_buf = NULL;
+	struct dfu_status *dfu_stat_buf;
 	u8 *dfu_state = NULL;
 	u8 *block = NULL;
 
@@ -378,7 +378,7 @@ static int at76_usbdfu_download(struct usb_device *udev, u8 *buf, u32 size,
 		return -EINVAL;
 	}
 
-	dfu_stat_buf = kmalloc(sizeof(struct dfu_status), GFP_KERNEL);
+	dfu_stat_buf = kmalloc_obj(*dfu_stat_buf);
 	if (!dfu_stat_buf) {
 		ret = -ENOMEM;
 		goto exit;
@@ -607,7 +607,7 @@ static inline int at76_get_hw_cfg_intersil(struct usb_device *udev,
 static int at76_get_hw_config(struct at76_priv *priv)
 {
 	int ret;
-	union at76_hwcfg *hwcfg = kmalloc(sizeof(*hwcfg), GFP_KERNEL);
+	union at76_hwcfg *hwcfg = kmalloc_obj(*hwcfg);
 
 	if (!hwcfg)
 		return -ENOMEM;
@@ -721,9 +721,11 @@ static int at76_set_card_command(struct usb_device *udev, u8 cmd, void *buf,
 				 int buf_size)
 {
 	int ret;
-	struct at76_command *cmd_buf = kmalloc(sizeof(struct at76_command) +
-					       buf_size, GFP_KERNEL);
+	size_t total_size;
+	struct at76_command *cmd_buf;
 
+	total_size = struct_size(cmd_buf, data, buf_size);
+	cmd_buf = kmalloc(total_size, GFP_KERNEL);
 	if (!cmd_buf)
 		return -ENOMEM;
 
@@ -732,15 +734,13 @@ static int at76_set_card_command(struct usb_device *udev, u8 cmd, void *buf,
 	cmd_buf->size = cpu_to_le16(buf_size);
 	memcpy(cmd_buf->data, buf, buf_size);
 
-	at76_dbg_dump(DBG_CMD, cmd_buf, sizeof(struct at76_command) + buf_size,
+	at76_dbg_dump(DBG_CMD, cmd_buf, total_size,
 		      "issuing command %s (0x%02x)",
 		      at76_get_cmd_string(cmd), cmd);
 
 	ret = usb_control_msg(udev, usb_sndctrlpipe(udev, 0), 0x0e,
 			      USB_TYPE_VENDOR | USB_DIR_OUT | USB_RECIP_DEVICE,
-			      0, 0, cmd_buf,
-			      sizeof(struct at76_command) + buf_size,
-			      USB_CTRL_GET_TIMEOUT);
+			      0, 0, cmd_buf, total_size, USB_CTRL_GET_TIMEOUT);
 	kfree(cmd_buf);
 	return ret;
 }
@@ -931,14 +931,12 @@ static void at76_dump_mib_mac_addr(struct at76_priv *priv)
 {
 	int i;
 	int ret;
-	struct mib_mac_addr *m = kmalloc(sizeof(struct mib_mac_addr),
-					 GFP_KERNEL);
+	struct mib_mac_addr *m = kmalloc_obj(*m);
 
 	if (!m)
 		return;
 
-	ret = at76_get_mib(priv->udev, MIB_MAC_ADDR, m,
-			   sizeof(struct mib_mac_addr));
+	ret = at76_get_mib(priv->udev, MIB_MAC_ADDR, m, sizeof(*m));
 	if (ret < 0) {
 		wiphy_err(priv->hw->wiphy,
 			  "at76_get_mib (MAC_ADDR) failed: %d\n", ret);
@@ -961,13 +959,12 @@ static void at76_dump_mib_mac_wep(struct at76_priv *priv)
 	int i;
 	int ret;
 	int key_len;
-	struct mib_mac_wep *m = kmalloc(sizeof(struct mib_mac_wep), GFP_KERNEL);
+	struct mib_mac_wep *m = kmalloc_obj(*m);
 
 	if (!m)
 		return;
 
-	ret = at76_get_mib(priv->udev, MIB_MAC_WEP, m,
-			   sizeof(struct mib_mac_wep));
+	ret = at76_get_mib(priv->udev, MIB_MAC_WEP, m, sizeof(*m));
 	if (ret < 0) {
 		wiphy_err(priv->hw->wiphy,
 			  "at76_get_mib (MAC_WEP) failed: %d\n", ret);
@@ -997,14 +994,12 @@ exit:
 static void at76_dump_mib_mac_mgmt(struct at76_priv *priv)
 {
 	int ret;
-	struct mib_mac_mgmt *m = kmalloc(sizeof(struct mib_mac_mgmt),
-					 GFP_KERNEL);
+	struct mib_mac_mgmt *m = kmalloc_obj(*m);
 
 	if (!m)
 		return;
 
-	ret = at76_get_mib(priv->udev, MIB_MAC_MGMT, m,
-			   sizeof(struct mib_mac_mgmt));
+	ret = at76_get_mib(priv->udev, MIB_MAC_MGMT, m, sizeof(*m));
 	if (ret < 0) {
 		wiphy_err(priv->hw->wiphy,
 			  "at76_get_mib (MAC_MGMT) failed: %d\n", ret);
@@ -1035,12 +1030,12 @@ exit:
 static void at76_dump_mib_mac(struct at76_priv *priv)
 {
 	int ret;
-	struct mib_mac *m = kmalloc(sizeof(struct mib_mac), GFP_KERNEL);
+	struct mib_mac *m = kmalloc_obj(*m);
 
 	if (!m)
 		return;
 
-	ret = at76_get_mib(priv->udev, MIB_MAC, m, sizeof(struct mib_mac));
+	ret = at76_get_mib(priv->udev, MIB_MAC, m, sizeof(*m));
 	if (ret < 0) {
 		wiphy_err(priv->hw->wiphy,
 			  "at76_get_mib (MAC) failed: %d\n", ret);
@@ -1072,12 +1067,12 @@ exit:
 static void at76_dump_mib_phy(struct at76_priv *priv)
 {
 	int ret;
-	struct mib_phy *m = kmalloc(sizeof(struct mib_phy), GFP_KERNEL);
+	struct mib_phy *m = kmalloc_obj(*m);
 
 	if (!m)
 		return;
 
-	ret = at76_get_mib(priv->udev, MIB_PHY, m, sizeof(struct mib_phy));
+	ret = at76_get_mib(priv->udev, MIB_PHY, m, sizeof(*m));
 	if (ret < 0) {
 		wiphy_err(priv->hw->wiphy,
 			  "at76_get_mib (PHY) failed: %d\n", ret);
@@ -1105,7 +1100,7 @@ exit:
 static void at76_dump_mib_local(struct at76_priv *priv)
 {
 	int ret;
-	struct mib_local *m = kmalloc(sizeof(*m), GFP_KERNEL);
+	struct mib_local *m = kmalloc_obj(*m);
 
 	if (!m)
 		return;
@@ -1130,13 +1125,12 @@ exit:
 static void at76_dump_mib_mdomain(struct at76_priv *priv)
 {
 	int ret;
-	struct mib_mdomain *m = kmalloc(sizeof(struct mib_mdomain), GFP_KERNEL);
+	struct mib_mdomain *m = kmalloc_obj(*m);
 
 	if (!m)
 		return;
 
-	ret = at76_get_mib(priv->udev, MIB_MDOMAIN, m,
-			   sizeof(struct mib_mdomain));
+	ret = at76_get_mib(priv->udev, MIB_MDOMAIN, m, sizeof(*m));
 	if (ret < 0) {
 		wiphy_err(priv->hw->wiphy,
 			  "at76_get_mib (MDOMAIN) failed: %d\n", ret);
@@ -1375,7 +1369,7 @@ static int at76_startup_device(struct at76_priv *priv)
 		 priv->scan_min_time, priv->scan_max_time,
 		 priv->scan_mode == SCAN_TYPE_ACTIVE ? "active" : "passive");
 
-	memset(ccfg, 0, sizeof(struct at76_card_config));
+	memset(ccfg, 0, sizeof(*ccfg));
 	ccfg->promiscuous_mode = 0;
 	ccfg->short_retry_limit = priv->short_retry_limit;
 
@@ -1411,7 +1405,7 @@ static int at76_startup_device(struct at76_priv *priv)
 	ccfg->beacon_period = cpu_to_le16(priv->beacon_period);
 
 	ret = at76_set_card_command(priv->udev, CMD_STARTUP, &priv->card_config,
-				    sizeof(struct at76_card_config));
+				    sizeof(*ccfg));
 	if (ret < 0) {
 		wiphy_err(priv->hw->wiphy, "at76_set_card_command failed: %d\n",
 			  ret);
@@ -1527,13 +1521,16 @@ static inline int at76_guess_freq(struct at76_priv *priv)
 
 	if (ieee80211_is_probe_resp(hdr->frame_control)) {
 		el_off = offsetof(struct ieee80211_mgmt, u.probe_resp.variable);
-		el = ((struct ieee80211_mgmt *)hdr)->u.probe_resp.variable;
 	} else if (ieee80211_is_beacon(hdr->frame_control)) {
 		el_off = offsetof(struct ieee80211_mgmt, u.beacon.variable);
-		el = ((struct ieee80211_mgmt *)hdr)->u.beacon.variable;
 	} else {
 		goto exit;
 	}
+
+	if (len < el_off)
+		goto exit;
+
+	el = priv->rx_skb->data + el_off;
 	len -= el_off;
 
 	el = cfg80211_find_ie(WLAN_EID_DS_PARAMS, el, len);
@@ -1856,7 +1853,7 @@ error:
 	return 0;
 }
 
-static void at76_mac80211_stop(struct ieee80211_hw *hw)
+static void at76_mac80211_stop(struct ieee80211_hw *hw, bool suspend)
 {
 	struct at76_priv *priv = hw->priv;
 
@@ -2008,7 +2005,7 @@ exit:
 	return 0;
 }
 
-static int at76_config(struct ieee80211_hw *hw, u32 changed)
+static int at76_config(struct ieee80211_hw *hw, int radio_idx, u32 changed)
 {
 	struct at76_priv *priv = hw->priv;
 
@@ -2178,6 +2175,10 @@ static int at76_set_key(struct ieee80211_hw *hw, enum set_key_cmd cmd,
 }
 
 static const struct ieee80211_ops at76_ops = {
+	.add_chanctx = ieee80211_emulate_add_chanctx,
+	.remove_chanctx = ieee80211_emulate_remove_chanctx,
+	.change_chanctx = ieee80211_emulate_change_chanctx,
+	.switch_vif_chanctx = ieee80211_emulate_switch_vif_chanctx,
 	.tx = at76_mac80211_tx,
 	.wake_tx_queue = ieee80211_handle_wake_tx_queue,
 	.add_interface = at76_add_interface,
@@ -2228,34 +2229,20 @@ static struct at76_priv *at76_alloc_new_device(struct usb_device *udev)
 static int at76_alloc_urbs(struct at76_priv *priv,
 			   struct usb_interface *interface)
 {
-	struct usb_endpoint_descriptor *endpoint, *ep_in, *ep_out;
-	int i;
+	struct usb_endpoint_descriptor *ep_in, *ep_out;
 	int buffer_size;
 	struct usb_host_interface *iface_desc;
+	int ret;
 
 	at76_dbg(DBG_PROC_ENTRY, "%s: ENTER", __func__);
 
 	at76_dbg(DBG_URB, "%s: NumEndpoints %d ", __func__,
 		 interface->cur_altsetting->desc.bNumEndpoints);
 
-	ep_in = NULL;
-	ep_out = NULL;
 	iface_desc = interface->cur_altsetting;
-	for (i = 0; i < iface_desc->desc.bNumEndpoints; i++) {
-		endpoint = &iface_desc->endpoint[i].desc;
 
-		at76_dbg(DBG_URB, "%s: %d. endpoint: addr 0x%x attr 0x%x",
-			 __func__, i, endpoint->bEndpointAddress,
-			 endpoint->bmAttributes);
-
-		if (!ep_in && usb_endpoint_is_bulk_in(endpoint))
-			ep_in = endpoint;
-
-		if (!ep_out && usb_endpoint_is_bulk_out(endpoint))
-			ep_out = endpoint;
-	}
-
-	if (!ep_in || !ep_out) {
+	ret = usb_find_common_endpoints(iface_desc, &ep_in, &ep_out, NULL, NULL);
+	if (ret) {
 		dev_err(&interface->dev, "bulk endpoints missing\n");
 		return -ENXIO;
 	}
@@ -2419,7 +2406,7 @@ static void at76_delete_device(struct at76_priv *priv)
 
 	kfree(priv->bulk_out_buffer);
 
-	del_timer_sync(&ledtrig_tx_timer);
+	timer_delete_sync(&ledtrig_tx_timer);
 
 	kfree_skb(priv->rx_skb);
 
@@ -2439,16 +2426,14 @@ static int at76_probe(struct usb_interface *interface,
 	struct usb_device *udev;
 	int op_mode;
 	int need_ext_fw = 0;
-	struct mib_fw_version *fwv = NULL;
+	struct mib_fw_version *fwv;
 	int board_type = (int)id->driver_info;
 
-	udev = usb_get_dev(interface_to_usbdev(interface));
+	udev = interface_to_usbdev(interface);
 
-	fwv = kmalloc(sizeof(*fwv), GFP_KERNEL);
-	if (!fwv) {
-		ret = -ENOMEM;
-		goto exit;
-	}
+	fwv = kmalloc_obj(*fwv);
+	if (!fwv)
+		return -ENOMEM;
 
 	/* Load firmware into kernel memory */
 	fwe = at76_load_firmware(udev, board_type);
@@ -2527,7 +2512,7 @@ static int at76_probe(struct usb_interface *interface,
 
 	usb_set_intfdata(interface, priv);
 
-	memcpy(&priv->fw_version, fwv, sizeof(struct mib_fw_version));
+	memcpy(&priv->fw_version, fwv, sizeof(*fwv));
 	priv->board_type = board_type;
 
 	ret = at76_init_new_device(priv, interface);
@@ -2536,8 +2521,7 @@ static int at76_probe(struct usb_interface *interface,
 
 exit:
 	kfree(fwv);
-	if (ret < 0)
-		usb_put_dev(udev);
+
 	return ret;
 }
 
@@ -2554,7 +2538,6 @@ static void at76_disconnect(struct usb_interface *interface)
 
 	wiphy_info(priv->hw->wiphy, "disconnecting\n");
 	at76_delete_device(priv);
-	usb_put_dev(priv->udev);
 	dev_info(&interface->dev, "disconnected\n");
 }
 

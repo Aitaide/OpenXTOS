@@ -9,17 +9,13 @@
  *
  */
 
-#define KMSG_COMPONENT "dasd"
-
+#include <linux/export.h>
 #include <linux/ctype.h>
 #include <linux/init.h>
 
 #include <asm/debug.h>
 #include <asm/ebcdic.h>
 #include <linux/uaccess.h>
-
-/* This is ugly... */
-#define PRINTK_HEADER "dasd_erp:"
 
 #include "dasd_int.h"
 
@@ -124,16 +120,19 @@ dasd_default_erp_action(struct dasd_ccw_req *cqr)
  */
 struct dasd_ccw_req *dasd_default_erp_postaction(struct dasd_ccw_req *cqr)
 {
-	int success;
+	int success, aborted;
 	unsigned long startclk, stopclk;
 	struct dasd_device *startdev;
+	unsigned int proc_bytes;
 
 	BUG_ON(cqr->refers == NULL || cqr->function == NULL);
 
 	success = cqr->status == DASD_CQR_DONE;
+	aborted = cqr->status == DASD_CQR_ABORTED;
 	startclk = cqr->startclk;
 	stopclk = cqr->stopclk;
 	startdev = cqr->startdev;
+	proc_bytes = cqr->proc_bytes;
 
 	/* free all ERPs - but NOT the original cqr */
 	while (cqr->refers != NULL) {
@@ -151,7 +150,11 @@ struct dasd_ccw_req *dasd_default_erp_postaction(struct dasd_ccw_req *cqr)
 	cqr->startclk = startclk;
 	cqr->stopclk = stopclk;
 	cqr->startdev = startdev;
-	if (success)
+	cqr->proc_bytes = proc_bytes;
+	if (aborted)
+		/* base request is owned by the ESE format replacement CQR */
+		cqr->status = DASD_CQR_ABORTED;
+	else if (success)
 		cqr->status = DASD_CQR_DONE;
 	else {
 		cqr->status = DASD_CQR_FAILED;
@@ -170,12 +173,12 @@ dasd_log_sense(struct dasd_ccw_req *cqr, struct irb *irb)
 	device = cqr->startdev;
 	if (cqr->intrc == -ETIMEDOUT) {
 		dev_err(&device->cdev->dev,
-			"A timeout error occurred for cqr %p\n", cqr);
+			"A timeout error occurred for cqr %px\n", cqr);
 		return;
 	}
 	if (cqr->intrc == -ENOLINK) {
 		dev_err(&device->cdev->dev,
-			"A transport error occurred for cqr %p\n", cqr);
+			"A transport error occurred for cqr %px\n", cqr);
 		return;
 	}
 	/* dump sense data */

@@ -37,7 +37,6 @@
 		.io_reg = base + 0x4 + REG_SIZE * id,		\
 		.intr_cfg_reg = base + 0x8 + REG_SIZE * id,	\
 		.intr_status_reg = base + 0xc + REG_SIZE * id,	\
-		.intr_target_reg = base + 0x8 + REG_SIZE * id,	\
 		.mux_bit = 2,			\
 		.pull_bit = 0,			\
 		.drv_bit = 6,			\
@@ -67,7 +66,6 @@
 		.io_reg = 0,				\
 		.intr_cfg_reg = 0,			\
 		.intr_status_reg = 0,			\
-		.intr_target_reg = 0,			\
 		.mux_bit = -1,				\
 		.pull_bit = -1,				\
 		.drv_bit = -1,				\
@@ -92,7 +90,6 @@
 		.io_reg = 0,				\
 		.intr_cfg_reg = 0,			\
 		.intr_status_reg = 0,			\
-		.intr_target_reg = 0,			\
 		.mux_bit = -1,				\
 		.pull_bit = pull,			\
 		.drv_bit = drv,				\
@@ -117,7 +114,6 @@
 		.io_reg = offset + 0x4,			\
 		.intr_cfg_reg = 0,			\
 		.intr_status_reg = 0,			\
-		.intr_target_reg = 0,			\
 		.mux_bit = -1,				\
 		.pull_bit = 3,				\
 		.drv_bit = 0,				\
@@ -991,7 +987,7 @@ static const char * const mss_lte_groups[] = {
 };
 
 static const struct pinfunction sdm670_functions[] = {
-	MSM_PIN_FUNCTION(gpio),
+	MSM_GPIO_PIN_FUNCTION(gpio),
 	MSM_PIN_FUNCTION(adsp_ext),
 	MSM_PIN_FUNCTION(agera_pll),
 	MSM_PIN_FUNCTION(atest_char),
@@ -1290,6 +1286,22 @@ static const int sdm670_reserved_gpios[] = {
 	58, 59, 60, 61, 62, 63, 64, 69, 70, 71, 72, 73, 74, 104, -1
 };
 
+static const struct msm_gpio_wakeirq_map sdm670_pdc_map[] = {
+	{ 1, 30 }, { 3, 31 }, { 5, 32 }, { 10, 33 }, { 11, 34 },
+	{ 20, 35 }, { 22, 36 }, { 24, 37 }, { 26, 38 }, { 30, 39 },
+	{ 31, 117 }, { 32, 41 }, { 34, 42 }, { 36, 43 }, { 37, 44 },
+	{ 38, 45 }, { 39, 46 }, { 40, 47 }, { 41, 115 }, { 43, 49 },
+	{ 44, 50 }, { 46, 51 }, { 48, 52 }, { 49, 118 }, { 52, 54 },
+	{ 53, 55 }, { 54, 56 }, { 56, 57 }, { 57, 58 }, { 66, 66 },
+	{ 68, 67 }, { 77, 70 }, { 78, 71 }, { 79, 72 }, { 80, 73 },
+	{ 84, 74 }, { 85, 75 }, { 86, 76 }, { 88, 77 }, { 89, 116 },
+	{ 91, 79 }, { 92, 80 }, { 95, 81 }, { 96, 82 }, { 97, 83 },
+	{ 101, 84 }, { 103, 85 }, { 115, 90 }, { 116, 91 }, { 117, 92 },
+	{ 118, 93 }, { 119, 94 }, { 120, 95 }, { 121, 96 }, { 122, 97 },
+	{ 123, 98 }, { 124, 99 }, { 125, 100 }, { 127, 102 }, { 128, 103 },
+	{ 129, 104 }, { 130, 105 }, { 132, 106 }, { 133, 107 }, { 145, 108 },
+};
+
 static const struct msm_pinctrl_soc_data sdm670_pinctrl = {
 	.pins = sdm670_pins,
 	.npins = ARRAY_SIZE(sdm670_pins),
@@ -1299,6 +1311,9 @@ static const struct msm_pinctrl_soc_data sdm670_pinctrl = {
 	.ngroups = ARRAY_SIZE(sdm670_groups),
 	.ngpios = 151,
 	.reserved_gpios = sdm670_reserved_gpios,
+	.wakeirq_map = sdm670_pdc_map,
+	.nwakeirq_map = ARRAY_SIZE(sdm670_pdc_map),
+	.wakeirq_dual_edge_errata = true,
 };
 
 static int sdm670_pinctrl_probe(struct platform_device *pdev)
@@ -1318,7 +1333,6 @@ static struct platform_driver sdm670_pinctrl_driver = {
 		.of_match_table = sdm670_pinctrl_of_match,
 	},
 	.probe = sdm670_pinctrl_probe,
-	.remove = msm_pinctrl_remove,
 };
 
 static int __init sdm670_pinctrl_init(void)

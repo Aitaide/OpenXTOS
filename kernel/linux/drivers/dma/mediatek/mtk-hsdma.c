@@ -226,7 +226,7 @@ struct mtk_hsdma_soc {
  * @pc_refcnt:		     Track how many VCs are using the PC
  * @lock:		     Lock protect agaisting multiple VCs access PC
  * @soc:		     The pointer to area holding differences among
- *			     vaious platform
+ *			     various platform
  */
 struct mtk_hsdma_device {
 	struct dma_device ddev;
@@ -334,7 +334,7 @@ static int mtk_hsdma_alloc_pchan(struct mtk_hsdma_device *hsdma,
 	ring->cur_tptr = 0;
 	ring->cur_rptr = MTK_DMA_SIZE - 1;
 
-	ring->cb = kcalloc(MTK_DMA_SIZE, sizeof(*ring->cb), GFP_NOWAIT);
+	ring->cb = kzalloc_objs(*ring->cb, MTK_DMA_SIZE, GFP_NOWAIT);
 	if (!ring->cb) {
 		err = -ENOMEM;
 		goto err_free_dma;
@@ -722,7 +722,7 @@ mtk_hsdma_prep_dma_memcpy(struct dma_chan *c, dma_addr_t dest,
 {
 	struct mtk_hsdma_vdesc *hvd;
 
-	hvd = kzalloc(sizeof(*hvd), GFP_NOWAIT);
+	hvd = kzalloc_obj(*hvd, GFP_NOWAIT);
 	if (!hvd)
 		return NULL;
 
@@ -1009,7 +1009,7 @@ err_unregister:
 	return err;
 }
 
-static int mtk_hsdma_remove(struct platform_device *pdev)
+static void mtk_hsdma_remove(struct platform_device *pdev)
 {
 	struct mtk_hsdma_device *hsdma = platform_get_drvdata(pdev);
 	struct mtk_hsdma_vchan *vc;
@@ -1034,8 +1034,6 @@ static int mtk_hsdma_remove(struct platform_device *pdev)
 
 	dma_async_device_unregister(&hsdma->ddev);
 	of_dma_controller_free(pdev->dev.of_node);
-
-	return 0;
 }
 
 static struct platform_driver mtk_hsdma_driver = {

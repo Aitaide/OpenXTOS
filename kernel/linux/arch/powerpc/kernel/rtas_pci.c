@@ -43,7 +43,7 @@ static inline int config_access_valid(struct pci_dn *dn, int where)
 	return 0;
 }
 
-int rtas_read_config(struct pci_dn *pdn, int where, int size, u32 *val)
+int rtas_pci_dn_read_config(struct pci_dn *pdn, int where, int size, u32 *val)
 {
 	int returnval = -1;
 	unsigned long buid, addr;
@@ -54,6 +54,10 @@ int rtas_read_config(struct pci_dn *pdn, int where, int size, u32 *val)
 	if (!config_access_valid(pdn, where))
 		return PCIBIOS_BAD_REGISTER_NUMBER;
 #ifdef CONFIG_EEH
+	if (pdn->edev &&
+	    (pdn->edev->mode & EEH_DEV_REMOVED))
+		return PCIBIOS_DEVICE_NOT_FOUND;
+
 	if (pdn->edev && pdn->edev->pe &&
 	    (pdn->edev->pe->state & EEH_PE_CFG_BLOCKED))
 		return PCIBIOS_SET_FAILED;
@@ -87,7 +91,7 @@ static int rtas_pci_read_config(struct pci_bus *bus,
 	pdn = pci_get_pdn_by_devfn(bus, devfn);
 
 	/* Validity of pdn is checked in here */
-	ret = rtas_read_config(pdn, where, size, val);
+	ret = rtas_pci_dn_read_config(pdn, where, size, val);
 	if (*val == EEH_IO_ERROR_VALUE(size) &&
 	    eeh_dev_check_failure(pdn_to_eeh_dev(pdn)))
 		return PCIBIOS_DEVICE_NOT_FOUND;
@@ -95,7 +99,7 @@ static int rtas_pci_read_config(struct pci_bus *bus,
 	return ret;
 }
 
-int rtas_write_config(struct pci_dn *pdn, int where, int size, u32 val)
+int rtas_pci_dn_write_config(struct pci_dn *pdn, int where, int size, u32 val)
 {
 	unsigned long buid, addr;
 	int ret;
@@ -105,6 +109,10 @@ int rtas_write_config(struct pci_dn *pdn, int where, int size, u32 val)
 	if (!config_access_valid(pdn, where))
 		return PCIBIOS_BAD_REGISTER_NUMBER;
 #ifdef CONFIG_EEH
+	if (pdn->edev &&
+	    (pdn->edev->mode & EEH_DEV_REMOVED))
+		return PCIBIOS_DEVICE_NOT_FOUND;
+
 	if (pdn->edev && pdn->edev->pe &&
 	    (pdn->edev->pe->state & EEH_PE_CFG_BLOCKED))
 		return PCIBIOS_SET_FAILED;
@@ -134,7 +142,7 @@ static int rtas_pci_write_config(struct pci_bus *bus,
 	pdn = pci_get_pdn_by_devfn(bus, devfn);
 
 	/* Validity of pdn is checked in here. */
-	return rtas_write_config(pdn, where, size, val);
+	return rtas_pci_dn_write_config(pdn, where, size, val);
 }
 
 static struct pci_ops rtas_pci_ops = {

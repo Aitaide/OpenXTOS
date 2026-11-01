@@ -10,6 +10,7 @@
 #define PMBUS_H
 
 #include <linux/bitops.h>
+#include <linux/cleanup.h>
 #include <linux/regulator/driver.h>
 
 /*
@@ -241,7 +242,17 @@ enum pmbus_regs {
 /*
  * OPERATION
  */
+#define PB_OPERATION_CONTROL_V_SRC	GENMASK(5, 4)
 #define PB_OPERATION_CONTROL_ON		BIT(7)
+
+/*
+ * ON_OFF_CONFIG
+ */
+#define PB_ON_OFF_CONFIG_POWERUP_CONTROL	BIT(4)
+#define PB_ON_OFF_CONFIG_OPERATION_REQ		BIT(3)
+#define PB_ON_OFF_CONFIG_EN_PIN_REQ		BIT(2)
+#define PB_ON_OFF_CONFIG_POLARITY_HIGH		BIT(1)
+#define PB_ON_OFF_CONFIG_TURN_OFF_FAST		BIT(0)
 
 /*
  * WRITE_PROTECT
@@ -376,7 +387,7 @@ enum pmbus_sensor_classes {
 };
 
 #define PMBUS_PAGES	32	/* Per PMBus specification */
-#define PMBUS_PHASES	10	/* Maximum number of phases per page */
+#define PMBUS_PHASES	16	/* Maximum number of phases per page */
 
 /* Functionality bit mask */
 #define PMBUS_HAVE_VIN		BIT(0)
@@ -407,7 +418,19 @@ enum pmbus_sensor_classes {
 #define PMBUS_PAGE_VIRTUAL	BIT(31)	/* Page is virtual */
 
 enum pmbus_data_format { linear = 0, ieee754, direct, vid };
-enum vrm_version { vr11 = 0, vr12, vr13, imvp9, amd625mv };
+enum vrm_version { vr11 = 0, vr12, vr13, imvp9, amd625mv, nvidia195mv };
+
+/* PMBus revision identifiers */
+#define PMBUS_REV_10	0x00	/* PMBus revision 1.0 */
+#define PMBUS_REV_11	0x11	/* PMBus revision 1.1 */
+#define PMBUS_REV_12	0x22	/* PMBus revision 1.2 */
+#define PMBUS_REV_13	0x33	/* PMBus revision 1.3 */
+#define PMBUS_REV_131	0x44	/* PMBus revision 1.3.1 */
+#define PMBUS_REV_14	0x55	/* PMBus revision 1.4 */
+
+/* Operation type flags for pmbus_update_ts */
+#define PMBUS_OP_WRITE		BIT(0)
+#define PMBUS_OP_PAGE_CHANGE	BIT(1)
 
 struct pmbus_driver_info {
 	int pages;		/* Total number of pages */
@@ -457,11 +480,34 @@ struct pmbus_driver_info {
 
 	/* custom attributes */
 	const struct attribute_group **groups;
+
+	/*
+	 * Some chips need a little delay between SMBus communication. When
+	 * set, the generic PMBus helper functions will wait if necessary
+	 * to meet this requirement. The access delay is honored after
+	 * every SMBus operation. The write delay is only honored after
+	 * SMBus write operations.
+	 */
+	int access_delay;		/* in microseconds */
+	int write_delay;		/* in microseconds */
+	int page_change_delay;		/* in microseconds */
+
+	/*
+	 * Some chips do not support the PMBUS_REVISION command.
+	 * Drivers for such chips can report the supported PMBus revision here.
+	 *
+	 * Drivers must set have_pmbus_revision to true and provide the
+	 * supported PMBus version in pmbus_revision.
+	 */
+	bool have_pmbus_revision;	/* true if pmbus_revision is valid */
+	u8 pmbus_revision;		/* PMBus revision */
 };
 
 /* Regulator ops */
 
 extern const struct regulator_ops pmbus_regulator_ops;
+int pmbus_regulator_init_cb(struct regulator_dev *rdev,
+			    struct regulator_config *config);
 
 /* Macros for filling in array of struct regulator_desc */
 #define PMBUS_REGULATOR_STEP(_name, _id, _voltages, _step, _min_uV)  \
@@ -476,15 +522,47 @@ extern const struct regulator_ops pmbus_regulator_ops;
 		.n_voltages = _voltages,			\
 		.uV_step = _step,				\
 		.min_uV = _min_uV,				\
+		.init_cb = pmbus_regulator_init_cb,		\
 	}
 
 #define PMBUS_REGULATOR(_name, _id)   PMBUS_REGULATOR_STEP(_name, _id, 0, 0, 0)
+
+#define __PMBUS_REGULATOR_STEP_ONE(_name, _node, _voltages, _step, _min_uV)  \
+	{							\
+		.name = (_name),				\
+		.of_match = of_match_ptr(_name),		\
+		.regulators_node = of_match_ptr(_node),		\
+		.ops = &pmbus_regulator_ops,			\
+		.type = REGULATOR_VOLTAGE,			\
+		.owner = THIS_MODULE,				\
+		.n_voltages = _voltages,			\
+		.uV_step = _step,				\
+		.min_uV = _min_uV,				\
+		.init_cb = pmbus_regulator_init_cb,		\
+	}
+
+/*
+ * _NODE macros are defined for historic reasons and MUST NOT be used in new
+ * drivers.
+ */
+#define PMBUS_REGULATOR_STEP_ONE_NODE(_name, _voltages, _step, _min_uV)  \
+	__PMBUS_REGULATOR_STEP_ONE(_name, "regulators", _voltages, _step, _min_uV)
+
+#define PMBUS_REGULATOR_ONE_NODE(_name)	PMBUS_REGULATOR_STEP_ONE_NODE(_name, 0, 0, 0)
+
+#define PMBUS_REGULATOR_STEP_ONE(_name, _voltages, _step, _min_uV)  \
+	__PMBUS_REGULATOR_STEP_ONE(_name, NULL, _voltages, _step, _min_uV)
+
+#define PMBUS_REGULATOR_ONE(_name)	PMBUS_REGULATOR_STEP_ONE(_name, 0, 0, 0)
 
 /* Function declarations */
 
 void pmbus_clear_cache(struct i2c_client *client);
 void pmbus_set_update(struct i2c_client *client, u8 reg, bool update);
+void pmbus_wait(struct i2c_client *client);
+void pmbus_update_ts(struct i2c_client *client, int op);
 int pmbus_set_page(struct i2c_client *client, int page, int phase);
+int pmbus_read_smbus_i2c_block_data(struct i2c_client *client, u8 reg, char *data_buf);
 int pmbus_read_word_data(struct i2c_client *client, int page, int phase,
 			 u8 reg);
 int pmbus_write_word_data(struct i2c_client *client, int page, u8 reg,
@@ -496,6 +574,7 @@ int pmbus_write_byte_data(struct i2c_client *client, int page, u8 reg,
 int pmbus_update_byte_data(struct i2c_client *client, int page, u8 reg,
 			   u8 mask, u8 value);
 void pmbus_clear_faults(struct i2c_client *client);
+void pmbus_check_and_notify_faults(struct i2c_client *client);
 bool pmbus_check_byte_register(struct i2c_client *client, int page, int reg);
 bool pmbus_check_word_register(struct i2c_client *client, int page, int reg);
 int pmbus_do_probe(struct i2c_client *client, struct pmbus_driver_info *info);
@@ -506,7 +585,11 @@ int pmbus_get_fan_rate_device(struct i2c_client *client, int page, int id,
 int pmbus_get_fan_rate_cached(struct i2c_client *client, int page, int id,
 			      enum pmbus_fan_mode mode);
 int pmbus_lock_interruptible(struct i2c_client *client);
+void pmbus_lock(struct i2c_client *client);
 void pmbus_unlock(struct i2c_client *client);
+
+DEFINE_GUARD(pmbus_lock, struct i2c_client *, pmbus_lock(_T), pmbus_unlock(_T))
+
 int pmbus_update_fan(struct i2c_client *client, int page, int id,
 		     u8 config, u8 mask, u16 command);
 struct dentry *pmbus_get_debugfs_dir(struct i2c_client *client);

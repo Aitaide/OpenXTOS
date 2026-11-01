@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-2.0 or BSD-3-Clause
+// SPDX-License-Identifier: GPL-2.0 OR BSD-3-Clause
 
 /* Authors: Bernard Metzler <bmt@zurich.ibm.com> */
 /* Copyright (c) 2008-2019, IBM Corporation */
@@ -38,7 +38,7 @@ static int siw_rx_umem(struct siw_rx_stream *srx, struct siw_umem *umem,
 
 		p = siw_get_upage(umem, dest_addr);
 		if (unlikely(!p)) {
-			pr_warn("siw: %s: [QP %u]: bogus addr: %pK, %pK\n",
+			pr_warn("siw: %s: [QP %u]: bogus addr: %p, %p\n",
 				__func__, qp_id(rx_qp(srx)),
 				(void *)(uintptr_t)dest_addr,
 				(void *)(uintptr_t)umem->fp_addr);
@@ -51,7 +51,7 @@ static int siw_rx_umem(struct siw_rx_stream *srx, struct siw_umem *umem,
 		pg_off = dest_addr & ~PAGE_MASK;
 		bytes = min(len, (int)PAGE_SIZE - pg_off);
 
-		siw_dbg_qp(rx_qp(srx), "page %pK, bytes=%u\n", p, bytes);
+		siw_dbg_qp(rx_qp(srx), "page %p, bytes=%u\n", p, bytes);
 
 		dest = kmap_atomic(p);
 		rv = skb_copy_bits(srx->skb, srx->skb_offset, dest + pg_off,
@@ -67,10 +67,10 @@ static int siw_rx_umem(struct siw_rx_stream *srx, struct siw_umem *umem,
 
 			return -EFAULT;
 		}
-		if (srx->mpa_crc_hd) {
+		if (srx->mpa_crc_enabled) {
 			if (rdma_is_kernel_res(&rx_qp(srx)->base_qp.res)) {
-				crypto_shash_update(srx->mpa_crc_hd,
-					(u8 *)(dest + pg_off), bytes);
+				siw_crc_update(&srx->mpa_crc, dest + pg_off,
+					       bytes);
 				kunmap_atomic(dest);
 			} else {
 				kunmap_atomic(dest);
@@ -105,17 +105,17 @@ static int siw_rx_kva(struct siw_rx_stream *srx, void *kva, int len)
 {
 	int rv;
 
-	siw_dbg_qp(rx_qp(srx), "kva: 0x%pK, len: %u\n", kva, len);
+	siw_dbg_qp(rx_qp(srx), "kva: 0x%p, len: %u\n", kva, len);
 
 	rv = skb_copy_bits(srx->skb, srx->skb_offset, kva, len);
 	if (unlikely(rv)) {
-		pr_warn("siw: [QP %u]: %s, len %d, kva 0x%pK, rv %d\n",
+		pr_warn("siw: [QP %u]: %s, len %d, kva 0x%p, rv %d\n",
 			qp_id(rx_qp(srx)), __func__, len, kva, rv);
 
 		return rv;
 	}
-	if (srx->mpa_crc_hd)
-		crypto_shash_update(srx->mpa_crc_hd, (u8 *)kva, len);
+	if (srx->mpa_crc_enabled)
+		siw_crc_update(&srx->mpa_crc, kva, len);
 
 	srx->skb_offset += len;
 	srx->skb_copied += len;
@@ -405,6 +405,20 @@ out:
 	return wqe;
 }
 
+static int siw_rx_data(struct siw_mem *mem_p, struct siw_rx_stream *srx,
+		       unsigned int *pbl_idx, u64 addr, int bytes)
+{
+	int rv;
+
+	if (mem_p->mem_obj == NULL)
+		rv = siw_rx_kva(srx, ib_virt_dma_to_ptr(addr), bytes);
+	else if (!mem_p->is_pbl)
+		rv = siw_rx_umem(srx, mem_p->umem, addr, bytes);
+	else
+		rv = siw_rx_pbl(srx, pbl_idx, mem_p, addr, bytes);
+	return rv;
+}
+
 /*
  * siw_proc_send:
  *
@@ -485,17 +499,8 @@ int siw_proc_send(struct siw_qp *qp)
 			break;
 		}
 		mem_p = *mem;
-		if (mem_p->mem_obj == NULL)
-			rv = siw_rx_kva(srx,
-				ib_virt_dma_to_ptr(sge->laddr + frx->sge_off),
-				sge_bytes);
-		else if (!mem_p->is_pbl)
-			rv = siw_rx_umem(srx, mem_p->umem,
-					 sge->laddr + frx->sge_off, sge_bytes);
-		else
-			rv = siw_rx_pbl(srx, &frx->pbl_idx, mem_p,
-					sge->laddr + frx->sge_off, sge_bytes);
-
+		rv = siw_rx_data(mem_p, srx, &frx->pbl_idx,
+				 sge->laddr + frx->sge_off, sge_bytes);
 		if (unlikely(rv != sge_bytes)) {
 			wqe->processed += rcvd_bytes;
 
@@ -598,17 +603,8 @@ int siw_proc_write(struct siw_qp *qp)
 		return -EINVAL;
 	}
 
-	if (mem->mem_obj == NULL)
-		rv = siw_rx_kva(srx,
-			(void *)(uintptr_t)(srx->ddp_to + srx->fpdu_part_rcvd),
-			bytes);
-	else if (!mem->is_pbl)
-		rv = siw_rx_umem(srx, mem->umem,
-				 srx->ddp_to + srx->fpdu_part_rcvd, bytes);
-	else
-		rv = siw_rx_pbl(srx, &frx->pbl_idx, mem,
-				srx->ddp_to + srx->fpdu_part_rcvd, bytes);
-
+	rv = siw_rx_data(mem, srx, &frx->pbl_idx,
+			 srx->ddp_to + srx->fpdu_part_rcvd, bytes);
 	if (unlikely(rv != bytes)) {
 		siw_init_terminate(qp, TERM_ERROR_LAYER_DDP,
 				   DDP_ETYPE_CATASTROPHIC,
@@ -848,18 +844,18 @@ int siw_proc_rresp(struct siw_qp *qp)
 	}
 	mem_p = *mem;
 
+	if (unlikely(wqe->processed + srx->fpdu_part_rem > wqe->bytes)) {
+		siw_dbg_qp(qp, "rresp len: %d + %d > %d\n",
+			   wqe->processed, srx->fpdu_part_rem, wqe->bytes);
+		wqe->wc_status = SIW_WC_LOC_LEN_ERR;
+		siw_init_terminate(qp, TERM_ERROR_LAYER_DDP,
+				   DDP_ETYPE_TAGGED_BUF,
+				   DDP_ECODE_T_BASE_BOUNDS, 0);
+		return -EINVAL;
+	}
 	bytes = min(srx->fpdu_part_rem, srx->skb_new);
-
-	if (mem_p->mem_obj == NULL)
-		rv = siw_rx_kva(srx,
-			ib_virt_dma_to_ptr(sge->laddr + wqe->processed),
-			bytes);
-	else if (!mem_p->is_pbl)
-		rv = siw_rx_umem(srx, mem_p->umem, sge->laddr + wqe->processed,
-				 bytes);
-	else
-		rv = siw_rx_pbl(srx, &frx->pbl_idx, mem_p,
-				sge->laddr + wqe->processed, bytes);
+	rv = siw_rx_data(mem_p, srx, &frx->pbl_idx,
+			 sge->laddr + wqe->processed, bytes);
 	if (rv != bytes) {
 		wqe->wc_status = SIW_WC_GENERAL_ERR;
 		rv = -EINVAL;
@@ -879,6 +875,13 @@ error_term:
 	siw_init_terminate(qp, TERM_ERROR_LAYER_DDP, DDP_ETYPE_CATASTROPHIC,
 			   DDP_ECODE_CATASTROPHIC, 0);
 	return rv;
+}
+
+static void siw_update_skb_rcvd(struct siw_rx_stream *srx, u16 length)
+{
+	srx->skb_offset += length;
+	srx->skb_new -= length;
+	srx->skb_copied += length;
 }
 
 int siw_proc_terminate(struct siw_qp *qp)
@@ -925,9 +928,7 @@ int siw_proc_terminate(struct siw_qp *qp)
 		goto out;
 
 	infop += to_copy;
-	srx->skb_offset += to_copy;
-	srx->skb_new -= to_copy;
-	srx->skb_copied += to_copy;
+	siw_update_skb_rcvd(srx, to_copy);
 	srx->fpdu_part_rcvd += to_copy;
 	srx->fpdu_part_rem -= to_copy;
 
@@ -949,9 +950,7 @@ int siw_proc_terminate(struct siw_qp *qp)
 			   term->flag_m ? "valid" : "invalid");
 	}
 out:
-	srx->skb_new -= to_copy;
-	srx->skb_offset += to_copy;
-	srx->skb_copied += to_copy;
+	siw_update_skb_rcvd(srx, to_copy);
 	srx->fpdu_part_rcvd += to_copy;
 	srx->fpdu_part_rem -= to_copy;
 
@@ -970,24 +969,22 @@ static int siw_get_trailer(struct siw_qp *qp, struct siw_rx_stream *srx)
 
 	skb_copy_bits(skb, srx->skb_offset, tbuf, avail);
 
-	srx->skb_new -= avail;
-	srx->skb_offset += avail;
-	srx->skb_copied += avail;
+	siw_update_skb_rcvd(srx, avail);
 	srx->fpdu_part_rem -= avail;
 
 	if (srx->fpdu_part_rem)
 		return -EAGAIN;
 
-	if (!srx->mpa_crc_hd)
+	if (!srx->mpa_crc_enabled)
 		return 0;
 
 	if (srx->pad)
-		crypto_shash_update(srx->mpa_crc_hd, tbuf, srx->pad);
+		siw_crc_update(&srx->mpa_crc, tbuf, srx->pad);
 	/*
 	 * CRC32 is computed, transmitted and received directly in NBO,
 	 * so there's never a reason to convert byte order.
 	 */
-	crypto_shash_final(srx->mpa_crc_hd, (u8 *)&crc_own);
+	siw_crc_final(&srx->mpa_crc, (u8 *)&crc_own);
 	crc_in = (__force __wsum)srx->trailer.crc;
 
 	if (unlikely(crc_in != crc_own)) {
@@ -1023,12 +1020,8 @@ static int siw_get_hdr(struct siw_rx_stream *srx)
 		skb_copy_bits(skb, srx->skb_offset,
 			      (char *)c_hdr + srx->fpdu_part_rcvd, bytes);
 
+		siw_update_skb_rcvd(srx, bytes);
 		srx->fpdu_part_rcvd += bytes;
-
-		srx->skb_new -= bytes;
-		srx->skb_offset += bytes;
-		srx->skb_copied += bytes;
-
 		if (srx->fpdu_part_rcvd < MIN_DDP_HDR)
 			return -EAGAIN;
 
@@ -1086,19 +1079,30 @@ static int siw_get_hdr(struct siw_rx_stream *srx)
 	if (iwarp_pktinfo[opcode].hdr_len > sizeof(struct iwarp_ctrl_tagged)) {
 		int hdrlen = iwarp_pktinfo[opcode].hdr_len;
 
-		bytes = min_t(int, hdrlen - MIN_DDP_HDR, srx->skb_new);
+		bytes = min_t(int, hdrlen - srx->fpdu_part_rcvd, srx->skb_new);
 
 		skb_copy_bits(skb, srx->skb_offset,
 			      (char *)c_hdr + srx->fpdu_part_rcvd, bytes);
 
+		siw_update_skb_rcvd(srx, bytes);
 		srx->fpdu_part_rcvd += bytes;
-
-		srx->skb_new -= bytes;
-		srx->skb_offset += bytes;
-		srx->skb_copied += bytes;
-
 		if (srx->fpdu_part_rcvd < hdrlen)
 			return -EAGAIN;
+	}
+
+	/*
+	 * Peer-controlled mpa_len must not underflow srx->fpdu_part_rem
+	 * in siw_tcp_rx_data(); a negative value flows as a signed copy
+	 * length into siw_check_mem() and skb_copy_bits().
+	 */
+	if (unlikely(be16_to_cpu(c_hdr->mpa_len) + MPA_HDR_SIZE <
+		     iwarp_pktinfo[opcode].hdr_len)) {
+		pr_warn_ratelimited("siw: short mpa_len %u for opcode %u (hdr_len %u)\n",
+				    be16_to_cpu(c_hdr->mpa_len), opcode,
+				    iwarp_pktinfo[opcode].hdr_len);
+		siw_init_terminate(rx_qp(srx), TERM_ERROR_LAYER_LLP,
+				   LLP_ETYPE_MPA, LLP_ECODE_FPDU_START, 0);
+		return -EINVAL;
 	}
 
 	/*
@@ -1113,13 +1117,12 @@ static int siw_get_hdr(struct siw_rx_stream *srx)
 	 * (tagged/untagged). E.g., a WRITE can get intersected by a SEND,
 	 * but not by a READ RESPONSE etc.
 	 */
-	if (srx->mpa_crc_hd) {
+	if (srx->mpa_crc_enabled) {
 		/*
 		 * Restart CRC computation
 		 */
-		crypto_shash_init(srx->mpa_crc_hd);
-		crypto_shash_update(srx->mpa_crc_hd, (u8 *)c_hdr,
-				    srx->fpdu_part_rcvd);
+		siw_crc_init(&srx->mpa_crc);
+		siw_crc_update(&srx->mpa_crc, c_hdr, srx->fpdu_part_rcvd);
 	}
 	if (frx->more_ddp_segs) {
 		frx->first_ddp_seg = 0;
@@ -1456,7 +1459,8 @@ int siw_tcp_rx_data(read_descriptor_t *rd_desc, struct sk_buff *skb,
 		}
 		if (unlikely(rv != 0 && rv != -EAGAIN)) {
 			if ((srx->state > SIW_GET_HDR ||
-			     qp->rx_fpdu->more_ddp_segs) && run_completion)
+			     (qp->rx_fpdu && qp->rx_fpdu->more_ddp_segs)) &&
+			    run_completion)
 				siw_rdmap_complete(qp, rv);
 
 			siw_dbg_qp(qp, "rx error %d, rx state %d\n", rv,

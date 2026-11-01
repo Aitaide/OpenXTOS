@@ -390,7 +390,6 @@ static int cppi41_dma_alloc_chan_resources(struct dma_chan *chan)
 	if (!c->is_tx)
 		cppi_writel(c->q_num, c->gcr_reg + RXHPCRA0);
 
-	pm_runtime_mark_last_busy(cdd->ddev.dev);
 	pm_runtime_put_autosuspend(cdd->ddev.dev);
 
 	return 0;
@@ -411,7 +410,6 @@ static void cppi41_dma_free_chan_resources(struct dma_chan *chan)
 
 	WARN_ON(!list_empty(&cdd->pending));
 
-	pm_runtime_mark_last_busy(cdd->ddev.dev);
 	pm_runtime_put_autosuspend(cdd->ddev.dev);
 }
 
@@ -509,7 +507,6 @@ static void cppi41_dma_issue_pending(struct dma_chan *chan)
 		cppi41_run_queue(cdd);
 	spin_unlock_irqrestore(&cdd->lock, flags);
 
-	pm_runtime_mark_last_busy(cdd->ddev.dev);
 	pm_runtime_put_autosuspend(cdd->ddev.dev);
 }
 
@@ -627,7 +624,6 @@ static struct dma_async_tx_descriptor *cppi41_dma_prep_slave_sg(
 	txd = &c->txd;
 
 err_out_not_ready:
-	pm_runtime_mark_last_busy(cdd->ddev.dev);
 	pm_runtime_put_autosuspend(cdd->ddev.dev);
 
 	return txd;
@@ -1139,7 +1135,6 @@ static int cppi41_dma_probe(struct platform_device *pdev)
 	if (ret)
 		goto err_of;
 
-	pm_runtime_mark_last_busy(dev);
 	pm_runtime_put_autosuspend(dev);
 
 	return 0;
@@ -1156,7 +1151,7 @@ err_get_sync:
 	return ret;
 }
 
-static int cppi41_dma_remove(struct platform_device *pdev)
+static void cppi41_dma_remove(struct platform_device *pdev)
 {
 	struct cppi41_dd *cdd = platform_get_drvdata(pdev);
 	int error;
@@ -1173,7 +1168,6 @@ static int cppi41_dma_remove(struct platform_device *pdev)
 	pm_runtime_dont_use_autosuspend(&pdev->dev);
 	pm_runtime_put_sync(&pdev->dev);
 	pm_runtime_disable(&pdev->dev);
-	return 0;
 }
 
 static int __maybe_unused cppi41_suspend(struct device *dev)
@@ -1253,5 +1247,6 @@ static struct platform_driver cpp41_dma_driver = {
 };
 
 module_platform_driver(cpp41_dma_driver);
+MODULE_DESCRIPTION("Texas Instruments CPPI 4.1 DMA support");
 MODULE_LICENSE("GPL");
 MODULE_AUTHOR("Sebastian Andrzej Siewior <bigeasy@linutronix.de>");

@@ -85,6 +85,7 @@ struct user_evtchn {
 	struct per_user_data *user;
 	evtchn_port_t port;
 	bool enabled;
+	bool unbinding;
 };
 
 static void evtchn_free_ring(evtchn_port_t *ring)
@@ -163,6 +164,10 @@ static irqreturn_t evtchn_interrupt(int irq, void *data)
 	struct user_evtchn *evtchn = data;
 	struct per_user_data *u = evtchn->user;
 	unsigned int prod, cons;
+
+	/* Handler might be called when tearing down the IRQ. */
+	if (evtchn->unbinding)
+		return IRQ_HANDLED;
 
 	WARN(!evtchn->enabled,
 	     "Interrupt for port %u, but apparently not enabled; per-user %p\n",
@@ -327,7 +332,7 @@ static int evtchn_resize_ring(struct per_user_data *u)
 	else
 		new_size = 2 * u->ring_size;
 
-	new_ring = kvmalloc_array(new_size, sizeof(*new_ring), GFP_KERNEL);
+	new_ring = kvmalloc_objs(*new_ring, new_size);
 	if (!new_ring)
 		return -ENOMEM;
 
@@ -381,7 +386,7 @@ static int evtchn_bind_to_user(struct per_user_data *u, evtchn_port_t port,
 	 * serialized bind operations.)
 	 */
 
-	evtchn = kzalloc(sizeof(*evtchn), GFP_KERNEL);
+	evtchn = kzalloc_obj(*evtchn);
 	if (!evtchn)
 		return -ENOMEM;
 
@@ -397,7 +402,7 @@ static int evtchn_bind_to_user(struct per_user_data *u, evtchn_port_t port,
 	if (rc < 0)
 		goto err;
 
-	rc = bind_evtchn_to_irqhandler_lateeoi(port, evtchn_interrupt, 0,
+	rc = bind_evtchn_to_irqhandler_lateeoi(port, evtchn_interrupt, IRQF_SHARED,
 					       u->name, evtchn);
 	if (rc < 0)
 		goto err;
@@ -421,6 +426,7 @@ static void evtchn_unbind_from_user(struct per_user_data *u,
 
 	BUG_ON(irq < 0);
 
+	evtchn->unbinding = true;
 	unbind_from_irqhandler(irq, evtchn);
 
 	del_evtchn(u, evtchn);
@@ -636,7 +642,7 @@ static int evtchn_open(struct inode *inode, struct file *filp)
 {
 	struct per_user_data *u;
 
-	u = kzalloc(sizeof(*u), GFP_KERNEL);
+	u = kzalloc_obj(*u);
 	if (u == NULL)
 		return -ENOMEM;
 
@@ -688,7 +694,6 @@ static const struct file_operations evtchn_fops = {
 	.fasync  = evtchn_fasync,
 	.open    = evtchn_open,
 	.release = evtchn_release,
-	.llseek	 = no_llseek,
 };
 
 static struct miscdevice evtchn_miscdev = {
@@ -723,4 +728,5 @@ static void __exit evtchn_cleanup(void)
 module_init(evtchn_init);
 module_exit(evtchn_cleanup);
 
+MODULE_DESCRIPTION("Xen /dev/xen/evtchn device driver");
 MODULE_LICENSE("GPL");

@@ -7,7 +7,6 @@
  */
 
 #include <linux/clk-provider.h>
-#include <linux/mod_devicetable.h>
 #include <linux/platform_device.h>
 
 #include "clk-mtk.h"
@@ -53,7 +52,7 @@ MODULE_DEVICE_TABLE(of, of_match_clk_mt8516_aud);
 
 static struct platform_driver clk_mt8516_aud_drv = {
 	.probe = mtk_clk_simple_probe,
-	.remove_new = mtk_clk_simple_remove,
+	.remove = mtk_clk_simple_remove,
 	.driver = {
 		.name = "clk-mt8516-aud",
 		.of_match_table = of_match_clk_mt8516_aud,

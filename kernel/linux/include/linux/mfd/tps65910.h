@@ -12,7 +12,7 @@
 #ifndef __LINUX_MFD_TPS65910_H
 #define __LINUX_MFD_TPS65910_H
 
-#include <linux/gpio.h>
+#include <linux/gpio/consumer.h>
 #include <linux/regmap.h>
 
 /* TPS chip id list */
@@ -749,7 +749,7 @@
 #define VDDCTRL_ST_SHIFT                                 0
 
 
-/*Register VDDCTRL_OP  (0x28) bit definitios */
+/*Register VDDCTRL_OP  (0x28) bit definitions */
 #define VDDCTRL_OP_CMD_MASK                              0x80
 #define VDDCTRL_OP_CMD_SHIFT                             7
 #define VDDCTRL_OP_SEL_MASK                              0x7F

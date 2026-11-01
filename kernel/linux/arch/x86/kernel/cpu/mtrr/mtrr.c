@@ -1,21 +1,8 @@
+// SPDX-License-Identifier: LGPL-2.0+
 /*  Generic MTRR (Memory Type Range Register) driver.
 
     Copyright (C) 1997-2000  Richard Gooch
     Copyright (c) 2002	     Patrick Mochel
-
-    This library is free software; you can redistribute it and/or
-    modify it under the terms of the GNU Library General Public
-    License as published by the Free Software Foundation; either
-    version 2 of the License, or (at your option) any later version.
-
-    This library is distributed in the hope that it will be useful,
-    but WITHOUT ANY WARRANTY; without even the implied warranty of
-    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
-    Library General Public License for more details.
-
-    You should have received a copy of the GNU Library General Public
-    License along with this library; if not, write to the Free
-    Software Foundation, Inc., 675 Mass Ave, Cambridge, MA 02139, USA.
 
     Richard Gooch may be reached by email at  rgooch@atnf.csiro.au
     The postal address is:
@@ -54,6 +41,12 @@
 #include <asm/memtype.h>
 
 #include "mtrr.h"
+
+static_assert(X86_MEMTYPE_UC == MTRR_TYPE_UNCACHABLE);
+static_assert(X86_MEMTYPE_WC == MTRR_TYPE_WRCOMB);
+static_assert(X86_MEMTYPE_WT == MTRR_TYPE_WRTHROUGH);
+static_assert(X86_MEMTYPE_WP == MTRR_TYPE_WRPROT);
+static_assert(X86_MEMTYPE_WB == MTRR_TYPE_WRBACK);
 
 /* arch_phys_wc_add returns an MTRR register index plus this offset. */
 #define MTRR_TO_PHYS_WC_OFFSET 1000
@@ -554,7 +547,7 @@ void __init mtrr_bp_init(void)
 {
 	bool generic_mtrrs = cpu_feature_enabled(X86_FEATURE_MTRR);
 	const char *why = "(not available)";
-	unsigned long config, dummy;
+	unsigned long config;
 
 	phys_hi_rsvd = GENMASK(31, boot_cpu_data.x86_phys_bits - 32);
 
@@ -578,7 +571,7 @@ void __init mtrr_bp_init(void)
 	if (mtrr_enabled()) {
 		/* Get the number of variable MTRR ranges. */
 		if (mtrr_if == &generic_mtrr_ops)
-			rdmsr(MSR_MTRRcap, config, dummy);
+			rdmsrq(MSR_MTRRcap, config);
 		else
 			config = mtrr_if->var_regs;
 		num_var_ranges = config & MTRR_CAP_VCNT;
@@ -609,7 +602,7 @@ void mtrr_save_state(void)
 {
 	int first_cpu;
 
-	if (!mtrr_enabled())
+	if (!mtrr_enabled() || !mtrr_state.have_fixed)
 		return;
 
 	first_cpu = cpumask_first(cpu_online_mask);
@@ -619,7 +612,7 @@ void mtrr_save_state(void)
 static int __init mtrr_init_finalize(void)
 {
 	/*
-	 * Map might exist if mtrr_overwrite_state() has been called or if
+	 * Map might exist if guest_force_mtrr_state() has been called or if
 	 * mtrr_enabled() returns true.
 	 */
 	mtrr_copy_map();

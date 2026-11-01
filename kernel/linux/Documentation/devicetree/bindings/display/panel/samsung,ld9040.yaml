@@ -17,10 +17,8 @@ properties:
   compatible:
     const: samsung,ld9040
 
-  display-timings: true
-  port: true
-  reg: true
-  reset-gpios: true
+  reg:
+    maxItems: 1
 
   vdd3-supply:
     description: core voltage supply

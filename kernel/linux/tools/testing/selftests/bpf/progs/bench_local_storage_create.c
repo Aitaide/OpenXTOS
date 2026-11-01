@@ -8,7 +8,6 @@
 
 long create_errs = 0;
 long create_cnts = 0;
-long kmalloc_cnts = 0;
 __u32 bench_pid = 0;
 
 struct storage {
@@ -28,16 +27,6 @@ struct {
 	__type(key, int);
 	__type(value, struct storage);
 } task_storage_map SEC(".maps");
-
-SEC("raw_tp/kmalloc")
-int BPF_PROG(kmalloc, unsigned long call_site, const void *ptr,
-	     size_t bytes_req, size_t bytes_alloc, gfp_t gfp_flags,
-	     int node)
-{
-	__sync_fetch_and_add(&kmalloc_cnts, 1);
-
-	return 0;
-}
 
 SEC("tp_btf/sched_process_fork")
 int BPF_PROG(sched_process_fork, struct task_struct *parent, struct task_struct *child)
@@ -61,14 +50,15 @@ SEC("lsm.s/socket_post_create")
 int BPF_PROG(socket_post_create, struct socket *sock, int family, int type,
 	     int protocol, int kern)
 {
+	struct sock *sk = sock->sk;
 	struct storage *stg;
 	__u32 pid;
 
 	pid = bpf_get_current_pid_tgid() >> 32;
-	if (pid != bench_pid)
+	if (pid != bench_pid || !sk)
 		return 0;
 
-	stg = bpf_sk_storage_get(&sk_storage_map, sock->sk, NULL,
+	stg = bpf_sk_storage_get(&sk_storage_map, sk, NULL,
 				 BPF_LOCAL_STORAGE_GET_F_CREATE);
 
 	if (stg)

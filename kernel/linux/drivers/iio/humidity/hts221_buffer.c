@@ -81,8 +81,7 @@ int hts221_allocate_trigger(struct iio_dev *iio_dev)
 	unsigned long irq_type;
 	int err;
 
-	irq_type = irqd_get_trigger_type(irq_get_irq_data(hw->irq));
-
+	irq_type = irq_get_trigger_type(hw->irq);
 	switch (irq_type) {
 	case IRQF_TRIGGER_HIGH:
 	case IRQF_TRIGGER_RISING:
@@ -123,11 +122,8 @@ int hts221_allocate_trigger(struct iio_dev *iio_dev)
 					hts221_trigger_handler_thread,
 					irq_type | IRQF_ONESHOT,
 					hw->name, hw);
-	if (err) {
-		dev_err(hw->dev, "failed to request trigger irq %d\n",
-			hw->irq);
+	if (err)
 		return err;
-	}
 
 	hw->trig = devm_iio_trigger_alloc(hw->dev, "%s-trigger",
 					  iio_dev->name);

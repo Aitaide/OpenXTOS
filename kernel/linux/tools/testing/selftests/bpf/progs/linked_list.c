@@ -4,12 +4,25 @@
 #include <bpf/bpf_helpers.h>
 #include <bpf/bpf_core_read.h>
 #include "bpf_experimental.h"
-
-#ifndef ARRAY_SIZE
-#define ARRAY_SIZE(x) (sizeof(x) / sizeof((x)[0]))
-#endif
+#include "bpf_misc.h"
 
 #include "linked_list.h"
+
+struct head_nested_inner {
+	struct bpf_spin_lock lock;
+	struct bpf_list_head head __contains(foo, node2);
+};
+
+struct head_nested {
+	int dummy;
+	struct head_nested_inner inner;
+};
+
+private(C) struct bpf_spin_lock glock_c;
+private(C) struct bpf_list_head ghead_array[2] __contains(foo, node2);
+private(C) struct bpf_list_head ghead_array_one[1] __contains(foo, node2);
+
+private(D) struct head_nested ghead_nested;
 
 static __always_inline
 int list_push_pop(struct bpf_spin_lock *lock, struct bpf_list_head *head, bool leave_in_map)
@@ -277,6 +290,77 @@ int test_list_in_list(struct bpf_spin_lock *lock, struct bpf_list_head *head)
 	return list_in_list(lock, head, true);
 }
 
+#define MAX_LIST_CLEAR_NODES 256
+
+static __always_inline
+int clear_list(struct bpf_spin_lock *lock, struct bpf_list_head *head)
+{
+	struct bpf_list_node *n;
+	int i;
+
+	for (i = 0; i < MAX_LIST_CLEAR_NODES; i++) {
+		bpf_spin_lock(lock);
+		n = bpf_list_pop_front(head);
+		bpf_spin_unlock(lock);
+		if (!n)
+			return 0;
+		bpf_obj_drop(container_of(n, struct foo, node2));
+	}
+	return 1;
+}
+
+SEC("syscall")
+int clear_map_list(void *ctx)
+{
+	struct map_value *v;
+
+	v = bpf_map_lookup_elem(&array_map, &(int){0});
+	if (!v)
+		return 1;
+	return clear_list(&v->lock, &v->head);
+}
+
+SEC("syscall")
+int clear_inner_map_list(void *ctx)
+{
+	struct map_value *v;
+	void *map;
+
+	map = bpf_map_lookup_elem(&map_of_maps, &(int){0});
+	if (!map)
+		return 1;
+	v = bpf_map_lookup_elem(map, &(int){0});
+	if (!v)
+		return 1;
+	return clear_list(&v->lock, &v->head);
+}
+
+SEC("syscall")
+int clear_global_list(void *ctx)
+{
+	return clear_list(&glock, &ghead);
+}
+
+SEC("syscall")
+int clear_global_nested_list(void *ctx)
+{
+	return clear_list(&ghead_nested.inner.lock, &ghead_nested.inner.head);
+}
+
+SEC("syscall")
+int clear_global_array_list(void *ctx)
+{
+	int ret;
+
+	ret = clear_list(&glock_c, &ghead_array[0]);
+	if (ret)
+		return ret;
+	ret = clear_list(&glock_c, &ghead_array[1]);
+	if (ret)
+		return ret;
+	return clear_list(&glock_c, &ghead_array_one[0]);
+}
+
 SEC("tc")
 int map_list_push_pop(void *ctx)
 {
@@ -307,6 +391,32 @@ SEC("tc")
 int global_list_push_pop(void *ctx)
 {
 	return test_list_push_pop(&glock, &ghead);
+}
+
+SEC("tc")
+int global_list_push_pop_nested(void *ctx)
+{
+	return test_list_push_pop(&ghead_nested.inner.lock, &ghead_nested.inner.head);
+}
+
+SEC("tc")
+int global_list_array_push_pop(void *ctx)
+{
+	int r;
+
+	r = test_list_push_pop(&glock_c, &ghead_array[0]);
+	if (r)
+		return r;
+
+	r = test_list_push_pop(&glock_c, &ghead_array[1]);
+	if (r)
+		return r;
+
+	/* Arrays with only one element is a special case, being treated
+	 * just like a bpf_list_head variable by the verifier, not an
+	 * array.
+	 */
+	return test_list_push_pop(&glock_c, &ghead_array_one[0]);
 }
 
 SEC("tc")

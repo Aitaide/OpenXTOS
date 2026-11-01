@@ -1057,7 +1057,7 @@ struct ef4_nic_type {
 	void (*finish_flush)(struct ef4_nic *efx);
 	void (*prepare_flr)(struct ef4_nic *efx);
 	void (*finish_flr)(struct ef4_nic *efx);
-	size_t (*describe_stats)(struct ef4_nic *efx, u8 *names);
+	size_t (*describe_stats)(struct ef4_nic *efx, u8 **names);
 	size_t (*update_stats)(struct ef4_nic *efx, u64 *full_stats,
 			       struct rtnl_link_stats64 *core_stats);
 	void (*start_stats)(struct ef4_nic *efx);
@@ -1208,7 +1208,7 @@ ef4_channel_get_tx_queue(struct ef4_channel *channel, unsigned type)
 
 static inline bool ef4_tx_queue_used(struct ef4_tx_queue *tx_queue)
 {
-	return !(tx_queue->efx->net_dev->num_tc < 2 &&
+	return !(netdev_get_num_tc(tx_queue->efx->net_dev) < 2 &&
 		 tx_queue->queue & EF4_TXQ_TYPE_HIGHPRI);
 }
 

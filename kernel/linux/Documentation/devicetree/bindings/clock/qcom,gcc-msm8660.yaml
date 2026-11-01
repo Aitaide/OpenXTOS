@@ -14,7 +14,7 @@ description: |
   Qualcomm global clock control module provides the clocks and resets on
   MSM8660
 
-  See also::
+  See also:
     include/dt-bindings/clock/qcom,gcc-msm8660.h
     include/dt-bindings/reset/qcom,gcc-msm8660.h
 
@@ -34,6 +34,8 @@ properties:
       - const: pxo
       - const: cxo
 
+  '#power-domain-cells': false
+
 required:
   - compatible
 
@@ -47,7 +49,6 @@ examples:
       reg = <0x900000 0x4000>;
       #clock-cells = <1>;
       #reset-cells = <1>;
-      #power-domain-cells = <1>;
       clocks = <&pxo_board>, <&cxo_board>;
       clock-names = "pxo", "cxo";
     };

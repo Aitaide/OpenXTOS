@@ -73,7 +73,7 @@ int gre_parse_header(struct sk_buff *skb, struct tnl_ptk_info *tpi,
 	if (unlikely(greh->flags & (GRE_VERSION | GRE_ROUTING)))
 		return -EINVAL;
 
-	tpi->flags = gre_flags_to_tnl_flags(greh->flags);
+	gre_flags_to_tnl_flags(tpi->flags, greh->flags);
 	hdr_len = gre_calc_hlen(tpi->flags);
 
 	if (!pskb_may_pull(skb, nhs + hdr_len))
@@ -159,14 +159,18 @@ static int gre_rcv(struct sk_buff *skb)
 	rcu_read_lock();
 	proto = rcu_dereference(gre_proto[ver]);
 	if (!proto || !proto->handler)
-		goto drop_unlock;
+		goto drop_nohandler;
 	ret = proto->handler(skb);
 	rcu_read_unlock();
 	return ret;
 
-drop_unlock:
+drop_nohandler:
 	rcu_read_unlock();
+	dev_core_stats_rx_nohandler_inc(skb->dev);
+	kfree_skb(skb);
+	return NET_RX_DROP;
 drop:
+	dev_core_stats_rx_dropped_inc(skb->dev);
 	kfree_skb(skb);
 	return NET_RX_DROP;
 }
@@ -199,7 +203,7 @@ static const struct net_protocol net_gre_protocol = {
 
 static int __init gre_init(void)
 {
-	pr_info("GRE over IPv4 demultiplexor driver\n");
+	pr_info("GRE over IPv4 demultiplexer driver\n");
 
 	if (inet_add_protocol(&net_gre_protocol, IPPROTO_GRE) < 0) {
 		pr_err("can't add protocol\n");
@@ -217,5 +221,5 @@ module_init(gre_init);
 module_exit(gre_exit);
 
 MODULE_DESCRIPTION("GRE over IPv4 demultiplexer driver");
-MODULE_AUTHOR("D. Kozlov (xeb@mail.ru)");
+MODULE_AUTHOR("D. Kozlov <xeb@mail.ru>");
 MODULE_LICENSE("GPL");

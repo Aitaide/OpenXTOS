@@ -15,12 +15,9 @@
 #include <linux/slab.h>
 #include <linux/timer.h>
 #include <linux/tty.h>
-#include <linux/tty_driver.h>
 #include <linux/tty_flip.h>
 #include <linux/module.h>
 #include <linux/spinlock.h>
-#include <linux/uaccess.h>
-#include <linux/atomic.h>
 #include <linux/usb.h>
 #include <linux/usb/serial.h>
 
@@ -104,7 +101,7 @@ struct garmin_packet {
 	int               seq;
 	/* the real size of the data array, always > 0 */
 	int               size;
-	__u8              data[];
+	__u8              data[] __counted_by(size);
 };
 
 /* structure used to keep the current state of the driver */
@@ -267,8 +264,7 @@ static int pkt_add(struct garmin_data *garmin_data_p,
 
 	/* process only packets containing data ... */
 	if (data_length) {
-		pkt = kmalloc(sizeof(struct garmin_packet)+data_length,
-								GFP_ATOMIC);
+		pkt = kmalloc_flex(*pkt, data, data_length, GFP_ATOMIC);
 		if (!pkt)
 			return 0;
 
@@ -1358,7 +1354,8 @@ static void garmin_unthrottle(struct tty_struct *tty)
  */
 static void timeout_handler(struct timer_list *t)
 {
-	struct garmin_data *garmin_data_p = from_timer(garmin_data_p, t, timer);
+	struct garmin_data *garmin_data_p = timer_container_of(garmin_data_p,
+						               t, timer);
 
 	/* send the next queued packet to the tty port */
 	if (garmin_data_p->mode == MODE_NATIVE)
@@ -1373,7 +1370,7 @@ static int garmin_port_probe(struct usb_serial_port *port)
 	int status;
 	struct garmin_data *garmin_data_p;
 
-	garmin_data_p = kzalloc(sizeof(struct garmin_data), GFP_KERNEL);
+	garmin_data_p = kzalloc_obj(struct garmin_data);
 	if (!garmin_data_p)
 		return -ENOMEM;
 
@@ -1413,7 +1410,6 @@ static void garmin_port_remove(struct usb_serial_port *port)
 /* All of the device info needed */
 static struct usb_serial_driver garmin_device = {
 	.driver = {
-		.owner       = THIS_MODULE,
 		.name        = "garmin_gps",
 	},
 	.description         = "Garmin GPS usb/tty",

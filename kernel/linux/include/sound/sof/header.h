@@ -3,7 +3,7 @@
  * This file is provided under a dual BSD/GPLv2 license.  When using or
  * redistributing this file, you may do so under either license.
  *
- * Copyright(c) 2018 Intel Corporation. All rights reserved.
+ * Copyright(c) 2018 Intel Corporation
  */
 
 #ifndef __INCLUDE_SOUND_SOF_HEADER_H__
@@ -179,7 +179,7 @@ struct sof_ipc_compound_hdr {
 	uint32_t count;		/**< count of 0 means end of compound sequence */
 }  __packed;
 
-/**
+/*
  * OOPS header architecture specific data.
  */
 struct sof_ipc_dsp_oops_arch_hdr {
@@ -187,7 +187,7 @@ struct sof_ipc_dsp_oops_arch_hdr {
 	uint32_t totalsize;	/* Total size of oops message */
 }  __packed;
 
-/**
+/*
  * OOPS header platform specific data.
  */
 struct sof_ipc_dsp_oops_plat_hdr {

@@ -8,7 +8,6 @@
 //
 
 #include <linux/device.h>
-#include <linux/mod_devicetable.h>
 #include <linux/module.h>
 #include <linux/soundwire/sdw.h>
 #include <linux/soundwire/sdw_type.h>
@@ -237,11 +236,6 @@ static int sdw_mockup_sdw_probe(struct sdw_slave *slave,
 	return ret;
 }
 
-static int sdw_mockup_sdw_remove(struct sdw_slave *slave)
-{
-	return 0;
-}
-
 /*
  * Intel reserved parts ID with the following mapping expected:
  * 0xAAAA: generic full-duplex codec
@@ -262,10 +256,8 @@ MODULE_DEVICE_TABLE(sdw, sdw_mockup_id);
 static struct sdw_driver sdw_mockup_sdw_driver = {
 	.driver = {
 		.name = "sdw-mockup",
-		.owner = THIS_MODULE,
 	},
 	.probe = sdw_mockup_sdw_probe,
-	.remove = sdw_mockup_sdw_remove,
 	.ops = &sdw_mockup_slave_ops,
 	.id_table = sdw_mockup_id,
 };

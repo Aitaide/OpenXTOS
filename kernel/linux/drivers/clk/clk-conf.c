@@ -10,6 +10,7 @@
 #include <linux/device.h>
 #include <linux/of.h>
 #include <linux/printk.h>
+#include <linux/slab.h>
 
 static int __set_clk_parents(struct device_node *node, bool clk_supplier)
 {
@@ -81,13 +82,44 @@ err:
 static int __set_clk_rates(struct device_node *node, bool clk_supplier)
 {
 	struct of_phandle_args clkspec;
-	struct property	*prop;
-	const __be32 *cur;
-	int rc, index = 0;
+	int rc, count, count_64, index;
 	struct clk *clk;
-	u32 rate;
+	u64 *rates_64 __free(kfree) = NULL;
+	u32 *rates __free(kfree) = NULL;
 
-	of_property_for_each_u32(node, "assigned-clock-rates", prop, cur, rate) {
+	count = of_property_count_u32_elems(node, "assigned-clock-rates");
+	count_64 = of_property_count_u64_elems(node, "assigned-clock-rates-u64");
+	if (count_64 > 0) {
+		count = count_64;
+		rates_64 = kcalloc(count, sizeof(*rates_64), GFP_KERNEL);
+		if (!rates_64)
+			return -ENOMEM;
+
+		rc = of_property_read_u64_array(node,
+						"assigned-clock-rates-u64",
+						rates_64, count);
+	} else if (count > 0) {
+		rates = kcalloc(count, sizeof(*rates), GFP_KERNEL);
+		if (!rates)
+			return -ENOMEM;
+
+		rc = of_property_read_u32_array(node, "assigned-clock-rates",
+						rates, count);
+	} else {
+		return 0;
+	}
+
+	if (rc)
+		return rc;
+
+	for (index = 0; index < count; index++) {
+		unsigned long rate;
+
+		if (rates_64)
+			rate = rates_64[index];
+		else
+			rate = rates[index];
+
 		if (rate) {
 			rc = of_parse_phandle_with_args(node, "assigned-clocks",
 					"#clock-cells",	index, &clkspec);
@@ -114,14 +146,85 @@ static int __set_clk_rates(struct device_node *node, bool clk_supplier)
 
 			rc = clk_set_rate(clk, rate);
 			if (rc < 0)
-				pr_err("clk: couldn't set %s clk rate to %u (%d), current rate: %lu\n",
+				pr_err("clk: couldn't set %s clk rate to %lu (%d), current rate: %lu\n",
 				       __clk_get_name(clk), rate, rc,
 				       clk_get_rate(clk));
 			clk_put(clk);
 		}
-		index++;
 	}
 	return 0;
+}
+
+static int __set_clk_spread_spectrum(struct device_node *node, bool clk_supplier)
+{
+	u32 elem_size = sizeof(struct clk_spread_spectrum);
+	struct clk_spread_spectrum *sscs;
+	struct of_phandle_args clkspec;
+	int rc, count, index;
+	struct clk *clk;
+
+	/* modfreq, spreadPercent, modmethod */
+	count = of_property_count_elems_of_size(node, "assigned-clock-sscs", elem_size);
+	if (count <= 0)
+		return 0;
+
+	sscs = kcalloc(count, elem_size, GFP_KERNEL);
+	if (!sscs)
+		return -ENOMEM;
+
+	rc = of_property_read_u32_array(node, "assigned-clock-sscs", (u32 *)sscs,
+					count * 3);
+	if (rc)
+		goto free_sscs;
+
+	for (index = 0; index < count; index++) {
+		struct clk_spread_spectrum *conf = &sscs[index];
+		struct clk_hw *hw;
+
+		if (!conf->modfreq_hz && !conf->spread_bp && !conf->method)
+			continue;
+
+		rc = of_parse_phandle_with_args(node, "assigned-clocks", "#clock-cells",
+						index, &clkspec);
+		if (rc < 0) {
+			/* skip empty (null) phandles */
+			if (rc == -ENOENT) {
+				rc = 0;
+				continue;
+			} else
+				goto free_sscs;
+		}
+
+		if (clkspec.np == node && !clk_supplier) {
+			of_node_put(clkspec.np);
+			goto free_sscs;
+		}
+
+		clk = of_clk_get_from_provider(&clkspec);
+		of_node_put(clkspec.np);
+		if (IS_ERR(clk)) {
+			if (PTR_ERR(clk) != -EPROBE_DEFER)
+				pr_warn("clk: couldn't get clock %d for %pOF\n",
+					index, node);
+			rc = PTR_ERR(clk);
+			goto free_sscs;
+		}
+
+		hw = __clk_get_hw(clk);
+		rc = clk_hw_set_spread_spectrum(hw, conf);
+		if (rc < 0) {
+			pr_err("clk: couldn't set %s clk spread spectrum %u %u %u: %d\n",
+			       __clk_get_name(clk), conf->modfreq_hz, conf->spread_bp,
+			       conf->method, rc);
+			/* Do not fail */
+			rc = 0;
+		}
+		clk_put(clk);
+	}
+
+free_sscs:
+	kfree(sscs);
+	return rc;
 }
 
 /**
@@ -142,6 +245,10 @@ int of_clk_set_defaults(struct device_node *node, bool clk_supplier)
 
 	if (!node)
 		return 0;
+
+	rc = __set_clk_spread_spectrum(node, clk_supplier);
+	if (rc < 0)
+		return rc;
 
 	rc = __set_clk_parents(node, clk_supplier);
 	if (rc < 0)

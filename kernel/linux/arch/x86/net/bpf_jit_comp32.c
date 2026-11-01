@@ -1194,7 +1194,7 @@ struct jit_context {
 #define PROLOGUE_SIZE 35
 
 /*
- * Emit prologue code for BPF program and check it's size.
+ * Emit prologue code for BPF program and check its size.
  * bpf_tail_call helper will skip it while jumping into another program.
  */
 static void emit_prologue(u8 **pprog, u32 stack_depth)
@@ -1273,7 +1273,7 @@ static int emit_jmp_edx(u8 **pprog, u8 *ip)
 	u8 *prog = *pprog;
 	int cnt = 0;
 
-#ifdef CONFIG_RETPOLINE
+#ifdef CONFIG_MITIGATION_RETPOLINE
 	EMIT1_off32(0xE9, (u8 *)__x86_indirect_thunk_edx - (ip + 5));
 #else
 	EMIT2(0xFF, 0xE2);
@@ -2518,38 +2518,22 @@ bool bpf_jit_needs_zext(void)
 	return true;
 }
 
-struct bpf_prog *bpf_int_jit_compile(struct bpf_prog *prog)
+struct bpf_prog *bpf_int_jit_compile(struct bpf_verifier_env *env, struct bpf_prog *prog)
 {
 	struct bpf_binary_header *header = NULL;
-	struct bpf_prog *tmp, *orig_prog = prog;
 	int proglen, oldproglen = 0;
 	struct jit_context ctx = {};
-	bool tmp_blinded = false;
 	u8 *image = NULL;
 	int *addrs;
 	int pass;
 	int i;
 
 	if (!prog->jit_requested)
-		return orig_prog;
+		return prog;
 
-	tmp = bpf_jit_blind_constants(prog);
-	/*
-	 * If blinding was requested and we failed during blinding,
-	 * we must fall back to the interpreter.
-	 */
-	if (IS_ERR(tmp))
-		return orig_prog;
-	if (tmp != prog) {
-		tmp_blinded = true;
-		prog = tmp;
-	}
-
-	addrs = kmalloc_array(prog->len, sizeof(*addrs), GFP_KERNEL);
-	if (!addrs) {
-		prog = orig_prog;
-		goto out;
-	}
+	addrs = kmalloc_objs(*addrs, prog->len);
+	if (!addrs)
+		return prog;
 
 	/*
 	 * Before first pass, make a rough estimation of addrs[]
@@ -2574,7 +2558,6 @@ out_image:
 			image = NULL;
 			if (header)
 				bpf_jit_binary_free(header);
-			prog = orig_prog;
 			goto out_addrs;
 		}
 		if (image) {
@@ -2588,10 +2571,8 @@ out_image:
 		if (proglen == oldproglen) {
 			header = bpf_jit_binary_alloc(proglen, &image,
 						      1, jit_fill_hole);
-			if (!header) {
-				prog = orig_prog;
+			if (!header)
 				goto out_addrs;
-			}
 		}
 		oldproglen = proglen;
 		cond_resched();
@@ -2600,21 +2581,14 @@ out_image:
 	if (bpf_jit_enable > 1)
 		bpf_jit_dump(prog->len, proglen, pass + 1, image);
 
-	if (image) {
-		bpf_jit_binary_lock_ro(header);
+	if (image && !bpf_jit_binary_lock_ro(header)) {
 		prog->bpf_func = (void *)image;
 		prog->jited = 1;
 		prog->jited_len = proglen;
-	} else {
-		prog = orig_prog;
 	}
 
 out_addrs:
 	kfree(addrs);
-out:
-	if (tmp_blinded)
-		bpf_jit_prog_release_other(prog, prog == orig_prog ?
-					   tmp : orig_prog);
 	return prog;
 }
 

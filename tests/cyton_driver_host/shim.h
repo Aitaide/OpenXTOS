@@ -89,7 +89,7 @@ void host_wait_enter(void);
 struct device { int unused; };
 struct serdev_device;
 struct serdev_device_ops {
-    int (*receive_buf)(struct serdev_device *, const unsigned char *, size_t);
+    size_t (*receive_buf)(struct serdev_device *, const unsigned char *, size_t);
     void (*write_wakeup)(struct serdev_device *);
 };
 struct serdev_device { struct device dev; void *data; const struct serdev_device_ops *ops; };

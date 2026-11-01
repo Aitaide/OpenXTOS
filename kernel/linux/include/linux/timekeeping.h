@@ -4,6 +4,7 @@
 
 #include <linux/errno.h>
 #include <linux/clocksource_ids.h>
+#include <linux/ktime.h>
 
 /* Included from linux/ktime.h */
 
@@ -21,14 +22,14 @@ extern int do_sys_settimeofday64(const struct timespec64 *tv,
 				 const struct timezone *tz);
 
 /*
- * ktime_get() family: read the current time in a multitude of ways,
+ * ktime_get() family - read the current time in a multitude of ways.
  *
  * The default time reference is CLOCK_MONOTONIC, starting at
  * boot time but not counting the time spent in suspend.
  * For other references, use the functions with "real", "clocktai",
  * "boottime" and "raw" suffixes.
  *
- * To get the time in a different format, use the ones wit
+ * To get the time in a different format, use the ones with
  * "ns", "ts64" and "seconds" suffix.
  *
  * See Documentation/core-api/timekeeping.rst for more details.
@@ -43,6 +44,11 @@ extern void ktime_get_ts64(struct timespec64 *ts);
 extern void ktime_get_real_ts64(struct timespec64 *tv);
 extern void ktime_get_coarse_ts64(struct timespec64 *ts);
 extern void ktime_get_coarse_real_ts64(struct timespec64 *ts);
+
+/* Multigrain timestamp interfaces */
+extern void ktime_get_coarse_real_ts64_mg(struct timespec64 *ts);
+extern void ktime_get_real_ts64_mg(struct timespec64 *ts);
+extern unsigned long timekeeping_get_mg_floor_swaps(void);
 
 void getboottime64(struct timespec64 *ts);
 
@@ -73,6 +79,8 @@ extern u32 ktime_get_resolution_ns(void);
 
 /**
  * ktime_get_real - get the real (wall-) time in ktime_t format
+ *
+ * Returns: real (wall) time in ktime_t format
  */
 static inline ktime_t ktime_get_real(void)
 {
@@ -85,10 +93,12 @@ static inline ktime_t ktime_get_coarse_real(void)
 }
 
 /**
- * ktime_get_boottime - Returns monotonic time since boot in ktime_t format
+ * ktime_get_boottime - Get monotonic time since boot in ktime_t format
  *
  * This is similar to CLOCK_MONTONIC/ktime_get, but also includes the
  * time spent in suspend.
+ *
+ * Returns: monotonic time since boot in ktime_t format
  */
 static inline ktime_t ktime_get_boottime(void)
 {
@@ -101,7 +111,9 @@ static inline ktime_t ktime_get_coarse_boottime(void)
 }
 
 /**
- * ktime_get_clocktai - Returns the TAI time of day in ktime_t format
+ * ktime_get_clocktai - Get the TAI time of day in ktime_t format
+ *
+ * Returns: the TAI time of day in ktime_t format
  */
 static inline ktime_t ktime_get_clocktai(void)
 {
@@ -143,32 +155,60 @@ static inline u64 ktime_get_coarse_clocktai_ns(void)
 
 /**
  * ktime_mono_to_real - Convert monotonic time to clock realtime
+ * @mono: monotonic time to convert
+ *
+ * Returns: time converted to realtime clock
  */
 static inline ktime_t ktime_mono_to_real(ktime_t mono)
 {
 	return ktime_mono_to_any(mono, TK_OFFS_REAL);
 }
 
+/**
+ * ktime_get_ns - Get the current time in nanoseconds
+ *
+ * Returns: current time converted to nanoseconds
+ */
 static inline u64 ktime_get_ns(void)
 {
 	return ktime_to_ns(ktime_get());
 }
 
+/**
+ * ktime_get_real_ns - Get the current real/wall time in nanoseconds
+ *
+ * Returns: current real time converted to nanoseconds
+ */
 static inline u64 ktime_get_real_ns(void)
 {
 	return ktime_to_ns(ktime_get_real());
 }
 
+/**
+ * ktime_get_boottime_ns - Get the monotonic time since boot in nanoseconds
+ *
+ * Returns: current boottime converted to nanoseconds
+ */
 static inline u64 ktime_get_boottime_ns(void)
 {
 	return ktime_to_ns(ktime_get_boottime());
 }
 
+/**
+ * ktime_get_clocktai_ns - Get the current TAI time of day in nanoseconds
+ *
+ * Returns: current TAI time converted to nanoseconds
+ */
 static inline u64 ktime_get_clocktai_ns(void)
 {
 	return ktime_to_ns(ktime_get_clocktai());
 }
 
+/**
+ * ktime_get_raw_ns - Get the raw monotonic time in nanoseconds
+ *
+ * Returns: current raw monotonic time converted to nanoseconds
+ */
 static inline u64 ktime_get_raw_ns(void)
 {
 	return ktime_to_ns(ktime_get_raw());
@@ -224,59 +264,90 @@ extern bool timekeeping_rtc_skipresume(void);
 extern void timekeeping_inject_sleeptime64(const struct timespec64 *delta);
 
 /*
- * struct ktime_timestanps - Simultaneous mono/boot/real timestamps
- * @mono:	Monotonic timestamp
- * @boot:	Boottime timestamp
- * @real:	Realtime timestamp
+ * Auxiliary clock interfaces
  */
-struct ktime_timestamps {
-	u64		mono;
-	u64		boot;
-	u64		real;
-};
+#ifdef CONFIG_POSIX_AUX_CLOCKS
+extern bool __must_check ktime_get_aux(clockid_t id, ktime_t *kt);
+extern bool __must_check ktime_get_aux_ts64(clockid_t id, struct timespec64 *kt);
+#else
+static inline bool __must_check ktime_get_aux(clockid_t id, ktime_t *kt) { return false; }
+static inline bool __must_check ktime_get_aux_ts64(clockid_t id, struct timespec64 *kt)
+{
+	return false;
+}
+#endif
 
 /**
- * struct system_time_snapshot - simultaneous raw/real time capture with
- *				 counter value
- * @cycles:	Clocksource counter value to produce the system times
- * @real:	Realtime system time
- * @raw:	Monotonic raw system time
- * @clock_was_set_seq:	The sequence number of clock was set events
+ * struct system_time_snapshot - Simultaneous time capture of monotonic raw time,
+ *				 a selected CLOCK_* and the clocksource counter value
+ * @cycles:		Clocksource counter value to produce the system times
+ * @hw_cycles:		For derived clocksources, the hardware counter value from
+ *			which @cycles was derived
+ * @systime:		The system time of the selected CLOCK ID
+ * @monoraw:		Monotonic raw system time
+ * @cs_id:		Clocksource ID
+ * @hw_csid:		Clocksource ID of the underlying hardware counter for derived
+ *			clocksources which implement the read_snapshot() callback.
+ * @clock_was_set_seq:	The sequence number of clock-was-set events
  * @cs_was_changed_seq:	The sequence number of clocksource change events
+ * @valid:		True if the snapshot is valid
+ *
+ * @monoraw is CLOCK_MONOTONIC_RAW for system time CLOCK ids. For CLOCK_AUX$N
+ * clock ids it's the monotonic raw time related to the AUX clock, which is
+ * CLOCK_MONOTONIC_RAW plus a AUX clock specific offset.
  */
 struct system_time_snapshot {
 	u64			cycles;
-	ktime_t			real;
-	ktime_t			raw;
+	u64			hw_cycles;
+	ktime_t			systime;
+	ktime_t			monoraw;
 	enum clocksource_ids	cs_id;
-	unsigned int		clock_was_set_seq;
+	enum clocksource_ids	hw_csid;
+	u32			clock_was_set_seq;
 	u8			cs_was_changed_seq;
+	u8			valid;
+};
+
+/**
+ * struct system_counterval_t - system counter value with the ID of the
+ *				corresponding clocksource
+ * @cycles:	System counter value
+ * @cs_id:	Clocksource ID corresponding to system counter value. Used by
+ *		timekeeping code to verify comparability of two cycle values.
+ *		The default ID, CSID_GENERIC, does not identify a specific
+ *		clocksource.
+ * @use_nsecs:	@cycles is in nanoseconds.
+ */
+struct system_counterval_t {
+	u64			cycles;
+	enum clocksource_ids	cs_id;
+	bool			use_nsecs;
 };
 
 /**
  * struct system_device_crosststamp - system/device cross-timestamp
  *				      (synchronized capture)
+ * @clock_id:		System time Clock ID to capture
  * @device:		Device time
- * @sys_realtime:	Realtime simultaneous with device time
+ * @sys_counter:	Clocksource counter value simultaneous with device time
+ * @sys_systime:	System time for @clock_id
  * @sys_monoraw:	Monotonic raw simultaneous with device time
+ *
+ * @sys_monoraw is CLOCK_MONOTONIC_RAW for system time CLOCK ids. For
+ * CLOCK_AUX$N clock ids it's the monotonic raw time related to the AUX clock,
+ * which is CLOCK_MONOTONIC_RAW plus a AUX clock specific offset.
  */
 struct system_device_crosststamp {
-	ktime_t device;
-	ktime_t sys_realtime;
-	ktime_t sys_monoraw;
+	clockid_t			clock_id;
+	ktime_t				device;
+	struct system_counterval_t	sys_counter;
+	ktime_t				sys_systime;
+	ktime_t				sys_monoraw;
 };
 
-/**
- * struct system_counterval_t - system counter value with the pointer to the
- *				corresponding clocksource
- * @cycles:	System counter value
- * @cs:		Clocksource corresponding to system counter value. Used by
- *		timekeeping code to verify comparibility of two cycle values
- */
-struct system_counterval_t {
-	u64			cycles;
-	struct clocksource	*cs;
-};
+extern bool ktime_real_to_base_clock(ktime_t treal,
+				     enum clocksource_ids base_id, u64 *cycles);
+extern bool timekeeping_clocksource_has_base(enum clocksource_ids id);
 
 /*
  * Get cross timestamp between system clock and device clock
@@ -290,12 +361,10 @@ extern int get_device_system_crosststamp(
 			struct system_device_crosststamp *xtstamp);
 
 /*
- * Simultaneously snapshot realtime and monotonic raw clocks
+ * Simultaneously snapshot a given clock with MONOTONIC_RAW and the underlying
+ * clocksource counter value.
  */
-extern void ktime_get_snapshot(struct system_time_snapshot *systime_snapshot);
-
-/* NMI safe mono/boot/realtime timestamps */
-extern void ktime_get_fast_timestamps(struct ktime_timestamps *snap);
+extern void ktime_get_snapshot_id(clockid_t clock_id, struct system_time_snapshot *systime_snapshot);
 
 /*
  * Persistent clock related interfaces

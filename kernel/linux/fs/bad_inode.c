@@ -29,7 +29,7 @@ static const struct file_operations bad_file_ops =
 
 static int bad_inode_create(struct mnt_idmap *idmap,
 			    struct inode *dir, struct dentry *dentry,
-			    umode_t mode, bool excl)
+			    umode_t mode)
 {
 	return -EIO;
 }
@@ -58,10 +58,10 @@ static int bad_inode_symlink(struct mnt_idmap *idmap,
 	return -EIO;
 }
 
-static int bad_inode_mkdir(struct mnt_idmap *idmap, struct inode *dir,
-			   struct dentry *dentry, umode_t mode)
+static struct dentry *bad_inode_mkdir(struct mnt_idmap *idmap, struct inode *dir,
+				      struct dentry *dentry, umode_t mode)
 {
-	return -EIO;
+	return ERR_PTR(-EIO);
 }
 
 static int bad_inode_rmdir (struct inode *dir, struct dentry *dentry)
@@ -133,7 +133,8 @@ static int bad_inode_fiemap(struct inode *inode,
 	return -EIO;
 }
 
-static int bad_inode_update_time(struct inode *inode, int flags)
+static int bad_inode_update_time(struct inode *inode, enum fs_update_time type,
+				 unsigned int flags)
 {
 	return -EIO;
 }
@@ -208,7 +209,7 @@ void make_bad_inode(struct inode *inode)
 	remove_inode_hash(inode);
 
 	inode->i_mode = S_IFREG;
-	inode->i_atime = inode->i_mtime = inode_set_ctime_current(inode);
+	simple_inode_init_ts(inode);
 	inode->i_op = &bad_inode_ops;	
 	inode->i_opflags &= ~IOP_XATTR;
 	inode->i_fop = &bad_file_ops;	

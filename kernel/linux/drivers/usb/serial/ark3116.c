@@ -28,7 +28,6 @@
 #include <linux/usb/serial.h>
 #include <linux/serial.h>
 #include <linux/serial_reg.h>
-#include <linux/uaccess.h>
 #include <linux/mutex.h>
 #include <linux/spinlock.h>
 
@@ -126,7 +125,7 @@ static int ark3116_port_probe(struct usb_serial_port *port)
 	struct usb_serial *serial = port->serial;
 	struct ark3116_private *priv;
 
-	priv = kzalloc(sizeof(*priv), GFP_KERNEL);
+	priv = kzalloc_obj(*priv);
 	if (!priv)
 		return -ENOMEM;
 
@@ -599,7 +598,6 @@ static void ark3116_process_read_urb(struct urb *urb)
 
 static struct usb_serial_driver ark3116_device = {
 	.driver = {
-		.owner =	THIS_MODULE,
 		.name =		"ark3116",
 	},
 	.id_table =		id_table,

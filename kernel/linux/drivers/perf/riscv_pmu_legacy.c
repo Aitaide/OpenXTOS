@@ -8,7 +8,6 @@
  * which are in turn based on sparc64 and x86 code.
  */
 
-#include <linux/mod_devicetable.h>
 #include <linux/perf/riscv_pmu.h>
 #include <linux/platform_device.h>
 
@@ -22,19 +21,25 @@ static int pmu_legacy_ctr_get_idx(struct perf_event *event)
 	struct perf_event_attr *attr = &event->attr;
 
 	if (event->attr.type != PERF_TYPE_HARDWARE)
-		return -EOPNOTSUPP;
+		return -ENOENT;
 	if (attr->config == PERF_COUNT_HW_CPU_CYCLES)
 		return RISCV_PMU_LEGACY_CYCLE;
 	else if (attr->config == PERF_COUNT_HW_INSTRUCTIONS)
 		return RISCV_PMU_LEGACY_INSTRET;
 	else
-		return -EOPNOTSUPP;
+		return -ENOENT;
 }
 
 /* For legacy config & counter index are same */
 static int pmu_legacy_event_map(struct perf_event *event, u64 *config)
 {
 	return pmu_legacy_ctr_get_idx(event);
+}
+
+/* cycle & instret are always 64 bit, one bit less according to SBI spec */
+static int pmu_legacy_ctr_get_width(int idx)
+{
+	return 63;
 }
 
 static u64 pmu_legacy_read_ctr(struct perf_event *event)
@@ -105,18 +110,21 @@ static void pmu_legacy_init(struct riscv_pmu *pmu)
 {
 	pr_info("Legacy PMU implementation is available\n");
 
-	pmu->cmask = BIT(RISCV_PMU_LEGACY_CYCLE) |
-		BIT(RISCV_PMU_LEGACY_INSTRET);
+	bitmap_zero(pmu->cmask, RISCV_MAX_COUNTERS);
+	set_bit(RISCV_PMU_LEGACY_CYCLE, pmu->cmask);
+	set_bit(RISCV_PMU_LEGACY_INSTRET, pmu->cmask);
 	pmu->ctr_start = pmu_legacy_ctr_start;
 	pmu->ctr_stop = NULL;
 	pmu->event_map = pmu_legacy_event_map;
 	pmu->ctr_get_idx = pmu_legacy_ctr_get_idx;
-	pmu->ctr_get_width = NULL;
+	pmu->ctr_get_width = pmu_legacy_ctr_get_width;
 	pmu->ctr_clear_idx = NULL;
 	pmu->ctr_read = pmu_legacy_read_ctr;
 	pmu->event_mapped = pmu_legacy_event_mapped;
 	pmu->event_unmapped = pmu_legacy_event_unmapped;
 	pmu->csr_index = pmu_legacy_csr_index;
+	pmu->pmu.capabilities |= PERF_PMU_CAP_NO_INTERRUPT;
+	pmu->pmu.capabilities |= PERF_PMU_CAP_NO_EXCLUDE;
 
 	perf_pmu_register(&pmu->pmu, "cpu", PERF_TYPE_RAW);
 }
@@ -128,6 +136,7 @@ static int pmu_legacy_device_probe(struct platform_device *pdev)
 	pmu = riscv_pmu_alloc();
 	if (!pmu)
 		return -ENOMEM;
+	pmu->pmu.parent = &pdev->dev;
 	pmu_legacy_init(pmu);
 
 	return 0;

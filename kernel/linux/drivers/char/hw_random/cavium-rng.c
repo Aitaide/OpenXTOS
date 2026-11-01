@@ -73,8 +73,8 @@ static void cavium_rng_remove(struct pci_dev *pdev)
 }
 
 static const struct pci_device_id cavium_rng_pf_id_table[] = {
-	{ PCI_DEVICE(PCI_VENDOR_ID_CAVIUM, 0xa018), 0, 0, 0}, /* Thunder RNM */
-	{0,},
+	{ PCI_DEVICE(PCI_VENDOR_ID_CAVIUM, 0xa018) }, /* Thunder RNM */
+	{ },
 };
 
 MODULE_DEVICE_TABLE(pci, cavium_rng_pf_id_table);
@@ -88,4 +88,5 @@ static struct pci_driver cavium_rng_pf_driver = {
 
 module_pci_driver(cavium_rng_pf_driver);
 MODULE_AUTHOR("Omer Khaliq <okhaliq@caviumnetworks.com>");
+MODULE_DESCRIPTION("Cavium ThunderX Random Number Generator support");
 MODULE_LICENSE("GPL v2");

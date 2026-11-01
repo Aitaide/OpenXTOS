@@ -12,6 +12,7 @@
 #include <linux/moduleparam.h>
 #include <linux/init.h>
 #include <linux/slab.h>
+#include <linux/string_choices.h>
 #include <linux/ioport.h>
 #include <asm/io.h>
 
@@ -21,7 +22,7 @@
 
 struct eisa_device_info {
 	struct eisa_device_id id;
-	char name[50];
+	char name[EISA_DEVICE_INFO_NAME_SIZE];
 };
 
 #ifdef CONFIG_EISA_NAMES
@@ -105,10 +106,10 @@ static char __init *decode_eisa_sig(unsigned long addr)
 	return sig_str;
 }
 
-static int eisa_bus_match(struct device *dev, struct device_driver *drv)
+static int eisa_bus_match(struct device *dev, const struct device_driver *drv)
 {
 	struct eisa_device *edev = to_eisa_device(dev);
-	struct eisa_driver *edrv = to_eisa_driver(drv);
+	const struct eisa_driver *edrv = to_eisa_driver(drv);
 	const struct eisa_device_id *eids = edrv->id_table;
 
 	if (!eids)
@@ -135,7 +136,7 @@ static int eisa_bus_uevent(const struct device *dev, struct kobj_uevent_env *env
 	return 0;
 }
 
-struct bus_type eisa_bus_type = {
+const struct bus_type eisa_bus_type = {
 	.name  = "eisa",
 	.match = eisa_bus_match,
 	.uevent = eisa_bus_uevent,
@@ -317,7 +318,7 @@ static int __init eisa_probe(struct eisa_root_device *root)
 	/* First try to get hold of slot 0. If there is no device
 	 * here, simply fail, unless root->force_probe is set. */
 
-	edev = kzalloc(sizeof(*edev), GFP_KERNEL);
+	edev = kzalloc_obj(*edev);
 	if (!edev)
 		return -ENOMEM;
 
@@ -350,7 +351,7 @@ static int __init eisa_probe(struct eisa_root_device *root)
  force_probe:
 
 	for (c = 0, i = 1; i <= root->slots; i++) {
-		edev = kzalloc(sizeof(*edev), GFP_KERNEL);
+		edev = kzalloc_obj(*edev);
 		if (!edev) {
 			dev_err(root->dev, "EISA: Out of memory for slot %d\n",
 				i);
@@ -393,7 +394,7 @@ static int __init eisa_probe(struct eisa_root_device *root)
 		}
 	}
 
-	dev_info(root->dev, "EISA: Detected %d card%s\n", c, c == 1 ? "" : "s");
+	dev_info(root->dev, "EISA: Detected %d card%s\n", c, str_plural(c));
 	return 0;
 }
 

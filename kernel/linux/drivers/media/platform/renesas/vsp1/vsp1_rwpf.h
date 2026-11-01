@@ -21,6 +21,9 @@
 #define RWPF_PAD_SINK				0
 #define RWPF_PAD_SOURCE				1
 
+#define RWPF_MIN_WIDTH				1
+#define RWPF_MIN_HEIGHT				1
+
 struct v4l2_ctrl;
 struct vsp1_dl_manager;
 struct vsp1_rwpf;
@@ -35,9 +38,6 @@ struct vsp1_rwpf {
 	struct v4l2_ctrl_handler ctrls;
 
 	struct vsp1_video *video;
-
-	unsigned int max_width;
-	unsigned int max_height;
 
 	struct v4l2_pix_format_mplane format;
 	const struct vsp1_format_info *fmtinfo;
@@ -79,11 +79,10 @@ static inline struct vsp1_rwpf *entity_to_rwpf(struct vsp1_entity *entity)
 struct vsp1_rwpf *vsp1_rpf_create(struct vsp1_device *vsp1, unsigned int index);
 struct vsp1_rwpf *vsp1_wpf_create(struct vsp1_device *vsp1, unsigned int index);
 
+void vsp1_wpf_stop(struct vsp1_rwpf *wpf);
+
 int vsp1_rwpf_init_ctrls(struct vsp1_rwpf *rwpf, unsigned int ncontrols);
 
-extern const struct v4l2_subdev_pad_ops vsp1_rwpf_pad_ops;
-
-struct v4l2_rect *vsp1_rwpf_get_crop(struct vsp1_rwpf *rwpf,
-				     struct v4l2_subdev_state *sd_state);
+extern const struct v4l2_subdev_ops vsp1_rwpf_subdev_ops;
 
 #endif /* __VSP1_RWPF_H__ */

@@ -18,7 +18,6 @@
 
 #include <linux/dma-mapping.h>
 #include <linux/slab.h>
-#include <linux/ath9k_platform.h>
 #include <linux/module.h>
 #include <linux/of.h>
 #include <linux/of_net.h>
@@ -151,12 +150,12 @@ static void ath9k_deinit_softc(struct ath_softc *sc);
 
 static void ath9k_op_ps_wakeup(struct ath_common *common)
 {
-	ath9k_ps_wakeup((struct ath_softc *) common->priv);
+	ath9k_ps_wakeup(common->priv);
 }
 
 static void ath9k_op_ps_restore(struct ath_common *common)
 {
-	ath9k_ps_restore((struct ath_softc *) common->priv);
+	ath9k_ps_restore(common->priv);
 }
 
 static const struct ath_ps_ops ath9k_ps_ops = {
@@ -174,7 +173,7 @@ static void ath9k_iowrite32(void *hw_priv, u32 val, u32 reg_offset)
 {
 	struct ath_hw *ah = hw_priv;
 	struct ath_common *common = ath9k_hw_common(ah);
-	struct ath_softc *sc = (struct ath_softc *) common->priv;
+	struct ath_softc *sc = common->priv;
 
 	if (NR_CPUS > 1 && ah->config.serialize_regmode == SER_REG_MODE_ON) {
 		unsigned long flags;
@@ -189,7 +188,7 @@ static unsigned int ath9k_ioread32(void *hw_priv, u32 reg_offset)
 {
 	struct ath_hw *ah = hw_priv;
 	struct ath_common *common = ath9k_hw_common(ah);
-	struct ath_softc *sc = (struct ath_softc *) common->priv;
+	struct ath_softc *sc = common->priv;
 	u32 val;
 
 	if (NR_CPUS > 1 && ah->config.serialize_regmode == SER_REG_MODE_ON) {
@@ -229,7 +228,7 @@ static unsigned int ath9k_reg_rmw(void *hw_priv, u32 reg_offset, u32 set, u32 cl
 {
 	struct ath_hw *ah = hw_priv;
 	struct ath_common *common = ath9k_hw_common(ah);
-	struct ath_softc *sc = (struct ath_softc *) common->priv;
+	struct ath_softc *sc = common->priv;
 	unsigned long flags;
 	u32 val;
 
@@ -286,7 +285,7 @@ int ath_descdma_setup(struct ath_softc *sc, struct ath_descdma *dd,
 {
 	struct ath_common *common = ath9k_hw_common(sc->sc_ah);
 	u8 *ds;
-	int i, bsize, desc_len;
+	int i, desc_len;
 
 	ath_dbg(common, CONFIG, "%s DMA: %u buffers %u desc/buf\n",
 		name, nbuf, ndesc);
@@ -340,8 +339,7 @@ int ath_descdma_setup(struct ath_softc *sc, struct ath_descdma *dd,
 	if (is_tx) {
 		struct ath_buf *bf;
 
-		bsize = sizeof(struct ath_buf) * nbuf;
-		bf = devm_kzalloc(sc->dev, bsize, GFP_KERNEL);
+		bf = devm_kcalloc(sc->dev, sizeof(*bf), nbuf, GFP_KERNEL);
 		if (!bf)
 			return -ENOMEM;
 
@@ -371,8 +369,7 @@ int ath_descdma_setup(struct ath_softc *sc, struct ath_descdma *dd,
 	} else {
 		struct ath_rxbuf *bf;
 
-		bsize = sizeof(struct ath_rxbuf) * nbuf;
-		bf = devm_kzalloc(sc->dev, bsize, GFP_KERNEL);
+		bf = devm_kcalloc(sc->dev, sizeof(struct ath_rxbuf), nbuf, GFP_KERNEL);
 		if (!bf)
 			return -ENOMEM;
 
@@ -577,14 +574,14 @@ static int ath9k_nvmem_request_eeprom(struct ath_softc *sc)
 	size_t len;
 	int err;
 
-	cell = devm_nvmem_cell_get(sc->dev, "calibration");
+	cell = nvmem_cell_get(sc->dev, "calibration");
 	if (IS_ERR(cell)) {
 		err = PTR_ERR(cell);
 
 		/* nvmem cell might not be defined, or the nvmem
 		 * subsystem isn't included. In this case, follow
-		 * the established "just return 0;" convention of
-		 * ath9k_init_platform to say:
+		 * the established "just return 0;" convention
+		 * to say:
 		 * "All good. Nothing to see here. Please go on."
 		 */
 		if (err == -ENOENT || err == -EOPNOTSUPP)
@@ -594,6 +591,7 @@ static int ath9k_nvmem_request_eeprom(struct ath_softc *sc)
 	}
 
 	buf = nvmem_cell_read(cell, &len);
+	nvmem_cell_put(cell);
 	if (IS_ERR(buf))
 		return PTR_ERR(buf);
 
@@ -608,7 +606,7 @@ static int ath9k_nvmem_request_eeprom(struct ath_softc *sc)
 	}
 
 	/* devres manages the calibration values release on shutdown */
-	ah->nvmem_blob = (u16 *)devm_kmemdup(sc->dev, buf, len, GFP_KERNEL);
+	ah->nvmem_blob = devm_kmemdup(sc->dev, buf, len, GFP_KERNEL);
 	kfree(buf);
 	if (!ah->nvmem_blob)
 		return -ENOMEM;
@@ -616,49 +614,6 @@ static int ath9k_nvmem_request_eeprom(struct ath_softc *sc)
 	ah->nvmem_blob_len = len;
 	ah->ah_flags &= ~AH_USE_EEPROM;
 	ah->ah_flags |= AH_NO_EEP_SWAP;
-
-	return 0;
-}
-
-static int ath9k_init_platform(struct ath_softc *sc)
-{
-	struct ath9k_platform_data *pdata = sc->dev->platform_data;
-	struct ath_hw *ah = sc->sc_ah;
-	struct ath_common *common = ath9k_hw_common(ah);
-	int ret;
-
-	if (!pdata)
-		return 0;
-
-	if (!pdata->use_eeprom) {
-		ah->ah_flags &= ~AH_USE_EEPROM;
-		ah->gpio_mask = pdata->gpio_mask;
-		ah->gpio_val = pdata->gpio_val;
-		ah->led_pin = pdata->led_pin;
-		ah->is_clk_25mhz = pdata->is_clk_25mhz;
-		ah->get_mac_revision = pdata->get_mac_revision;
-		ah->external_reset = pdata->external_reset;
-		ah->disable_2ghz = pdata->disable_2ghz;
-		ah->disable_5ghz = pdata->disable_5ghz;
-
-		if (!pdata->endian_check)
-			ah->ah_flags |= AH_NO_EEP_SWAP;
-	}
-
-	if (pdata->eeprom_name) {
-		ret = ath9k_eeprom_request(sc, pdata->eeprom_name);
-		if (ret)
-			return ret;
-	}
-
-	if (pdata->led_active_high)
-		ah->config.led_active_high = true;
-
-	if (pdata->tx_gain_buffalo)
-		ah->config.tx_gain_buffalo = true;
-
-	if (pdata->macaddr)
-		ether_addr_copy(common->macaddr, pdata->macaddr);
 
 	return 0;
 }
@@ -691,7 +646,9 @@ static int ath9k_of_init(struct ath_softc *sc)
 		ah->ah_flags |= AH_NO_EEP_SWAP;
 	}
 
-	of_get_mac_address(np, common->macaddr);
+	ret = of_get_mac_address(np, common->macaddr);
+	if (ret == -EPROBE_DEFER)
+		return ret;
 
 	return 0;
 }
@@ -747,10 +704,6 @@ static int ath9k_init_softc(u16 devid, struct ath_softc *sc,
 	 * Platform quirks.
 	 */
 	ath9k_init_pcoem_platform(sc);
-
-	ret = ath9k_init_platform(sc);
-	if (ret)
-		return ret;
 
 	ret = ath9k_of_init(sc);
 	if (ret)
@@ -1004,7 +957,6 @@ static void ath9k_set_hw_capab(struct ath_softc *sc, struct ieee80211_hw *hw)
 	hw->wiphy->flags |= WIPHY_FLAG_IBSS_RSN;
 	hw->wiphy->flags |= WIPHY_FLAG_SUPPORTS_TDLS;
 	hw->wiphy->flags |= WIPHY_FLAG_HAS_REMAIN_ON_CHANNEL;
-	hw->wiphy->flags |= WIPHY_FLAG_SUPPORTS_5_10_MHZ;
 	hw->wiphy->flags |= WIPHY_FLAG_HAS_CHANNEL_SWITCH;
 	hw->wiphy->flags |= WIPHY_FLAG_AP_UAPSD;
 
@@ -1145,7 +1097,7 @@ static void ath9k_deinit_softc(struct ath_softc *sc)
 		if (ATH_TXQ_SETUP(sc, i))
 			ath_tx_cleanupq(sc, &sc->tx.txq[i]);
 
-	del_timer_sync(&sc->sleep_timer);
+	timer_delete_sync(&sc->sleep_timer);
 	ath9k_hw_deinit(sc->sc_ah);
 	if (sc->dfs_detector != NULL)
 		sc->dfs_detector->exit(sc->dfs_detector);

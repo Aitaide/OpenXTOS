@@ -13,6 +13,7 @@
 
 #include <stdio.h>
 #include <stdlib.h>
+#include <stdbool.h>
 #include <sys/types.h>
 #include <sys/stat.h>
 #include <fcntl.h>
@@ -23,9 +24,6 @@
 #include <linux/types.h>
 #include <getopt.h>
 
-#define bool int
-#define true 1
-#define false 0
 #define TASK_COMM_LEN 16
 
 struct block_list {
@@ -33,7 +31,6 @@ struct block_list {
 	char *comm; // task command name
 	char *stacktrace;
 	__u64 ts_nsec;
-	__u64 free_ts_nsec;
 	int len;
 	int num;
 	int page_num;
@@ -42,18 +39,23 @@ struct block_list {
 	int allocator;
 };
 enum FILTER_BIT {
-	FILTER_UNRELEASE = 1<<1,
-	FILTER_PID = 1<<2,
-	FILTER_TGID = 1<<3,
-	FILTER_COMM = 1<<4
+	FILTER_PID = 1<<1,
+	FILTER_TGID = 1<<2,
+	FILTER_COMM = 1<<3
 };
+
+enum FILTER_RESULT {
+	FILTER_ERROR,
+	FILTER_SKIP,
+	FILTER_MATCH
+};
+
 enum CULL_BIT {
-	CULL_UNRELEASE = 1<<1,
-	CULL_PID = 1<<2,
-	CULL_TGID = 1<<3,
-	CULL_COMM = 1<<4,
-	CULL_STACKTRACE = 1<<5,
-	CULL_ALLOCATOR = 1<<6
+	CULL_PID = 1<<1,
+	CULL_TGID = 1<<2,
+	CULL_COMM = 1<<3,
+	CULL_STACKTRACE = 1<<4,
+	CULL_ALLOCATOR = 1<<5
 };
 enum ALLOCATOR_BIT {
 	ALLOCATOR_CMA = 1<<1,
@@ -62,13 +64,22 @@ enum ALLOCATOR_BIT {
 	ALLOCATOR_OTHERS = 1<<4
 };
 enum ARG_TYPE {
-	ARG_TXT, ARG_COMM, ARG_STACKTRACE, ARG_ALLOC_TS, ARG_FREE_TS,
-	ARG_CULL_TIME, ARG_PAGE_NUM, ARG_PID, ARG_TGID, ARG_UNKNOWN, ARG_FREE,
-	ARG_ALLOCATOR
+	ARG_TXT, ARG_COMM, ARG_STACKTRACE, ARG_ALLOC_TS, ARG_CULL_TIME,
+	ARG_PAGE_NUM, ARG_PID, ARG_TGID, ARG_UNKNOWN, ARG_ALLOCATOR
 };
 enum SORT_ORDER {
 	SORT_ASC = 1,
 	SORT_DESC = -1,
+};
+enum COMP_FLAG {
+	COMP_NO_FLAG = 0,
+	COMP_ALLOC = 1<<0,
+	COMP_PAGE_NUM = 1<<1,
+	COMP_PID = 1<<2,
+	COMP_STACK = 1<<3,
+	COMP_NUM = 1<<4,
+	COMP_TGID = 1<<5,
+	COMP_COMM = 1<<6
 };
 struct filter_condition {
 	pid_t *pids;
@@ -90,7 +101,6 @@ static regex_t pid_pattern;
 static regex_t tgid_pattern;
 static regex_t comm_pattern;
 static regex_t ts_nsec_pattern;
-static regex_t free_ts_nsec_pattern;
 static struct block_list *list;
 static int list_size;
 static int max_size;
@@ -178,25 +188,11 @@ static int compare_ts(const void *p1, const void *p2)
 {
 	const struct block_list *l1 = p1, *l2 = p2;
 
-	return l1->ts_nsec < l2->ts_nsec ? -1 : 1;
-}
-
-static int compare_free_ts(const void *p1, const void *p2)
-{
-	const struct block_list *l1 = p1, *l2 = p2;
-
-	return l1->free_ts_nsec < l2->free_ts_nsec ? -1 : 1;
-}
-
-static int compare_release(const void *p1, const void *p2)
-{
-	const struct block_list *l1 = p1, *l2 = p2;
-
-	if (!l1->free_ts_nsec && !l2->free_ts_nsec)
-		return 0;
-	if (l1->free_ts_nsec && l2->free_ts_nsec)
-		return 0;
-	return l1->free_ts_nsec ? 1 : -1;
+	if (l1->ts_nsec < l2->ts_nsec)
+		return -1;
+	if (l1->ts_nsec > l2->ts_nsec)
+		return 1;
+	return 0;
 }
 
 static int compare_cull_condition(const void *p1, const void *p2)
@@ -211,8 +207,6 @@ static int compare_cull_condition(const void *p1, const void *p2)
 		return compare_tgid(p1, p2);
 	if ((cull & CULL_COMM) && compare_comm(p1, p2))
 		return compare_comm(p1, p2);
-	if ((cull & CULL_UNRELEASE) && compare_release(p1, p2))
-		return compare_release(p1, p2);
 	if ((cull & CULL_ALLOCATOR) && compare_allocator(p1, p2))
 		return compare_allocator(p1, p2);
 	return 0;
@@ -228,7 +222,23 @@ static int compare_sort_condition(const void *p1, const void *p2)
 	return cmp;
 }
 
-static int search_pattern(regex_t *pattern, char *pattern_str, char *buf)
+static int remove_pattern(regex_t *pattern, char *buf, int len)
+{
+	regmatch_t pmatch[2];
+	int err;
+
+	err = regexec(pattern, buf, 2, pmatch, REG_NOTBOL);
+	if (err != 0 || pmatch[1].rm_so == -1)
+		return len;
+
+	memcpy(buf + pmatch[1].rm_so,
+		buf + pmatch[1].rm_eo, len - pmatch[1].rm_eo);
+
+	return len - (pmatch[1].rm_eo - pmatch[1].rm_so);
+}
+
+static int search_pattern(regex_t *pattern, char *pattern_str,
+			  size_t pattern_str_size, char *buf)
 {
 	int err, val_len;
 	regmatch_t pmatch[2];
@@ -240,8 +250,14 @@ static int search_pattern(regex_t *pattern, char *pattern_str, char *buf)
 		return -1;
 	}
 	val_len = pmatch[1].rm_eo - pmatch[1].rm_so;
+	if ((size_t)val_len >= pattern_str_size) {
+		if (debug_on)
+			fprintf(stderr, "pattern too long in %s\n", buf);
+		return -1;
+	}
 
 	memcpy(pattern_str, buf + pmatch[1].rm_so, val_len);
+	pattern_str[val_len] = '\0';
 
 	return 0;
 }
@@ -298,7 +314,8 @@ static int get_page_num(char *buf)
 	char order_str[FIELD_BUFF] = {0};
 	char *endptr;
 
-	search_pattern(&order_pattern, order_str, buf);
+	if (search_pattern(&order_pattern, order_str, sizeof(order_str), buf) < 0)
+		return 0;
 	errno = 0;
 	order_val = strtol(order_str, &endptr, 10);
 	if (order_val > 64 || errno != 0 || endptr == order_str || *endptr != '\0') {
@@ -316,7 +333,8 @@ static pid_t get_pid(char *buf)
 	char pid_str[FIELD_BUFF] = {0};
 	char *endptr;
 
-	search_pattern(&pid_pattern, pid_str, buf);
+	if (search_pattern(&pid_pattern, pid_str, sizeof(pid_str), buf) < 0)
+		return -1;
 	errno = 0;
 	pid = strtol(pid_str, &endptr, 10);
 	if (errno != 0 || endptr == pid_str || *endptr != '\0') {
@@ -335,7 +353,8 @@ static pid_t get_tgid(char *buf)
 	char tgid_str[FIELD_BUFF] = {0};
 	char *endptr;
 
-	search_pattern(&tgid_pattern, tgid_str, buf);
+	if (search_pattern(&tgid_pattern, tgid_str, sizeof(tgid_str), buf) < 0)
+		return -1;
 	errno = 0;
 	tgid = strtol(tgid_str, &endptr, 10);
 	if (errno != 0 || endptr == tgid_str || *endptr != '\0') {
@@ -354,7 +373,9 @@ static __u64 get_ts_nsec(char *buf)
 	char ts_nsec_str[FIELD_BUFF] = {0};
 	char *endptr;
 
-	search_pattern(&ts_nsec_pattern, ts_nsec_str, buf);
+	if (search_pattern(&ts_nsec_pattern, ts_nsec_str,
+			   sizeof(ts_nsec_str), buf) < 0)
+		return -1;
 	errno = 0;
 	ts_nsec = strtoull(ts_nsec_str, &endptr, 10);
 	if (errno != 0 || endptr == ts_nsec_str || *endptr != '\0') {
@@ -366,39 +387,34 @@ static __u64 get_ts_nsec(char *buf)
 	return ts_nsec;
 }
 
-static __u64 get_free_ts_nsec(char *buf)
-{
-	__u64 free_ts_nsec;
-	char free_ts_nsec_str[FIELD_BUFF] = {0};
-	char *endptr;
-
-	search_pattern(&free_ts_nsec_pattern, free_ts_nsec_str, buf);
-	errno = 0;
-	free_ts_nsec = strtoull(free_ts_nsec_str, &endptr, 10);
-	if (errno != 0 || endptr == free_ts_nsec_str || *endptr != '\0') {
-		if (debug_on)
-			fprintf(stderr, "wrong free_ts_nsec in follow buf:\n%s\n", buf);
-		return -1;
-	}
-
-	return free_ts_nsec;
-}
-
 static char *get_comm(char *buf)
 {
 	char *comm_str = malloc(TASK_COMM_LEN);
 
+	if (!comm_str)
+		return NULL;
+
 	memset(comm_str, 0, TASK_COMM_LEN);
 
-	search_pattern(&comm_pattern, comm_str, buf);
+	if (search_pattern(&comm_pattern, comm_str, TASK_COMM_LEN, buf) < 0) {
+		free(comm_str);
+		return NULL;
+	}
 	errno = 0;
 	if (errno != 0) {
 		if (debug_on)
 			fprintf(stderr, "wrong comm in follow buf:\n%s\n", buf);
+		free(comm_str);
 		return NULL;
 	}
 
 	return comm_str;
+}
+
+static void free_block_list(struct block_list *block)
+{
+	free(block->comm);
+	free(block->txt);
 }
 
 static int get_arg_type(const char *arg)
@@ -411,12 +427,8 @@ static int get_arg_type(const char *arg)
 		return  ARG_COMM;
 	else if (!strcmp(arg, "stacktrace") || !strcmp(arg, "st"))
 		return ARG_STACKTRACE;
-	else if (!strcmp(arg, "free") || !strcmp(arg, "f"))
-		return ARG_FREE;
 	else if (!strcmp(arg, "txt") || !strcmp(arg, "T"))
 		return ARG_TXT;
-	else if (!strcmp(arg, "free_ts") || !strcmp(arg, "ft"))
-		return ARG_FREE_TS;
 	else if (!strcmp(arg, "alloc_ts") || !strcmp(arg, "at"))
 		return ARG_ALLOC_TS;
 	else if (!strcmp(arg, "allocator") || !strcmp(arg, "ator"))
@@ -469,56 +481,62 @@ static bool match_str_list(const char *str, char **list, int list_size)
 	return false;
 }
 
-static bool is_need(char *buf)
+static enum FILTER_RESULT filter_record(char *buf)
 {
-	__u64 ts_nsec, free_ts_nsec;
+	char *comm;
 
-	ts_nsec = get_ts_nsec(buf);
-	free_ts_nsec = get_free_ts_nsec(buf);
-
-	if ((filter & FILTER_UNRELEASE) && free_ts_nsec != 0 && ts_nsec < free_ts_nsec)
-		return false;
 	if ((filter & FILTER_PID) && !match_num_list(get_pid(buf), fc.pids, fc.pids_size))
-		return false;
+		return FILTER_SKIP;
 	if ((filter & FILTER_TGID) &&
 		!match_num_list(get_tgid(buf), fc.tgids, fc.tgids_size))
-		return false;
+		return FILTER_SKIP;
+	if (!(filter & FILTER_COMM))
+		return FILTER_MATCH;
 
-	char *comm = get_comm(buf);
+	comm = get_comm(buf);
+	if (!comm)
+		return FILTER_ERROR;
 
-	if ((filter & FILTER_COMM) &&
-	!match_str_list(comm, fc.comms, fc.comms_size)) {
+	if (!match_str_list(comm, fc.comms, fc.comms_size)) {
 		free(comm);
-		return false;
+		return FILTER_SKIP;
 	}
 	free(comm);
-	return true;
+	return FILTER_MATCH;
 }
 
 static bool add_list(char *buf, int len, char *ext_buf)
 {
-	if (list_size != 0 &&
-		len == list[list_size-1].len &&
-		memcmp(buf, list[list_size-1].txt, len) == 0) {
-		list[list_size-1].num++;
-		list[list_size-1].page_num += get_page_num(buf);
-		return true;
-	}
+	enum FILTER_RESULT filter_result;
+
 	if (list_size == max_size) {
 		fprintf(stderr, "max_size too small??\n");
 		return false;
 	}
-	if (!is_need(buf))
+	filter_result = filter_record(buf);
+	if (filter_result == FILTER_ERROR) {
+		fprintf(stderr, "Out of memory\n");
+		return false;
+	}
+	if (filter_result == FILTER_SKIP)
 		return true;
 	list[list_size].pid = get_pid(buf);
 	list[list_size].tgid = get_tgid(buf);
 	list[list_size].comm = get_comm(buf);
-	list[list_size].txt = malloc(len+1);
-	if (!list[list_size].txt) {
+	if (!list[list_size].comm) {
 		fprintf(stderr, "Out of memory\n");
 		return false;
 	}
+	list[list_size].txt = malloc(len + 1);
+	if (!list[list_size].txt) {
+		fprintf(stderr, "Out of memory\n");
+		free(list[list_size].comm);
+		return false;
+	}
 	memcpy(list[list_size].txt, buf, len);
+	if (sc.cmps[0] != compare_ts) {
+		len = remove_pattern(&ts_nsec_pattern, list[list_size].txt, len);
+	}
 	list[list_size].txt[len] = 0;
 	list[list_size].len = len;
 	list[list_size].num = 1;
@@ -528,7 +546,6 @@ static bool add_list(char *buf, int len, char *ext_buf)
 	if (*list[list_size].stacktrace == '\n')
 		list[list_size].stacktrace++;
 	list[list_size].ts_nsec = get_ts_nsec(buf);
-	list[list_size].free_ts_nsec = get_free_ts_nsec(buf);
 	list[list_size].allocator = get_allocator(buf, ext_buf);
 	list_size++;
 	if (list_size % 1000 == 0) {
@@ -554,8 +571,6 @@ static bool parse_cull_args(const char *arg_str)
 			cull |= CULL_COMM;
 		else if (arg_type == ARG_STACKTRACE)
 			cull |= CULL_STACKTRACE;
-		else if (arg_type == ARG_FREE)
-			cull |= CULL_UNRELEASE;
 		else if (arg_type == ARG_ALLOCATOR)
 			cull |= CULL_ALLOCATOR;
 		else {
@@ -616,8 +631,6 @@ static bool parse_sort_args(const char *arg_str)
 			sc.cmps[i] = compare_stacktrace;
 		else if (arg_type == ARG_ALLOC_TS)
 			sc.cmps[i] = compare_ts;
-		else if (arg_type == ARG_FREE_TS)
-			sc.cmps[i] = compare_free_ts;
 		else if (arg_type == ARG_TXT)
 			sc.cmps[i] = compare_txt;
 		else if (arg_type == ARG_ALLOCATOR)
@@ -672,21 +685,26 @@ static void print_allocator(FILE *out, int allocator)
 static void usage(void)
 {
 	printf("Usage: ./page_owner_sort [OPTIONS] <input> <output>\n"
-		"-m\t\tSort by total memory.\n"
-		"-s\t\tSort by the stack trace.\n"
-		"-t\t\tSort by times (default).\n"
-		"-p\t\tSort by pid.\n"
-		"-P\t\tSort by tgid.\n"
-		"-n\t\tSort by task command name.\n"
-		"-a\t\tSort by memory allocate time.\n"
-		"-r\t\tSort by memory release time.\n"
-		"-f\t\tFilter out the information of blocks whose memory has been released.\n"
-		"-d\t\tPrint debug information.\n"
-		"--pid <pidlist>\tSelect by pid. This selects the information of blocks whose process ID numbers appear in <pidlist>.\n"
-		"--tgid <tgidlist>\tSelect by tgid. This selects the information of blocks whose Thread Group ID numbers appear in <tgidlist>.\n"
-		"--name <cmdlist>\n\t\tSelect by command name. This selects the information of blocks whose command name appears in <cmdlist>.\n"
-		"--cull <rules>\tCull by user-defined rules.<rules> is a single argument in the form of a comma-separated list with some common fields predefined\n"
-		"--sort <order>\tSpecify sort order as: [+|-]key[,[+|-]key[,...]]\n"
+		"-a\t\t\tSort by memory allocation time.\n"
+		"-m\t\t\tSort by total memory.\n"
+		"-n\t\t\tSort by task command name.\n"
+		"-p\t\t\tSort by pid.\n"
+		"-P\t\t\tSort by tgid.\n"
+		"-s\t\t\tSort by the stacktrace.\n"
+		"-t\t\t\tSort by number of times record is seen (default).\n\n"
+		"--pid <pidlist>\t\tSelect by pid. This selects the information"
+		" of\n\t\t\tblocks whose process ID numbers appear in <pidlist>.\n"
+		"--tgid <tgidlist>\tSelect by tgid. This selects the information"
+		" of\n\t\t\tblocks whose Thread Group ID numbers appear in "
+		"<tgidlist>.\n"
+		"--name <cmdlist>\tSelect by command name. This selects the"
+		" information\n\t\t\tof blocks whose command name appears in"
+		" <cmdlist>.\n"
+		"--cull <rules>\t\tCull by user-defined rules. <rules> is a "
+		"single\n\t\t\targument in the form of a comma-separated list "
+		"with some\n\t\t\tcommon fields predefined (pid, tgid, comm, "
+		"stacktrace, allocator)\n"
+		"--sort <order>\t\tSpecify sort order as: [+|-]key[,[+|-]key[,...]]\n"
 	);
 }
 
@@ -694,50 +712,50 @@ int main(int argc, char **argv)
 {
 	FILE *fin, *fout;
 	char *buf, *ext_buf;
-	int i, count;
+	int i, count, compare_flag;
 	struct stat st;
 	int opt;
 	struct option longopts[] = {
 		{ "pid", required_argument, NULL, 1 },
 		{ "tgid", required_argument, NULL, 2 },
 		{ "name", required_argument, NULL, 3 },
-		{ "cull",  required_argument, NULL, 4 },
-		{ "sort",  required_argument, NULL, 5 },
+		{ "cull", required_argument, NULL, 4 },
+		{ "sort", required_argument, NULL, 5 },
+		{ "help", no_argument, NULL, 'h' },
 		{ 0, 0, 0, 0},
 	};
 
-	while ((opt = getopt_long(argc, argv, "adfmnprstP", longopts, NULL)) != -1)
+	compare_flag = COMP_NO_FLAG;
+
+	while ((opt = getopt_long(argc, argv, "admnpstPh", longopts, NULL)) != -1)
 		switch (opt) {
 		case 'a':
-			set_single_cmp(compare_ts, SORT_ASC);
+			compare_flag |= COMP_ALLOC;
 			break;
 		case 'd':
 			debug_on = true;
 			break;
-		case 'f':
-			filter = filter | FILTER_UNRELEASE;
-			break;
 		case 'm':
-			set_single_cmp(compare_page_num, SORT_DESC);
+			compare_flag |= COMP_PAGE_NUM;
 			break;
 		case 'p':
-			set_single_cmp(compare_pid, SORT_ASC);
-			break;
-		case 'r':
-			set_single_cmp(compare_free_ts, SORT_ASC);
+			compare_flag |= COMP_PID;
 			break;
 		case 's':
-			set_single_cmp(compare_stacktrace, SORT_ASC);
+			compare_flag |= COMP_STACK;
 			break;
 		case 't':
-			set_single_cmp(compare_num, SORT_DESC);
+			compare_flag |= COMP_NUM;
 			break;
 		case 'P':
-			set_single_cmp(compare_tgid, SORT_ASC);
+			compare_flag |= COMP_TGID;
 			break;
 		case 'n':
-			set_single_cmp(compare_comm, SORT_ASC);
+			compare_flag |= COMP_COMM;
 			break;
+		case 'h':
+			usage();
+			exit(0);
 		case 1:
 			filter = filter | FILTER_PID;
 			fc.pids = parse_nums_list(optarg, &fc.pids_size);
@@ -784,9 +802,41 @@ int main(int argc, char **argv)
 		exit(1);
 	}
 
+	/* Only one compare option is allowed, yet we also want handle the
+	 * default case were no option is provided, but we still want to
+	 * match the behavior of the -t option (compare by number of times
+	 * a record is seen
+	 */
+	switch (compare_flag) {
+	case COMP_ALLOC:
+		set_single_cmp(compare_ts, SORT_ASC);
+		break;
+	case COMP_PAGE_NUM:
+		set_single_cmp(compare_page_num, SORT_DESC);
+		break;
+	case COMP_PID:
+		set_single_cmp(compare_pid, SORT_ASC);
+		break;
+	case COMP_STACK:
+		set_single_cmp(compare_stacktrace, SORT_ASC);
+		break;
+	case COMP_NO_FLAG:
+	case COMP_NUM:
+		set_single_cmp(compare_num, SORT_DESC);
+		break;
+	case COMP_TGID:
+		set_single_cmp(compare_tgid, SORT_ASC);
+		break;
+	case COMP_COMM:
+		set_single_cmp(compare_comm, SORT_ASC);
+		break;
+	default:
+		usage();
+		exit(1);
+	}
+
 	fin = fopen(argv[optind], "r");
-	fout = fopen(argv[optind + 1], "w");
-	if (!fin || !fout) {
+	if (!fin) {
 		usage();
 		perror("open: ");
 		exit(1);
@@ -800,10 +850,8 @@ int main(int argc, char **argv)
 		goto out_tgid;
 	if (!check_regcomp(&comm_pattern, "tgid\\s*[0-9]*\\s*\\((.*)\\),\\s*ts"))
 		goto out_comm;
-	if (!check_regcomp(&ts_nsec_pattern, "ts\\s*([0-9]*)\\s*ns,"))
+	if (!check_regcomp(&ts_nsec_pattern, "ts\\s*([0-9]*)\\s*ns"))
 		goto out_ts;
-	if (!check_regcomp(&free_ts_nsec_pattern, "free_ts\\s*([0-9]*)\\s*ns"))
-		goto out_free_ts;
 
 	fstat(fileno(fin), &st);
 	max_size = st.st_size / 100; /* hack ... */
@@ -825,6 +873,13 @@ int main(int argc, char **argv)
 			goto out_free;
 	}
 
+	fout = fopen(argv[optind + 1], "w");
+	if (!fout) {
+		usage();
+		perror("open: ");
+		exit(1);
+	}
+
 	printf("loaded %d\n", list_size);
 
 	printf("sorting ....\n");
@@ -840,8 +895,10 @@ int main(int argc, char **argv)
 		} else {
 			list[count-1].num += list[i].num;
 			list[count-1].page_num += list[i].page_num;
+			free_block_list(&list[i]);
 		}
 	}
+	list_size = count;
 
 	qsort(list, count, sizeof(list[0]), compare_sort_condition);
 
@@ -864,9 +921,6 @@ int main(int argc, char **argv)
 				fprintf(fout, ", ");
 				print_allocator(fout, list[i].allocator);
 			}
-			if (cull & CULL_UNRELEASE)
-				fprintf(fout, " (%s)",
-						list[i].free_ts_nsec ? "UNRELEASED" : "RELEASED");
 			if (cull & CULL_STACKTRACE)
 				fprintf(fout, ":\n%s", list[i].stacktrace);
 			fprintf(fout, "\n");
@@ -878,10 +932,11 @@ out_free:
 		free(ext_buf);
 	if (buf)
 		free(buf);
-	if (list)
+	if (list) {
+		for (i = 0; i < list_size; i++)
+			free_block_list(&list[i]);
 		free(list);
-out_free_ts:
-	regfree(&free_ts_nsec_pattern);
+	}
 out_ts:
 	regfree(&ts_nsec_pattern);
 out_comm:

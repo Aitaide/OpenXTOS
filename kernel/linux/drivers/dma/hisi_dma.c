@@ -163,7 +163,7 @@ struct hisi_dma_dev {
 	u32 chan_depth;
 	enum hisi_dma_reg_layout reg_layout;
 	void __iomem *queue_base; /* queue region start of register */
-	struct hisi_dma_chan chan[];
+	struct hisi_dma_chan chan[] __counted_by(chan_num);
 };
 
 #ifdef CONFIG_DEBUG_FS
@@ -485,7 +485,7 @@ hisi_dma_prep_dma_memcpy(struct dma_chan *c, dma_addr_t dst, dma_addr_t src,
 	struct hisi_dma_chan *chan = to_hisi_dma_chan(c);
 	struct hisi_dma_desc *desc;
 
-	desc = kzalloc(sizeof(*desc), GFP_NOWAIT);
+	desc = kzalloc_obj(*desc, GFP_NOWAIT);
 	if (!desc)
 		return NULL;
 
@@ -677,7 +677,7 @@ static void hisi_dma_init_hw_qp(struct hisi_dma_dev *hdma_dev, u32 index)
 		writel_relaxed(tmp, addr);
 
 		/*
-		 * 0 - dma should process FLR whith CPU.
+		 * 0 - dma should process FLR with CPU.
 		 * 1 - dma not process FLR, only cpu process FLR.
 		 */
 		addr = q_base + HISI_DMA_HIP09_DMA_FLR_DISABLE +
@@ -983,7 +983,7 @@ static int hisi_dma_probe(struct pci_dev *pdev, const struct pci_device_id *id)
 	hdma_dev = devm_kzalloc(dev, struct_size(hdma_dev, chan, chan_num),
 				GFP_KERNEL);
 	if (!hdma_dev)
-		return -EINVAL;
+		return -ENOMEM;
 
 	hdma_dev->base = pcim_iomap_table(pdev)[PCI_BAR_2];
 	hdma_dev->pdev = pdev;
@@ -1037,6 +1037,7 @@ static const struct pci_device_id hisi_dma_pci_tbl[] = {
 	{ PCI_DEVICE(PCI_VENDOR_ID_HUAWEI, 0xa122) },
 	{ 0, }
 };
+MODULE_DEVICE_TABLE(pci, hisi_dma_pci_tbl);
 
 static struct pci_driver hisi_dma_pci_driver = {
 	.name		= "hisi_dma",
@@ -1050,4 +1051,3 @@ MODULE_AUTHOR("Zhou Wang <wangzhou1@hisilicon.com>");
 MODULE_AUTHOR("Zhenfa Qiu <qiuzhenfa@hisilicon.com>");
 MODULE_DESCRIPTION("HiSilicon Kunpeng DMA controller driver");
 MODULE_LICENSE("GPL v2");
-MODULE_DEVICE_TABLE(pci, hisi_dma_pci_tbl);

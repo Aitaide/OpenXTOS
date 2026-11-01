@@ -5,6 +5,7 @@
 #include <stdlib.h>
 #include <signal.h>
 #include <sys/mman.h>
+#include <linux/compiler.h>
 #include <linux/string.h>
 
 #include "tests.h"
@@ -28,7 +29,7 @@
 static int __test__sw_clock_freq(enum perf_sw_ids clock_id)
 {
 	int i, err = -1;
-	volatile int tmp = 0;
+	volatile int tmp __maybe_unused = 0;
 	u64 total_periods = 0;
 	int nr_samples = 0;
 	char sbuf[STRERR_BUFSIZE];
@@ -58,19 +59,19 @@ static int __test__sw_clock_freq(enum perf_sw_ids clock_id)
 	evsel = evsel__new(&attr);
 	if (evsel == NULL) {
 		pr_debug("evsel__new\n");
-		goto out_delete_evlist;
+		goto out_put_evlist;
 	}
 	evlist__add(evlist, evsel);
 
-	cpus = perf_cpu_map__dummy_new();
+	cpus = perf_cpu_map__new_any_cpu();
 	threads = thread_map__new_by_tid(getpid());
 	if (!cpus || !threads) {
 		err = -ENOMEM;
 		pr_debug("Not enough memory to create thread/cpu maps\n");
-		goto out_delete_evlist;
+		goto out_put_evlist;
 	}
 
-	perf_evlist__set_maps(&evlist->core, cpus, threads);
+	perf_evlist__set_maps(evlist__core(evlist), cpus, threads);
 
 	if (evlist__open(evlist)) {
 		const char *knob = "/proc/sys/kernel/perf_event_max_sample_rate";
@@ -79,14 +80,14 @@ static int __test__sw_clock_freq(enum perf_sw_ids clock_id)
 		pr_debug("Couldn't open evlist: %s\nHint: check %s, using %" PRIu64 " in this test.\n",
 			 str_error_r(errno, sbuf, sizeof(sbuf)),
 			 knob, (u64)attr.sample_freq);
-		goto out_delete_evlist;
+		goto out_put_evlist;
 	}
 
-	err = evlist__mmap(evlist, 128);
+	err = evlist__do_mmap(evlist, 128);
 	if (err < 0) {
 		pr_debug("failed to mmap event: %d (%s)\n", errno,
 			 str_error_r(errno, sbuf, sizeof(sbuf)));
-		goto out_delete_evlist;
+		goto out_put_evlist;
 	}
 
 	evlist__enable(evlist);
@@ -97,26 +98,29 @@ static int __test__sw_clock_freq(enum perf_sw_ids clock_id)
 
 	evlist__disable(evlist);
 
-	md = &evlist->mmap[0];
+	md = &evlist__mmap(evlist)[0];
 	if (perf_mmap__read_init(&md->core) < 0)
 		goto out_init;
 
 	while ((event = perf_mmap__read_event(&md->core)) != NULL) {
 		struct perf_sample sample;
 
+		perf_sample__init(&sample, /*all=*/false);
 		if (event->header.type != PERF_RECORD_SAMPLE)
 			goto next_event;
 
 		err = evlist__parse_sample(evlist, event, &sample);
 		if (err < 0) {
 			pr_debug("Error during parse sample\n");
-			goto out_delete_evlist;
+			perf_sample__exit(&sample);
+			goto out_put_evlist;
 		}
 
 		total_periods += sample.period;
 		nr_samples++;
 next_event:
 		perf_mmap__consume(&md->core);
+		perf_sample__exit(&sample);
 	}
 	perf_mmap__read_done(&md->core);
 
@@ -127,10 +131,10 @@ out_init:
 		err = -1;
 	}
 
-out_delete_evlist:
+out_put_evlist:
 	perf_cpu_map__put(cpus);
 	perf_thread_map__put(threads);
-	evlist__delete(evlist);
+	evlist__put(evlist);
 	return err;
 }
 

@@ -54,12 +54,25 @@ enum {
 	BNXT_RE_UCNTX_CMASK_HAVE_MODE = 0x02ULL,
 	BNXT_RE_UCNTX_CMASK_WC_DPI_ENABLED = 0x04ULL,
 	BNXT_RE_UCNTX_CMASK_DBR_PACING_ENABLED = 0x08ULL,
+	BNXT_RE_UCNTX_CMASK_POW2_DISABLED = 0x10ULL,
+	BNXT_RE_UCNTX_CMASK_MSN_TABLE_ENABLED = 0x40,
+	BNXT_RE_UCNTX_CMASK_QP_RATE_LIMIT_ENABLED = 0x80ULL,
+	BNXT_RE_UCNTX_CMASK_TOGGLE_MEM_UOBJ_SUPPORT = 0x400000ULL,
 };
 
 enum bnxt_re_wqe_mode {
 	BNXT_QPLIB_WQE_MODE_STATIC	= 0x00,
 	BNXT_QPLIB_WQE_MODE_VARIABLE	= 0x01,
 	BNXT_QPLIB_WQE_MODE_INVALID	= 0x02,
+};
+
+enum {
+	BNXT_RE_COMP_MASK_REQ_UCNTX_POW2_SUPPORT = 0x01,
+	BNXT_RE_COMP_MASK_REQ_UCNTX_VAR_WQE_SUPPORT = 0x02,
+};
+
+struct bnxt_re_uctx_req {
+	__aligned_u64 comp_mask;
 };
 
 struct bnxt_re_uctx_resp {
@@ -90,6 +103,15 @@ struct bnxt_re_pd_resp {
 struct bnxt_re_cq_req {
 	__aligned_u64 cq_va;
 	__aligned_u64 cq_handle;
+	__aligned_u64 comp_mask;
+};
+
+enum bnxt_re_resp_cq_mask {
+	BNXT_RE_CQ_TOGGLE_PAGE_SUPPORT = 0x1,
+};
+
+enum bnxt_re_req_cq_mask {
+	BNXT_RE_CQ_FIXED_NUM_CQE_ENABLE = 0x1,
 };
 
 struct bnxt_re_cq_resp {
@@ -97,16 +119,28 @@ struct bnxt_re_cq_resp {
 	__u32 tail;
 	__u32 phase;
 	__u32 rsvd;
+	__aligned_u64 comp_mask;
 };
 
 struct bnxt_re_resize_cq_req {
 	__aligned_u64 cq_va;
 };
 
+enum bnxt_re_qp_mask {
+	BNXT_RE_QP_REQ_MASK_FIXED_QUE_ATTR = 0x1,
+};
+
 struct bnxt_re_qp_req {
 	__aligned_u64 qpsva;
 	__aligned_u64 qprva;
 	__aligned_u64 qp_handle;
+	__aligned_u64 comp_mask;
+	__u32 sq_slots;
+	__u32 sq_npsn;
+};
+
+enum bnxt_re_create_qp_attrs {
+	BNXT_RE_CREATE_QP_ATTR_DBR_HANDLE = UVERBS_ID_DRIVER_NS_WITH_UHW,
 };
 
 struct bnxt_re_qp_resp {
@@ -119,8 +153,14 @@ struct bnxt_re_srq_req {
 	__aligned_u64 srq_handle;
 };
 
+enum bnxt_re_srq_mask {
+	BNXT_RE_SRQ_TOGGLE_PAGE_SUPPORT = 0x1,
+};
+
 struct bnxt_re_srq_resp {
 	__u32 srqid;
+	__u32 rsvd; /* padding */
+	__aligned_u64 comp_mask;
 };
 
 enum bnxt_re_shpg_offt {
@@ -133,6 +173,9 @@ enum bnxt_re_shpg_offt {
 enum bnxt_re_objects {
 	BNXT_RE_OBJECT_ALLOC_PAGE = (1U << UVERBS_ID_NS_SHIFT),
 	BNXT_RE_OBJECT_NOTIFY_DRV,
+	BNXT_RE_OBJECT_GET_TOGGLE_MEM,
+	BNXT_RE_OBJECT_DBR,
+	BNXT_RE_OBJECT_DEFAULT_DBR,
 };
 
 enum bnxt_re_alloc_page_type {
@@ -161,4 +204,73 @@ enum bnxt_re_alloc_page_methods {
 enum bnxt_re_notify_drv_methods {
 	BNXT_RE_METHOD_NOTIFY_DRV = (1U << UVERBS_ID_NS_SHIFT),
 };
+
+/* Toggle mem */
+
+enum bnxt_re_get_toggle_mem_type {
+	BNXT_RE_CQ_TOGGLE_MEM = 0,
+	BNXT_RE_SRQ_TOGGLE_MEM,
+};
+
+enum bnxt_re_var_toggle_mem_attrs {
+	BNXT_RE_TOGGLE_MEM_HANDLE = (1U << UVERBS_ID_NS_SHIFT),
+	BNXT_RE_TOGGLE_MEM_TYPE,
+	BNXT_RE_TOGGLE_MEM_RES_ID,
+	BNXT_RE_TOGGLE_MEM_MMAP_PAGE,
+	BNXT_RE_TOGGLE_MEM_MMAP_OFFSET,
+	BNXT_RE_TOGGLE_MEM_MMAP_LENGTH,
+	BNXT_RE_TOGGLE_MEM_CQ_HANDLE,
+	BNXT_RE_TOGGLE_MEM_SRQ_HANDLE,
+};
+
+enum bnxt_re_toggle_mem_attrs {
+	BNXT_RE_RELEASE_TOGGLE_MEM_HANDLE = (1U << UVERBS_ID_NS_SHIFT),
+};
+
+enum bnxt_re_toggle_mem_methods {
+	BNXT_RE_METHOD_GET_TOGGLE_MEM = (1U << UVERBS_ID_NS_SHIFT),
+	BNXT_RE_METHOD_RELEASE_TOGGLE_MEM,
+};
+
+struct bnxt_re_packet_pacing_caps {
+	__u32 qp_rate_limit_min;
+	__u32 qp_rate_limit_max; /* In kbps */
+	/* Corresponding bit will be set if qp type from
+	 * 'enum ib_qp_type' is supported, e.g.
+	 * supported_qpts |= 1 << IB_QPT_RC
+	 */
+	__u32 supported_qpts;
+	__u32 reserved;
+};
+
+struct bnxt_re_query_device_ex_resp {
+	struct bnxt_re_packet_pacing_caps packet_pacing_caps;
+};
+
+struct bnxt_re_db_region {
+	__u32 dpi;
+	__u32 reserved;
+	__aligned_u64 reserved2;
+};
+
+enum bnxt_re_obj_dbr_alloc_attrs {
+	BNXT_RE_ALLOC_DBR_HANDLE = (1U << UVERBS_ID_NS_SHIFT),
+	BNXT_RE_ALLOC_DBR_ATTR,
+	BNXT_RE_ALLOC_DBR_OFFSET,
+};
+
+enum bnxt_re_obj_dbr_free_attrs {
+	BNXT_RE_FREE_DBR_HANDLE = (1U << UVERBS_ID_NS_SHIFT),
+};
+
+enum bnxt_re_obj_default_dbr_attrs {
+	BNXT_RE_DEFAULT_DBR_ATTR = (1U << UVERBS_ID_NS_SHIFT),
+};
+
+enum bnxt_re_obj_dpi_methods {
+	BNXT_RE_METHOD_DBR_ALLOC = (1U << UVERBS_ID_NS_SHIFT),
+	BNXT_RE_METHOD_DBR_FREE,
+	BNXT_RE_METHOD_GET_DEFAULT_DBR,
+};
+
 #endif /* __BNXT_RE_UVERBS_ABI_H__*/

@@ -20,6 +20,7 @@
 #include <linux/ctype.h>
 #include <linux/slab.h>
 #include <linux/namei.h>
+#include <linux/hex.h>
 #include <linux/kernel.h>
 #include <linux/iversion.h>
 #include "fat.h"
@@ -43,17 +44,13 @@ static inline void vfat_d_version_set(struct dentry *dentry,
  * If it happened, the negative dentry isn't actually negative
  * anymore.  So, drop it.
  */
-static int vfat_revalidate_shortname(struct dentry *dentry)
+static bool vfat_revalidate_shortname(struct dentry *dentry, struct inode *dir)
 {
-	int ret = 1;
-	spin_lock(&dentry->d_lock);
-	if (!inode_eq_iversion(d_inode(dentry->d_parent), vfat_d_version(dentry)))
-		ret = 0;
-	spin_unlock(&dentry->d_lock);
-	return ret;
+	return inode_eq_iversion(dir, vfat_d_version(dentry));
 }
 
-static int vfat_revalidate(struct dentry *dentry, unsigned int flags)
+static int vfat_revalidate(struct inode *dir, const struct qstr *name,
+			   struct dentry *dentry, unsigned int flags)
 {
 	if (flags & LOOKUP_RCU)
 		return -ECHILD;
@@ -61,10 +58,11 @@ static int vfat_revalidate(struct dentry *dentry, unsigned int flags)
 	/* This is not negative dentry. Always valid. */
 	if (d_really_is_positive(dentry))
 		return 1;
-	return vfat_revalidate_shortname(dentry);
+	return vfat_revalidate_shortname(dentry, dir);
 }
 
-static int vfat_revalidate_ci(struct dentry *dentry, unsigned int flags)
+static int vfat_revalidate_ci(struct inode *dir, const struct qstr *name,
+			      struct dentry *dentry, unsigned int flags)
 {
 	if (flags & LOOKUP_RCU)
 		return -ECHILD;
@@ -97,7 +95,7 @@ static int vfat_revalidate_ci(struct dentry *dentry, unsigned int flags)
 	if (flags & (LOOKUP_CREATE | LOOKUP_RENAME_TARGET))
 		return 0;
 
-	return vfat_revalidate_shortname(dentry);
+	return vfat_revalidate_shortname(dentry, dir);
 }
 
 /* returns the length of a struct qstr, ignoring trailing dots */
@@ -665,7 +663,7 @@ static int vfat_add_entry(struct inode *dir, const struct qstr *qname,
 	if (len == 0)
 		return -ENOENT;
 
-	slots = kmalloc_array(MSDOS_SLOTS, sizeof(*slots), GFP_NOFS);
+	slots = kmalloc_objs(*slots, MSDOS_SLOTS, GFP_NOFS);
 	if (slots == NULL)
 		return -ENOMEM;
 
@@ -679,11 +677,10 @@ static int vfat_add_entry(struct inode *dir, const struct qstr *qname,
 		goto cleanup;
 
 	/* update timestamp */
-	fat_truncate_time(dir, ts, S_CTIME|S_MTIME);
+	fat_truncate_time(dir, ts, FAT_UPDATE_CMTIME);
+	mark_inode_dirty(dir);
 	if (IS_DIRSYNC(dir))
-		(void)fat_sync_inode(dir);
-	else
-		mark_inode_dirty(dir);
+		(void)sync_inode_metadata(dir, 1);
 cleanup:
 	kfree(slots);
 	return err;
@@ -757,7 +754,7 @@ error:
 }
 
 static int vfat_create(struct mnt_idmap *idmap, struct inode *dir,
-		       struct dentry *dentry, umode_t mode, bool excl)
+		       struct dentry *dentry, umode_t mode)
 {
 	struct super_block *sb = dir->i_sb;
 	struct inode *inode;
@@ -806,10 +803,15 @@ static int vfat_rmdir(struct inode *dir, struct dentry *dentry)
 	err = fat_remove_entries(dir, &sinfo);	/* and releases bh */
 	if (err)
 		goto out;
-	drop_nlink(dir);
+	if (dir->i_nlink >= 3)
+		drop_nlink(dir);
+	else {
+		fat_fs_error(sb, "parent dir link count too low (%u)",
+			dir->i_nlink);
+	}
 
 	clear_nlink(inode);
-	fat_truncate_time(inode, NULL, S_ATIME|S_MTIME);
+	fat_truncate_time(inode, NULL, FAT_UPDATE_ATIME | FAT_UPDATE_CMTIME);
 	fat_detach(inode);
 	vfat_d_version_set(dentry, inode_query_iversion(dir));
 out:
@@ -835,7 +837,7 @@ static int vfat_unlink(struct inode *dir, struct dentry *dentry)
 	if (err)
 		goto out;
 	clear_nlink(inode);
-	fat_truncate_time(inode, NULL, S_ATIME|S_MTIME);
+	fat_truncate_time(inode, NULL, FAT_UPDATE_ATIME | FAT_UPDATE_CMTIME);
 	fat_detach(inode);
 	vfat_d_version_set(dentry, inode_query_iversion(dir));
 out:
@@ -844,8 +846,8 @@ out:
 	return err;
 }
 
-static int vfat_mkdir(struct mnt_idmap *idmap, struct inode *dir,
-		      struct dentry *dentry, umode_t mode)
+static struct dentry *vfat_mkdir(struct mnt_idmap *idmap, struct inode *dir,
+				  struct dentry *dentry, umode_t mode)
 {
 	struct super_block *sb = dir->i_sb;
 	struct inode *inode;
@@ -880,13 +882,13 @@ static int vfat_mkdir(struct mnt_idmap *idmap, struct inode *dir,
 	d_instantiate(dentry, inode);
 
 	mutex_unlock(&MSDOS_SB(sb)->s_lock);
-	return 0;
+	return NULL;
 
 out_free:
 	fat_free_clusters(dir, cluster);
 out:
 	mutex_unlock(&MSDOS_SB(sb)->s_lock);
-	return err;
+	return ERR_PTR(err);
 }
 
 static int vfat_get_dotdot_de(struct inode *inode, struct buffer_head **bh,
@@ -901,9 +903,9 @@ static int vfat_get_dotdot_de(struct inode *inode, struct buffer_head **bh,
 
 static int vfat_sync_ipos(struct inode *dir, struct inode *inode)
 {
-	if (IS_DIRSYNC(dir))
-		return fat_sync_inode(inode);
 	mark_inode_dirty(inode);
+	if (IS_DIRSYNC(dir))
+		return sync_inode_metadata(inode, 1);
 	return 0;
 }
 
@@ -912,7 +914,7 @@ static int vfat_update_dotdot_de(struct inode *dir, struct inode *inode,
 				 struct msdos_dir_entry *dotdot_de)
 {
 	fat_set_start(dotdot_de, MSDOS_I(dir)->i_logstart);
-	mark_buffer_dirty_inode(dotdot_bh, inode);
+	mmb_mark_buffer_dirty(dotdot_bh, &MSDOS_I(inode)->i_metadata_bhs);
 	if (IS_DIRSYNC(dir))
 		return sync_dirty_buffer(dotdot_bh);
 	return 0;
@@ -921,11 +923,10 @@ static int vfat_update_dotdot_de(struct inode *dir, struct inode *inode,
 static void vfat_update_dir_metadata(struct inode *dir, struct timespec64 *ts)
 {
 	inode_inc_iversion(dir);
-	fat_truncate_time(dir, ts, S_CTIME | S_MTIME);
+	fat_truncate_time(dir, ts, FAT_UPDATE_CMTIME);
+	mark_inode_dirty(dir);
 	if (IS_DIRSYNC(dir))
-		(void)fat_sync_inode(dir);
-	else
-		mark_inode_dirty(dir);
+		(void)sync_inode_metadata(dir, 1);
 }
 
 static int vfat_rename(struct inode *old_dir, struct dentry *old_dentry,
@@ -999,7 +1000,6 @@ static int vfat_rename(struct inode *old_dir, struct dentry *old_dentry,
 		drop_nlink(new_inode);
 		if (is_dir)
 			drop_nlink(new_inode);
-		fat_truncate_time(new_inode, &ts, S_CTIME);
 	}
 out:
 	brelse(sinfo.bh);
@@ -1022,8 +1022,10 @@ error_inode:
 	fat_attach(old_inode, old_sinfo.i_pos);
 	if (new_inode) {
 		fat_attach(new_inode, new_i_pos);
-		if (corrupt)
-			corrupt |= fat_sync_inode(new_inode);
+		if (corrupt) {
+			mark_inode_dirty(new_inode);
+			corrupt |= sync_inode_metadata(new_inode, 1);
+		}
 	} else {
 		/*
 		 * If new entry was not sharing the data cluster, it
@@ -1037,7 +1039,7 @@ error_inode:
 	if (corrupt < 0) {
 		fat_fs_error(new_dir->i_sb,
 			     "%s: Filesystem corrupted (i_pos %lld)",
-			     __func__, sinfo.i_pos);
+			     __func__, new_i_pos);
 	}
 	goto out;
 }
@@ -1183,6 +1185,7 @@ static const struct inode_operations vfat_dir_inode_operations = {
 	.rename		= vfat_rename2,
 	.setattr	= fat_setattr,
 	.getattr	= fat_getattr,
+	.fileattr_get	= fat_fileattr_get,
 	.update_time	= fat_update_time,
 };
 
@@ -1190,29 +1193,53 @@ static void setup(struct super_block *sb)
 {
 	MSDOS_SB(sb)->dir_ops = &vfat_dir_inode_operations;
 	if (MSDOS_SB(sb)->options.name_check != 's')
-		sb->s_d_op = &vfat_ci_dentry_ops;
+		set_default_d_op(sb, &vfat_ci_dentry_ops);
 	else
-		sb->s_d_op = &vfat_dentry_ops;
+		set_default_d_op(sb, &vfat_dentry_ops);
 }
 
-static int vfat_fill_super(struct super_block *sb, void *data, int silent)
+static int vfat_fill_super(struct super_block *sb, struct fs_context *fc)
 {
-	return fat_fill_super(sb, data, silent, 1, setup);
+	return fat_fill_super(sb, fc, setup);
 }
 
-static struct dentry *vfat_mount(struct file_system_type *fs_type,
-		       int flags, const char *dev_name,
-		       void *data)
+static int vfat_get_tree(struct fs_context *fc)
 {
-	return mount_bdev(fs_type, flags, dev_name, data, vfat_fill_super);
+	return get_tree_bdev(fc, vfat_fill_super);
+}
+
+static int vfat_parse_param(struct fs_context *fc, struct fs_parameter *param)
+{
+	return fat_parse_param(fc, param, true);
+}
+
+static const struct fs_context_operations vfat_context_ops = {
+	.parse_param	= vfat_parse_param,
+	.get_tree	= vfat_get_tree,
+	.reconfigure	= fat_reconfigure,
+	.free		= fat_free_fc,
+};
+
+static int vfat_init_fs_context(struct fs_context *fc)
+{
+	int err;
+
+	/* Initialize with is_vfat == true */
+	err = fat_init_fs_context(fc, true);
+	if (err)
+		return err;
+
+	fc->ops = &vfat_context_ops;
+	return 0;
 }
 
 static struct file_system_type vfat_fs_type = {
 	.owner		= THIS_MODULE,
 	.name		= "vfat",
-	.mount		= vfat_mount,
 	.kill_sb	= kill_block_super,
 	.fs_flags	= FS_REQUIRES_DEV | FS_ALLOW_IDMAP,
+	.init_fs_context = vfat_init_fs_context,
+	.parameters     = fat_param_spec,
 };
 MODULE_ALIAS_FS("vfat");
 

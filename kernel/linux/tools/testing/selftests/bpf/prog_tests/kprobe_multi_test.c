@@ -1,9 +1,16 @@
 // SPDX-License-Identifier: GPL-2.0
+#include <errno.h>
+#include <sys/prctl.h>
 #include <test_progs.h>
 #include "kprobe_multi.skel.h"
 #include "trace_helpers.h"
 #include "kprobe_multi_empty.skel.h"
 #include "kprobe_multi_override.skel.h"
+#include "kprobe_multi_session.skel.h"
+#include "kprobe_multi_session_cookie.skel.h"
+#include "kprobe_multi_verifier.skel.h"
+#include "kprobe_write_ctx.skel.h"
+#include "kprobe_multi_sleepable.skel.h"
 #include "bpf/libbpf_internal.h"
 #include "bpf/hashmap.h"
 
@@ -214,7 +221,9 @@ static void test_attach_api_syms(void)
 static void test_attach_api_fails(void)
 {
 	LIBBPF_OPTS(bpf_kprobe_multi_opts, opts);
+	LIBBPF_OPTS(bpf_test_run_opts, topts);
 	struct kprobe_multi *skel = NULL;
+	struct kprobe_multi_sleepable *sl_skel = NULL;
 	struct bpf_link *link = NULL;
 	unsigned long long addrs[2];
 	const char *syms[2] = {
@@ -222,6 +231,7 @@ static void test_attach_api_fails(void)
 		"bpf_fentry_test2",
 	};
 	__u64 cookies[2];
+	int saved_error, err;
 
 	addrs[0] = ksym_get_addr("bpf_fentry_test1");
 	addrs[1] = ksym_get_addr("bpf_fentry_test2");
@@ -238,10 +248,11 @@ static void test_attach_api_fails(void)
 	/* fail_1 - pattern and opts NULL */
 	link = bpf_program__attach_kprobe_multi_opts(skel->progs.test_kprobe_manual,
 						     NULL, NULL);
+	saved_error = -errno;
 	if (!ASSERT_ERR_PTR(link, "fail_1"))
 		goto cleanup;
 
-	if (!ASSERT_EQ(libbpf_get_error(link), -EINVAL, "fail_1_error"))
+	if (!ASSERT_EQ(saved_error, -EINVAL, "fail_1_error"))
 		goto cleanup;
 
 	/* fail_2 - both addrs and syms set */
@@ -252,10 +263,11 @@ static void test_attach_api_fails(void)
 
 	link = bpf_program__attach_kprobe_multi_opts(skel->progs.test_kprobe_manual,
 						     NULL, &opts);
+	saved_error = -errno;
 	if (!ASSERT_ERR_PTR(link, "fail_2"))
 		goto cleanup;
 
-	if (!ASSERT_EQ(libbpf_get_error(link), -EINVAL, "fail_2_error"))
+	if (!ASSERT_EQ(saved_error, -EINVAL, "fail_2_error"))
 		goto cleanup;
 
 	/* fail_3 - pattern and addrs set */
@@ -266,10 +278,11 @@ static void test_attach_api_fails(void)
 
 	link = bpf_program__attach_kprobe_multi_opts(skel->progs.test_kprobe_manual,
 						     "ksys_*", &opts);
+	saved_error = -errno;
 	if (!ASSERT_ERR_PTR(link, "fail_3"))
 		goto cleanup;
 
-	if (!ASSERT_EQ(libbpf_get_error(link), -EINVAL, "fail_3_error"))
+	if (!ASSERT_EQ(saved_error, -EINVAL, "fail_3_error"))
 		goto cleanup;
 
 	/* fail_4 - pattern and cnt set */
@@ -280,10 +293,11 @@ static void test_attach_api_fails(void)
 
 	link = bpf_program__attach_kprobe_multi_opts(skel->progs.test_kprobe_manual,
 						     "ksys_*", &opts);
+	saved_error = -errno;
 	if (!ASSERT_ERR_PTR(link, "fail_4"))
 		goto cleanup;
 
-	if (!ASSERT_EQ(libbpf_get_error(link), -EINVAL, "fail_4_error"))
+	if (!ASSERT_EQ(saved_error, -EINVAL, "fail_4_error"))
 		goto cleanup;
 
 	/* fail_5 - pattern and cookies */
@@ -294,145 +308,199 @@ static void test_attach_api_fails(void)
 
 	link = bpf_program__attach_kprobe_multi_opts(skel->progs.test_kprobe_manual,
 						     "ksys_*", &opts);
+	saved_error = -errno;
 	if (!ASSERT_ERR_PTR(link, "fail_5"))
 		goto cleanup;
 
-	if (!ASSERT_EQ(libbpf_get_error(link), -EINVAL, "fail_5_error"))
+	if (!ASSERT_EQ(saved_error, -EINVAL, "fail_5_error"))
 		goto cleanup;
+
+	/* fail_6 - abnormal cnt */
+	opts.addrs = (const unsigned long *) addrs;
+	opts.syms = NULL;
+	opts.cnt = INT_MAX;
+	opts.cookies = NULL;
+
+	link = bpf_program__attach_kprobe_multi_opts(skel->progs.test_kprobe_manual,
+						     NULL, &opts);
+	saved_error = -errno;
+	if (!ASSERT_ERR_PTR(link, "fail_6"))
+		goto cleanup;
+
+	if (!ASSERT_EQ(saved_error, -E2BIG, "fail_6_error"))
+		goto cleanup;
+
+	/* fail_7 - non-existent wildcard pattern (slow path) */
+	LIBBPF_OPTS_RESET(opts);
+
+	link = bpf_program__attach_kprobe_multi_opts(skel->progs.test_kprobe_manual,
+						     "__nonexistent_func_xyz_*",
+						     &opts);
+	saved_error = -errno;
+	if (!ASSERT_ERR_PTR(link, "fail_7"))
+		goto cleanup;
+
+	if (!ASSERT_EQ(saved_error, -ENOENT, "fail_7_error"))
+		goto cleanup;
+
+	/* fail_8 - non-existent exact name (fast path), same error as wildcard */
+	link = bpf_program__attach_kprobe_multi_opts(skel->progs.test_kprobe_manual,
+						     "__nonexistent_func_xyz_123",
+						     &opts);
+	saved_error = -errno;
+	if (!ASSERT_ERR_PTR(link, "fail_8"))
+		goto cleanup;
+
+	if (!ASSERT_EQ(saved_error, -ENOENT, "fail_8_error"))
+		goto cleanup;
+
+	/* fail_9 - sleepable kprobe multi should not attach */
+	sl_skel = kprobe_multi_sleepable__open();
+	if (!ASSERT_OK_PTR(sl_skel, "sleep_skel_open"))
+		goto cleanup;
+
+	sl_skel->bss->user_ptr = sl_skel;
+
+	err = bpf_program__set_flags(sl_skel->progs.handle_kprobe_multi_sleepable,
+				     BPF_F_SLEEPABLE);
+	if (!ASSERT_OK(err, "sleep_skel_set_flags"))
+		goto cleanup;
+
+	err = kprobe_multi_sleepable__load(sl_skel);
+	if (!ASSERT_OK(err, "sleep_skel_load"))
+		goto cleanup;
+
+	link = bpf_program__attach_kprobe_multi_opts(sl_skel->progs.handle_kprobe_multi_sleepable,
+						     "bpf_fentry_test1", NULL);
+	saved_error = -errno;
+
+	if (!ASSERT_ERR_PTR(link, "fail_9"))
+		goto cleanup;
+
+	if (!ASSERT_EQ(saved_error, -EINVAL, "fail_9_error"))
+		goto cleanup;
+
+	err = bpf_prog_test_run_opts(bpf_program__fd(sl_skel->progs.fentry), &topts);
+	ASSERT_OK(err, "bpf_prog_test_run_opts");
 
 cleanup:
 	bpf_link__destroy(link);
 	kprobe_multi__destroy(skel);
+	kprobe_multi_sleepable__destroy(sl_skel);
 }
 
-static size_t symbol_hash(long key, void *ctx __maybe_unused)
+static void test_session_skel_api(void)
 {
-	return str_hash((const char *) key);
-}
+	struct kprobe_multi_session *skel = NULL;
+	LIBBPF_OPTS(bpf_kprobe_multi_opts, opts);
+	LIBBPF_OPTS(bpf_test_run_opts, topts);
+	struct bpf_link *link = NULL;
+	int i, err, prog_fd;
 
-static bool symbol_equal(long key1, long key2, void *ctx __maybe_unused)
-{
-	return strcmp((const char *) key1, (const char *) key2) == 0;
-}
+	skel = kprobe_multi_session__open_and_load();
+	if (!ASSERT_OK_PTR(skel, "kprobe_multi_session__open_and_load"))
+		return;
 
-static int get_syms(char ***symsp, size_t *cntp, bool kernel)
-{
-	size_t cap = 0, cnt = 0, i;
-	char *name = NULL, **syms = NULL;
-	struct hashmap *map;
-	char buf[256];
-	FILE *f;
-	int err = 0;
+	skel->bss->pid = getpid();
+
+	err = kprobe_multi_session__attach(skel);
+	if (!ASSERT_OK(err, " kprobe_multi_session__attach"))
+		goto cleanup;
+
+	prog_fd = bpf_program__fd(skel->progs.trigger);
+	err = bpf_prog_test_run_opts(prog_fd, &topts);
+	ASSERT_OK(err, "test_run");
+	ASSERT_EQ(topts.retval, 0, "test_run");
 
 	/*
-	 * The available_filter_functions contains many duplicates,
-	 * but other than that all symbols are usable in kprobe multi
-	 * interface.
-	 * Filtering out duplicates by using hashmap__add, which won't
-	 * add existing entry.
+	 * bpf_fentry_test1 is hit by both the wildcard probe and the exact
+	 * name probe (test_kprobe_syms), so entry + return fires twice: 4.
+	 * bpf_fentry_test2-4 are hit only by the wildcard probe: 2.
 	 */
+	ASSERT_EQ(skel->bss->kprobe_session_result[0], 4, "kprobe_session_result");
+	for (i = 1; i < 4; i++)
+		ASSERT_EQ(skel->bss->kprobe_session_result[i], 2, "kprobe_session_result");
 
-	if (access("/sys/kernel/tracing/trace", F_OK) == 0)
-		f = fopen("/sys/kernel/tracing/available_filter_functions", "r");
-	else
-		f = fopen("/sys/kernel/debug/tracing/available_filter_functions", "r");
+	/* bpf_fentry_test5-8 trigger only entry probe, result is 1 */
+	for (i = 4; i < 8; i++)
+		ASSERT_EQ(skel->bss->kprobe_session_result[i], 1, "kprobe_session_result");
 
-	if (!f)
-		return -EINVAL;
-
-	map = hashmap__new(symbol_hash, symbol_equal, NULL);
-	if (IS_ERR(map)) {
-		err = libbpf_get_error(map);
-		goto error;
-	}
-
-	while (fgets(buf, sizeof(buf), f)) {
-		if (kernel && strchr(buf, '['))
-			continue;
-		if (!kernel && !strchr(buf, '['))
-			continue;
-
-		free(name);
-		if (sscanf(buf, "%ms$*[^\n]\n", &name) != 1)
-			continue;
-		/*
-		 * We attach to almost all kernel functions and some of them
-		 * will cause 'suspicious RCU usage' when fprobe is attached
-		 * to them. Filter out the current culprits - arch_cpu_idle
-		 * default_idle and rcu_* functions.
-		 */
-		if (!strcmp(name, "arch_cpu_idle"))
-			continue;
-		if (!strcmp(name, "default_idle"))
-			continue;
-		if (!strncmp(name, "rcu_", 4))
-			continue;
-		if (!strcmp(name, "bpf_dispatcher_xdp_func"))
-			continue;
-		if (!strncmp(name, "__ftrace_invalid_address__",
-			     sizeof("__ftrace_invalid_address__") - 1))
-			continue;
-
-		err = hashmap__add(map, name, 0);
-		if (err == -EEXIST) {
-			err = 0;
-			continue;
-		}
-		if (err)
-			goto error;
-
-		err = libbpf_ensure_mem((void **) &syms, &cap,
-					sizeof(*syms), cnt + 1);
-		if (err)
-			goto error;
-
-		syms[cnt++] = name;
-		name = NULL;
-	}
-
-	*symsp = syms;
-	*cntp = cnt;
-
-error:
-	free(name);
-	fclose(f);
-	hashmap__free(map);
-	if (err) {
-		for (i = 0; i < cnt; i++)
-			free(syms[i]);
-		free(syms);
-	}
-	return err;
+cleanup:
+	bpf_link__destroy(link);
+	kprobe_multi_session__destroy(skel);
 }
 
-static void test_kprobe_multi_bench_attach(bool kernel)
+static void test_session_cookie_skel_api(void)
+{
+	struct kprobe_multi_session_cookie *skel = NULL;
+	LIBBPF_OPTS(bpf_kprobe_multi_opts, opts);
+	LIBBPF_OPTS(bpf_test_run_opts, topts);
+	struct bpf_link *link = NULL;
+	int err, prog_fd;
+
+	skel = kprobe_multi_session_cookie__open_and_load();
+	if (!ASSERT_OK_PTR(skel, "fentry_raw_skel_load"))
+		return;
+
+	skel->bss->pid = getpid();
+
+	err = kprobe_multi_session_cookie__attach(skel);
+	if (!ASSERT_OK(err, " kprobe_multi_wrapper__attach"))
+		goto cleanup;
+
+	prog_fd = bpf_program__fd(skel->progs.trigger);
+	err = bpf_prog_test_run_opts(prog_fd, &topts);
+	ASSERT_OK(err, "test_run");
+	ASSERT_EQ(topts.retval, 0, "test_run");
+
+	ASSERT_EQ(skel->bss->test_kprobe_1_result, 1, "test_kprobe_1_result");
+	ASSERT_EQ(skel->bss->test_kprobe_2_result, 2, "test_kprobe_2_result");
+	ASSERT_EQ(skel->bss->test_kprobe_3_result, 3, "test_kprobe_3_result");
+
+cleanup:
+	bpf_link__destroy(link);
+	kprobe_multi_session_cookie__destroy(skel);
+}
+
+static void test_unique_match(void)
 {
 	LIBBPF_OPTS(bpf_kprobe_multi_opts, opts);
-	struct kprobe_multi_empty *skel = NULL;
+	struct kprobe_multi *skel = NULL;
+	struct bpf_link *link = NULL;
+
+	skel = kprobe_multi__open_and_load();
+	if (!ASSERT_OK_PTR(skel, "kprobe_multi__open_and_load"))
+		return;
+
+	opts.unique_match = true;
+	skel->bss->pid = getpid();
+	link = bpf_program__attach_kprobe_multi_opts(skel->progs.test_kprobe_manual,
+						     "bpf_fentry_test*", &opts);
+	if (!ASSERT_ERR_PTR(link, "bpf_program__attach_kprobe_multi_opts"))
+		bpf_link__destroy(link);
+
+	link = bpf_program__attach_kprobe_multi_opts(skel->progs.test_kprobe_manual,
+						     "bpf_fentry_test8*", &opts);
+	if (ASSERT_OK_PTR(link, "bpf_program__attach_kprobe_multi_opts"))
+		bpf_link__destroy(link);
+
+	kprobe_multi__destroy(skel);
+}
+
+static void do_bench_test(struct kprobe_multi_empty *skel, struct bpf_kprobe_multi_opts *opts)
+{
 	long attach_start_ns, attach_end_ns;
 	long detach_start_ns, detach_end_ns;
 	double attach_delta, detach_delta;
 	struct bpf_link *link = NULL;
-	char **syms = NULL;
-	size_t cnt = 0, i;
-
-	if (!ASSERT_OK(get_syms(&syms, &cnt, kernel), "get_syms"))
-		return;
-
-	skel = kprobe_multi_empty__open_and_load();
-	if (!ASSERT_OK_PTR(skel, "kprobe_multi_empty__open_and_load"))
-		goto cleanup;
-
-	opts.syms = (const char **) syms;
-	opts.cnt = cnt;
 
 	attach_start_ns = get_time_ns();
 	link = bpf_program__attach_kprobe_multi_opts(skel->progs.test_kprobe_empty,
-						     NULL, &opts);
+						     NULL, opts);
 	attach_end_ns = get_time_ns();
 
 	if (!ASSERT_OK_PTR(link, "bpf_program__attach_kprobe_multi_opts"))
-		goto cleanup;
+		return;
 
 	detach_start_ns = get_time_ns();
 	bpf_link__destroy(link);
@@ -441,17 +509,63 @@ static void test_kprobe_multi_bench_attach(bool kernel)
 	attach_delta = (attach_end_ns - attach_start_ns) / 1000000000.0;
 	detach_delta = (detach_end_ns - detach_start_ns) / 1000000000.0;
 
-	printf("%s: found %lu functions\n", __func__, cnt);
+	printf("%s: found %lu functions\n", __func__, opts->cnt);
 	printf("%s: attached in %7.3lfs\n", __func__, attach_delta);
 	printf("%s: detached in %7.3lfs\n", __func__, detach_delta);
+}
+
+static void test_kprobe_multi_bench_attach(bool kernel)
+{
+	LIBBPF_OPTS(bpf_kprobe_multi_opts, opts);
+	struct kprobe_multi_empty *skel = NULL;
+	struct ksyms *ksyms = NULL;
+
+	if (!ASSERT_OK(bpf_get_ksyms(&ksyms, kernel), "bpf_get_ksyms"))
+		return;
+
+	skel = kprobe_multi_empty__open_and_load();
+	if (!ASSERT_OK_PTR(skel, "kprobe_multi_empty__open_and_load"))
+		goto cleanup;
+
+	opts.syms = (const char **)ksyms->filtered_syms;
+	opts.cnt = ksyms->filtered_cnt;
+
+	do_bench_test(skel, &opts);
 
 cleanup:
 	kprobe_multi_empty__destroy(skel);
-	if (syms) {
-		for (i = 0; i < cnt; i++)
-			free(syms[i]);
-		free(syms);
+	free_kallsyms_local(ksyms);
+}
+
+static void test_kprobe_multi_bench_attach_addr(bool kernel)
+{
+	LIBBPF_OPTS(bpf_kprobe_multi_opts, opts);
+	struct kprobe_multi_empty *skel = NULL;
+	unsigned long *addrs = NULL;
+	size_t cnt = 0;
+	int err;
+
+	err = bpf_get_addrs(&addrs, &cnt, kernel);
+	if (err == -ENOENT) {
+		test__skip();
+		return;
 	}
+
+	if (!ASSERT_OK(err, "bpf_get_addrs"))
+		return;
+
+	skel = kprobe_multi_empty__open_and_load();
+	if (!ASSERT_OK_PTR(skel, "kprobe_multi_empty__open_and_load"))
+		goto cleanup;
+
+	opts.addrs = addrs;
+	opts.cnt = cnt;
+
+	do_bench_test(skel, &opts);
+
+cleanup:
+	kprobe_multi_empty__destroy(skel);
+	free(addrs);
 }
 
 static void test_attach_override(void)
@@ -488,12 +602,118 @@ cleanup:
 	kprobe_multi_override__destroy(skel);
 }
 
+static void test_override(void)
+{
+	struct kprobe_multi_override *skel = NULL;
+	int err;
+
+	skel = kprobe_multi_override__open_and_load();
+	if (!ASSERT_OK_PTR(skel, "kprobe_multi_empty__open_and_load"))
+		goto cleanup;
+
+	skel->bss->pid = getpid();
+
+	/* no override */
+	err = prctl(0xffff, 0);
+	ASSERT_EQ(err, -1, "err");
+
+	/* kprobe.multi override */
+	skel->links.test_override = bpf_program__attach_kprobe_multi_opts(skel->progs.test_override,
+						SYS_PREFIX "sys_prctl", NULL);
+	if (!ASSERT_OK_PTR(skel->links.test_override, "bpf_program__attach_kprobe_multi_opts"))
+		goto cleanup;
+
+	err = prctl(0xffff, 0);
+	ASSERT_EQ(err, 123, "err");
+
+	bpf_link__destroy(skel->links.test_override);
+	skel->links.test_override = NULL;
+
+	/* kprobe override */
+	skel->links.test_kprobe_override = bpf_program__attach_kprobe(skel->progs.test_kprobe_override,
+							false, SYS_PREFIX "sys_prctl");
+	if (!ASSERT_OK_PTR(skel->links.test_kprobe_override, "bpf_program__attach_kprobe"))
+		goto cleanup;
+
+	err = prctl(0xffff, 0);
+	ASSERT_EQ(err, 123, "err");
+
+cleanup:
+	kprobe_multi_override__destroy(skel);
+}
+
+#ifdef __x86_64__
+static void test_attach_write_ctx(void)
+{
+	struct kprobe_write_ctx *skel = NULL;
+	struct bpf_link *link = NULL;
+
+	skel = kprobe_write_ctx__open_and_load();
+	if (!ASSERT_OK_PTR(skel, "kprobe_write_ctx__open_and_load"))
+		return;
+
+	link = bpf_program__attach_kprobe_opts(skel->progs.kprobe_multi_write_ctx,
+						     "bpf_fentry_test1", NULL);
+	if (!ASSERT_ERR_PTR(link, "bpf_program__attach_kprobe_opts"))
+		bpf_link__destroy(link);
+
+	kprobe_write_ctx__destroy(skel);
+}
+#else
+static void test_attach_write_ctx(void)
+{
+	test__skip();
+}
+#endif
+
+/*
+ * Test kprobe_multi handles shadow symbols (vmlinux + module duplicate).
+ * bpf_fentry_shadow_test exists in both vmlinux and bpf_testmod.
+ * kprobe_multi resolves via ftrace_lookup_symbols() which finds the
+ * vmlinux symbol first and stops, so this should always succeed.
+ */
+static void test_attach_probe_dup_sym(void)
+{
+	LIBBPF_OPTS(bpf_kprobe_multi_opts, opts);
+	const char *syms[1] = { "bpf_fentry_shadow_test" };
+	struct kprobe_multi *skel = NULL;
+	struct bpf_link *link1 = NULL, *link2 = NULL;
+
+	skel = kprobe_multi__open_and_load();
+	if (!ASSERT_OK_PTR(skel, "kprobe_multi__open_and_load"))
+		goto cleanup;
+
+	skel->bss->pid = getpid();
+	opts.syms = syms;
+	opts.cnt = ARRAY_SIZE(syms);
+
+	link1 = bpf_program__attach_kprobe_multi_opts(skel->progs.test_kprobe_manual,
+						      NULL, &opts);
+	if (!ASSERT_OK_PTR(link1, "attach_kprobe_multi_dup_sym"))
+		goto cleanup;
+
+	opts.retprobe = true;
+	link2 = bpf_program__attach_kprobe_multi_opts(skel->progs.test_kretprobe_manual,
+						      NULL, &opts);
+	if (!ASSERT_OK_PTR(link2, "attach_kretprobe_multi_dup_sym"))
+		goto cleanup;
+
+cleanup:
+	bpf_link__destroy(link2);
+	bpf_link__destroy(link1);
+	kprobe_multi__destroy(skel);
+}
+
 void serial_test_kprobe_multi_bench_attach(void)
 {
 	if (test__start_subtest("kernel"))
 		test_kprobe_multi_bench_attach(true);
 	if (test__start_subtest("modules"))
 		test_kprobe_multi_bench_attach(false);
+	if (test__start_subtest("kernel"))
+		test_kprobe_multi_bench_attach_addr(true);
+	if (test__start_subtest("modules"))
+		test_kprobe_multi_bench_attach_addr(false);
 }
 
 void test_kprobe_multi_test(void)
@@ -517,4 +737,17 @@ void test_kprobe_multi_test(void)
 		test_attach_api_fails();
 	if (test__start_subtest("attach_override"))
 		test_attach_override();
+	if (test__start_subtest("override"))
+		test_override();
+	if (test__start_subtest("session"))
+		test_session_skel_api();
+	if (test__start_subtest("session_cookie"))
+		test_session_cookie_skel_api();
+	if (test__start_subtest("unique_match"))
+		test_unique_match();
+	if (test__start_subtest("attach_write_ctx"))
+		test_attach_write_ctx();
+	if (test__start_subtest("dup_sym"))
+		test_attach_probe_dup_sym();
+	RUN_TESTS(kprobe_multi_verifier);
 }

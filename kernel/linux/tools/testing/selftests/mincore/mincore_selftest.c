@@ -15,8 +15,8 @@
 #include <string.h>
 #include <fcntl.h>
 
-#include "../kselftest.h"
-#include "../kselftest_harness.h"
+#include "kselftest.h"
+#include "kselftest_harness.h"
 
 /* Default test file size: 4MB */
 #define MB (1UL << 20)
@@ -242,14 +242,22 @@ TEST(check_file_mmap)
 	}
 
 	/*
-	 * Touch a page in the middle of the mapping. We expect the next
-	 * few pages (the readahead window) to be populated too.
+	 * Touch a page in the middle of the mapping. We expect some
+	 * surrounding pages (the readahead window) to be populated too.
+	 * Depending on the page size and readahead setting, the pages may
+	 * land before the faulted page rather than after it.
 	 */
 	addr[FILE_SIZE / 2] = 1;
 	retval = mincore(addr, FILE_SIZE, vec);
 	ASSERT_EQ(0, retval);
 	ASSERT_EQ(1, vec[FILE_SIZE / 2 / page_size]) {
 		TH_LOG("Page not found in memory after use");
+	}
+
+	i = FILE_SIZE / 2 / page_size - 1;
+	while (i >= 0 && vec[i]) {
+		ra_pages++;
+		i--;
 	}
 
 	i = FILE_SIZE / 2 / page_size + 1;
@@ -261,9 +269,6 @@ TEST(check_file_mmap)
 		TH_LOG("No read-ahead pages found in memory");
 	}
 
-	EXPECT_LT(i, vec_size) {
-		TH_LOG("Read-ahead pages reached the end of the file");
-	}
 	/*
 	 * End of the readahead window. The rest of the pages shouldn't
 	 * be in memory.
@@ -286,8 +291,7 @@ out_free:
 
 /*
  * Test mincore() behavior on a page backed by a tmpfs file.  This test
- * performs the same steps as the previous one. However, we don't expect
- * any readahead in this case.
+ * performs the same steps as the previous one.
  */
 TEST(check_tmpfs_mmap)
 {
@@ -298,7 +302,6 @@ TEST(check_tmpfs_mmap)
 	int page_size;
 	int fd;
 	int i;
-	int ra_pages = 0;
 
 	page_size = sysconf(_SC_PAGESIZE);
 	vec_size = FILE_SIZE / page_size;
@@ -341,23 +344,13 @@ TEST(check_tmpfs_mmap)
 	}
 
 	/*
-	 * Touch a page in the middle of the mapping. We expect only
-	 * that page to be fetched into memory.
+	 * Touch a page in the middle of the mapping.
 	 */
 	addr[FILE_SIZE / 2] = 1;
 	retval = mincore(addr, FILE_SIZE, vec);
 	ASSERT_EQ(0, retval);
 	ASSERT_EQ(1, vec[FILE_SIZE / 2 / page_size]) {
 		TH_LOG("Page not found in memory after use");
-	}
-
-	i = FILE_SIZE / 2 / page_size + 1;
-	while (i < vec_size && vec[i]) {
-		ra_pages++;
-		i++;
-	}
-	ASSERT_EQ(ra_pages, 0) {
-		TH_LOG("Read-ahead pages found in memory");
 	}
 
 	munmap(addr, FILE_SIZE);

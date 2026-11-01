@@ -10,7 +10,7 @@
  */
 #include <linux/dmaengine.h>
 #include <linux/dma/pxa-dma.h>
-#include <linux/gpio.h>
+#include <linux/gpio/consumer.h>
 #include <linux/gpio-pxa.h>
 #include <linux/module.h>
 #include <linux/kernel.h>
@@ -58,8 +58,15 @@ static unsigned long ac97_reset_config[] = {
 	GPIO95_AC97_nRESET,
 };
 
-void pxa27x_configure_ac97reset(int reset_gpio, bool to_gpio)
+void pxa27x_configure_ac97reset(struct gpio_desc *gpiod, bool to_gpio)
 {
+	int reset_gpio;
+
+	if (!gpiod)
+		return;
+
+	reset_gpio = desc_to_gpio(gpiod);
+
 	/*
 	 * This helper function is used to work around a bug in the pxa27x's
 	 * ac97 controller during a warm reset.  The configuration of the
@@ -276,12 +283,8 @@ void __init pxa27x_set_i2c_power_info(struct i2c_pxa_platform_data *info)
 	pxa_register_device(&pxa27x_device_i2c_power, info);
 }
 
-static struct pxa_gpio_platform_data pxa27x_gpio_info __initdata = {
-	.irq_base	= PXA_GPIO_TO_IRQ(0),
-	.gpio_set_wake	= gpio_set_wake,
-};
-
 static struct platform_device *devices[] __initdata = {
+	&pxa27x_device_gpio,
 	&pxa27x_device_udc,
 	&pxa_device_pmu,
 	&pxa_device_i2s,
@@ -341,12 +344,14 @@ static int __init pxa27x_init(void)
 
 		pxa27x_init_pm();
 
-		register_syscore_ops(&pxa_irq_syscore_ops);
-		register_syscore_ops(&pxa2xx_mfp_syscore_ops);
+		register_syscore(&pxa_irq_syscore);
+		register_syscore(&pxa2xx_mfp_syscore);
 
 		if (!of_have_populated_dt()) {
-			pxa_register_device(&pxa27x_device_gpio,
-					    &pxa27x_gpio_info);
+			software_node_register(&pxa2xx_gpiochip_node);
+			pxa27x_device_gpio.dev.fwnode = software_node_fwnode(
+								&pxa2xx_gpiochip_node);
+
 			pxa2xx_set_dmac_info(&pxa27x_dma_pdata);
 			ret = platform_add_devices(devices,
 						   ARRAY_SIZE(devices));

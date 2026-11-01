@@ -20,8 +20,8 @@
 #include <sound/initval.h>
 #include <sound/pcm_params.h>
 #include <sound/soc.h>
-#include <sound/pxa2xx-lib.h>
 #include <sound/dmaengine_pcm.h>
+#include "pxa2xx-lib.h"
 #include "mmp-sspa.h"
 
 /*
@@ -574,7 +574,7 @@ static struct platform_driver asoc_mmp_sspa_driver = {
 		.of_match_table = of_match_ptr(mmp_sspa_of_match),
 	},
 	.probe = asoc_mmp_sspa_probe,
-	.remove_new = asoc_mmp_sspa_remove,
+	.remove = asoc_mmp_sspa_remove,
 };
 
 module_platform_driver(asoc_mmp_sspa_driver);

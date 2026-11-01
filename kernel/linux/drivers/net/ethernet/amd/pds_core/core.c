@@ -110,7 +110,6 @@ static void pdsc_qcq_intr_free(struct pdsc *pdsc, struct pdsc_qcq *qcq)
 		return;
 
 	pdsc_intr_free(pdsc, qcq->intx);
-	qcq->intx = PDS_CORE_INTR_INDEX_NOT_ASSIGNED;
 }
 
 static int pdsc_qcq_intr_alloc(struct pdsc *pdsc, struct pdsc_qcq *qcq)
@@ -125,10 +124,11 @@ static int pdsc_qcq_intr_alloc(struct pdsc *pdsc, struct pdsc_qcq *qcq)
 
 	snprintf(name, sizeof(name), "%s-%d-%s",
 		 PDS_CORE_DRV_NAME, pdsc->pdev->bus->number, qcq->q.name);
-	index = pdsc_intr_alloc(pdsc, name, pdsc_adminq_isr, qcq);
+	index = pdsc_intr_alloc(pdsc, name, pdsc_adminq_isr, pdsc);
 	if (index < 0)
 		return index;
 	qcq->intx = index;
+	qcq->cq.bound_intr = &pdsc->intr_info[index];
 
 	return 0;
 }
@@ -144,6 +144,12 @@ void pdsc_qcq_free(struct pdsc *pdsc, struct pdsc_qcq *qcq)
 
 	pdsc_qcq_intr_free(pdsc, qcq);
 
+	/* Drain any work queued by ISR before it was freed above */
+	if (qcq->work.func)
+		cancel_work_sync(&qcq->work);
+
+	qcq->intx = PDS_CORE_INTR_INDEX_NOT_ASSIGNED;
+
 	if (qcq->q_base)
 		dma_free_coherent(dev, qcq->q_size,
 				  qcq->q_base, qcq->q_base_pa);
@@ -152,11 +158,8 @@ void pdsc_qcq_free(struct pdsc *pdsc, struct pdsc_qcq *qcq)
 		dma_free_coherent(dev, qcq->cq_size,
 				  qcq->cq_base, qcq->cq_base_pa);
 
-	if (qcq->cq.info)
-		vfree(qcq->cq.info);
-
-	if (qcq->q.info)
-		vfree(qcq->q.info);
+	vfree(qcq->cq.info);
+	vfree(qcq->q.info);
 
 	memset(qcq, 0, sizeof(*qcq));
 }
@@ -169,8 +172,10 @@ static void pdsc_q_map(struct pdsc_queue *q, void *base, dma_addr_t base_pa)
 	q->base = base;
 	q->base_pa = base_pa;
 
-	for (i = 0, cur = q->info; i < q->num_descs; i++, cur++)
+	for (i = 0, cur = q->info; i < q->num_descs; i++, cur++) {
 		cur->desc = base + (i * q->desc_size);
+		init_completion(&cur->completion);
+	}
 }
 
 static void pdsc_cq_map(struct pdsc_cq *cq, void *base, dma_addr_t base_pa)
@@ -225,7 +230,6 @@ int pdsc_qcq_alloc(struct pdsc *pdsc, unsigned int type, unsigned int index,
 		goto err_out_free_irq;
 	}
 
-	qcq->cq.bound_intr = &pdsc->intr_info[qcq->intx];
 	qcq->cq.num_descs = num_descs;
 	qcq->cq.desc_size = cq_desc_size;
 	qcq->cq.tail_idx = 0;
@@ -303,6 +307,20 @@ err_out:
 	return err;
 }
 
+static void pdsc_core_uninit(struct pdsc *pdsc)
+{
+	/* Free adminqcq first: its work accesses notifyqcq, so we must
+	 * disable its IRQ and drain its work before freeing notifyqcq.
+	 */
+	pdsc_qcq_free(pdsc, &pdsc->adminqcq);
+	pdsc_qcq_free(pdsc, &pdsc->notifyqcq);
+
+	if (pdsc->kern_dbpage) {
+		iounmap(pdsc->kern_dbpage);
+		pdsc->kern_dbpage = NULL;
+	}
+}
+
 static int pdsc_core_init(struct pdsc *pdsc)
 {
 	union pds_core_dev_comp comp = {};
@@ -313,8 +331,28 @@ static int pdsc_core_init(struct pdsc *pdsc)
 	struct pds_core_dev_init_data_in cidi;
 	u32 dbid_count;
 	u32 dbpage_num;
+	int numdescs;
 	size_t sz;
 	int err;
+
+	numdescs = PDSC_ADMINQ_MAX_LENGTH;
+	err = pdsc_qcq_alloc(pdsc, PDS_CORE_QTYPE_ADMINQ, 0, "adminq",
+			     PDS_CORE_QCQ_F_CORE | PDS_CORE_QCQ_F_INTR,
+			     numdescs,
+			     sizeof(union pds_core_adminq_cmd),
+			     sizeof(union pds_core_adminq_comp),
+			     0, &pdsc->adminqcq);
+	if (err)
+		return err;
+
+	err = pdsc_qcq_alloc(pdsc, PDS_CORE_QTYPE_NOTIFYQ, 0, "notifyq",
+			     PDS_CORE_QCQ_F_NOTIFYQ,
+			     PDSC_NOTIFYQ_LENGTH,
+			     sizeof(struct pds_core_notifyq_cmd),
+			     sizeof(union pds_core_notifyq_comp),
+			     0, &pdsc->notifyqcq);
+	if (err)
+		goto err_out_uninit;
 
 	cidi.adminq_q_base = cpu_to_le64(pdsc->adminqcq.q_base_pa);
 	cidi.adminq_cq_base = cpu_to_le64(pdsc->adminqcq.cq_base_pa);
@@ -339,7 +377,7 @@ static int pdsc_core_init(struct pdsc *pdsc)
 	if (err) {
 		dev_err(pdsc->dev, "Device init command failed: %pe\n",
 			ERR_PTR(err));
-		return err;
+		goto err_out_uninit;
 	}
 
 	pdsc->hw_index = le32_to_cpu(cido.core_hw_index);
@@ -349,7 +387,8 @@ static int pdsc_core_init(struct pdsc *pdsc)
 	pdsc->kern_dbpage = pdsc_map_dbpage(pdsc, dbpage_num);
 	if (!pdsc->kern_dbpage) {
 		dev_err(pdsc->dev, "Cannot map dbpage, aborting\n");
-		return -ENOMEM;
+		err = -ENOMEM;
+		goto err_out_uninit;
 	}
 
 	pdsc->adminqcq.q.hw_type = cido.adminq_hw_type;
@@ -362,10 +401,18 @@ static int pdsc_core_init(struct pdsc *pdsc)
 
 	pdsc->last_eid = 0;
 
+	return 0;
+
+err_out_uninit:
+	pdsc_core_uninit(pdsc);
 	return err;
 }
 
 static struct pdsc_viftype pdsc_viftype_defaults[] = {
+	[PDS_DEV_TYPE_FWCTL] = { .name = PDS_DEV_TYPE_FWCTL_STR,
+				 .enabled = true,
+				 .vif_id = PDS_DEV_TYPE_FWCTL,
+				 .dl_id = -1 },
 	[PDS_DEV_TYPE_VDPA] = { .name = PDS_DEV_TYPE_VDPA_STR,
 				.vif_id = PDS_DEV_TYPE_VDPA,
 				.dl_id = DEVLINK_PARAM_GENERIC_ID_ENABLE_VNET },
@@ -376,8 +423,8 @@ static int pdsc_viftypes_init(struct pdsc *pdsc)
 {
 	enum pds_core_vif_types vt;
 
-	pdsc->viftype_status = kzalloc(sizeof(pdsc_viftype_defaults),
-				       GFP_KERNEL);
+	pdsc->viftype_status = kzalloc_objs(*pdsc->viftype_status,
+					    ARRAY_SIZE(pdsc_viftype_defaults));
 	if (!pdsc->viftype_status)
 		return -ENOMEM;
 
@@ -392,6 +439,7 @@ static int pdsc_viftypes_init(struct pdsc *pdsc)
 
 		/* See what the Core device has for support */
 		vt_support = !!le16_to_cpu(pdsc->dev_ident.vif_types[vt]);
+
 		dev_dbg(pdsc->dev, "VIF %s is %ssupported\n",
 			pdsc->viftype_status[vt].name,
 			vt_support ? "" : "not ");
@@ -404,40 +452,13 @@ static int pdsc_viftypes_init(struct pdsc *pdsc)
 
 int pdsc_setup(struct pdsc *pdsc, bool init)
 {
-	int numdescs;
 	int err;
 
-	if (init)
-		err = pdsc_dev_init(pdsc);
-	else
-		err = pdsc_dev_reinit(pdsc);
+	pci_set_master(pdsc->pdev);
+
+	err = pdsc_dev_init(pdsc);
 	if (err)
 		return err;
-
-	/* Scale the descriptor ring length based on number of CPUs and VFs */
-	numdescs = max_t(int, PDSC_ADMINQ_MIN_LENGTH, num_online_cpus());
-	numdescs += 2 * pci_sriov_get_totalvfs(pdsc->pdev);
-	numdescs = roundup_pow_of_two(numdescs);
-	err = pdsc_qcq_alloc(pdsc, PDS_CORE_QTYPE_ADMINQ, 0, "adminq",
-			     PDS_CORE_QCQ_F_CORE | PDS_CORE_QCQ_F_INTR,
-			     numdescs,
-			     sizeof(union pds_core_adminq_cmd),
-			     sizeof(union pds_core_adminq_comp),
-			     0, &pdsc->adminqcq);
-	if (err)
-		goto err_out_teardown;
-
-	err = pdsc_qcq_alloc(pdsc, PDS_CORE_QTYPE_NOTIFYQ, 0, "notifyq",
-			     PDS_CORE_QCQ_F_NOTIFYQ,
-			     PDSC_NOTIFYQ_LENGTH,
-			     sizeof(struct pds_core_notifyq_cmd),
-			     sizeof(union pds_core_notifyq_comp),
-			     0, &pdsc->notifyqcq);
-	if (err)
-		goto err_out_teardown;
-
-	/* NotifyQ rides on the AdminQ interrupt */
-	pdsc->notifyqcq.intx = pdsc->adminqcq.intx;
 
 	/* Set up the Core with the AdminQ and NotifyQ info */
 	err = pdsc_core_init(pdsc);
@@ -445,13 +466,15 @@ int pdsc_setup(struct pdsc *pdsc, bool init)
 		goto err_out_teardown;
 
 	/* Set up the VIFs */
-	err = pdsc_viftypes_init(pdsc);
-	if (err)
-		goto err_out_teardown;
+	if (init) {
+		err = pdsc_viftypes_init(pdsc);
+		if (err)
+			goto err_out_teardown;
 
-	if (init)
 		pdsc_debugfs_add_viftype(pdsc);
+	}
 
+	refcount_set(&pdsc->adminq_refcnt, 1);
 	clear_bit(PDSC_S_FW_DEAD, &pdsc->state);
 	return 0;
 
@@ -462,30 +485,30 @@ err_out_teardown:
 
 void pdsc_teardown(struct pdsc *pdsc, bool removing)
 {
-	int i;
-
 	if (!pdsc->pdev->is_virtfn)
 		pdsc_devcmd_reset(pdsc);
-	pdsc_qcq_free(pdsc, &pdsc->notifyqcq);
-	pdsc_qcq_free(pdsc, &pdsc->adminqcq);
 
-	kfree(pdsc->viftype_status);
-	pdsc->viftype_status = NULL;
+	pci_clear_master(pdsc->pdev);
+	if (!pdsc->pdev->is_virtfn) {
+		u16 val;
 
-	if (pdsc->intr_info) {
-		for (i = 0; i < pdsc->nintrs; i++)
-			pdsc_intr_free(pdsc, i);
-
-		if (removing) {
-			kfree(pdsc->intr_info);
-			pdsc->intr_info = NULL;
-		}
+		/* Flush any in-flight DMA before freeing buffers.
+		 * A config read completion cannot return until all prior
+		 * device-initiated memory writes have completed.
+		 */
+		pci_read_config_word(pdsc->pdev, PCI_VENDOR_ID, &val);
 	}
 
-	if (pdsc->kern_dbpage) {
-		iounmap(pdsc->kern_dbpage);
-		pdsc->kern_dbpage = NULL;
+	pdsc_core_uninit(pdsc);
+
+	if (removing) {
+		kfree(pdsc->viftype_status);
+		pdsc->viftype_status = NULL;
 	}
+
+	pdsc_debugfs_del_host_mem(pdsc);
+	pdsc_host_mem_free(pdsc);
+	pdsc_dev_uninit(pdsc);
 
 	set_bit(PDSC_S_FW_DEAD, &pdsc->state);
 }
@@ -494,6 +517,8 @@ int pdsc_start(struct pdsc *pdsc)
 {
 	pds_core_intr_mask(&pdsc->intr_ctrl[pdsc->adminqcq.intx],
 			   PDS_CORE_INTR_MASK_CLEAR);
+	pdsc_host_mem_add(pdsc);
+	pdsc_debugfs_add_host_mem(pdsc);
 
 	return 0;
 }
@@ -512,7 +537,26 @@ void pdsc_stop(struct pdsc *pdsc)
 					   PDS_CORE_INTR_MASK_SET);
 }
 
-static void pdsc_fw_down(struct pdsc *pdsc)
+static void pdsc_adminq_wait_and_dec_once_unused(struct pdsc *pdsc)
+{
+	/* The driver initializes the adminq_refcnt to 1 when the adminq is
+	 * allocated and ready for use. Other users/requesters will increment
+	 * the refcnt while in use. If the refcnt is down to 1 then the adminq
+	 * is not in use and the refcnt can be cleared and adminq freed. Before
+	 * calling this function the driver will set PDSC_S_FW_DEAD, which
+	 * prevent subsequent attempts to use the adminq and increment the
+	 * refcnt to fail. This guarantees that this function will eventually
+	 * exit.
+	 */
+	while (!refcount_dec_if_one(&pdsc->adminq_refcnt)) {
+		dev_dbg_ratelimited(pdsc->dev, "%s: adminq in use\n",
+				    __func__);
+		cpu_relax();
+		cond_resched();
+	}
+}
+
+void pdsc_fw_down(struct pdsc *pdsc)
 {
 	union pds_core_notifyq_comp reset_event = {
 		.reset.ecode = cpu_to_le16(PDS_EVENT_RESET),
@@ -520,9 +564,14 @@ static void pdsc_fw_down(struct pdsc *pdsc)
 	};
 
 	if (test_and_set_bit(PDSC_S_FW_DEAD, &pdsc->state)) {
-		dev_err(pdsc->dev, "%s: already happening\n", __func__);
+		dev_warn(pdsc->dev, "%s: already happening\n", __func__);
 		return;
 	}
+
+	if (pdsc->pdev->is_virtfn)
+		return;
+
+	pdsc_adminq_wait_and_dec_once_unused(pdsc);
 
 	/* Notify clients of fw_down */
 	if (pdsc->fw_reporter)
@@ -533,7 +582,7 @@ static void pdsc_fw_down(struct pdsc *pdsc)
 	pdsc_teardown(pdsc, PDSC_TEARDOWN_RECOVERY);
 }
 
-static void pdsc_fw_up(struct pdsc *pdsc)
+void pdsc_fw_up(struct pdsc *pdsc)
 {
 	union pds_core_notifyq_comp reset_event = {
 		.reset.ecode = cpu_to_le16(PDS_EVENT_RESET),
@@ -545,6 +594,13 @@ static void pdsc_fw_up(struct pdsc *pdsc)
 		dev_err(pdsc->dev, "%s: fw not dead\n", __func__);
 		return;
 	}
+
+	if (pdsc->pdev->is_virtfn) {
+		clear_bit(PDSC_S_FW_DEAD, &pdsc->state);
+		return;
+	}
+
+	pdsc_fw_components_invalidate(pdsc);
 
 	err = pdsc_setup(pdsc, PDSC_SETUP_RECOVERY);
 	if (err)
@@ -565,6 +621,35 @@ static void pdsc_fw_up(struct pdsc *pdsc)
 
 err_out:
 	pdsc_teardown(pdsc, PDSC_TEARDOWN_RECOVERY);
+}
+
+void pdsc_pci_reset_thread(struct work_struct *work)
+{
+	struct pdsc *pdsc = container_of(work, struct pdsc, pci_reset_work);
+	struct pci_dev *pdev = pdsc->pdev;
+
+	/* Use try variant to avoid deadlock with pdsc_remove().
+	 * If lock is contended, the watchdog timer will retry.
+	 */
+	pci_try_reset_function(pdev);
+}
+
+static void pdsc_check_pci_health(struct pdsc *pdsc)
+{
+	u8 fw_status;
+
+	/* some sort of teardown already in progress */
+	if (!pdsc->info_regs)
+		return;
+
+	fw_status = ioread8(&pdsc->info_regs->fw_status);
+
+	/* is PCI broken? */
+	if (fw_status != PDS_RC_BAD_PCI)
+		return;
+
+	/* prevent deadlock between pdsc_reset_prepare and pdsc_health_thread */
+	queue_work(pdsc->wq, &pdsc->pci_reset_work);
 }
 
 void pdsc_health_thread(struct work_struct *work)
@@ -593,8 +678,167 @@ void pdsc_health_thread(struct work_struct *work)
 			pdsc_fw_down(pdsc);
 	}
 
+	pdsc_check_pci_health(pdsc);
+
 	pdsc->fw_generation = pdsc->fw_status & PDS_CORE_FW_STS_F_GENERATION;
 
 out_unlock:
 	mutex_unlock(&pdsc->config_lock);
+}
+
+static void pdsc_host_mem_del_one(struct pdsc *pdsc, u16 tag, u8 reason)
+{
+	union pds_core_dev_comp comp = {};
+	union pds_core_dev_cmd cmd = {
+		.host_mem.opcode = PDS_CORE_CMD_HOST_MEM,
+		.host_mem.oper = PDS_CORE_HOST_MEM_DEL,
+		.host_mem.tag = cpu_to_le16(tag),
+		.host_mem.reason = reason,
+	};
+
+	dev_dbg(pdsc->dev, "Sending devcmd for mem del tag %d\n", tag);
+	pdsc_devcmd(pdsc, &cmd, &comp, pdsc->devcmd_timeout);
+}
+
+static int pdsc_host_mem_add_one(struct pdsc *pdsc, int index)
+{
+	struct pdsc_host_mem *hm = &pdsc->host_mem_reqs[index];
+	union pds_core_dev_comp comp = {};
+	union pds_core_dev_cmd cmd = {};
+	int err;
+
+	cmd.host_mem.opcode = PDS_CORE_CMD_HOST_MEM;
+	cmd.host_mem.oper = PDS_CORE_HOST_MEM_QUERY;
+	cmd.host_mem.index = cpu_to_le16(index);
+	dev_dbg(pdsc->dev, "Sending devcmd for mem query index %d\n", index);
+	err = pdsc_devcmd(pdsc, &cmd, &comp, pdsc->devcmd_timeout);
+	if (err || comp.status != PDS_RC_SUCCESS) {
+		dev_err(pdsc->dev, "mem query failed err %d status %d\n",
+			err, comp.status);
+		return err ? err : -EIO;
+	}
+	hm->size = le32_to_cpu(comp.host_mem.size);
+	hm->tag = le16_to_cpu(comp.host_mem.tag);
+	dev_dbg(pdsc->dev, "mem query returned size %d tag %d\n",
+		hm->size, hm->tag);
+
+	if (!hm->size || hm->size > PDSC_HOST_MEM_MAX_CONTIG) {
+		dev_err(pdsc->dev, "invalid size %d for tag %d\n",
+			hm->size, hm->tag);
+		err = -EINVAL;
+		goto err_del;
+	}
+
+	hm->order = get_order(hm->size);
+	hm->pg = alloc_pages(GFP_KERNEL | __GFP_ZERO | __GFP_NOWARN, hm->order);
+	if (!hm->pg) {
+		dev_warn(pdsc->dev, "alloc order %d failed for tag %d\n",
+			 hm->order, hm->tag);
+		err = -ENOMEM;
+		goto err_del;
+	}
+
+	hm->pa = dma_map_page(pdsc->dev, hm->pg, 0, hm->size,
+			      DMA_BIDIRECTIONAL);
+	if (dma_mapping_error(pdsc->dev, hm->pa)) {
+		dev_err(pdsc->dev, "dma map failed for tag %d size %d\n",
+			hm->tag, hm->size);
+		__free_pages(hm->pg, hm->order);
+		hm->pg = NULL;
+		err = -EIO;
+		goto err_del;
+	}
+
+	/* Track this allocation so pdsc_host_mem_free() can clean it up */
+	pdsc->num_host_mem_reqs++;
+
+	memset(&cmd, 0, sizeof(cmd));
+	memset(&comp, 0, sizeof(comp));
+	cmd.host_mem.opcode = PDS_CORE_CMD_HOST_MEM;
+	cmd.host_mem.oper = PDS_CORE_HOST_MEM_ADD;
+	cmd.host_mem.tag = cpu_to_le16(hm->tag);
+	cmd.host_mem.size = cpu_to_le32(hm->size);
+	cmd.host_mem.buf_pa = cpu_to_le64(hm->pa);
+
+	dev_dbg(pdsc->dev, "Sending devcmd for mem add tag %d size %d pa %pad\n",
+		hm->tag, hm->size, &hm->pa);
+	err = pdsc_devcmd(pdsc, &cmd, &comp, pdsc->devcmd_timeout);
+	if (err || comp.status != PDS_RC_SUCCESS) {
+		dev_err(pdsc->dev, "mem add failed err %d status %d for tag %d\n",
+			err, comp.status, hm->tag);
+		err = err ? err : -EIO;
+		goto err_del;
+	}
+	dev_dbg(pdsc->dev, "mem add completed for tag %d\n", hm->tag);
+
+	return 0;
+
+err_del:
+	/* After MEM_QUERY succeeds, firmware expects MEM_ADD or MEM_DEL */
+	pdsc_host_mem_del_one(pdsc, hm->tag, PDS_RC_ENOMEM);
+	return err;
+}
+
+void pdsc_host_mem_add(struct pdsc *pdsc)
+{
+	union pds_core_dev_comp comp = {};
+	union pds_core_dev_cmd cmd = {};
+	u16 count;
+	int err;
+	int i;
+
+	if (!(pdsc->dev_ident.capabilities &
+	     cpu_to_le64(PDS_CORE_DEV_CAP_HOST_MEM)))
+		return;
+
+	cmd.host_mem.opcode = PDS_CORE_CMD_HOST_MEM;
+	cmd.host_mem.oper = PDS_CORE_HOST_MEM_GET_COUNT;
+	cmd.host_mem.index = cpu_to_le16(PDSC_HOST_MEM_MAX_COUNT);
+	cmd.host_mem.max_contig = cpu_to_le32(PDSC_HOST_MEM_MAX_CONTIG);
+	dev_dbg(pdsc->dev, "Sending devcmd for mem get count max_contig %u\n",
+		PDSC_HOST_MEM_MAX_CONTIG);
+	err = pdsc_devcmd(pdsc, &cmd, &comp, pdsc->devcmd_timeout);
+	if (err || comp.status != PDS_RC_SUCCESS) {
+		dev_err(pdsc->dev, "mem get count failed err %d status %d\n",
+			err, comp.status);
+		return;
+	}
+
+	count = min(le16_to_cpu(comp.host_mem.count),
+		    PDSC_HOST_MEM_MAX_COUNT);
+	dev_dbg(pdsc->dev, "mem get count returned count %d\n", count);
+	if (count == 0)
+		return;
+
+	pdsc->host_mem_reqs = kzalloc_objs(*pdsc->host_mem_reqs, count);
+	if (!pdsc->host_mem_reqs) {
+		dev_err(pdsc->dev, "failed to alloc host_mem_reqs array\n");
+		return;
+	}
+
+	for (i = 0; i < count; i++) {
+		err = pdsc_host_mem_add_one(pdsc, i);
+		if (err)
+			break;
+	}
+}
+
+void pdsc_host_mem_free(struct pdsc *pdsc)
+{
+	int i;
+
+	if (!pdsc->host_mem_reqs)
+		return;
+
+	for (i = 0; i < pdsc->num_host_mem_reqs; i++) {
+		dma_unmap_page(pdsc->dev, pdsc->host_mem_reqs[i].pa,
+			       pdsc->host_mem_reqs[i].size,
+			       DMA_BIDIRECTIONAL);
+		__free_pages(pdsc->host_mem_reqs[i].pg,
+			     pdsc->host_mem_reqs[i].order);
+	}
+
+	kfree(pdsc->host_mem_reqs);
+	pdsc->host_mem_reqs = NULL;
+	pdsc->num_host_mem_reqs = 0;
 }

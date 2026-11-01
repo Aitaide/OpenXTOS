@@ -238,7 +238,7 @@ static ssize_t sk_store(struct kobject *kobj,
 	ret = hp_wmi_perform_query(HPWMI_SECUREPLATFORM_SET_SK,
 				   HPWMI_SECUREPLATFORM,
 				   (void *)bioscfg_drv.spm_data.signing_key,
-				   count, 0);
+				   length, 0);
 
 	if (!ret) {
 		bioscfg_drv.spm_data.mechanism = SIGNING_KEY;
@@ -274,7 +274,7 @@ static ssize_t kek_store(struct kobject *kobj,
 	ret = hp_wmi_perform_query(HPWMI_SECUREPLATFORM_SET_KEK,
 				   HPWMI_SECUREPLATFORM,
 				   (void *)bioscfg_drv.spm_data.endorsement_key,
-				   count, 0);
+				   length, 0);
 
 	if (!ret) {
 		bioscfg_drv.spm_data.mechanism = ENDORSEMENT_KEY;
@@ -365,8 +365,7 @@ int hp_populate_secure_platform_data(struct kobject *attr_name_kobj)
 	/* Populate data for Secure Platform Management */
 	bioscfg_drv.spm_data.attr_name_kobj = attr_name_kobj;
 
-	strscpy(bioscfg_drv.spm_data.attribute_name, SPM_STR,
-		sizeof(bioscfg_drv.spm_data.attribute_name));
+	strscpy(bioscfg_drv.spm_data.attribute_name, SPM_STR);
 
 	bioscfg_drv.spm_data.is_enabled = 0;
 	bioscfg_drv.spm_data.mechanism = 0;

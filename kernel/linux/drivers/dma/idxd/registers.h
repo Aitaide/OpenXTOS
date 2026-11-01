@@ -3,14 +3,19 @@
 #ifndef _IDXD_REGISTERS_H_
 #define _IDXD_REGISTERS_H_
 
+#ifdef __KERNEL__
 #include <uapi/linux/idxd.h>
+#else
+#include <linux/idxd.h>
+#endif
 
 /* PCI Config */
-#define PCI_DEVICE_ID_INTEL_DSA_SPR0	0x0b25
-#define PCI_DEVICE_ID_INTEL_IAX_SPR0	0x0cfe
+#define PCI_DEVICE_ID_INTEL_IAA_PTL	0xb02d
+#define PCI_DEVICE_ID_INTEL_IAA_WCL	0xfd2d
 
 #define DEVICE_VERSION_1		0x100
 #define DEVICE_VERSION_2		0x200
+#define DEVICE_VERSION_3		0x300
 
 #define IDXD_MMIO_BAR		0
 #define IDXD_WQ_BAR		2
@@ -43,7 +48,7 @@ union gen_cap_reg {
 		u64 rsvd3:32;
 	};
 	u64 bits;
-} __packed;
+};
 #define IDXD_GENCAP_OFFSET		0x10
 
 union wq_cap_reg {
@@ -63,7 +68,7 @@ union wq_cap_reg {
 		u64 rsvd4:8;
 	};
 	u64 bits;
-} __packed;
+};
 #define IDXD_WQCAP_OFFSET		0x20
 #define IDXD_WQCFG_MIN			5
 
@@ -77,7 +82,7 @@ union group_cap_reg {
 		u64 rsvd:45;
 	};
 	u64 bits;
-} __packed;
+};
 #define IDXD_GRPCAP_OFFSET		0x30
 
 union engine_cap_reg {
@@ -86,7 +91,7 @@ union engine_cap_reg {
 		u64 rsvd:56;
 	};
 	u64 bits;
-} __packed;
+};
 
 #define IDXD_ENGCAP_OFFSET		0x38
 
@@ -112,7 +117,7 @@ union offsets_reg {
 		u64 rsvd:48;
 	};
 	u64 bits[2];
-} __packed;
+};
 
 #define IDXD_TABLE_MULT			0x100
 
@@ -126,7 +131,7 @@ union gencfg_reg {
 		u32 rsvd2:18;
 	};
 	u32 bits;
-} __packed;
+};
 
 #define IDXD_GENCTRL_OFFSET		0x88
 union genctrl_reg {
@@ -137,7 +142,7 @@ union genctrl_reg {
 		u32 rsvd:29;
 	};
 	u32 bits;
-} __packed;
+};
 
 #define IDXD_GENSTATS_OFFSET		0x90
 union gensts_reg {
@@ -147,7 +152,7 @@ union gensts_reg {
 		u32 rsvd:28;
 	};
 	u32 bits;
-} __packed;
+};
 
 enum idxd_device_status_state {
 	IDXD_DEVICE_STATE_DISABLED = 0,
@@ -181,7 +186,7 @@ union idxd_command_reg {
 		u32 int_req:1;
 	};
 	u32 bits;
-} __packed;
+};
 
 enum idxd_cmd {
 	IDXD_CMD_ENABLE_DEVICE = 1,
@@ -211,7 +216,7 @@ union cmdsts_reg {
 		u8 active:1;
 	};
 	u32 bits;
-} __packed;
+};
 #define IDXD_CMDSTS_ACTIVE		0x80000000
 #define IDXD_CMDSTS_ERR_MASK		0xff
 #define IDXD_CMDSTS_RES_SHIFT		8
@@ -282,7 +287,7 @@ union sw_err_reg {
 		u64 rsvd5;
 	};
 	u64 bits[4];
-} __packed;
+};
 
 union iaa_cap_reg {
 	struct {
@@ -301,7 +306,7 @@ union iaa_cap_reg {
 		u64 rsvd:52;
 	};
 	u64 bits;
-} __packed;
+};
 
 #define IDXD_IAACAP_OFFSET	0x180
 
@@ -318,7 +323,7 @@ union evlcfg_reg {
 		u64 rsvd2:28;
 	};
 	u64 bits[2];
-} __packed;
+};
 
 #define IDXD_EVL_SIZE_MIN	0x0040
 #define IDXD_EVL_SIZE_MAX	0xffff
@@ -332,7 +337,7 @@ union msix_perm {
 		u32 pasid:20;
 	};
 	u32 bits;
-} __packed;
+};
 
 union group_flags {
 	struct {
@@ -350,13 +355,13 @@ union group_flags {
 		u64 rsvd5:26;
 	};
 	u64 bits;
-} __packed;
+};
 
 struct grpcfg {
 	u64 wqs[4];
 	u64 engines;
 	union group_flags flags;
-} __packed;
+};
 
 union wqcfg {
 	struct {
@@ -382,7 +387,8 @@ union wqcfg {
 		/* bytes 12-15 */
 		u32 max_xfer_shift:5;
 		u32 max_batch_shift:4;
-		u32 rsvd4:23;
+		u32 max_sgl_shift:4;
+		u32 rsvd4:19;
 
 		/* bytes 16-19 */
 		u16 occupancy_inth;
@@ -408,7 +414,7 @@ union wqcfg {
 		u64 op_config[4];
 	};
 	u32 bits[16];
-} __packed;
+};
 
 #define WQCFG_PASID_IDX                2
 #define WQCFG_PRIVL_IDX		2
@@ -440,12 +446,14 @@ union wqcfg {
 /*
  * This macro calculates the offset into the GRPCFG register
  * idxd - struct idxd *
- * n - wq id
- * ofs - the index of the 32b dword for the config register
+ * n - group id
+ * ofs - the index of the 64b qword for the config register
  *
- * The WQCFG register block is divided into groups per each wq. The n index
- * allows us to move to the register group that's for that particular wq.
- * Each register is 32bits. The ofs gives us the number of register to access.
+ * The GRPCFG register block is divided into three sub-registers, which
+ * are GRPWQCFG, GRPENGCFG and GRPFLGCFG. The n index allows us to move
+ * to the register block that contains the three sub-registers.
+ * Each register block is 64bits. And the ofs gives us the offset
+ * within the GRPWQCFG register to access.
  */
 #define GRPWQCFG_OFFSET(idxd_dev, n, ofs) ((idxd_dev)->grpcfg_offset +\
 					   (n) * GRPCFG_SIZE + sizeof(u64) * (ofs))
@@ -470,7 +478,7 @@ union idxd_perfcap {
 		u64 rsvd3:8;
 	};
 	u64 bits;
-} __packed;
+};
 
 #define IDXD_EVNTCAP_OFFSET		0x80
 union idxd_evntcap {
@@ -479,7 +487,7 @@ union idxd_evntcap {
 		u64 rsvd:36;
 	};
 	u64 bits;
-} __packed;
+};
 
 struct idxd_event {
 	union {
@@ -489,7 +497,7 @@ struct idxd_event {
 		};
 		u32 val;
 	};
-} __packed;
+};
 
 #define IDXD_CNTRCAP_OFFSET		0x800
 struct idxd_cntrcap {
@@ -502,7 +510,7 @@ struct idxd_cntrcap {
 		u32 val;
 	};
 	struct idxd_event events[];
-} __packed;
+};
 
 #define IDXD_PERFRST_OFFSET		0x10
 union idxd_perfrst {
@@ -512,7 +520,7 @@ union idxd_perfrst {
 		u32 rsvd:30;
 	};
 	u32 val;
-} __packed;
+};
 
 #define IDXD_OVFSTATUS_OFFSET		0x30
 #define IDXD_PERFFRZ_OFFSET		0x20
@@ -529,7 +537,7 @@ union idxd_cntrcfg {
 		u64 rsvd3:4;
 	};
 	u64 val;
-} __packed;
+};
 
 #define IDXD_FLTCFG_OFFSET		0x300
 
@@ -539,7 +547,7 @@ union idxd_cntrdata {
 		u64 event_count_value;
 	};
 	u64 val;
-} __packed;
+};
 
 union event_cfg {
 	struct {
@@ -547,7 +555,7 @@ union event_cfg {
 		u64 event_enc:28;
 	};
 	u64 val;
-} __packed;
+};
 
 union filter_cfg {
 	struct {
@@ -558,7 +566,7 @@ union filter_cfg {
 		u64 eng:8;
 	};
 	u64 val;
-} __packed;
+};
 
 #define IDXD_EVLSTATUS_OFFSET		0xf0
 
@@ -576,7 +584,31 @@ union evl_status_reg {
 		u32 bits_upper32;
 	};
 	u64 bits;
-} __packed;
+};
+
+#define IDXD_DSACAP0_OFFSET		0x180
+union dsacap0_reg {
+	u64 bits;
+	struct {
+		u64 max_sgl_shift:4;
+		u64 max_gr_block_shift:4;
+		u64 ops_inter_domain:7;
+		u64 rsvd1:17;
+		u64 sgl_formats:16;
+		u64 max_sg_process:8;
+		u64 rsvd2:8;
+	};
+};
+
+#define IDXD_DSACAP1_OFFSET		0x188
+union dsacap1_reg {
+	u64 bits;
+};
+
+#define IDXD_DSACAP2_OFFSET		0x190
+union dsacap2_reg {
+	u64 bits;
+};
 
 #define IDXD_MAX_BATCH_IDENT	256
 
@@ -616,17 +648,17 @@ struct __evl_entry {
 	};
 	u64 fault_addr;
 	u64 rsvd5;
-} __packed;
+};
 
 struct dsa_evl_entry {
 	struct __evl_entry e;
 	struct dsa_completion_record cr;
-} __packed;
+};
 
 struct iax_evl_entry {
 	struct __evl_entry e;
 	u64 rsvd[4];
 	struct iax_completion_record cr;
-} __packed;
+};
 
 #endif

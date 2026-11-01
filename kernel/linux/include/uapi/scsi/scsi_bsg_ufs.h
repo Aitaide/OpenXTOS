@@ -94,16 +94,15 @@ struct utp_upiu_header {
 };
 
 /**
- * struct utp_upiu_query - upiu request buffer structure for
- * query request.
- * @opcode: command to perform B-0
- * @idn: a value that indicates the particular type of data B-1
- * @index: Index to further identify data B-2
- * @selector: Index to further identify data B-3
+ * struct utp_upiu_query - QUERY REQUEST UPIU structure.
+ * @opcode: query function to perform B-0
+ * @idn: descriptor or attribute identification number B-1
+ * @index: Index that further identifies which data to access B-2
+ * @selector: Index that further identifies which data to access B-3
  * @reserved_osf: spec reserved field B-4,5
- * @length: number of descriptor bytes to read/write B-6,7
- * @value: Attribute value to be written DW-5
- * @reserved: spec reserved DW-6,7
+ * @length: number of descriptor bytes to read or write B-6,7
+ * @value: if @opcode == UPIU_QUERY_OPCODE_WRITE_ATTR, the value to be written B-6,7
+ * @reserved: reserved for future use DW-6,7
  */
 struct utp_upiu_query {
 	__u8 opcode;
@@ -123,6 +122,7 @@ struct utp_upiu_query {
  * @idn: a value that indicates the particular type of data B-1
  * @index: Index to further identify data B-2
  * @selector: Index to further identify data B-3
+ * @osf3: spec field B-4
  * @osf4: spec field B-5
  * @osf5: spec field B 6,7
  * @osf6: spec field DW 8,9
@@ -138,12 +138,13 @@ struct utp_upiu_query_v4_0 {
 	__be16 osf5;
 	__be32 osf6;
 	__be32 osf7;
+	/* private: */
 	__be32 reserved;
 };
 
 /**
  * struct utp_upiu_cmd - Command UPIU structure
- * @data_transfer_len: Data Transfer Length DW-3
+ * @exp_data_transfer_len: Data Transfer Length DW-3
  * @cdb: Command Descriptor Block CDB DW-4 to DW-7
  */
 struct utp_upiu_cmd {

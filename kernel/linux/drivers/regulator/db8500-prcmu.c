@@ -13,7 +13,7 @@
 #include <linux/err.h>
 #include <linux/spinlock.h>
 #include <linux/platform_device.h>
-#include <linux/mfd/dbx500-prcmu.h>
+#include <linux/mfd/db8500-prcmu.h>
 #include <linux/regulator/driver.h>
 #include <linux/regulator/machine.h>
 #include <linux/regulator/db8500-prcmu.h>
@@ -93,13 +93,13 @@ static int enable_epod(u16 epod_id, bool ramret)
 
 	if (ramret) {
 		if (!epod_on[epod_id]) {
-			ret = prcmu_set_epod(epod_id, EPOD_STATE_RAMRET);
+			ret = db8500_prcmu_set_epod(epod_id, EPOD_STATE_RAMRET);
 			if (ret < 0)
 				return ret;
 		}
 		epod_ramret[epod_id] = true;
 	} else {
-		ret = prcmu_set_epod(epod_id, EPOD_STATE_ON);
+		ret = db8500_prcmu_set_epod(epod_id, EPOD_STATE_ON);
 		if (ret < 0)
 			return ret;
 		epod_on[epod_id] = true;
@@ -114,18 +114,18 @@ static int disable_epod(u16 epod_id, bool ramret)
 
 	if (ramret) {
 		if (!epod_on[epod_id]) {
-			ret = prcmu_set_epod(epod_id, EPOD_STATE_OFF);
+			ret = db8500_prcmu_set_epod(epod_id, EPOD_STATE_OFF);
 			if (ret < 0)
 				return ret;
 		}
 		epod_ramret[epod_id] = false;
 	} else {
 		if (epod_ramret[epod_id]) {
-			ret = prcmu_set_epod(epod_id, EPOD_STATE_RAMRET);
+			ret = db8500_prcmu_set_epod(epod_id, EPOD_STATE_RAMRET);
 			if (ret < 0)
 				return ret;
 		} else {
-			ret = prcmu_set_epod(epod_id, EPOD_STATE_OFF);
+			ret = db8500_prcmu_set_epod(epod_id, EPOD_STATE_OFF);
 			if (ret < 0)
 				return ret;
 		}
@@ -469,11 +469,9 @@ static int db8500_regulator_probe(struct platform_device *pdev)
 	return 0;
 }
 
-static int db8500_regulator_remove(struct platform_device *pdev)
+static void db8500_regulator_remove(struct platform_device *pdev)
 {
 	ux500_regulator_debug_exit();
-
-	return 0;
 }
 
 static struct platform_driver db8500_regulator_driver = {

@@ -47,7 +47,6 @@ struct iommu_group;
 struct iommu_domain;
 struct reset_control;
 struct dma_buf_attachment;
-struct tegra_vde_h264_frame;
 struct tegra_vde_h264_decoder_ctx;
 
 struct tegra_video_frame {
@@ -108,6 +107,7 @@ struct tegra_vde {
 	struct list_head map_list;
 	struct reset_control *rst;
 	struct reset_control *rst_mc;
+	struct tegra_pmc *pmc;
 	struct gen_pool *iram_pool;
 	struct completion decode_completion;
 	struct clk *clk;

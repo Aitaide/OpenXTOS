@@ -126,7 +126,7 @@ static LIST_HEAD(dup_failed_modules);
  *     These typically should not happen unless your system is under memory
  *     pressure.
  *   * invalid_becoming_bytes: total number of bytes allocated and freed used
- *     used to read the kernel module userspace wants us to read before we
+ *     to read the kernel module userspace wants us to read before we
  *     promote it to be processed to be added to our @modules linked list. These
  *     failures can happen if we had a check in between a successful kernel_read_file_from_fd()
  *     call and right before we allocate the our private memory for the module
@@ -250,10 +250,10 @@ int try_add_failed_module(const char *name, enum fail_dup_mod_reason reason)
 		}
 	}
 
-	mod_fail = kzalloc(sizeof(*mod_fail), GFP_KERNEL);
+	mod_fail = kzalloc_obj(*mod_fail);
 	if (!mod_fail)
 		return -ENOMEM;
-	memcpy(mod_fail->name, name, strlen(name));
+	strscpy(mod_fail->name, name);
 	__set_bit(reason, &mod_fail->dup_fail_mask);
 	atomic_long_inc(&mod_fail->count);
 	list_add_rcu(&mod_fail->list, &dup_failed_modules);

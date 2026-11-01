@@ -62,6 +62,23 @@ void adf_enable_vf2pf_interrupts(struct adf_accel_dev *accel_dev, u32 vf_mask)
 	unsigned long flags;
 
 	spin_lock_irqsave(&accel_dev->pf.vf2pf_ints_lock, flags);
+	if (!READ_ONCE(accel_dev->pf.vf2pf_disabled))
+		GET_PFVF_OPS(accel_dev)->enable_vf2pf_interrupts(pmisc_addr, vf_mask);
+	spin_unlock_irqrestore(&accel_dev->pf.vf2pf_ints_lock, flags);
+}
+
+void adf_enable_all_vf2pf_interrupts(struct adf_accel_dev *accel_dev, u32 num_vfs)
+{
+	void __iomem *pmisc_addr = adf_get_pmisc_base(accel_dev);
+	unsigned long flags;
+	u32 vf_mask;
+
+	vf_mask = BIT_ULL(num_vfs) - 1;
+	if (!vf_mask)
+		return;
+
+	spin_lock_irqsave(&accel_dev->pf.vf2pf_ints_lock, flags);
+	WRITE_ONCE(accel_dev->pf.vf2pf_disabled, false);
 	GET_PFVF_OPS(accel_dev)->enable_vf2pf_interrupts(pmisc_addr, vf_mask);
 	spin_unlock_irqrestore(&accel_dev->pf.vf2pf_ints_lock, flags);
 }
@@ -72,6 +89,7 @@ void adf_disable_all_vf2pf_interrupts(struct adf_accel_dev *accel_dev)
 	unsigned long flags;
 
 	spin_lock_irqsave(&accel_dev->pf.vf2pf_ints_lock, flags);
+	WRITE_ONCE(accel_dev->pf.vf2pf_disabled, true);
 	GET_PFVF_OPS(accel_dev)->disable_all_vf2pf_interrupts(pmisc_addr);
 	spin_unlock_irqrestore(&accel_dev->pf.vf2pf_ints_lock, flags);
 }
@@ -132,6 +150,26 @@ static bool adf_handle_pm_int(struct adf_accel_dev *accel_dev)
 	return false;
 }
 
+static bool adf_handle_ras_int(struct adf_accel_dev *accel_dev)
+{
+	struct adf_ras_ops *ras_ops = &accel_dev->hw_device->ras_ops;
+	bool reset_required;
+
+	if (ras_ops->handle_interrupt &&
+	    ras_ops->handle_interrupt(accel_dev, &reset_required)) {
+		if (reset_required) {
+			dev_err(&GET_DEV(accel_dev), "Fatal error, reset required\n");
+			if (adf_notify_fatal_error(accel_dev))
+				dev_err(&GET_DEV(accel_dev),
+					"Failed to notify fatal error\n");
+		}
+
+		return true;
+	}
+
+	return false;
+}
+
 static irqreturn_t adf_msix_isr_ae(int irq, void *dev_ptr)
 {
 	struct adf_accel_dev *accel_dev = dev_ptr;
@@ -145,10 +183,34 @@ static irqreturn_t adf_msix_isr_ae(int irq, void *dev_ptr)
 	if (adf_handle_pm_int(accel_dev))
 		return IRQ_HANDLED;
 
+	if (adf_handle_ras_int(accel_dev))
+		return IRQ_HANDLED;
+
 	dev_dbg(&GET_DEV(accel_dev), "qat_dev%d spurious AE interrupt\n",
 		accel_dev->accel_id);
 
 	return IRQ_NONE;
+}
+
+void adf_isr_sync_ae_cluster(struct adf_accel_dev *accel_dev)
+{
+	struct adf_accel_pci *pci_dev_info = &accel_dev->accel_pci_dev;
+	struct adf_hw_device_data *hw_data = GET_HW_DATA(accel_dev);
+	u32 num_entries = pci_dev_info->msix_entries.num_entries;
+	struct adf_irq *irqs = pci_dev_info->msix_entries.irqs;
+	u32 irq_idx;
+	int irq;
+
+	if (!test_bit(ADF_STATUS_IRQ_ALLOCATED, &accel_dev->status) || !irqs)
+		return;
+
+	irq_idx = num_entries > 1 ? hw_data->num_banks : 0;
+	if (irq_idx >= num_entries || !irqs[irq_idx].enabled)
+		return;
+
+	irq = pci_irq_vector(pci_dev_info->pci_dev, hw_data->num_banks);
+	if (irq > 0)
+		synchronize_irq(irq);
 }
 
 static void adf_free_irqs(struct adf_accel_dev *accel_dev)
@@ -254,7 +316,7 @@ static int adf_isr_alloc_msix_vectors_data(struct adf_accel_dev *accel_dev)
 	if (!accel_dev->pf.vf_info)
 		msix_num_entries += hw_data->num_banks;
 
-	irqs = kzalloc_node(msix_num_entries * sizeof(*irqs),
+	irqs = kcalloc_node(msix_num_entries, sizeof(*irqs),
 			    GFP_KERNEL, dev_to_node(&GET_DEV(accel_dev)));
 	if (!irqs)
 		return -ENOMEM;
@@ -357,13 +419,12 @@ EXPORT_SYMBOL_GPL(adf_isr_resource_alloc);
 /**
  * adf_init_misc_wq() - Init misc workqueue
  *
- * Function init workqueue 'qat_misc_wq' for general purpose.
- *
  * Return: 0 on success, error code otherwise.
  */
 int __init adf_init_misc_wq(void)
 {
-	adf_misc_wq = alloc_workqueue("qat_misc_wq", WQ_MEM_RECLAIM, 0);
+	adf_misc_wq = alloc_workqueue("qat_misc_wq",
+				      WQ_MEM_RECLAIM | WQ_PERCPU, 0);
 
 	return !adf_misc_wq ? -ENOMEM : 0;
 }
@@ -385,4 +446,9 @@ bool adf_misc_wq_queue_delayed_work(struct delayed_work *work,
 				    unsigned long delay)
 {
 	return queue_delayed_work(adf_misc_wq, work, delay);
+}
+
+void adf_misc_wq_flush(void)
+{
+	flush_workqueue(adf_misc_wq);
 }

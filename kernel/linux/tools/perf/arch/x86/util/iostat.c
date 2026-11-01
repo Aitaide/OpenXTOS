@@ -32,7 +32,7 @@
 #define MAX_PATH 1024
 #endif
 
-#define UNCORE_IIO_PMU_PATH	"devices/uncore_iio_%d"
+#define UNCORE_IIO_PMU_PATH	"bus/event_source/devices/uncore_iio_%d"
 #define SYSFS_UNCORE_PMU_PATH	"%s/"UNCORE_IIO_PMU_PATH
 #define PLATFORM_MAPPING_PATH	UNCORE_IIO_PMU_PATH"/die%d"
 
@@ -332,13 +332,15 @@ err:
 	return ret;
 }
 
-int iostat_prepare(struct evlist *evlist, struct perf_stat_config *config)
+int iostat_prepare(struct evlist **evlist_ptr, struct perf_stat_config *config)
 {
-	if (evlist->core.nr_entries > 0) {
+	struct evlist *evlist = *evlist_ptr;
+
+	if (evlist__nr_entries(evlist) > 0) {
 		pr_warning("The -e and -M options are not supported."
 			   "All chosen events/metrics will be dropped\n");
-		evlist__delete(evlist);
-		evlist = evlist__new();
+		evlist__put(evlist);
+		*evlist_ptr = evlist = evlist__new();
 		if (!evlist)
 			return -ENOMEM;
 	}
@@ -400,9 +402,13 @@ void iostat_prefix(struct evlist *evlist,
 		   struct perf_stat_config *config,
 		   char *prefix, struct timespec *ts)
 {
-	struct iio_root_port *rp = evlist->selected->priv;
+	struct iio_root_port *rp = evlist__selected(evlist)->priv;
 
 	if (rp) {
+		/*
+		 * TODO: This is the incorrect format in JSON mode.
+		 *       See prepare_timestamp()
+		 */
 		if (ts)
 			sprintf(prefix, "%6lu.%09lu%s%04x:%02x%s",
 				ts->tv_sec, ts->tv_nsec,
@@ -444,7 +450,7 @@ void iostat_print_metric(struct perf_stat_config *config, struct evsel *evsel,
 		iostat_value = (count->val - prev_count_val) /
 			       ((double) count->run / count->ena);
 	}
-	out->print_metric(config, out->ctx, NULL, "%8.0f", iostat_metric,
+	out->print_metric(config, out->ctx, METRIC_THRESHOLD_UNKNOWN, "%8.0f", iostat_metric,
 			  iostat_value / (256 * 1024));
 }
 
@@ -459,7 +465,7 @@ void iostat_print_counters(struct evlist *evlist,
 	iostat_prefix(evlist, config, prefix, ts);
 	fprintf(config->output, "%s", prefix);
 	evlist__for_each_entry(evlist, counter) {
-		perf_device = evlist->selected->priv;
+		perf_device = evlist__selected(evlist)->priv;
 		if (perf_device && perf_device != counter->priv) {
 			evlist__set_selected(evlist, counter);
 			iostat_prefix(evlist, config, prefix, ts);

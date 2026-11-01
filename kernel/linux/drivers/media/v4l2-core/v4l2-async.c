@@ -316,19 +316,26 @@ v4l2_async_nf_try_all_subdevs(struct v4l2_async_notifier *notifier);
 static int v4l2_async_create_ancillary_links(struct v4l2_async_notifier *n,
 					     struct v4l2_subdev *sd)
 {
-	struct media_link *link = NULL;
-
 #if IS_ENABLED(CONFIG_MEDIA_CONTROLLER)
+	struct media_link *link;
 
 	if (sd->entity.function != MEDIA_ENT_F_LENS &&
 	    sd->entity.function != MEDIA_ENT_F_FLASH)
 		return 0;
 
+	if (!n->sd) {
+		dev_warn(notifier_dev(n),
+			 "not a sub-device notifier, not creating an ancillary link for %s!\n",
+			 dev_name(sd->dev));
+		return 0;
+	}
+
 	link = media_create_ancillary_link(&n->sd->entity, &sd->entity);
 
-#endif
-
 	return IS_ERR(link) ? PTR_ERR(link) : 0;
+#else
+	return 0;
+#endif
 }
 
 static int v4l2_async_match_notify(struct v4l2_async_notifier *notifier,
@@ -336,12 +343,11 @@ static int v4l2_async_match_notify(struct v4l2_async_notifier *notifier,
 				   struct v4l2_subdev *sd,
 				   struct v4l2_async_connection *asc)
 {
-	struct v4l2_async_notifier *subdev_notifier;
 	bool registered = false;
 	int ret;
 
 	if (list_empty(&sd->asc_list)) {
-		ret = v4l2_device_register_subdev(v4l2_dev, sd);
+		ret = __v4l2_device_register_subdev(v4l2_dev, sd, sd->owner);
 		if (ret < 0)
 			return ret;
 		registered = true;
@@ -382,6 +388,24 @@ static int v4l2_async_match_notify(struct v4l2_async_notifier *notifier,
 	dev_dbg(notifier_dev(notifier), "v4l2-async: %s bound (ret %d)\n",
 		dev_name(sd->dev), ret);
 
+	return 0;
+
+err_call_unbind:
+	v4l2_async_nf_call_unbind(notifier, sd, asc);
+
+err_unregister_subdev:
+	if (registered)
+		v4l2_device_unregister_subdev(sd);
+
+	return ret;
+}
+
+static int
+v4l2_async_nf_try_subdev_notifier(struct v4l2_async_notifier *notifier,
+				  struct v4l2_subdev *sd)
+{
+	struct v4l2_async_notifier *subdev_notifier;
+
 	/*
 	 * See if the sub-device has a notifier. If not, return here.
 	 */
@@ -397,16 +421,6 @@ static int v4l2_async_match_notify(struct v4l2_async_notifier *notifier,
 	subdev_notifier->parent = notifier;
 
 	return v4l2_async_nf_try_all_subdevs(subdev_notifier);
-
-err_call_unbind:
-	v4l2_async_nf_call_unbind(notifier, sd, asc);
-	list_del(&asc->asc_subdev_entry);
-
-err_unregister_subdev:
-	if (registered)
-		v4l2_device_unregister_subdev(sd);
-
-	return ret;
 }
 
 /* Test all async sub-devices in a notifier for a match. */
@@ -435,6 +449,10 @@ again:
 			"v4l2-async: match found, subdev %s\n", sd->name);
 
 		ret = v4l2_async_match_notify(notifier, v4l2_dev, sd, asc);
+		if (ret < 0)
+			return ret;
+
+		ret = v4l2_async_nf_try_subdev_notifier(notifier, sd);
 		if (ret < 0)
 			return ret;
 
@@ -563,6 +581,7 @@ void v4l2_async_nf_init(struct v4l2_async_notifier *notifier,
 {
 	INIT_LIST_HEAD(&notifier->waiting_list);
 	INIT_LIST_HEAD(&notifier->done_list);
+	INIT_LIST_HEAD(&notifier->notifier_entry);
 	notifier->v4l2_dev = v4l2_dev;
 }
 EXPORT_SYMBOL(v4l2_async_nf_init);
@@ -572,6 +591,7 @@ void v4l2_async_subdev_nf_init(struct v4l2_async_notifier *notifier,
 {
 	INIT_LIST_HEAD(&notifier->waiting_list);
 	INIT_LIST_HEAD(&notifier->done_list);
+	INIT_LIST_HEAD(&notifier->notifier_entry);
 	notifier->sd = sd;
 }
 EXPORT_SYMBOL_GPL(v4l2_async_subdev_nf_init);
@@ -618,16 +638,10 @@ err_unlock:
 
 int v4l2_async_nf_register(struct v4l2_async_notifier *notifier)
 {
-	int ret;
-
 	if (WARN_ON(!notifier->v4l2_dev == !notifier->sd))
 		return -EINVAL;
 
-	ret = __v4l2_async_nf_register(notifier);
-	if (ret)
-		notifier->v4l2_dev = NULL;
-
-	return ret;
+	return __v4l2_async_nf_register(notifier);
 }
 EXPORT_SYMBOL(v4l2_async_nf_register);
 
@@ -639,7 +653,7 @@ __v4l2_async_nf_unregister(struct v4l2_async_notifier *notifier)
 
 	v4l2_async_nf_unbind_all_subdevs(notifier);
 
-	list_del(&notifier->notifier_entry);
+	list_del_init(&notifier->notifier_entry);
 }
 
 void v4l2_async_nf_unregister(struct v4l2_async_notifier *notifier)
@@ -764,7 +778,7 @@ int v4l2_async_subdev_endpoint_add(struct v4l2_subdev *sd,
 {
 	struct v4l2_async_subdev_endpoint *ase;
 
-	ase = kmalloc(sizeof(*ase), GFP_KERNEL);
+	ase = kmalloc_obj(*ase);
 	if (!ase)
 		return -ENOMEM;
 
@@ -787,7 +801,7 @@ v4l2_async_connection_unique(struct v4l2_subdev *sd)
 }
 EXPORT_SYMBOL_GPL(v4l2_async_connection_unique);
 
-int v4l2_async_register_subdev(struct v4l2_subdev *sd)
+int __v4l2_async_register_subdev(struct v4l2_subdev *sd, struct module *module)
 {
 	struct v4l2_async_notifier *subdev_notifier;
 	struct v4l2_async_notifier *notifier;
@@ -811,6 +825,8 @@ int v4l2_async_register_subdev(struct v4l2_subdev *sd)
 		return -EINVAL;
 	}
 
+	sd->owner = module;
+
 	mutex_lock(&list_lock);
 
 	list_for_each_entry(notifier, &notifier_list, notifier_entry) {
@@ -824,7 +840,11 @@ int v4l2_async_register_subdev(struct v4l2_subdev *sd)
 			ret = v4l2_async_match_notify(notifier, v4l2_dev, sd,
 						      asc);
 			if (ret)
-				goto err_unbind;
+				goto err_unlock;
+
+			ret = v4l2_async_nf_try_subdev_notifier(notifier, sd);
+			if (ret)
+				goto err_unbind_one;
 
 			ret = v4l2_async_nf_try_complete(notifier);
 			if (ret)
@@ -848,14 +868,17 @@ err_unbind:
 	if (subdev_notifier)
 		v4l2_async_nf_unbind_all_subdevs(subdev_notifier);
 
-	if (asc)
-		v4l2_async_unbind_subdev_one(notifier, asc);
+err_unbind_one:
+	v4l2_async_unbind_subdev_one(notifier, asc);
 
+err_unlock:
 	mutex_unlock(&list_lock);
+
+	sd->owner = NULL;
 
 	return ret;
 }
-EXPORT_SYMBOL(v4l2_async_register_subdev);
+EXPORT_SYMBOL(__v4l2_async_register_subdev);
 
 void v4l2_async_unregister_subdev(struct v4l2_subdev *sd)
 {
@@ -874,13 +897,18 @@ void v4l2_async_unregister_subdev(struct v4l2_subdev *sd)
 	sd->subdev_notifier = NULL;
 
 	if (sd->asc_list.next) {
-		list_for_each_entry_safe(asc, asc_tmp, &sd->asc_list,
-					 asc_subdev_entry) {
-			list_move(&asc->asc_entry,
-				  &asc->notifier->waiting_list);
-
-			v4l2_async_unbind_subdev_one(asc->notifier, asc);
-			list_del(&asc->asc_subdev_entry);
+		if (list_empty(&sd->asc_list)) {
+			/*
+			 * If the sub-device was registered through other means
+			 * than v4l2-async, there are no async connections but
+			 * the sub-device may still well be registered.
+			 * Unregister it now.
+			 */
+			v4l2_device_unregister_subdev(sd);
+		} else {
+			list_for_each_entry_safe(asc, asc_tmp, &sd->asc_list,
+						 asc_subdev_entry)
+				v4l2_async_unbind_subdev_one(asc->notifier, asc);
 		}
 	}
 
@@ -969,4 +997,5 @@ module_exit(v4l2_async_exit);
 MODULE_AUTHOR("Guennadi Liakhovetski <g.liakhovetski@gmx.de>");
 MODULE_AUTHOR("Sakari Ailus <sakari.ailus@linux.intel.com>");
 MODULE_AUTHOR("Ezequiel Garcia <ezequiel@collabora.com>");
+MODULE_DESCRIPTION("V4L2 asynchronous subdevice registration API");
 MODULE_LICENSE("GPL");

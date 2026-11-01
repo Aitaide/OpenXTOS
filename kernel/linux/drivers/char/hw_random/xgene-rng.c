@@ -16,7 +16,6 @@
 #include <linux/interrupt.h>
 #include <linux/io.h>
 #include <linux/module.h>
-#include <linux/mod_devicetable.h>
 #include <linux/platform_device.h>
 #include <linux/timer.h>
 
@@ -88,12 +87,12 @@ struct xgene_rng_dev {
 
 static void xgene_rng_expired_timer(struct timer_list *t)
 {
-	struct xgene_rng_dev *ctx = from_timer(ctx, t, failure_timer);
+	struct xgene_rng_dev *ctx = timer_container_of(ctx, t, failure_timer);
 
 	/* Clear failure counter as timer expired */
 	disable_irq(ctx->irq);
 	ctx->failure_cnt = 0;
-	del_timer(&ctx->failure_timer);
+	timer_delete(&ctx->failure_timer);
 	enable_irq(ctx->irq);
 }
 
@@ -297,7 +296,7 @@ static int xgene_rng_init(struct hwrng *rng)
 
 #ifdef CONFIG_ACPI
 static const struct acpi_device_id xgene_rng_acpi_match[] = {
-	{ "APMC0D18", },
+	{ .id = "APMC0D18" },
 	{ }
 };
 MODULE_DEVICE_TABLE(acpi, xgene_rng_acpi_match);
@@ -321,7 +320,6 @@ static int xgene_rng_probe(struct platform_device *pdev)
 		return -ENOMEM;
 
 	ctx->dev = &pdev->dev;
-	platform_set_drvdata(pdev, ctx);
 
 	ctx->csr_base = devm_platform_ioremap_resource(pdev, 0);
 	if (IS_ERR(ctx->csr_base))
@@ -338,7 +336,7 @@ static int xgene_rng_probe(struct platform_device *pdev)
 	rc = devm_request_irq(&pdev->dev, ctx->irq, xgene_rng_irq_handler, 0,
 				dev_name(&pdev->dev), ctx);
 	if (rc)
-		return dev_err_probe(&pdev->dev, rc, "Could not request RNG alarm IRQ\n");
+		return rc;
 
 	/* Enable IP clock */
 	clk = devm_clk_get_optional_enabled(&pdev->dev, NULL);
@@ -358,15 +356,13 @@ static int xgene_rng_probe(struct platform_device *pdev)
 	return 0;
 }
 
-static int xgene_rng_remove(struct platform_device *pdev)
+static void xgene_rng_remove(struct platform_device *pdev)
 {
 	int rc;
 
 	rc = device_init_wakeup(&pdev->dev, 0);
 	if (rc)
 		dev_err(&pdev->dev, "RNG init wakeup failed error %d\n", rc);
-
-	return 0;
 }
 
 static const struct of_device_id xgene_rng_of_match[] = {
@@ -378,7 +374,7 @@ MODULE_DEVICE_TABLE(of, xgene_rng_of_match);
 
 static struct platform_driver xgene_rng_driver = {
 	.probe = xgene_rng_probe,
-	.remove	= xgene_rng_remove,
+	.remove = xgene_rng_remove,
 	.driver = {
 		.name		= "xgene-rng",
 		.of_match_table = xgene_rng_of_match,

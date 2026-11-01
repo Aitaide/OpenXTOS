@@ -39,7 +39,7 @@ static int pds_vdpa_probe(struct auxiliary_device *aux_dev,
 	struct pds_vdpa_aux *vdpa_aux;
 	int err;
 
-	vdpa_aux = kzalloc(sizeof(*vdpa_aux), GFP_KERNEL);
+	vdpa_aux = kzalloc_obj(*vdpa_aux);
 	if (!vdpa_aux)
 		return -ENOMEM;
 
@@ -93,8 +93,8 @@ static void pds_vdpa_remove(struct auxiliary_device *aux_dev)
 	struct device *dev = &aux_dev->dev;
 
 	vdpa_mgmtdev_unregister(&vdpa_aux->vdpa_mdev);
+	pds_vdpa_release_irqs(vdpa_aux->pdsv);
 	vp_modern_remove(&vdpa_aux->vd_mdev);
-	pci_free_irq_vectors(vdpa_aux->padev->vf_pdev);
 
 	pds_vdpa_debugfs_del_vdpadev(vdpa_aux);
 	kfree(vdpa_aux);

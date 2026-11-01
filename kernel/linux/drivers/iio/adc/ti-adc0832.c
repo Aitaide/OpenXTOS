@@ -8,7 +8,6 @@
  */
 
 #include <linux/module.h>
-#include <linux/mod_devicetable.h>
 #include <linux/spi/spi.h>
 #include <linux/iio/iio.h>
 #include <linux/regulator/consumer.h>
@@ -211,8 +210,7 @@ static irqreturn_t adc0832_trigger_handler(int irq, void *p)
 
 	mutex_lock(&adc->lock);
 
-	for_each_set_bit(scan_index, indio_dev->active_scan_mask,
-			 indio_dev->masklength) {
+	iio_for_each_active_channel(indio_dev, scan_index) {
 		const struct iio_chan_spec *scan_chan =
 				&indio_dev->channels[scan_index];
 		int ret = adc0832_adc_conversion(adc, scan_chan->channel,
@@ -226,8 +224,8 @@ static irqreturn_t adc0832_trigger_handler(int irq, void *p)
 		adc->data[i] = ret;
 		i++;
 	}
-	iio_push_to_buffers_with_timestamp(indio_dev, adc->data,
-					   iio_get_time_ns(indio_dev));
+	iio_push_to_buffers_with_ts(indio_dev, adc->data, sizeof(adc->data),
+				    iio_get_time_ns(indio_dev));
 out:
 	mutex_unlock(&adc->lock);
 
@@ -310,16 +308,16 @@ static const struct of_device_id adc0832_dt_ids[] = {
 	{ .compatible = "ti,adc0832", },
 	{ .compatible = "ti,adc0834", },
 	{ .compatible = "ti,adc0838", },
-	{}
+	{ }
 };
 MODULE_DEVICE_TABLE(of, adc0832_dt_ids);
 
 static const struct spi_device_id adc0832_id[] = {
-	{ "adc0831", adc0831 },
-	{ "adc0832", adc0832 },
-	{ "adc0834", adc0834 },
-	{ "adc0838", adc0838 },
-	{}
+	{ .name = "adc0831", .driver_data = adc0831 },
+	{ .name = "adc0832", .driver_data = adc0832 },
+	{ .name = "adc0834", .driver_data = adc0834 },
+	{ .name = "adc0838", .driver_data = adc0838 },
+	{ }
 };
 MODULE_DEVICE_TABLE(spi, adc0832_id);
 

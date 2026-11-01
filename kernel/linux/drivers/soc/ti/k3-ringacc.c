@@ -10,6 +10,7 @@
 #include <linux/module.h>
 #include <linux/of.h>
 #include <linux/platform_device.h>
+#include <linux/string_choices.h>
 #include <linux/sys_soc.h>
 #include <linux/dma/ti-cppi5.h>
 #include <linux/soc/ti/k3-ringacc.h>
@@ -161,7 +162,7 @@ struct k3_ring {
 	struct k3_ringacc_proxy_target_regs  __iomem *proxy;
 	dma_addr_t	ring_mem_dma;
 	void		*ring_mem_virt;
-	struct k3_ring_ops *ops;
+	const struct k3_ring_ops *ops;
 	u32		size;
 	enum k3_ring_size elm_size;
 	enum k3_ring_mode mode;
@@ -268,17 +269,17 @@ static int k3_ringacc_ring_pop_mem(struct k3_ring *ring, void *elem);
 static int k3_dmaring_fwd_pop(struct k3_ring *ring, void *elem);
 static int k3_dmaring_reverse_pop(struct k3_ring *ring, void *elem);
 
-static struct k3_ring_ops k3_ring_mode_ring_ops = {
+static const struct k3_ring_ops k3_ring_mode_ring_ops = {
 		.push_tail = k3_ringacc_ring_push_mem,
 		.pop_head = k3_ringacc_ring_pop_mem,
 };
 
-static struct k3_ring_ops k3_dmaring_fwd_ops = {
+static const struct k3_ring_ops k3_dmaring_fwd_ops = {
 		.push_tail = k3_ringacc_ring_push_mem,
 		.pop_head = k3_dmaring_fwd_pop,
 };
 
-static struct k3_ring_ops k3_dmaring_reverse_ops = {
+static const struct k3_ring_ops k3_dmaring_reverse_ops = {
 		/* Reverse side of the DMA ring can only be popped by SW */
 		.pop_head = k3_dmaring_reverse_pop,
 };
@@ -288,7 +289,7 @@ static int k3_ringacc_ring_pop_io(struct k3_ring *ring, void *elem);
 static int k3_ringacc_ring_push_head_io(struct k3_ring *ring, void *elem);
 static int k3_ringacc_ring_pop_tail_io(struct k3_ring *ring, void *elem);
 
-static struct k3_ring_ops k3_ring_mode_msg_ops = {
+static const struct k3_ring_ops k3_ring_mode_msg_ops = {
 		.push_tail = k3_ringacc_ring_push_io,
 		.push_head = k3_ringacc_ring_push_head_io,
 		.pop_tail = k3_ringacc_ring_pop_tail_io,
@@ -300,7 +301,7 @@ static int k3_ringacc_ring_push_tail_proxy(struct k3_ring *ring, void *elem);
 static int k3_ringacc_ring_pop_head_proxy(struct k3_ring *ring, void *elem);
 static int k3_ringacc_ring_pop_tail_proxy(struct k3_ring *ring, void *elem);
 
-static struct k3_ring_ops k3_ring_mode_proxy_ops = {
+static const struct k3_ring_ops k3_ring_mode_proxy_ops = {
 		.push_tail = k3_ringacc_ring_push_tail_proxy,
 		.push_head = k3_ringacc_ring_push_head_proxy,
 		.pop_tail = k3_ringacc_ring_pop_tail_proxy,
@@ -1012,7 +1013,7 @@ static int k3_ringacc_ring_pop_head_proxy(struct k3_ring *ring, void *elem)
 static int k3_ringacc_ring_pop_tail_proxy(struct k3_ring *ring, void *elem)
 {
 	return k3_ringacc_ring_access_proxy(ring, elem,
-					    K3_RINGACC_ACCESS_MODE_POP_HEAD);
+					    K3_RINGACC_ACCESS_MODE_POP_TAIL);
 }
 
 static int k3_ringacc_ring_access_io(struct k3_ring *ring, void *elem,
@@ -1083,7 +1084,7 @@ static int k3_ringacc_ring_pop_io(struct k3_ring *ring, void *elem)
 static int k3_ringacc_ring_pop_tail_io(struct k3_ring *ring, void *elem)
 {
 	return k3_ringacc_ring_access_io(ring, elem,
-					 K3_RINGACC_ACCESS_MODE_POP_HEAD);
+					 K3_RINGACC_ACCESS_MODE_POP_TAIL);
 }
 
 /*
@@ -1291,7 +1292,7 @@ struct k3_ringacc *of_k3_ringacc_get_by_phandle(struct device_node *np,
 
 	mutex_lock(&k3_ringacc_list_lock);
 	list_for_each_entry(entry, &k3_ringacc_list, list)
-		if (entry->dev->of_node == ringacc_np) {
+		if (device_match_of_node(entry->dev, ringacc_np)) {
 			ringacc = entry;
 			break;
 		}
@@ -1436,7 +1437,7 @@ static int k3_ringacc_init(struct platform_device *pdev,
 		 ringacc->rm_gp_range->desc[0].num,
 		 ringacc->tisci_dev_id);
 	dev_info(dev, "dma-ring-reset-quirk: %s\n",
-		 ringacc->dma_ring_reset_quirk ? "enabled" : "disabled");
+		 str_enabled_disabled(ringacc->dma_ring_reset_quirk));
 	dev_info(dev, "RA Proxy rev. %08x, num_proxies:%u\n",
 		 readl(&ringacc->proxy_gcfg->revision), ringacc->num_proxies);
 
@@ -1551,14 +1552,13 @@ static int k3_ringacc_probe(struct platform_device *pdev)
 	return 0;
 }
 
-static int k3_ringacc_remove(struct platform_device *pdev)
+static void k3_ringacc_remove(struct platform_device *pdev)
 {
 	struct k3_ringacc *ringacc = dev_get_drvdata(&pdev->dev);
 
 	mutex_lock(&k3_ringacc_list_lock);
 	list_del(&ringacc->list);
 	mutex_unlock(&k3_ringacc_list_lock);
-	return 0;
 }
 
 static struct platform_driver k3_ringacc_driver = {

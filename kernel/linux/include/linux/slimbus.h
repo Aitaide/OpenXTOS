@@ -8,9 +8,9 @@
 #include <linux/device.h>
 #include <linux/module.h>
 #include <linux/completion.h>
-#include <linux/mod_devicetable.h>
+#include <linux/device-id/slim.h>
 
-extern struct bus_type slimbus_bus;
+extern const struct bus_type slimbus_bus;
 
 /**
  * struct slim_eaddr - Enumeration address for a SLIMbus device
@@ -91,7 +91,7 @@ struct slim_driver {
 	struct device_driver		driver;
 	const struct slim_device_id	*id_table;
 };
-#define to_slim_driver(d) container_of(d, struct slim_driver, driver)
+#define to_slim_driver(d) container_of_const(d, struct slim_driver, driver)
 
 /**
  * struct slim_val_inf - Slimbus value or information element

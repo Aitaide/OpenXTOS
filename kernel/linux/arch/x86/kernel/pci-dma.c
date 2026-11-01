@@ -59,10 +59,8 @@ static void __init pci_swiotlb_detect(void)
 	 * bounce buffers as the hypervisor can't access arbitrary VM memory
 	 * that is not explicitly shared with it.
 	 */
-	if (cc_platform_has(CC_ATTR_GUEST_MEM_ENCRYPT)) {
+	if (cc_platform_has(CC_ATTR_GUEST_MEM_ENCRYPT))
 		x86_swiotlb_enable = true;
-		x86_swiotlb_flags |= SWIOTLB_FORCE;
-	}
 }
 #else
 static inline void __init pci_swiotlb_detect(void)
@@ -108,10 +106,6 @@ void __init pci_iommu_alloc(void)
 	swiotlb_init(x86_swiotlb_enable, x86_swiotlb_flags);
 }
 
-/*
- * See <Documentation/arch/x86/x86_64/boot-options.rst> for the iommu kernel
- * parameter documentation.
- */
 static __init int iommu_setup(char *p)
 {
 	iommu_merge = 1;

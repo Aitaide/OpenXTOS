@@ -471,10 +471,8 @@ static int init_cc_resources(struct platform_device *plat_dev)
 	/* register the driver isr function */
 	rc = devm_request_irq(dev, irq, cc_isr, IRQF_SHARED, "ccree",
 			      new_drvdata);
-	if (rc) {
-		dev_err(dev, "Could not register to interrupt %d\n", irq);
+	if (rc)
 		goto post_pm_err;
-	}
 	dev_dbg(dev, "Registered to IRQ: %d\n", irq);
 
 	init_cc_cache_params(new_drvdata);
@@ -623,7 +621,7 @@ static int ccree_probe(struct platform_device *plat_dev)
 	return 0;
 }
 
-static int ccree_remove(struct platform_device *plat_dev)
+static void ccree_remove(struct platform_device *plat_dev)
 {
 	struct device *dev = &plat_dev->dev;
 
@@ -632,8 +630,6 @@ static int ccree_remove(struct platform_device *plat_dev)
 	cleanup_cc_resources(plat_dev);
 
 	dev_info(dev, "ARM ccree device terminated\n");
-
-	return 0;
 }
 
 static struct platform_driver ccree_driver = {

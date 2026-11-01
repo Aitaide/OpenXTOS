@@ -19,7 +19,6 @@
 
 #include <linux/compat.h>
 #include <linux/blkdev.h>
-#include <linux/blk-mq-pci.h>
 #include <linux/completion.h>
 #include <linux/init.h>
 #include <linux/interrupt.h>
@@ -238,12 +237,12 @@ static struct aac_driver_ident aac_drivers[] = {
  *	TODO: unify with aac_scsi_cmd().
  */
 
-static int aac_queuecommand(struct Scsi_Host *shost,
-			    struct scsi_cmnd *cmd)
+static enum scsi_qc_status aac_queuecommand(struct Scsi_Host *shost,
+					    struct scsi_cmnd *cmd)
 {
 	aac_priv(cmd)->owner = AAC_OWNER_LOWLEVEL;
 
-	return aac_scsi_cmd(cmd) ? FAILED : 0;
+	return aac_scsi_cmd(cmd) ? SCSI_MLQUEUE_HOST_BUSY : 0;
 }
 
 /**
@@ -274,7 +273,7 @@ struct aac_driver_ident* aac_get_driver_ident(int devtype)
 /**
  *	aac_biosparm	-	return BIOS parameters for disk
  *	@sdev: The scsi device corresponding to the disk
- *	@bdev: the block device corresponding to the disk
+ *	@disk: the gendisk corresponding to the disk
  *	@capacity: the sector capacity of the disk
  *	@geom: geometry block to fill in
  *
@@ -293,7 +292,7 @@ struct aac_driver_ident* aac_get_driver_ident(int devtype)
  *	be displayed.
  */
 
-static int aac_biosparm(struct scsi_device *sdev, struct block_device *bdev,
+static int aac_biosparm(struct scsi_device *sdev, struct gendisk *disk,
 			sector_t capacity, int *geom)
 {
 	struct diskparm *param = (struct diskparm *)geom;
@@ -325,7 +324,7 @@ static int aac_biosparm(struct scsi_device *sdev, struct block_device *bdev,
 	 *	entry whose end_head matches one of the standard geometry
 	 *	translations ( 64/32, 128/32, 255/63 ).
 	 */
-	buf = scsi_bios_ptable(bdev);
+	buf = scsi_bios_ptable(disk);
 	if (!buf)
 		return 0;
 	if (*(__le16 *)(buf + 0x40) == cpu_to_le16(MSDOS_LABEL_MAGIC)) {
@@ -378,15 +377,17 @@ static int aac_biosparm(struct scsi_device *sdev, struct block_device *bdev,
 }
 
 /**
- *	aac_slave_configure		-	compute queue depths
+ *	aac_sdev_configure		-	compute queue depths
  *	@sdev:	SCSI device we are considering
+ *	@lim:	Request queue limits
  *
  *	Selects queue depths for each target device based on the host adapter's
  *	total capacity and the queue depth supported by the target device.
  *	A queue depth of one automatically disables tagged queueing.
  */
 
-static int aac_slave_configure(struct scsi_device *sdev)
+static int aac_sdev_configure(struct scsi_device *sdev,
+			      struct queue_limits *lim)
 {
 	struct aac_dev *aac = (struct aac_dev *)sdev->host->hostdata;
 	int chn, tid;
@@ -503,15 +504,6 @@ common_config:
 	sdev->tagged_supported = 1;
 
 	return 0;
-}
-
-static void aac_map_queues(struct Scsi_Host *shost)
-{
-	struct aac_dev *aac = (struct aac_dev *)shost->hostdata;
-
-	blk_mq_pci_map_queues(&shost->tag_set.map[HCTX_TYPE_DEFAULT],
-			      aac->pdev, 0);
-	aac->use_map_queue = true;
 }
 
 /**
@@ -1497,8 +1489,7 @@ static const struct scsi_host_template aac_driver_template = {
 	.queuecommand			= aac_queuecommand,
 	.bios_param			= aac_biosparm,
 	.shost_groups			= aac_host_groups,
-	.slave_configure		= aac_slave_configure,
-	.map_queues			= aac_map_queues,
+	.sdev_configure			= aac_sdev_configure,
 	.change_queue_depth		= aac_change_queue_depth,
 	.sdev_groups			= aac_dev_groups,
 	.eh_abort_handler		= aac_eh_abort,
@@ -1670,9 +1661,7 @@ static int aac_probe_one(struct pci_dev *pdev, const struct pci_device_id *id)
 	if (aac_reset_devices || reset_devices)
 		aac->init_reset = true;
 
-	aac->fibs = kcalloc(shost->can_queue + AAC_NUM_MGT_FIB,
-			    sizeof(struct fib),
-			    GFP_KERNEL);
+	aac->fibs = kzalloc_objs(struct fib, shost->can_queue + AAC_NUM_MGT_FIB);
 	if (!aac->fibs) {
 		error = -ENOMEM;
 		goto out_free_host;
@@ -1786,8 +1775,6 @@ static int aac_probe_one(struct pci_dev *pdev, const struct pci_device_id *id)
 	shost->max_lun = AAC_MAX_LUN;
 
 	pci_set_drvdata(pdev, shost);
-	shost->nr_hw_queues = aac->max_msix;
-	shost->host_tagset = 1;
 
 	error = scsi_add_host(shost, &pdev->dev);
 	if (error)
@@ -1919,7 +1906,6 @@ static void aac_remove_one(struct pci_dev *pdev)
 	struct aac_dev *aac = (struct aac_dev *)shost->hostdata;
 
 	aac_cancel_rescan_worker(aac);
-	aac->use_map_queue = false;
 	scsi_remove_host(shost);
 
 	__aac_shutdown(aac);
@@ -2041,7 +2027,7 @@ static void aac_pci_resume(struct pci_dev *pdev)
 	dev_err(&pdev->dev, "aacraid: PCI error - resume\n");
 }
 
-static struct pci_error_handlers aac_pci_err_handler = {
+static const struct pci_error_handlers aac_pci_err_handler = {
 	.error_detected		= aac_pci_error_detected,
 	.mmio_enabled		= aac_pci_mmio_enabled,
 	.slot_reset		= aac_pci_slot_reset,

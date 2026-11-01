@@ -1,7 +1,6 @@
+// SPDX-License-Identifier: GPL-2.0
 /*
  *		INETPEER - A storage for permanent information about peers
- *
- *  This source is covered by the GNU GPL, the same as all kernel sources.
  *
  *  Authors:	Andrey V. Savochkin <saw@msu.ru>
  */
@@ -22,6 +21,7 @@
 #include <net/ip.h>
 #include <net/inetpeer.h>
 #include <net/secure_seq.h>
+#include <linux/siphash.h>
 
 /*
  *  Theory of operations.
@@ -53,6 +53,34 @@
  */
 
 static struct kmem_cache *peer_cachep __ro_after_init;
+static siphash_aligned_key_t inetpeer_hash_key __read_mostly;
+
+static u64 inetpeer_addr_hash(const struct inetpeer_addr *a)
+{
+	net_get_random_once(&inetpeer_hash_key, sizeof(inetpeer_hash_key));
+
+	if (a->family == AF_INET)
+		return siphash_2u32((__force u32)a->a4.addr, a->a4.vif,
+				    &inetpeer_hash_key);
+
+	return siphash_4u32((__force u32)a->a6.s6_addr32[0],
+			    (__force u32)a->a6.s6_addr32[1],
+			    (__force u32)a->a6.s6_addr32[2],
+			    (__force u32)a->a6.s6_addr32[3],
+			    &inetpeer_hash_key);
+}
+
+static int inetpeer_entry_cmp(u64 dhash,
+			      const struct inetpeer_addr *daddr,
+			      const struct inet_peer *p)
+{
+	if (dhash < p->hash)
+		return -1;
+	if (dhash > p->hash)
+		return 1;
+
+	return inetpeer_addr_cmp(daddr, &p->daddr);
+}
 
 void inet_peer_base_init(struct inet_peer_base *bp)
 {
@@ -60,7 +88,6 @@ void inet_peer_base_init(struct inet_peer_base *bp)
 	seqlock_init(&bp->lock);
 	bp->total = 0;
 }
-EXPORT_SYMBOL_GPL(inet_peer_base_init);
 
 #define PEER_MAX_GC 32
 
@@ -81,14 +108,12 @@ void __init inet_initpeers(void)
 
 	inet_peer_threshold = clamp_val(nr_entries, 4096, 65536 + 128);
 
-	peer_cachep = kmem_cache_create("inet_peer_cache",
-			sizeof(struct inet_peer),
-			0, SLAB_HWCACHE_ALIGN | SLAB_PANIC,
-			NULL);
+	peer_cachep = KMEM_CACHE(inet_peer, SLAB_HWCACHE_ALIGN | SLAB_PANIC);
 }
 
 /* Called with rcu_read_lock() or base->lock held */
 static struct inet_peer *lookup(const struct inetpeer_addr *daddr,
+				u64 dhash,
 				struct inet_peer_base *base,
 				unsigned int seq,
 				struct inet_peer *gc_stack[],
@@ -98,6 +123,7 @@ static struct inet_peer *lookup(const struct inetpeer_addr *daddr,
 {
 	struct rb_node **pp, *parent, *next;
 	struct inet_peer *p;
+	u32 now;
 
 	pp = &base->rb_root.rb_node;
 	parent = NULL;
@@ -109,10 +135,11 @@ static struct inet_peer *lookup(const struct inetpeer_addr *daddr,
 			break;
 		parent = next;
 		p = rb_entry(parent, struct inet_peer, rb_node);
-		cmp = inetpeer_addr_cmp(daddr, &p->daddr);
+		cmp = inetpeer_entry_cmp(dhash, daddr, p);
 		if (cmp == 0) {
-			if (!refcount_inc_not_zero(&p->refcnt))
-				break;
+			now = jiffies;
+			if (READ_ONCE(p->dtime) != now)
+				WRITE_ONCE(p->dtime, now);
 			return p;
 		}
 		if (gc_stack) {
@@ -129,11 +156,6 @@ static struct inet_peer *lookup(const struct inetpeer_addr *daddr,
 	*parent_p = parent;
 	*pp_p = pp;
 	return NULL;
-}
-
-static void inetpeer_free_rcu(struct rcu_head *head)
-{
-	kmem_cache_free(peer_cachep, container_of(head, struct inet_peer, rcu));
 }
 
 /* perform garbage collect on all items stacked during a lookup */
@@ -158,9 +180,6 @@ static void inet_peer_gc(struct inet_peer_base *base,
 	for (i = 0; i < gc_cnt; i++) {
 		p = gc_stack[i];
 
-		/* The READ_ONCE() pairs with the WRITE_ONCE()
-		 * in inet_putpeer()
-		 */
 		delta = (__u32)jiffies - READ_ONCE(p->dtime);
 
 		if (delta < ttl || !refcount_dec_if_one(&p->refcnt))
@@ -171,35 +190,29 @@ static void inet_peer_gc(struct inet_peer_base *base,
 		if (p) {
 			rb_erase(&p->rb_node, &base->rb_root);
 			base->total--;
-			call_rcu(&p->rcu, inetpeer_free_rcu);
+			kfree_rcu(p, rcu);
 		}
 	}
 }
 
+/* Must be called under RCU : No refcount change is done here. */
 struct inet_peer *inet_getpeer(struct inet_peer_base *base,
-			       const struct inetpeer_addr *daddr,
-			       int create)
+			       const struct inetpeer_addr *daddr)
 {
 	struct inet_peer *p, *gc_stack[PEER_MAX_GC];
+	u64 dhash = inetpeer_addr_hash(daddr);
 	struct rb_node **pp, *parent;
 	unsigned int gc_cnt, seq;
-	int invalidated;
 
 	/* Attempt a lockless lookup first.
 	 * Because of a concurrent writer, we might not find an existing entry.
 	 */
-	rcu_read_lock();
 	seq = read_seqbegin(&base->lock);
-	p = lookup(daddr, base, seq, NULL, &gc_cnt, &parent, &pp);
-	invalidated = read_seqretry(&base->lock, seq);
-	rcu_read_unlock();
+	p = lookup(daddr, dhash, base, seq, NULL, &gc_cnt, &parent, &pp);
 
-	if (p)
+	/* Make sure tree was not modified during our lookup. */
+	if (p && !read_seqretry(&base->lock, seq))
 		return p;
-
-	/* If no writer did a change during our lookup, we can return early. */
-	if (!create && !invalidated)
-		return NULL;
 
 	/* retry an exact lookup, taking the lock before.
 	 * At least, nodes should be hot in our cache.
@@ -208,13 +221,14 @@ struct inet_peer *inet_getpeer(struct inet_peer_base *base,
 	write_seqlock_bh(&base->lock);
 
 	gc_cnt = 0;
-	p = lookup(daddr, base, seq, gc_stack, &gc_cnt, &parent, &pp);
-	if (!p && create) {
+	p = lookup(daddr, dhash, base, seq, gc_stack, &gc_cnt, &parent, &pp);
+	if (!p) {
 		p = kmem_cache_alloc(peer_cachep, GFP_ATOMIC);
 		if (p) {
 			p->daddr = *daddr;
+			p->hash = dhash;
 			p->dtime = (__u32)jiffies;
-			refcount_set(&p->refcnt, 2);
+			refcount_set(&p->refcnt, 1);
 			atomic_set(&p->rid, 0);
 			p->metrics[RTAX_LOCK-1] = INETPEER_METRICS_NEW;
 			p->rate_tokens = 0;
@@ -235,19 +249,12 @@ struct inet_peer *inet_getpeer(struct inet_peer_base *base,
 
 	return p;
 }
-EXPORT_SYMBOL_GPL(inet_getpeer);
 
 void inet_putpeer(struct inet_peer *p)
 {
-	/* The WRITE_ONCE() pairs with itself (we run lockless)
-	 * and the READ_ONCE() in inet_peer_gc()
-	 */
-	WRITE_ONCE(p->dtime, (__u32)jiffies);
-
 	if (refcount_dec_and_test(&p->refcnt))
-		call_rcu(&p->rcu, inetpeer_free_rcu);
+		kfree_rcu(p, rcu);
 }
-EXPORT_SYMBOL_GPL(inet_putpeer);
 
 /*
  *	Check transmit rate limitation for given message.
@@ -269,26 +276,29 @@ EXPORT_SYMBOL_GPL(inet_putpeer);
 #define XRLIM_BURST_FACTOR 6
 bool inet_peer_xrlim_allow(struct inet_peer *peer, int timeout)
 {
-	unsigned long now, token;
+	unsigned long now, token, otoken, delta;
 	bool rc = false;
 
 	if (!peer)
 		return true;
 
-	token = peer->rate_tokens;
+	token = otoken = READ_ONCE(peer->rate_tokens);
 	now = jiffies;
-	token += now - peer->rate_last;
-	peer->rate_last = now;
-	if (token > XRLIM_BURST_FACTOR * timeout)
-		token = XRLIM_BURST_FACTOR * timeout;
+	delta = now - READ_ONCE(peer->rate_last);
+	if (delta) {
+		WRITE_ONCE(peer->rate_last, now);
+		token += delta;
+		if (token > XRLIM_BURST_FACTOR * timeout)
+			token = XRLIM_BURST_FACTOR * timeout;
+	}
 	if (token >= timeout) {
 		token -= timeout;
 		rc = true;
 	}
-	peer->rate_tokens = token;
+	if (token != otoken)
+		WRITE_ONCE(peer->rate_tokens, token);
 	return rc;
 }
-EXPORT_SYMBOL(inet_peer_xrlim_allow);
 
 void inetpeer_invalidate_tree(struct inet_peer_base *base)
 {
@@ -305,4 +315,3 @@ void inetpeer_invalidate_tree(struct inet_peer_base *base)
 
 	base->total = 0;
 }
-EXPORT_SYMBOL(inetpeer_invalidate_tree);

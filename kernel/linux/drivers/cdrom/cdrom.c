@@ -624,15 +624,22 @@ int register_cdrom(struct gendisk *disk, struct cdrom_device_info *cdi)
 	if (check_media_type == 1)
 		cdi->options |= (int) CDO_CHECK_TYPE;
 
-	if (CDROM_CAN(CDC_MRW_W))
-		cdi->exit = cdrom_mrw_exit;
-
 	if (cdi->ops->read_cdda_bpc)
 		cdi->cdda_method = CDDA_BPC_FULL;
 	else
 		cdi->cdda_method = CDDA_OLD;
 
 	WARN_ON(!cdo->generic_packet);
+
+	/*
+	 * Propagate the drive's write support to the block layer so BLKROGET
+	 * reflects actual write capability. Drivers that use GET CONFIGURATION
+	 * features (CDC_MRW_W, CDC_RAM) must have called
+	 * cdrom_probe_write_features() before register_cdrom() so the mask is
+	 * complete here.
+	 */
+	set_disk_ro(disk, !CDROM_CAN(CDC_DVD_RAM | CDC_MRW_W | CDC_RAM |
+				     CDC_CD_RW));
 
 	cd_dbg(CD_REG_UNREG, "drive \"/dev/%s\" registered\n", cdi->name);
 	mutex_lock(&cdrom_mutex);
@@ -650,9 +657,6 @@ void unregister_cdrom(struct cdrom_device_info *cdi)
 	mutex_lock(&cdrom_mutex);
 	list_del(&cdi->list);
 	mutex_unlock(&cdrom_mutex);
-
-	if (cdi->exit)
-		cdi->exit(cdi);
 
 	cd_dbg(CD_REG_UNREG, "drive \"/dev/%s\" unregistered\n", cdi->name);
 }
@@ -747,6 +751,44 @@ static int cdrom_is_random_writable(struct cdrom_device_info *cdi, int *write)
 
 	return 0;
 }
+
+/*
+ * Probe write-related MMC features via GET CONFIGURATION and update
+ * cdi->mask accordingly. Drivers that populate cdi->mask from the MODE SENSE
+ * capabilities page (e.g. sr) should call this after those MODE SENSE bits
+ * have been set but before register_cdrom(), so that the full set of
+ * write-capability bits is known by the time register_cdrom() decides on the
+ * initial read-only state of the disk.
+ */
+void cdrom_probe_write_features(struct cdrom_device_info *cdi)
+{
+	int mrw, mrw_write, ram_write;
+
+	mrw = 0;
+	if (!cdrom_is_mrw(cdi, &mrw_write))
+		mrw = 1;
+
+	if (CDROM_CAN(CDC_MO_DRIVE))
+		ram_write = 1;
+	else
+		(void) cdrom_is_random_writable(cdi, &ram_write);
+
+	if (mrw)
+		cdi->mask &= ~CDC_MRW;
+	else
+		cdi->mask |= CDC_MRW;
+
+	if (mrw_write)
+		cdi->mask &= ~CDC_MRW_W;
+	else
+		cdi->mask |= CDC_MRW_W;
+
+	if (ram_write)
+		cdi->mask &= ~CDC_RAM;
+	else
+		cdi->mask |= CDC_RAM;
+}
+EXPORT_SYMBOL(cdrom_probe_write_features);
 
 static int cdrom_media_erasable(struct cdrom_device_info *cdi)
 {
@@ -900,32 +942,7 @@ static int cdrom_is_dvd_rw(struct cdrom_device_info *cdi)
  */
 static int cdrom_open_write(struct cdrom_device_info *cdi)
 {
-	int mrw, mrw_write, ram_write;
 	int ret = 1;
-
-	mrw = 0;
-	if (!cdrom_is_mrw(cdi, &mrw_write))
-		mrw = 1;
-
-	if (CDROM_CAN(CDC_MO_DRIVE))
-		ram_write = 1;
-	else
-		(void) cdrom_is_random_writable(cdi, &ram_write);
-	
-	if (mrw)
-		cdi->mask &= ~CDC_MRW;
-	else
-		cdi->mask |= CDC_MRW;
-
-	if (mrw_write)
-		cdi->mask &= ~CDC_MRW_W;
-	else
-		cdi->mask |= CDC_MRW_W;
-
-	if (ram_write)
-		cdi->mask &= ~CDC_RAM;
-	else
-		cdi->mask |= CDC_RAM;
 
 	if (CDROM_CAN(CDC_MRW_W))
 		ret = cdrom_mrw_open_write(cdi);
@@ -1106,7 +1123,7 @@ int open_for_data(struct cdrom_device_info *cdi)
 		}
 	}
 
-	cd_dbg(CD_OPEN, "all seems well, opening the devicen");
+	cd_dbg(CD_OPEN, "all seems well, opening the device\n");
 
 	/* all seems well, we can open the device */
 	ret = cdo->open(cdi, 0); /* open for data */
@@ -1264,6 +1281,8 @@ void cdrom_release(struct cdrom_device_info *cdi)
 		cd_dbg(CD_CLOSE, "Use count for \"/dev/%s\" now zero\n",
 		       cdi->name);
 		cdrom_dvd_rw_close_write(cdi);
+		if (CDROM_CAN(CDC_MRW_W))
+			cdrom_mrw_exit(cdi);
 
 		if ((cdo->capability & CDC_LOCK) && !cdi->keeplocked) {
 			cd_dbg(CD_CLOSE, "Unlocking door!\n");
@@ -1322,7 +1341,7 @@ static int cdrom_slot_status(struct cdrom_device_info *cdi, int slot)
 	if (cdi->sanyo_slot)
 		return CDS_NO_INFO;
 	
-	info = kmalloc(sizeof(*info), GFP_KERNEL);
+	info = kmalloc_obj(*info);
 	if (!info)
 		return -ENOMEM;
 
@@ -1351,7 +1370,7 @@ int cdrom_number_of_slots(struct cdrom_device_info *cdi)
 	/* cdrom_read_mech_status requires a valid value for capacity: */
 	cdi->capacity = 0; 
 
-	info = kmalloc(sizeof(*info), GFP_KERNEL);
+	info = kmalloc_obj(*info);
 	if (!info)
 		return -ENOMEM;
 
@@ -1410,7 +1429,7 @@ static int cdrom_select_disc(struct cdrom_device_info *cdi, int slot)
 		return cdrom_load_unload(cdi, -1);
 	}
 
-	info = kmalloc(sizeof(*info), GFP_KERNEL);
+	info = kmalloc_obj(*info);
 	if (!info)
 		return -ENOMEM;
 
@@ -2313,9 +2332,9 @@ static int cdrom_ioctl_media_changed(struct cdrom_device_info *cdi,
 		return -EINVAL;
 
 	/* Prevent arg from speculatively bypassing the length check */
-	barrier_nospec();
+	arg = array_index_nospec(arg, cdi->capacity);
 
-	info = kmalloc(sizeof(*info), GFP_KERNEL);
+	info = kmalloc_obj(*info);
 	if (!info)
 		return -ENOMEM;
 
@@ -2358,7 +2377,7 @@ static int cdrom_ioctl_timed_media_change(struct cdrom_device_info *cdi,
 		return -EFAULT;
 
 	tmp_info.media_flags = 0;
-	if (tmp_info.last_media_change - cdi->last_media_change_ms < 0)
+	if (cdi->last_media_change_ms > tmp_info.last_media_change)
 		tmp_info.media_flags |= MEDIA_CHANGED_FLAG;
 
 	tmp_info.last_media_change = cdi->last_media_change_ms;
@@ -3168,6 +3187,7 @@ static noinline int mmc_ioctl_cdrom_volume(struct cdrom_device_info *cdi,
 
 	/* set volume */
 	cgc->buffer = buffer + offset - 8;
+	cgc->buflen -= offset - 8;
 	memset(cgc->buffer, 0, 8);
 	return cdrom_mode_select(cdi, cgc);
 }
@@ -3473,7 +3493,7 @@ static int cdrom_print_info(const char *header, int val, char *info,
 	return 0;
 }
 
-static int cdrom_sysctl_info(struct ctl_table *ctl, int write,
+static int cdrom_sysctl_info(const struct ctl_table *ctl, int write,
                            void *buffer, size_t *lenp, loff_t *ppos)
 {
 	int pos;
@@ -3586,7 +3606,7 @@ static void cdrom_update_settings(void)
 	mutex_unlock(&cdrom_mutex);
 }
 
-static int cdrom_sysctl_handler(struct ctl_table *ctl, int write,
+static int cdrom_sysctl_handler(const struct ctl_table *ctl, int write,
 				void *buffer, size_t *lenp, loff_t *ppos)
 {
 	int ret;
@@ -3612,7 +3632,7 @@ static int cdrom_sysctl_handler(struct ctl_table *ctl, int write,
 }
 
 /* Place files in /proc/sys/dev/cdrom */
-static struct ctl_table cdrom_table[] = {
+static const struct ctl_table cdrom_table[] = {
 	{
 		.procname	= "info",
 		.data		= &cdrom_sysctl_settings.info, 
@@ -3655,7 +3675,6 @@ static struct ctl_table cdrom_table[] = {
 		.mode		= 0644,
 		.proc_handler	= cdrom_sysctl_handler
 	},
-	{ }
 };
 static struct ctl_table_header *cdrom_sysctl_header;
 
@@ -3678,8 +3697,7 @@ static void cdrom_sysctl_register(void)
 
 static void cdrom_sysctl_unregister(void)
 {
-	if (cdrom_sysctl_header)
-		unregister_sysctl_table(cdrom_sysctl_header);
+	unregister_sysctl_table(cdrom_sysctl_header);
 }
 
 #else /* CONFIG_SYSCTL */
@@ -3709,4 +3727,5 @@ static void __exit cdrom_exit(void)
 
 module_init(cdrom_init);
 module_exit(cdrom_exit);
+MODULE_DESCRIPTION("Uniform CD-ROM driver");
 MODULE_LICENSE("GPL");

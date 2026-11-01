@@ -89,7 +89,7 @@ static void htc_process_target_rdy(struct htc_target *target,
 				   void *buf)
 {
 	struct htc_endpoint *endpoint;
-	struct htc_ready_msg *htc_ready_msg = (struct htc_ready_msg *) buf;
+	struct htc_ready_msg *htc_ready_msg = buf;
 
 	target->credit_size = be16_to_cpu(htc_ready_msg->credit_size);
 
@@ -294,6 +294,9 @@ int htc_connect_service(struct htc_target *target,
 		return -ETIMEDOUT;
 	}
 
+	if (target->conn_rsp_epid < 0 || target->conn_rsp_epid >= ENDPOINT_MAX)
+		return -EINVAL;
+
 	*conn_rsp_epid = target->conn_rsp_epid;
 	return 0;
 err:
@@ -496,7 +499,7 @@ struct htc_target *ath9k_htc_hw_alloc(void *hif_handle,
 	struct htc_endpoint *endpoint;
 	struct htc_target *target;
 
-	target = kzalloc(sizeof(struct htc_target), GFP_KERNEL);
+	target = kzalloc_obj(struct htc_target);
 	if (!target)
 		return NULL;
 

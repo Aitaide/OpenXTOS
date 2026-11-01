@@ -9,9 +9,9 @@
  * Author: Gerald Schaefer <gerald.schaefer@de.ibm.com>
  */
 
-#define KMSG_COMPONENT	"appldata"
-#define pr_fmt(fmt) KMSG_COMPONENT ": " fmt
+#define pr_fmt(fmt) "appldata: " fmt
 
+#include <linux/export.h>
 #include <linux/module.h>
 #include <linux/sched/stat.h>
 #include <linux/init.h>
@@ -46,13 +46,12 @@
  * /proc entries (sysctl)
  */
 static const char appldata_proc_name[APPLDATA_PROC_NAME_LENGTH] = "appldata";
-static int appldata_timer_handler(struct ctl_table *ctl, int write,
+static int appldata_timer_handler(const struct ctl_table *ctl, int write,
 				  void *buffer, size_t *lenp, loff_t *ppos);
-static int appldata_interval_handler(struct ctl_table *ctl, int write,
+static int appldata_interval_handler(const struct ctl_table *ctl, int write,
 				     void *buffer, size_t *lenp, loff_t *ppos);
 
-static struct ctl_table_header *appldata_sysctl_header;
-static struct ctl_table appldata_table[] = {
+static const struct ctl_table appldata_table[] = {
 	{
 		.procname	= "timer",
 		.mode		= S_IRUGO | S_IWUSR,
@@ -63,7 +62,6 @@ static struct ctl_table appldata_table[] = {
 		.mode		= S_IRUGO | S_IWUSR,
 		.proc_handler	= appldata_interval_handler,
 	},
-	{ },
 };
 
 /*
@@ -141,7 +139,7 @@ int appldata_diag(char record_nr, u16 function, unsigned long buffer,
 	struct appldata_product_id *id;
 	int rc;
 
-	parm_list = kmalloc(sizeof(*parm_list), GFP_KERNEL);
+	parm_list = kmalloc_obj(*parm_list);
 	id = kmemdup(&appldata_id, sizeof(appldata_id), GFP_KERNEL);
 	rc = -ENOMEM;
 	if (parm_list && id) {
@@ -200,7 +198,7 @@ static void __appldata_vtimer_setup(int cmd)
  * Start/Stop timer, show status of timer (0 = not active, 1 = active)
  */
 static int
-appldata_timer_handler(struct ctl_table *ctl, int write,
+appldata_timer_handler(const struct ctl_table *ctl, int write,
 			   void *buffer, size_t *lenp, loff_t *ppos)
 {
 	int timer_active = appldata_timer_active;
@@ -233,7 +231,7 @@ appldata_timer_handler(struct ctl_table *ctl, int write,
  * current timer interval.
  */
 static int
-appldata_interval_handler(struct ctl_table *ctl, int write,
+appldata_interval_handler(const struct ctl_table *ctl, int write,
 			   void *buffer, size_t *lenp, loff_t *ppos)
 {
 	int interval = appldata_interval;
@@ -263,7 +261,7 @@ appldata_interval_handler(struct ctl_table *ctl, int write,
  * monitoring (0 = not in process, 1 = in process)
  */
 static int
-appldata_generic_handler(struct ctl_table *ctl, int write,
+appldata_generic_handler(const struct ctl_table *ctl, int write,
 			   void *buffer, size_t *lenp, loff_t *ppos)
 {
 	struct appldata_ops *ops = NULL, *tmp_ops;
@@ -351,8 +349,7 @@ int appldata_register_ops(struct appldata_ops *ops)
 	if (ops->size > APPLDATA_MAX_REC_SIZE)
 		return -EINVAL;
 
-	/* The last entry must be an empty one */
-	ops->ctl_table = kcalloc(2, sizeof(struct ctl_table), GFP_KERNEL);
+	ops->ctl_table = kzalloc_objs(struct ctl_table, 1);
 	if (!ops->ctl_table)
 		return -ENOMEM;
 
@@ -408,7 +405,7 @@ static int __init appldata_init(void)
 	appldata_wq = alloc_ordered_workqueue("appldata", 0);
 	if (!appldata_wq)
 		return -ENOMEM;
-	appldata_sysctl_header = register_sysctl(appldata_proc_name, appldata_table);
+	register_sysctl(appldata_proc_name, appldata_table);
 	return 0;
 }
 

@@ -7,8 +7,8 @@
 
 #include "vfio.h"
 
-MODULE_IMPORT_NS(IOMMUFD);
-MODULE_IMPORT_NS(IOMMUFD_VFIO);
+MODULE_IMPORT_NS("IOMMUFD");
+MODULE_IMPORT_NS("IOMMUFD_VFIO");
 
 bool vfio_iommufd_device_has_compat_ioas(struct vfio_device *vdev,
 					 struct iommufd_ctx *ictx)
@@ -25,6 +25,10 @@ int vfio_df_iommufd_bind(struct vfio_device_file *df)
 
 	lockdep_assert_held(&vdev->dev_set->lock);
 
+	/* Group noiommu via iommufd compat needs no device binding */
+	if (df->group && vfio_device_is_noiommu(vdev))
+		return 0;
+
 	return vdev->ops->bind_iommufd(vdev, ictx, &df->devid);
 }
 
@@ -36,7 +40,11 @@ int vfio_iommufd_compat_attach_ioas(struct vfio_device *vdev,
 
 	lockdep_assert_held(&vdev->dev_set->lock);
 
-	/* compat noiommu does not need to do ioas attach */
+	/*
+	 * Compat noiommu does not need to do ioas attach. This helper is
+	 * only called from the legacy group/iommufd compat path, so no
+	 * explicit df->group check is needed.
+	 */
 	if (vfio_device_is_noiommu(vdev))
 		return 0;
 
@@ -54,7 +62,7 @@ void vfio_df_iommufd_unbind(struct vfio_device_file *df)
 
 	lockdep_assert_held(&vdev->dev_set->lock);
 
-	if (vfio_device_is_noiommu(vdev))
+	if (df->group && vfio_device_is_noiommu(vdev))
 		return;
 
 	if (vdev->ops->unbind_iommufd)
@@ -119,16 +127,24 @@ int vfio_iommufd_physical_bind(struct vfio_device *vdev,
 	if (IS_ERR(idev))
 		return PTR_ERR(idev);
 	vdev->iommufd_device = idev;
+	ida_init(&vdev->pasids);
 	return 0;
 }
 EXPORT_SYMBOL_GPL(vfio_iommufd_physical_bind);
 
 void vfio_iommufd_physical_unbind(struct vfio_device *vdev)
 {
+	int pasid;
+
 	lockdep_assert_held(&vdev->dev_set->lock);
 
+	while ((pasid = ida_find_first(&vdev->pasids)) >= 0) {
+		iommufd_device_detach(vdev->iommufd_device, pasid);
+		ida_free(&vdev->pasids, pasid);
+	}
+
 	if (vdev->iommufd_attached) {
-		iommufd_device_detach(vdev->iommufd_device);
+		iommufd_device_detach(vdev->iommufd_device, IOMMU_NO_PASID);
 		vdev->iommufd_attached = false;
 	}
 	iommufd_device_unbind(vdev->iommufd_device);
@@ -146,9 +162,11 @@ int vfio_iommufd_physical_attach_ioas(struct vfio_device *vdev, u32 *pt_id)
 		return -EINVAL;
 
 	if (vdev->iommufd_attached)
-		rc = iommufd_device_replace(vdev->iommufd_device, pt_id);
+		rc = iommufd_device_replace(vdev->iommufd_device,
+					    IOMMU_NO_PASID, pt_id);
 	else
-		rc = iommufd_device_attach(vdev->iommufd_device, pt_id);
+		rc = iommufd_device_attach(vdev->iommufd_device,
+					   IOMMU_NO_PASID, pt_id);
 	if (rc)
 		return rc;
 	vdev->iommufd_attached = true;
@@ -163,10 +181,52 @@ void vfio_iommufd_physical_detach_ioas(struct vfio_device *vdev)
 	if (WARN_ON(!vdev->iommufd_device) || !vdev->iommufd_attached)
 		return;
 
-	iommufd_device_detach(vdev->iommufd_device);
+	iommufd_device_detach(vdev->iommufd_device, IOMMU_NO_PASID);
 	vdev->iommufd_attached = false;
 }
 EXPORT_SYMBOL_GPL(vfio_iommufd_physical_detach_ioas);
+
+int vfio_iommufd_physical_pasid_attach_ioas(struct vfio_device *vdev,
+					    u32 pasid, u32 *pt_id)
+{
+	int rc;
+
+	lockdep_assert_held(&vdev->dev_set->lock);
+
+	if (WARN_ON(!vdev->iommufd_device))
+		return -EINVAL;
+
+	if (ida_exists(&vdev->pasids, pasid))
+		return iommufd_device_replace(vdev->iommufd_device,
+					      pasid, pt_id);
+
+	rc = ida_alloc_range(&vdev->pasids, pasid, pasid, GFP_KERNEL);
+	if (rc < 0)
+		return rc;
+
+	rc = iommufd_device_attach(vdev->iommufd_device, pasid, pt_id);
+	if (rc)
+		ida_free(&vdev->pasids, pasid);
+
+	return rc;
+}
+EXPORT_SYMBOL_GPL(vfio_iommufd_physical_pasid_attach_ioas);
+
+void vfio_iommufd_physical_pasid_detach_ioas(struct vfio_device *vdev,
+					     u32 pasid)
+{
+	lockdep_assert_held(&vdev->dev_set->lock);
+
+	if (WARN_ON(!vdev->iommufd_device))
+		return;
+
+	if (!ida_exists(&vdev->pasids, pasid))
+		return;
+
+	iommufd_device_detach(vdev->iommufd_device, pasid);
+	ida_free(&vdev->pasids, pasid);
+}
+EXPORT_SYMBOL_GPL(vfio_iommufd_physical_pasid_detach_ioas);
 
 /*
  * The emulated standard ops mean that vfio_device is going to use the

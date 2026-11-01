@@ -13,7 +13,7 @@
 #include <linux/module.h>
 #include <linux/netdevice.h>
 #include <linux/crc-ccitt.h>
-#include <asm/unaligned.h>
+#include <linux/unaligned.h>
 
 #include <net/mac802154.h>
 #include <net/ieee802154_netdev.h>
@@ -35,16 +35,23 @@ void mac802154_rx_beacon_worker(struct work_struct *work)
 		container_of(work, struct ieee802154_local, rx_beacon_work);
 	struct cfg802154_mac_pkt *mac_pkt;
 
-	mac_pkt = list_first_entry_or_null(&local->rx_beacon_list,
-					   struct cfg802154_mac_pkt, node);
-	if (!mac_pkt)
-		return;
+	for (;;) {
+		spin_lock_bh(&local->rx_lock);
+		mac_pkt = list_first_entry_or_null(&local->rx_beacon_list,
+						   struct cfg802154_mac_pkt, node);
+		if (mac_pkt)
+			list_del(&mac_pkt->node);
+		spin_unlock_bh(&local->rx_lock);
+		if (!mac_pkt)
+			break;
 
-	mac802154_process_beacon(local, mac_pkt->skb, mac_pkt->page, mac_pkt->channel);
+		mac802154_process_beacon(local, mac_pkt->skb,
+					 mac_pkt->page, mac_pkt->channel);
 
-	list_del(&mac_pkt->node);
-	kfree_skb(mac_pkt->skb);
-	kfree(mac_pkt);
+		netdev_put(mac_pkt->sdata->dev, &mac_pkt->dev_tracker);
+		kfree_skb(mac_pkt->skb);
+		kfree(mac_pkt);
+	}
 }
 
 static bool mac802154_should_answer_beacon_req(struct ieee802154_local *local)
@@ -68,22 +75,15 @@ static bool mac802154_should_answer_beacon_req(struct ieee802154_local *local)
 	return interval == IEEE802154_ACTIVE_SCAN_DURATION;
 }
 
-void mac802154_rx_mac_cmd_worker(struct work_struct *work)
+static void mac802154_rx_mac_cmd(struct ieee802154_local *local,
+				 struct cfg802154_mac_pkt *mac_pkt)
 {
-	struct ieee802154_local *local =
-		container_of(work, struct ieee802154_local, rx_mac_cmd_work);
-	struct cfg802154_mac_pkt *mac_pkt;
 	u8 mac_cmd;
 	int rc;
 
-	mac_pkt = list_first_entry_or_null(&local->rx_mac_cmd_list,
-					   struct cfg802154_mac_pkt, node);
-	if (!mac_pkt)
-		return;
-
 	rc = ieee802154_get_mac_cmd(mac_pkt->skb, &mac_cmd);
 	if (rc)
-		goto out;
+		return;
 
 	switch (mac_cmd) {
 	case IEEE802154_CMD_BEACON_REQ:
@@ -93,14 +93,109 @@ void mac802154_rx_mac_cmd_worker(struct work_struct *work)
 
 		queue_delayed_work(local->mac_wq, &local->beacon_work, 0);
 		break;
+
+	case IEEE802154_CMD_ASSOCIATION_RESP:
+		dev_dbg(&mac_pkt->sdata->dev->dev, "processing ASSOC RESP\n");
+		if (!mac802154_is_associating(local))
+			break;
+
+		mac802154_process_association_resp(mac_pkt->sdata, mac_pkt->skb);
+		break;
+
+	case IEEE802154_CMD_ASSOCIATION_REQ:
+		dev_dbg(&mac_pkt->sdata->dev->dev, "processing ASSOC REQ\n");
+		if (mac_pkt->sdata->wpan_dev.iftype != NL802154_IFTYPE_COORD)
+			break;
+
+		mac802154_process_association_req(mac_pkt->sdata, mac_pkt->skb);
+		break;
+
+	case IEEE802154_CMD_DISASSOCIATION_NOTIFY:
+		dev_dbg(&mac_pkt->sdata->dev->dev, "processing DISASSOC NOTIF\n");
+		if (mac_pkt->sdata->wpan_dev.iftype != NL802154_IFTYPE_COORD)
+			break;
+
+		mac802154_process_disassociation_notif(mac_pkt->sdata, mac_pkt->skb);
+		break;
+
 	default:
 		break;
 	}
+}
 
-out:
-	list_del(&mac_pkt->node);
-	kfree_skb(mac_pkt->skb);
-	kfree(mac_pkt);
+void mac802154_rx_mac_cmd_worker(struct work_struct *work)
+{
+	struct ieee802154_local *local =
+		container_of(work, struct ieee802154_local, rx_mac_cmd_work);
+	struct cfg802154_mac_pkt *mac_pkt;
+
+	for (;;) {
+		spin_lock_bh(&local->rx_lock);
+		mac_pkt = list_first_entry_or_null(&local->rx_mac_cmd_list,
+						   struct cfg802154_mac_pkt, node);
+		if (mac_pkt)
+			list_del(&mac_pkt->node);
+		spin_unlock_bh(&local->rx_lock);
+		if (!mac_pkt)
+			break;
+
+		/* A stopped interface cannot transmit; skipping avoids a
+		 * needless association response (and the !netif_running()
+		 * warning it would trip) during teardown. The beacon worker
+		 * needs no such check as it never transmits.
+		 */
+		if (ieee802154_sdata_running(mac_pkt->sdata))
+			mac802154_rx_mac_cmd(local, mac_pkt);
+
+		netdev_put(mac_pkt->sdata->dev, &mac_pkt->dev_tracker);
+		kfree_skb(mac_pkt->skb);
+		kfree(mac_pkt);
+	}
+}
+
+/**
+ * mac802154_flush_list - free queued RX frames on @list
+ * @list: rx_beacon_list or rx_mac_cmd_list
+ * @sdata: only free frames received on this interface, or %NULL for all
+ *
+ * Each frame pins the net_device it was received on (via netdev_hold()),
+ * so release that reference as the frame is dropped. Caller must hold
+ * local->rx_lock.
+ */
+void mac802154_flush_list(struct list_head *list,
+			  struct ieee802154_sub_if_data *sdata)
+{
+	struct cfg802154_mac_pkt *mac_pkt, *tmp;
+
+	list_for_each_entry_safe(mac_pkt, tmp, list, node) {
+		if (sdata && mac_pkt->sdata != sdata)
+			continue;
+		list_del(&mac_pkt->node);
+		netdev_put(mac_pkt->sdata->dev, &mac_pkt->dev_tracker);
+		kfree_skb(mac_pkt->skb);
+		kfree(mac_pkt);
+	}
+}
+
+/**
+ * mac802154_flush_queued_pkts - drop queued RX work referencing @sdata
+ * @local: the mac802154 device
+ * @sdata: interface being removed
+ *
+ * The workers dereference the queued frame's interface directly
+ * (mac_pkt->sdata) or through skb->dev in mac802154_process_beacon(). Drop
+ * the not-yet-started entries belonging to @sdata before it is unregistered
+ * so their netdev reference is released; an entry already dequeued by a
+ * running worker keeps its own reference until the worker completes, which
+ * unregister_netdevice() then waits out.
+ */
+void mac802154_flush_queued_pkts(struct ieee802154_local *local,
+				 struct ieee802154_sub_if_data *sdata)
+{
+	spin_lock_bh(&local->rx_lock);
+	mac802154_flush_list(&local->rx_beacon_list, sdata);
+	mac802154_flush_list(&local->rx_mac_cmd_list, sdata);
+	spin_unlock_bh(&local->rx_lock);
 }
 
 static int
@@ -131,12 +226,15 @@ ieee802154_subif_frame(struct ieee802154_sub_if_data *sdata,
 
 	switch (mac_cb(skb)->dest.mode) {
 	case IEEE802154_ADDR_NONE:
-		if (hdr->source.mode != IEEE802154_ADDR_NONE)
-			/* FIXME: check if we are PAN coordinator */
-			skb->pkt_type = PACKET_OTHERHOST;
-		else
+		if (hdr->source.mode == IEEE802154_ADDR_NONE)
 			/* ACK comes with both addresses empty */
 			skb->pkt_type = PACKET_HOST;
+		else if (!wpan_dev->parent)
+			/* No dest means PAN coordinator is the recipient */
+			skb->pkt_type = PACKET_HOST;
+		else
+			/* We are not the PAN coordinator, just relaying */
+			skb->pkt_type = PACKET_OTHERHOST;
 		break;
 	case IEEE802154_ADDR_LONG:
 		if (mac_cb(skb)->dest.pan_id != span &&
@@ -185,7 +283,7 @@ ieee802154_subif_frame(struct ieee802154_sub_if_data *sdata,
 		if (!mac802154_is_scanning(sdata->local))
 			goto fail;
 
-		mac_pkt = kzalloc(sizeof(*mac_pkt), GFP_ATOMIC);
+		mac_pkt = kzalloc_obj(*mac_pkt, GFP_ATOMIC);
 		if (!mac_pkt)
 			goto fail;
 
@@ -193,19 +291,25 @@ ieee802154_subif_frame(struct ieee802154_sub_if_data *sdata,
 		mac_pkt->sdata = sdata;
 		mac_pkt->page = sdata->local->scan_page;
 		mac_pkt->channel = sdata->local->scan_channel;
+		netdev_hold(sdata->dev, &mac_pkt->dev_tracker, GFP_ATOMIC);
+		spin_lock(&sdata->local->rx_lock);
 		list_add_tail(&mac_pkt->node, &sdata->local->rx_beacon_list);
+		spin_unlock(&sdata->local->rx_lock);
 		queue_work(sdata->local->mac_wq, &sdata->local->rx_beacon_work);
 		return NET_RX_SUCCESS;
 
 	case IEEE802154_FC_TYPE_MAC_CMD:
 		dev_dbg(&sdata->dev->dev, "MAC COMMAND received\n");
-		mac_pkt = kzalloc(sizeof(*mac_pkt), GFP_ATOMIC);
+		mac_pkt = kzalloc_obj(*mac_pkt, GFP_ATOMIC);
 		if (!mac_pkt)
 			goto fail;
 
 		mac_pkt->skb = skb_get(skb);
 		mac_pkt->sdata = sdata;
+		netdev_hold(sdata->dev, &mac_pkt->dev_tracker, GFP_ATOMIC);
+		spin_lock(&sdata->local->rx_lock);
 		list_add_tail(&mac_pkt->node, &sdata->local->rx_mac_cmd_list);
+		spin_unlock(&sdata->local->rx_lock);
 		queue_work(sdata->local->mac_wq, &sdata->local->rx_mac_cmd_work);
 		return NET_RX_SUCCESS;
 

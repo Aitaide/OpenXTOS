@@ -89,7 +89,7 @@ int acpi_parse_trt(acpi_handle handle, int *trt_count, struct trt **trtp,
 	}
 
 	*trt_count = p->package.count;
-	trts = kcalloc(*trt_count, sizeof(struct trt), GFP_KERNEL);
+	trts = kzalloc_objs(struct trt, *trt_count);
 	if (!trts) {
 		result = -ENOMEM;
 		goto end;
@@ -165,7 +165,7 @@ int acpi_parse_art(acpi_handle handle, int *art_count, struct art **artp,
 
 	/* ignore p->package.elements[0], as this is _ART Revision field */
 	*art_count = p->package.count - 1;
-	arts = kcalloc(*art_count, sizeof(struct art), GFP_KERNEL);
+	arts = kzalloc_objs(struct art, *art_count);
 	if (!arts) {
 		result = -ENOMEM;
 		goto end;
@@ -220,9 +220,6 @@ static int acpi_parse_psvt(acpi_handle handle, int *psvt_count, struct psvt **ps
 	int i, result = 0;
 	struct psvt *psvts;
 
-	if (!acpi_has_method(handle, "PSVT"))
-		return -ENODEV;
-
 	status = acpi_evaluate_object(handle, "PSVT", NULL, &buffer);
 	if (ACPI_FAILURE(status))
 		return -ENODEV;
@@ -256,7 +253,7 @@ static int acpi_parse_psvt(acpi_handle handle, int *psvt_count, struct psvt **ps
 		goto end;
 	}
 
-	psvts = kcalloc(*psvt_count, sizeof(*psvts), GFP_KERNEL);
+	psvts = kzalloc_objs(*psvts, *psvt_count);
 	if (!psvts) {
 		result = -ENOMEM;
 		goto end;
@@ -309,7 +306,7 @@ static int acpi_parse_psvt(acpi_handle handle, int *psvt_count, struct psvt **ps
 
 		if (knob->type == ACPI_TYPE_STRING) {
 			memset(&psvt->limit, 0, sizeof(u64));
-			strncpy(psvt->limit.string, psvt_ptr->limit.str_ptr, knob->string.length);
+			strscpy(psvt->limit.string, psvt_ptr->limit.str_ptr, ACPI_LIMIT_STR_MAX_LEN);
 		} else {
 			psvt->limit.integer = psvt_ptr->limit.integer;
 		}
@@ -468,7 +465,7 @@ static int fill_psvt(char __user *ubuf)
 		psvt_user[i].unlimit_coeff = psvts[i].unlimit_coeff;
 		psvt_user[i].control_knob_type = psvts[i].control_knob_type;
 		if (psvt_user[i].control_knob_type == ACPI_TYPE_STRING)
-			strncpy(psvt_user[i].limit.string, psvts[i].limit.string,
+			strscpy(psvt_user[i].limit.string, psvts[i].limit.string,
 				ACPI_LIMIT_STR_MAX_LEN);
 		else
 			psvt_user[i].limit.integer = psvts[i].limit.integer;
@@ -564,7 +561,6 @@ static const struct file_operations acpi_thermal_rel_fops = {
 	.open		= acpi_thermal_rel_open,
 	.release	= acpi_thermal_rel_release,
 	.unlocked_ioctl	= acpi_thermal_rel_ioctl,
-	.llseek		= no_llseek,
 };
 
 static struct miscdevice acpi_thermal_rel_misc_device = {

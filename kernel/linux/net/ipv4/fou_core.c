@@ -22,7 +22,7 @@
 #include "fou_nl.h"
 
 struct fou {
-	struct socket *sock;
+	struct sock *sk;
 	u8 protocol;
 	u8 flags;
 	__be16 port;
@@ -50,7 +50,7 @@ struct fou_net {
 
 static inline struct fou *fou_from_sock(struct sock *sk)
 {
-	return sk->sk_user_data;
+	return rcu_dereference_sk_user_data(sk);
 }
 
 static int fou_recv_pull(struct sk_buff *skb, struct fou *fou, size_t len)
@@ -215,6 +215,9 @@ static int gue_udp_recv(struct sock *sk, struct sk_buff *skb)
 		return gue_control_message(skb, guehdr);
 
 	proto_ctype = guehdr->proto_ctype;
+	if (unlikely(!proto_ctype))
+		goto drop;
+
 	__skb_pull(skb, sizeof(struct udphdr) + hdrlen);
 	skb_reset_transport_header(skb);
 
@@ -228,14 +231,26 @@ drop:
 	return 0;
 }
 
+static const struct net_offload *fou_gro_ops(const struct sock *sk,
+					     int proto)
+{
+	const struct net_offload __rcu **offloads;
+
+	/* FOU doesn't allow IPv4 on IPv6 sockets. */
+	offloads = sk->sk_family == AF_INET6 ? inet6_offloads : inet_offloads;
+	return rcu_dereference(offloads[proto]);
+}
+
 static struct sk_buff *fou_gro_receive(struct sock *sk,
 				       struct list_head *head,
 				       struct sk_buff *skb)
 {
-	const struct net_offload __rcu **offloads;
-	u8 proto = fou_from_sock(sk)->protocol;
+	struct fou *fou = fou_from_sock(sk);
 	const struct net_offload *ops;
 	struct sk_buff *pp = NULL;
+
+	if (!fou)
+		goto out;
 
 	/* We can clear the encap_mark for FOU as we are essentially doing
 	 * one of two possible things.  We are either adding an L4 tunnel
@@ -248,8 +263,7 @@ static struct sk_buff *fou_gro_receive(struct sock *sk,
 	/* Flag this frame as already having an outer encap header */
 	NAPI_GRO_CB(skb)->is_fou = 1;
 
-	offloads = NAPI_GRO_CB(skb)->is_ipv6 ? inet6_offloads : inet_offloads;
-	ops = rcu_dereference(offloads[proto]);
+	ops = fou_gro_ops(sk, fou->protocol);
 	if (!ops || !ops->callbacks.gro_receive)
 		goto out;
 
@@ -262,15 +276,20 @@ out:
 static int fou_gro_complete(struct sock *sk, struct sk_buff *skb,
 			    int nhoff)
 {
-	const struct net_offload __rcu **offloads;
-	u8 proto = fou_from_sock(sk)->protocol;
+	struct fou *fou = fou_from_sock(sk);
 	const struct net_offload *ops;
-	int err = -ENOSYS;
+	int err;
 
-	offloads = NAPI_GRO_CB(skb)->is_ipv6 ? inet6_offloads : inet_offloads;
-	ops = rcu_dereference(offloads[proto]);
-	if (WARN_ON(!ops || !ops->callbacks.gro_complete))
+	if (!fou) {
+		err = -ENOENT;
 		goto out;
+	}
+
+	ops = fou_gro_ops(sk, fou->protocol);
+	if (WARN_ON(!ops || !ops->callbacks.gro_complete)) {
+		err = -ENOSYS;
+		goto out;
+	}
 
 	err = ops->callbacks.gro_complete(skb, nhoff);
 
@@ -307,7 +326,6 @@ static struct sk_buff *gue_gro_receive(struct sock *sk,
 				       struct list_head *head,
 				       struct sk_buff *skb)
 {
-	const struct net_offload __rcu **offloads;
 	const struct net_offload *ops;
 	struct sk_buff *pp = NULL;
 	struct sk_buff *p;
@@ -321,6 +339,9 @@ static struct sk_buff *gue_gro_receive(struct sock *sk,
 	u8 proto;
 
 	skb_gro_remcsum_init(&grc);
+
+	if (!fou)
+		goto out;
 
 	off = skb_gro_offset(skb);
 	len = off + sizeof(*guehdr);
@@ -351,7 +372,7 @@ static struct sk_buff *gue_gro_receive(struct sock *sk,
 	optlen = guehdr->hlen << 2;
 	len += optlen;
 
-	if (skb_gro_header_hard(skb, len)) {
+	if (!skb_gro_may_pull(skb, len)) {
 		guehdr = skb_gro_header_slow(skb, len, off);
 		if (unlikely(!guehdr))
 			goto out;
@@ -431,9 +452,8 @@ next_proto:
 	/* Flag this frame as already having an outer encap header */
 	NAPI_GRO_CB(skb)->is_fou = 1;
 
-	offloads = NAPI_GRO_CB(skb)->is_ipv6 ? inet6_offloads : inet_offloads;
-	ops = rcu_dereference(offloads[proto]);
-	if (WARN_ON_ONCE(!ops || !ops->callbacks.gro_receive))
+	ops = fou_gro_ops(sk, proto);
+	if (!ops || !ops->callbacks.gro_receive)
 		goto out;
 
 	pp = call_gro_receive(ops->callbacks.gro_receive, head, skb);
@@ -448,7 +468,6 @@ out:
 static int gue_gro_complete(struct sock *sk, struct sk_buff *skb, int nhoff)
 {
 	struct guehdr *guehdr = (struct guehdr *)(skb->data + nhoff);
-	const struct net_offload __rcu **offloads;
 	const struct net_offload *ops;
 	unsigned int guehlen = 0;
 	u8 proto;
@@ -475,8 +494,7 @@ static int gue_gro_complete(struct sock *sk, struct sk_buff *skb, int nhoff)
 		return err;
 	}
 
-	offloads = NAPI_GRO_CB(skb)->is_ipv6 ? inet6_offloads : inet_offloads;
-	ops = rcu_dereference(offloads[proto]);
+	ops = fou_gro_ops(sk, proto);
 	if (WARN_ON(!ops || !ops->callbacks.gro_complete))
 		goto out;
 
@@ -490,8 +508,8 @@ out:
 
 static bool fou_cfg_cmp(struct fou *fou, struct fou_cfg *cfg)
 {
-	struct sock *sk = fou->sock->sk;
 	struct udp_port_cfg *udp_cfg = &cfg->udp_config;
+	struct sock *sk = fou->sk;
 
 	if (fou->family != udp_cfg->family ||
 	    fou->port != udp_cfg->local_udp_port ||
@@ -540,11 +558,8 @@ static int fou_add_to_port_list(struct net *net, struct fou *fou,
 
 static void fou_release(struct fou *fou)
 {
-	struct socket *sock = fou->sock;
-
 	list_del(&fou->list);
-	udp_tunnel_sock_release(sock);
-
+	udp_tunnel_sock_release(fou->sk);
 	kfree_rcu(fou, rcu);
 }
 
@@ -563,7 +578,7 @@ static int fou_create(struct net *net, struct fou_cfg *cfg,
 		goto error;
 
 	/* Allocate FOU port structure */
-	fou = kzalloc(sizeof(*fou), GFP_KERNEL);
+	fou = kzalloc_obj(*fou);
 	if (!fou) {
 		err = -ENOMEM;
 		goto error;
@@ -575,7 +590,7 @@ static int fou_create(struct net *net, struct fou_cfg *cfg,
 	fou->family = cfg->udp_config.family;
 	fou->flags = cfg->flags;
 	fou->type = cfg->type;
-	fou->sock = sock;
+	fou->sk = sk;
 
 	memset(&tunnel_cfg, 0, sizeof(tunnel_cfg));
 	tunnel_cfg.encap_type = 1;
@@ -585,6 +600,10 @@ static int fou_create(struct net *net, struct fou_cfg *cfg,
 	/* Initial for fou type */
 	switch (cfg->type) {
 	case FOU_ENCAP_DIRECT:
+		if (!cfg->protocol) {
+			err = -EINVAL;
+			goto error;
+		}
 		tunnel_cfg.encap_rcv = fou_udp_recv;
 		tunnel_cfg.gro_receive = fou_gro_receive;
 		tunnel_cfg.gro_complete = fou_gro_complete;
@@ -600,7 +619,7 @@ static int fou_create(struct net *net, struct fou_cfg *cfg,
 		goto error;
 	}
 
-	setup_udp_tunnel_sock(net, sock, &tunnel_cfg);
+	setup_udp_tunnel_sock(net, sk, &tunnel_cfg);
 
 	sk->sk_allocation = GFP_ATOMIC;
 
@@ -614,9 +633,9 @@ static int fou_create(struct net *net, struct fou_cfg *cfg,
 	return 0;
 
 error:
-	kfree(fou);
 	if (sock)
-		udp_tunnel_sock_release(sock);
+		udp_tunnel_sock_release(sock->sk);
+	kfree_rcu(fou, rcu);
 
 	return err;
 }
@@ -761,9 +780,9 @@ int fou_nl_del_doit(struct sk_buff *skb, struct genl_info *info)
 
 static int fou_fill_info(struct fou *fou, struct sk_buff *msg)
 {
-	struct sock *sk = fou->sock->sk;
+	struct sock *sk = fou->sk;
 
-	if (nla_put_u8(msg, FOU_ATTR_AF, fou->sock->sk->sk_family) ||
+	if (nla_put_u8(msg, FOU_ATTR_AF, sk->sk_family) ||
 	    nla_put_be16(msg, FOU_ATTR_PORT, fou->port) ||
 	    nla_put_be16(msg, FOU_ATTR_PEER_PORT, sk->sk_dport) ||
 	    nla_put_u8(msg, FOU_ATTR_IPPROTO, fou->protocol) ||
@@ -775,7 +794,7 @@ static int fou_fill_info(struct fou *fou, struct sk_buff *msg)
 		if (nla_put_flag(msg, FOU_ATTR_REMCSUM_NOPARTIAL))
 			return -1;
 
-	if (fou->sock->sk->sk_family == AF_INET) {
+	if (sk->sk_family == AF_INET) {
 		if (nla_put_in_addr(msg, FOU_ATTR_LOCAL_V4, sk->sk_rcv_saddr))
 			return -1;
 
@@ -1025,7 +1044,7 @@ static void fou_build_udp(struct sk_buff *skb, struct ip_tunnel_encap *e,
 
 	uh->dest = e->dport;
 	uh->source = sport;
-	uh->len = htons(skb->len);
+	udp_set_len(uh, skb->len);
 	udp_set_csum(!(e->flags & TUNNEL_ENCAP_FLAG_CSUM), skb,
 		     fl4->saddr, fl4->daddr, skb->len);
 
@@ -1132,8 +1151,7 @@ static int gue_err(struct sk_buff *skb, u32 info)
 	 * recursion. Besides, this kind of encapsulation can't even be
 	 * configured currently. Discard this.
 	 */
-	if (guehdr->proto_ctype == IPPROTO_UDP ||
-	    guehdr->proto_ctype == IPPROTO_UDPLITE)
+	if (guehdr->proto_ctype == IPPROTO_UDP)
 		return -EOPNOTSUPP;
 
 	skb_set_transport_header(skb, -(int)sizeof(struct icmphdr));

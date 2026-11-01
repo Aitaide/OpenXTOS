@@ -6,8 +6,8 @@
 #ifndef __PINCTRL_LPASS_LPI_H__
 #define __PINCTRL_LPASS_LPI_H__
 
+#include <linux/array_size.h>
 #include <linux/bits.h>
-#include <linux/kernel.h>
 
 #include "../core.h"
 
@@ -16,6 +16,7 @@ struct platform_device;
 struct pinctrl_pin_desc;
 
 #define LPI_SLEW_RATE_CTL_REG	0xa000
+#define LPI_SPARE_1_REG		0xc000
 #define LPI_TLMM_REG_OFFSET		0x1000
 #define LPI_SLEW_RATE_MAX		0x03
 #define LPI_SLEW_BITS_SIZE		0x02
@@ -45,11 +46,9 @@ struct pinctrl_pin_desc;
 
 #define LPI_PINGROUP(id, soff, f1, f2, f3, f4)		\
 	{						\
-		.group.name = "gpio" #id,			\
-		.group.pins = gpio##id##_pins,		\
 		.pin = id,				\
 		.slew_offset = soff,			\
-		.group.num_pins = ARRAY_SIZE(gpio##id##_pins),	\
+		.slew_base_spare_1 = false,		\
 		.funcs = (int[]){			\
 			LPI_MUX_gpio,			\
 			LPI_MUX_##f1,			\
@@ -58,15 +57,56 @@ struct pinctrl_pin_desc;
 			LPI_MUX_##f4,			\
 		},					\
 		.nfuncs = 5,				\
+		.pin_offset = 0,			\
 	}
 
+#define LPI_PINGROUP_OFFSET(id, soff, f1, f2, f3, f4, poff)	\
+	{							\
+		.pin = id,					\
+		.slew_offset = soff,				\
+		.slew_base_spare_1 = false,			\
+		.funcs = (int[]){				\
+			LPI_MUX_gpio,				\
+			LPI_MUX_##f1,				\
+			LPI_MUX_##f2,				\
+			LPI_MUX_##f3,				\
+			LPI_MUX_##f4,				\
+		},						\
+		.nfuncs = 5,					\
+		.pin_offset = poff,				\
+	}
+
+#define LPI_PINGROUP_SLEW_SPARE_1(id, soff, f1, f2, f3, f4)	\
+	{							\
+		.pin = id,					\
+		.slew_offset = soff,				\
+		.slew_base_spare_1 = true,			\
+		.funcs = (int[]){				\
+			LPI_MUX_gpio,				\
+			LPI_MUX_##f1,				\
+			LPI_MUX_##f2,				\
+			LPI_MUX_##f3,				\
+			LPI_MUX_##f4,				\
+		},						\
+		.nfuncs = 5,					\
+		.pin_offset = 0,				\
+	}
+
+/*
+ * Slew rate control is done in the same register as rest of the
+ * pin configuration.
+ */
+#define LPI_FLAG_SLEW_RATE_SAME_REG			BIT(0)
+#define LPI_FLAG_USE_PREDEFINED_PIN_OFFSET		BIT(1)
+
 struct lpi_pingroup {
-	struct group_desc group;
 	unsigned int pin;
 	/* Bit offset in slew register for SoundWire pins only */
 	int slew_offset;
 	unsigned int *funcs;
 	unsigned int nfuncs;
+	unsigned int pin_offset;
+	bool slew_base_spare_1;
 };
 
 struct lpi_function {
@@ -82,9 +122,10 @@ struct lpi_pinctrl_variant_data {
 	int ngroups;
 	const struct lpi_function *functions;
 	int nfunctions;
+	unsigned int flags;
 };
 
 int lpi_pinctrl_probe(struct platform_device *pdev);
-int lpi_pinctrl_remove(struct platform_device *pdev);
+void lpi_pinctrl_remove(struct platform_device *pdev);
 
 #endif /*__PINCTRL_LPASS_LPI_H__*/

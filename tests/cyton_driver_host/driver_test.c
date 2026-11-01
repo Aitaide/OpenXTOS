@@ -47,7 +47,7 @@ static void board_reply(struct serdev_device *s,const void *data,size_t len)
         q=strchr("12345678",p[0]);
         if (q && !no_effect) board_regs[5+(q-"12345678")] |= 0x80;
     }
-    for (size_t i=0;i<n;i+=reply_fragment) { size_t part=n-i<reply_fragment?n-i:reply_fragment; assert(s->ops->receive_buf(s,(unsigned char *)text+i,part)==(int)part); }
+    for (size_t i=0;i<n;i+=reply_fragment) { size_t part=n-i<reply_fragment?n-i:reply_fragment; assert(s->ops->receive_buf(s,(unsigned char *)text+i,part)==part); }
 }
 
 static struct serdev_device serial;

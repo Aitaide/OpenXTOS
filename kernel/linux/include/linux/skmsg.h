@@ -4,6 +4,7 @@
 #ifndef _LINUX_SKMSG_H
 #define _LINUX_SKMSG_H
 
+#include <linux/bitops.h>
 #include <linux/bpf.h>
 #include <linux/filter.h>
 #include <linux/scatterlist.h>
@@ -58,6 +59,10 @@ struct sk_psock_progs {
 	struct bpf_prog			*stream_parser;
 	struct bpf_prog			*stream_verdict;
 	struct bpf_prog			*skb_verdict;
+	struct bpf_link			*msg_parser_link;
+	struct bpf_link			*stream_parser_link;
+	struct bpf_link			*stream_verdict_link;
+	struct bpf_link			*skb_verdict_link;
 };
 
 enum sk_psock_state_bits {
@@ -87,10 +92,14 @@ struct sk_psock {
 	struct sk_psock_progs		progs;
 #if IS_ENABLED(CONFIG_BPF_STREAM_PARSER)
 	struct strparser		strp;
+	u32				copied_seq;
+	u32				ingress_bytes;
 #endif
 	struct sk_buff_head		ingress_skb;
 	struct list_head		ingress_msg;
 	spinlock_t			ingress_lock;
+	/** @msg_tot_len: Total bytes queued in ingress_msg list. */
+	u32				msg_tot_len;
 	unsigned long			state;
 	struct list_head		link;
 	spinlock_t			link_lock;
@@ -100,12 +109,18 @@ struct sk_psock {
 	void (*saved_close)(struct sock *sk, long timeout);
 	void (*saved_write_space)(struct sock *sk);
 	void (*saved_data_ready)(struct sock *sk);
+	/* psock_update_sk_prot may be called with restore=false many times
+	 * so the handler must be safe for this case. It will be called
+	 * exactly once with restore=true when the psock is being destroyed
+	 * and psock refcnt is zero, but before an RCU grace period.
+	 */
 	int  (*psock_update_sk_prot)(struct sock *sk, struct sk_psock *psock,
 				     bool restore);
 	struct proto			*sk_proto;
 	struct mutex			work_mutex;
 	struct sk_psock_work_state	work_state;
 	struct delayed_work		work;
+	struct sock			*sk_pair;
 	struct rcu_work			rwork;
 };
 
@@ -129,6 +144,8 @@ int sk_msg_memcopy_from_iter(struct sock *sk, struct iov_iter *from,
 			     struct sk_msg *msg, u32 bytes);
 int sk_msg_recvmsg(struct sock *sk, struct sk_psock *psock, struct msghdr *msg,
 		   int len, int flags);
+int __sk_msg_recvmsg(struct sock *sk, struct sk_psock *psock, struct msghdr *msg,
+		     int len, int flags, int *copied_from_self);
 bool sk_msg_is_readable(struct sock *sk);
 
 static inline void sk_msg_check_to_free(struct sk_msg *msg, u32 i, u32 bytes)
@@ -183,11 +200,14 @@ static inline void sk_msg_xfer(struct sk_msg *dst, struct sk_msg *src,
 			       int which, u32 size)
 {
 	dst->sg.data[which] = src->sg.data[which];
+	__assign_bit(which, dst->sg.copy, test_bit(which, src->sg.copy));
 	dst->sg.data[which].length  = size;
 	dst->sg.size		   += size;
 	src->sg.size		   -= size;
 	src->sg.data[which].length -= size;
 	src->sg.data[which].offset += size;
+	if (!src->sg.data[which].length)
+		__clear_bit(which, src->sg.copy);
 }
 
 static inline void sk_msg_xfer_full(struct sk_msg *dst, struct sk_msg *src)
@@ -257,14 +277,17 @@ static inline void sk_msg_page_add(struct sk_msg *msg, struct page *page,
 static inline void sk_msg_sg_copy(struct sk_msg *msg, u32 i, bool copy_state)
 {
 	do {
-		if (copy_state)
-			__set_bit(i, msg->sg.copy);
-		else
-			__clear_bit(i, msg->sg.copy);
+		__assign_bit(i, msg->sg.copy, copy_state);
 		sk_msg_iter_var_next(i);
 		if (i == msg->sg.end)
 			break;
 	} while (1);
+}
+
+static inline void sk_msg_sg_copy_assign(struct sk_msg *dst, u32 dst_i,
+					 const struct sk_msg *src, u32 src_i)
+{
+	__assign_bit(dst_i, dst->sg.copy, test_bit(src_i, src->sg.copy));
 }
 
 static inline void sk_msg_sg_copy_set(struct sk_msg *msg, u32 start)
@@ -303,21 +326,48 @@ static inline bool sk_psock_test_state(const struct sk_psock *psock,
 
 static inline void sock_drop(struct sock *sk, struct sk_buff *skb)
 {
-	sk_drops_add(sk, skb);
+	sk_drops_skbadd(sk, skb);
 	kfree_skb(skb);
 }
 
-static inline void sk_psock_queue_msg(struct sk_psock *psock,
-				      struct sk_msg *msg)
+static inline u32 sk_psock_get_msg_len_nolock(struct sk_psock *psock)
+{
+	/* Used by ioctl to read msg_tot_len only; lock-free for performance */
+	return READ_ONCE(psock->msg_tot_len);
+}
+
+static inline void sk_psock_msg_len_add_locked(struct sk_psock *psock, int diff)
+{
+	/* Use WRITE_ONCE to ensure correct read in sk_psock_get_msg_len_nolock().
+	 * ingress_lock should be held to prevent concurrent updates to msg_tot_len
+	 */
+	WRITE_ONCE(psock->msg_tot_len, psock->msg_tot_len + diff);
+}
+
+static inline void sk_psock_msg_len_add(struct sk_psock *psock, int diff)
 {
 	spin_lock_bh(&psock->ingress_lock);
-	if (sk_psock_test_state(psock, SK_PSOCK_TX_ENABLED))
+	sk_psock_msg_len_add_locked(psock, diff);
+	spin_unlock_bh(&psock->ingress_lock);
+}
+
+static inline bool sk_psock_queue_msg(struct sk_psock *psock,
+				      struct sk_msg *msg)
+{
+	bool ret;
+
+	spin_lock_bh(&psock->ingress_lock);
+	if (sk_psock_test_state(psock, SK_PSOCK_TX_ENABLED)) {
 		list_add_tail(&msg->list, &psock->ingress_msg);
-	else {
+		sk_psock_msg_len_add_locked(psock, msg->sg.size);
+		ret = true;
+	} else {
 		sk_msg_free(psock->sk, msg);
 		kfree(msg);
+		ret = false;
 	}
 	spin_unlock_bh(&psock->ingress_lock);
+	return ret;
 }
 
 static inline struct sk_msg *sk_psock_dequeue_msg(struct sk_psock *psock)
@@ -326,10 +376,17 @@ static inline struct sk_msg *sk_psock_dequeue_msg(struct sk_psock *psock)
 
 	spin_lock_bh(&psock->ingress_lock);
 	msg = list_first_entry_or_null(&psock->ingress_msg, struct sk_msg, list);
-	if (msg)
+	if (msg) {
 		list_del(&msg->list);
+		sk_psock_msg_len_add_locked(psock, -msg->sg.size);
+	}
 	spin_unlock_bh(&psock->ingress_lock);
 	return msg;
+}
+
+static inline struct sk_msg *sk_psock_peek_msg_locked(struct sk_psock *psock)
+{
+	return list_first_entry_or_null(&psock->ingress_msg, struct sk_msg, list);
 }
 
 static inline struct sk_msg *sk_psock_peek_msg(struct sk_psock *psock)
@@ -337,7 +394,7 @@ static inline struct sk_msg *sk_psock_peek_msg(struct sk_psock *psock)
 	struct sk_msg *msg;
 
 	spin_lock_bh(&psock->ingress_lock);
-	msg = list_first_entry_or_null(&psock->ingress_msg, struct sk_msg, list);
+	msg = sk_psock_peek_msg_locked(psock);
 	spin_unlock_bh(&psock->ingress_lock);
 	return msg;
 }
@@ -404,11 +461,13 @@ void sk_psock_stop_verdict(struct sock *sk, struct sk_psock *psock);
 int sk_psock_msg_verdict(struct sock *sk, struct sk_psock *psock,
 			 struct sk_msg *msg);
 
-static inline struct sk_psock_link *sk_psock_init_link(void)
-{
-	return kzalloc(sizeof(struct sk_psock_link),
-		       GFP_ATOMIC | __GFP_NOWARN);
-}
+/*
+ * This specialized allocator has to be a macro for its allocations to be
+ * accounted separately (to have a separate alloc_tag). The typecast is
+ * intentional to enforce typesafety.
+ */
+#define sk_psock_init_link()	\
+		kzalloc_obj(struct sk_psock_link, GFP_ATOMIC | __GFP_NOWARN)
 
 static inline void sk_psock_free_link(struct sk_psock_link *link)
 {
@@ -455,10 +514,12 @@ static inline void sk_psock_put(struct sock *sk, struct sk_psock *psock)
 
 static inline void sk_psock_data_ready(struct sock *sk, struct sk_psock *psock)
 {
+	read_lock_bh(&sk->sk_callback_lock);
 	if (psock->saved_data_ready)
 		psock->saved_data_ready(sk);
 	else
 		sk->sk_data_ready(sk);
+	read_unlock_bh(&sk->sk_callback_lock);
 }
 
 static inline void psock_set_prog(struct bpf_prog **pprog,
@@ -490,19 +551,23 @@ static inline void psock_progs_drop(struct sk_psock_progs *progs)
 	psock_set_prog(&progs->skb_verdict, NULL);
 }
 
-int sk_psock_tls_strp_read(struct sk_psock *psock, struct sk_buff *skb);
-
-static inline bool sk_psock_strp_enabled(struct sk_psock *psock)
+/* for udp only, sk is not locked */
+static inline ssize_t sk_msg_first_len(struct sock *sk)
 {
-	if (!psock)
-		return false;
-	return !!psock->saved_data_ready;
-}
+	struct sk_psock *psock;
+	struct sk_msg *msg;
+	ssize_t inq = 0;
 
-static inline bool sk_is_udp(const struct sock *sk)
-{
-	return sk->sk_type == SOCK_DGRAM &&
-	       sk->sk_protocol == IPPROTO_UDP;
+	psock = sk_psock_get(sk);
+	if (likely(psock)) {
+		spin_lock_bh(&psock->ingress_lock);
+		msg = sk_psock_peek_msg_locked(psock);
+		if (msg)
+			inq = msg->sg.size;
+		spin_unlock_bh(&psock->ingress_lock);
+		sk_psock_put(sk, psock);
+	}
+	return inq;
 }
 
 #if IS_ENABLED(CONFIG_NET_SOCK_MSG)

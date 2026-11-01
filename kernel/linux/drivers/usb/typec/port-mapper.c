@@ -8,17 +8,23 @@
 
 #include <linux/acpi.h>
 #include <linux/component.h>
+#include <linux/thunderbolt.h>
+#include <linux/usb.h>
 
 #include "class.h"
 
 static int typec_aggregate_bind(struct device *dev)
 {
-	return component_bind_all(dev, NULL);
+	struct typec_port *port = to_typec_port(dev);
+
+	return component_bind_all(dev, &port->con);
 }
 
 static void typec_aggregate_unbind(struct device *dev)
 {
-	component_unbind_all(dev, NULL);
+	struct typec_port *port = to_typec_port(dev);
+
+	component_unbind_all(dev, &port->con);
 }
 
 static const struct component_master_ops typec_aggregate_ops = {
@@ -30,6 +36,28 @@ struct each_port_arg {
 	struct typec_port *port;
 	struct component_match *match;
 };
+
+static int usb4_port_compare(struct device *dev, void *fwnode)
+{
+	return usb4_usb3_port_match(dev, fwnode);
+}
+
+static bool typec_has_usb4_host_interface(const struct fwnode_handle *fwnode)
+{
+	if (!IS_REACHABLE(CONFIG_USB4))
+		return false;
+
+	struct fwnode_handle *nhi_fwnode __free(fwnode_handle) =
+		fwnode_find_reference(fwnode, "usb4-host-interface", 0);
+
+	/*
+	 * The USB4 port can only appear if the host interface is enabled in
+	 * the firmware and has been enumerated as a device. The latter is
+	 * the same check as in usb_acpi_add_usb4_devlink().
+	 */
+	return !IS_ERR(nhi_fwnode) && fwnode_device_is_available(nhi_fwnode) &&
+	       nhi_fwnode->dev;
+}
 
 static int typec_port_compare(struct device *dev, void *fwnode)
 {
@@ -46,9 +74,22 @@ static int typec_port_match(struct device *dev, void *data)
 	if (con_adev == adev)
 		return 0;
 
-	if (con_adev->pld_crc == adev->pld_crc)
+	if (con_adev->pld_crc == adev->pld_crc)	{
+		struct fwnode_handle *adev_fwnode = acpi_fwnode_handle(adev);
+
 		component_match_add(&arg->port->dev, &arg->match, typec_port_compare,
-				    acpi_fwnode_handle(adev));
+				    adev_fwnode);
+
+		/*
+		 * If dev is USB 3.x port, it may have reference to an available
+		 * USB4 host interface in which case we can also link the
+		 * Type-C port with the USB4 port.
+		 */
+		if (typec_has_usb4_host_interface(adev_fwnode))
+			component_match_add(&arg->port->dev, &arg->match,
+					    usb4_port_compare, adev_fwnode);
+	}
+
 	return 0;
 }
 

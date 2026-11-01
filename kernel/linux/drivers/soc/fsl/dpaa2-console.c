@@ -111,7 +111,7 @@ static int dpaa2_generic_console_open(struct inode *node, struct file *fp,
 	u64 base_addr;
 	int err;
 
-	cd = kmalloc(sizeof(*cd), GFP_KERNEL);
+	cd = kmalloc_obj(*cd);
 	if (!cd)
 		return -ENOMEM;
 
@@ -300,12 +300,10 @@ err_register_mc:
 	return error;
 }
 
-static int dpaa2_console_remove(struct platform_device *pdev)
+static void dpaa2_console_remove(struct platform_device *pdev)
 {
 	misc_deregister(&dpaa2_mc_console_dev);
 	misc_deregister(&dpaa2_aiop_console_dev);
-
-	return 0;
 }
 
 static const struct of_device_id dpaa2_console_match_table[] = {

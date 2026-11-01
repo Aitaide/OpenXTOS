@@ -9,9 +9,11 @@
 #include <linux/platform_device.h>
 #include <linux/jiffies.h>
 #include <linux/slab.h>
+#include <linux/string.h>
 #include <linux/time.h>
 #include <linux/wait.h>
 #include <linux/hrtimer.h>
+#include <linux/hrtimer_bases.h>
 #include <linux/math64.h>
 #include <linux/module.h>
 #include <sound/core.h>
@@ -99,6 +101,7 @@ struct dummy_timer_ops {
 	int (*prepare)(struct snd_pcm_substream *);
 	int (*start)(struct snd_pcm_substream *);
 	int (*stop)(struct snd_pcm_substream *);
+	int (*sync_stop)(struct snd_pcm_substream *);
 	snd_pcm_uframes_t (*pointer)(struct snd_pcm_substream *);
 };
 
@@ -268,19 +271,27 @@ static void dummy_systimer_update(struct dummy_systimer_pcm *dpcm)
 static int dummy_systimer_start(struct snd_pcm_substream *substream)
 {
 	struct dummy_systimer_pcm *dpcm = substream->runtime->private_data;
-	spin_lock(&dpcm->lock);
+
+	guard(spinlock)(&dpcm->lock);
 	dpcm->base_time = jiffies;
 	dummy_systimer_rearm(dpcm);
-	spin_unlock(&dpcm->lock);
 	return 0;
 }
 
 static int dummy_systimer_stop(struct snd_pcm_substream *substream)
 {
 	struct dummy_systimer_pcm *dpcm = substream->runtime->private_data;
-	spin_lock(&dpcm->lock);
-	del_timer(&dpcm->timer);
-	spin_unlock(&dpcm->lock);
+
+	guard(spinlock)(&dpcm->lock);
+	timer_delete(&dpcm->timer);
+	return 0;
+}
+
+static int dummy_systimer_sync_stop(struct snd_pcm_substream *substream)
+{
+	struct dummy_systimer_pcm *dpcm = substream->runtime->private_data;
+
+	timer_delete_sync(&dpcm->timer);
 	return 0;
 }
 
@@ -301,16 +312,15 @@ static int dummy_systimer_prepare(struct snd_pcm_substream *substream)
 
 static void dummy_systimer_callback(struct timer_list *t)
 {
-	struct dummy_systimer_pcm *dpcm = from_timer(dpcm, t, timer);
-	unsigned long flags;
+	struct dummy_systimer_pcm *dpcm = timer_container_of(dpcm, t, timer);
 	int elapsed = 0;
 
-	spin_lock_irqsave(&dpcm->lock, flags);
-	dummy_systimer_update(dpcm);
-	dummy_systimer_rearm(dpcm);
-	elapsed = dpcm->elapsed;
-	dpcm->elapsed = 0;
-	spin_unlock_irqrestore(&dpcm->lock, flags);
+	scoped_guard(spinlock_irqsave, &dpcm->lock) {
+		dummy_systimer_update(dpcm);
+		dummy_systimer_rearm(dpcm);
+		elapsed = dpcm->elapsed;
+		dpcm->elapsed = 0;
+	}
 	if (elapsed)
 		snd_pcm_period_elapsed(dpcm->substream);
 }
@@ -319,20 +329,17 @@ static snd_pcm_uframes_t
 dummy_systimer_pointer(struct snd_pcm_substream *substream)
 {
 	struct dummy_systimer_pcm *dpcm = substream->runtime->private_data;
-	snd_pcm_uframes_t pos;
 
-	spin_lock(&dpcm->lock);
+	guard(spinlock)(&dpcm->lock);
 	dummy_systimer_update(dpcm);
-	pos = dpcm->frac_pos / HZ;
-	spin_unlock(&dpcm->lock);
-	return pos;
+	return dpcm->frac_pos / HZ;
 }
 
 static int dummy_systimer_create(struct snd_pcm_substream *substream)
 {
 	struct dummy_systimer_pcm *dpcm;
 
-	dpcm = kzalloc(sizeof(*dpcm), GFP_KERNEL);
+	dpcm = kzalloc_obj(*dpcm);
 	if (!dpcm)
 		return -ENOMEM;
 	substream->runtime->private_data = dpcm;
@@ -344,7 +351,10 @@ static int dummy_systimer_create(struct snd_pcm_substream *substream)
 
 static void dummy_systimer_free(struct snd_pcm_substream *substream)
 {
-	kfree(substream->runtime->private_data);
+	struct dummy_systimer_pcm *dpcm = substream->runtime->private_data;
+
+	timer_shutdown_sync(&dpcm->timer);
+	kfree(dpcm);
 }
 
 static const struct dummy_timer_ops dummy_systimer_ops = {
@@ -353,6 +363,7 @@ static const struct dummy_timer_ops dummy_systimer_ops = {
 	.prepare =	dummy_systimer_prepare,
 	.start =	dummy_systimer_start,
 	.stop =		dummy_systimer_stop,
+	.sync_stop =	dummy_systimer_sync_stop,
 	.pointer =	dummy_systimer_pointer,
 };
 
@@ -410,9 +421,12 @@ static int dummy_hrtimer_stop(struct snd_pcm_substream *substream)
 	return 0;
 }
 
-static inline void dummy_hrtimer_sync(struct dummy_hrtimer_pcm *dpcm)
+static int dummy_hrtimer_sync_stop(struct snd_pcm_substream *substream)
 {
+	struct dummy_hrtimer_pcm *dpcm = substream->runtime->private_data;
+
 	hrtimer_cancel(&dpcm->timer);
+	return 0;
 }
 
 static snd_pcm_uframes_t
@@ -438,7 +452,6 @@ static int dummy_hrtimer_prepare(struct snd_pcm_substream *substream)
 	long sec;
 	unsigned long nsecs;
 
-	dummy_hrtimer_sync(dpcm);
 	period = runtime->period_size;
 	rate = runtime->rate;
 	sec = period / rate;
@@ -453,12 +466,11 @@ static int dummy_hrtimer_create(struct snd_pcm_substream *substream)
 {
 	struct dummy_hrtimer_pcm *dpcm;
 
-	dpcm = kzalloc(sizeof(*dpcm), GFP_KERNEL);
+	dpcm = kzalloc_obj(*dpcm);
 	if (!dpcm)
 		return -ENOMEM;
 	substream->runtime->private_data = dpcm;
-	hrtimer_init(&dpcm->timer, CLOCK_MONOTONIC, HRTIMER_MODE_REL_SOFT);
-	dpcm->timer.function = dummy_hrtimer_callback;
+	hrtimer_setup(&dpcm->timer, dummy_hrtimer_callback, CLOCK_MONOTONIC, HRTIMER_MODE_REL_SOFT);
 	dpcm->substream = substream;
 	atomic_set(&dpcm->running, 0);
 	return 0;
@@ -467,7 +479,7 @@ static int dummy_hrtimer_create(struct snd_pcm_substream *substream)
 static void dummy_hrtimer_free(struct snd_pcm_substream *substream)
 {
 	struct dummy_hrtimer_pcm *dpcm = substream->runtime->private_data;
-	dummy_hrtimer_sync(dpcm);
+
 	kfree(dpcm);
 }
 
@@ -477,6 +489,7 @@ static const struct dummy_timer_ops dummy_hrtimer_ops = {
 	.prepare =	dummy_hrtimer_prepare,
 	.start =	dummy_hrtimer_start,
 	.stop =		dummy_hrtimer_stop,
+	.sync_stop =	dummy_hrtimer_sync_stop,
 	.pointer =	dummy_hrtimer_pointer,
 };
 
@@ -497,6 +510,13 @@ static int dummy_pcm_trigger(struct snd_pcm_substream *substream, int cmd)
 		return get_dummy_ops(substream)->stop(substream);
 	}
 	return -EINVAL;
+}
+
+static int dummy_pcm_sync_stop(struct snd_pcm_substream *substream)
+{
+	if (get_dummy_ops(substream)->sync_stop)
+		return get_dummy_ops(substream)->sync_stop(substream);
+	return 0;
 }
 
 static int dummy_pcm_prepare(struct snd_pcm_substream *substream)
@@ -650,6 +670,7 @@ static const struct snd_pcm_ops dummy_pcm_ops = {
 	.hw_params =	dummy_pcm_hw_params,
 	.prepare =	dummy_pcm_prepare,
 	.trigger =	dummy_pcm_trigger,
+	.sync_stop =	dummy_pcm_sync_stop,
 	.pointer =	dummy_pcm_pointer,
 };
 
@@ -659,6 +680,7 @@ static const struct snd_pcm_ops dummy_pcm_ops_no_buf = {
 	.hw_params =	dummy_pcm_hw_params,
 	.prepare =	dummy_pcm_prepare,
 	.trigger =	dummy_pcm_trigger,
+	.sync_stop =	dummy_pcm_sync_stop,
 	.pointer =	dummy_pcm_pointer,
 	.copy =		dummy_pcm_copy,
 	.fill_silence =	dummy_pcm_silence,
@@ -685,7 +707,7 @@ static int snd_card_dummy_pcm(struct snd_dummy *dummy, int device,
 	snd_pcm_set_ops(pcm, SNDRV_PCM_STREAM_CAPTURE, ops);
 	pcm->private_data = dummy;
 	pcm->info_flags = 0;
-	strcpy(pcm->name, "Dummy PCM");
+	strscpy(pcm->name, "Dummy PCM");
 	if (!fake_buffer) {
 		snd_pcm_set_managed_buffer_all(pcm,
 			SNDRV_DMA_TYPE_CONTINUOUS,
@@ -724,10 +746,9 @@ static int snd_dummy_volume_get(struct snd_kcontrol *kcontrol,
 	struct snd_dummy *dummy = snd_kcontrol_chip(kcontrol);
 	int addr = kcontrol->private_value;
 
-	spin_lock_irq(&dummy->mixer_lock);
+	guard(spinlock_irq)(&dummy->mixer_lock);
 	ucontrol->value.integer.value[0] = dummy->mixer_volume[addr][0];
 	ucontrol->value.integer.value[1] = dummy->mixer_volume[addr][1];
-	spin_unlock_irq(&dummy->mixer_lock);
 	return 0;
 }
 
@@ -748,12 +769,11 @@ static int snd_dummy_volume_put(struct snd_kcontrol *kcontrol,
 		right = mixer_volume_level_min;
 	if (right > mixer_volume_level_max)
 		right = mixer_volume_level_max;
-	spin_lock_irq(&dummy->mixer_lock);
+	guard(spinlock_irq)(&dummy->mixer_lock);
 	change = dummy->mixer_volume[addr][0] != left ||
 	         dummy->mixer_volume[addr][1] != right;
 	dummy->mixer_volume[addr][0] = left;
 	dummy->mixer_volume[addr][1] = right;
-	spin_unlock_irq(&dummy->mixer_lock);
 	return change;
 }
 
@@ -773,10 +793,9 @@ static int snd_dummy_capsrc_get(struct snd_kcontrol *kcontrol,
 	struct snd_dummy *dummy = snd_kcontrol_chip(kcontrol);
 	int addr = kcontrol->private_value;
 
-	spin_lock_irq(&dummy->mixer_lock);
+	guard(spinlock_irq)(&dummy->mixer_lock);
 	ucontrol->value.integer.value[0] = dummy->capture_source[addr][0];
 	ucontrol->value.integer.value[1] = dummy->capture_source[addr][1];
-	spin_unlock_irq(&dummy->mixer_lock);
 	return 0;
 }
 
@@ -788,12 +807,11 @@ static int snd_dummy_capsrc_put(struct snd_kcontrol *kcontrol, struct snd_ctl_el
 
 	left = ucontrol->value.integer.value[0] & 1;
 	right = ucontrol->value.integer.value[1] & 1;
-	spin_lock_irq(&dummy->mixer_lock);
-	change = dummy->capture_source[addr][0] != left &&
+	guard(spinlock_irq)(&dummy->mixer_lock);
+	change = dummy->capture_source[addr][0] != left ||
 	         dummy->capture_source[addr][1] != right;
 	dummy->capture_source[addr][0] = left;
 	dummy->capture_source[addr][1] = right;
-	spin_unlock_irq(&dummy->mixer_lock);
 	return change;
 }
 
@@ -876,7 +894,7 @@ static int snd_card_dummy_new_mixer(struct snd_dummy *dummy)
 	int err;
 
 	spin_lock_init(&dummy->mixer_lock);
-	strcpy(card->mixername, "Dummy Mixer");
+	strscpy(card->mixername, "Dummy Mixer");
 	dummy->iobox = 1;
 
 	for (idx = 0; idx < ARRAY_SIZE(snd_dummy_controls); idx++) {
@@ -1025,6 +1043,12 @@ static int snd_dummy_probe(struct platform_device *devptr)
 	int idx, err;
 	int dev = devptr->id;
 
+	if (dev < 0 || dev >= SNDRV_CARDS) {
+		dev_warn(&devptr->dev,
+			 "Invalid card index %d, using default 0\n", dev);
+		dev = 0;
+	}
+
 	err = snd_devm_card_new(&devptr->dev, index[dev], id[dev], THIS_MODULE,
 				sizeof(struct snd_dummy), &card);
 	if (err < 0)
@@ -1033,8 +1057,7 @@ static int snd_dummy_probe(struct platform_device *devptr)
 	dummy->card = card;
 	for (mdl = dummy_models; *mdl && model[dev]; mdl++) {
 		if (strcmp(model[dev], (*mdl)->name) == 0) {
-			printk(KERN_INFO
-				"snd-dummy: Using model '%s' for card %i\n",
+			pr_info("snd-dummy: Using model '%s' for card %i\n",
 				(*mdl)->name, card->number);
 			m = dummy->model = *mdl;
 			break;
@@ -1085,8 +1108,8 @@ static int snd_dummy_probe(struct platform_device *devptr)
 	err = snd_card_dummy_new_mixer(dummy);
 	if (err < 0)
 		return err;
-	strcpy(card->driver, "Dummy");
-	strcpy(card->shortname, "Dummy");
+	strscpy(card->driver, "Dummy");
+	strscpy(card->shortname, "Dummy");
 	sprintf(card->longname, "Dummy %i", dev + 1);
 
 	dummy_proc_init(dummy);
@@ -1098,7 +1121,6 @@ static int snd_dummy_probe(struct platform_device *devptr)
 	return 0;
 }
 
-#ifdef CONFIG_PM_SLEEP
 static int snd_dummy_suspend(struct device *pdev)
 {
 	struct snd_card *card = dev_get_drvdata(pdev);
@@ -1115,11 +1137,7 @@ static int snd_dummy_resume(struct device *pdev)
 	return 0;
 }
 
-static SIMPLE_DEV_PM_OPS(snd_dummy_pm, snd_dummy_suspend, snd_dummy_resume);
-#define SND_DUMMY_PM_OPS	&snd_dummy_pm
-#else
-#define SND_DUMMY_PM_OPS	NULL
-#endif
+static DEFINE_SIMPLE_DEV_PM_OPS(snd_dummy_pm, snd_dummy_suspend, snd_dummy_resume);
 
 #define SND_DUMMY_DRIVER	"snd_dummy"
 
@@ -1127,7 +1145,7 @@ static struct platform_driver snd_dummy_driver = {
 	.probe		= snd_dummy_probe,
 	.driver		= {
 		.name	= SND_DUMMY_DRIVER,
-		.pm	= SND_DUMMY_PM_OPS,
+		.pm	= &snd_dummy_pm,
 	},
 };
 
@@ -1173,7 +1191,7 @@ static int __init alsa_card_dummy_init(void)
 	}
 	if (!cards) {
 #ifdef MODULE
-		printk(KERN_ERR "Dummy soundcard not found or device busy\n");
+		pr_err("Dummy soundcard not found or device busy\n");
 #endif
 		snd_dummy_unregister_all();
 		return -ENODEV;

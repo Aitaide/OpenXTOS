@@ -2,7 +2,6 @@
 // PCI interface driver for Loongson SPI Support
 // Copyright (C) 2023 Loongson Technology Corporation Limited
 
-#include <linux/mod_devicetable.h>
 #include <linux/pci.h>
 
 #include "spi-loongson.h"
@@ -19,11 +18,10 @@ static int loongson_spi_pci_register(struct pci_dev *pdev,
 	if (ret < 0)
 		return dev_err_probe(dev, ret, "cannot enable pci device\n");
 
-	ret = pcim_iomap_regions(pdev, BIT(pci_bar), pci_name(pdev));
+	reg_base = pcim_iomap_region(pdev, pci_bar, pci_name(pdev));
+	ret = PTR_ERR_OR_ZERO(reg_base);
 	if (ret)
 		return dev_err_probe(dev, ret, "failed to request and remap memory\n");
-
-	reg_base = pcim_iomap_table(pdev)[pci_bar];
 
 	ret = loongson_spi_init_controller(dev, reg_base);
 	if (ret)
@@ -45,11 +43,11 @@ static struct pci_driver loongson_spi_pci_driver = {
 	.probe      = loongson_spi_pci_register,
 	.driver	= {
 		.bus = &pci_bus_type,
-		.pm = &loongson_spi_dev_pm_ops,
+		.pm = pm_sleep_ptr(&loongson_spi_dev_pm_ops),
 	},
 };
 module_pci_driver(loongson_spi_pci_driver);
 
 MODULE_DESCRIPTION("Loongson spi pci driver");
 MODULE_LICENSE("GPL");
-MODULE_IMPORT_NS(SPI_LOONGSON_CORE);
+MODULE_IMPORT_NS("SPI_LOONGSON_CORE");

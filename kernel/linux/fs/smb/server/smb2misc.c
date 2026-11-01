@@ -5,9 +5,8 @@
  */
 
 #include "glob.h"
-#include "nterr.h"
 #include "smb_common.h"
-#include "smbstatus.h"
+#include "../common/smb2status.h"
 #include "mgmt/user_session.h"
 #include "connection.h"
 
@@ -101,29 +100,46 @@ static int smb2_get_data_area_len(unsigned int *off, unsigned int *len,
 		*len = le16_to_cpu(((struct smb2_sess_setup_req *)hdr)->SecurityBufferLength);
 		break;
 	case SMB2_TREE_CONNECT:
-		*off = le16_to_cpu(((struct smb2_tree_connect_req *)hdr)->PathOffset);
+		*off = max_t(unsigned short int,
+			     le16_to_cpu(((struct smb2_tree_connect_req *)hdr)->PathOffset),
+			     offsetof(struct smb2_tree_connect_req, Buffer));
 		*len = le16_to_cpu(((struct smb2_tree_connect_req *)hdr)->PathLength);
 		break;
 	case SMB2_CREATE:
 	{
+		unsigned short int name_off =
+			max_t(unsigned short int,
+			      le16_to_cpu(((struct smb2_create_req *)hdr)->NameOffset),
+			      offsetof(struct smb2_create_req, Buffer));
+		unsigned short int name_len =
+			le16_to_cpu(((struct smb2_create_req *)hdr)->NameLength);
+
 		if (((struct smb2_create_req *)hdr)->CreateContextsLength) {
 			*off = le32_to_cpu(((struct smb2_create_req *)
 				hdr)->CreateContextsOffset);
 			*len = le32_to_cpu(((struct smb2_create_req *)
 				hdr)->CreateContextsLength);
-			break;
+			if (!name_len)
+				break;
+
+			if (name_off + name_len < (u64)*off + *len)
+				break;
 		}
 
-		*off = le16_to_cpu(((struct smb2_create_req *)hdr)->NameOffset);
-		*len = le16_to_cpu(((struct smb2_create_req *)hdr)->NameLength);
+		*off = name_off;
+		*len = name_len;
 		break;
 	}
 	case SMB2_QUERY_INFO:
-		*off = le16_to_cpu(((struct smb2_query_info_req *)hdr)->InputBufferOffset);
+		*off = max_t(unsigned int,
+			     le16_to_cpu(((struct smb2_query_info_req *)hdr)->InputBufferOffset),
+			     offsetof(struct smb2_query_info_req, Buffer));
 		*len = le32_to_cpu(((struct smb2_query_info_req *)hdr)->InputBufferLength);
 		break;
 	case SMB2_SET_INFO:
-		*off = le16_to_cpu(((struct smb2_set_info_req *)hdr)->BufferOffset);
+		*off = max_t(unsigned int,
+			     le16_to_cpu(((struct smb2_set_info_req *)hdr)->BufferOffset),
+			     offsetof(struct smb2_set_info_req, Buffer));
 		*len = le32_to_cpu(((struct smb2_set_info_req *)hdr)->BufferLength);
 		break;
 	case SMB2_READ:
@@ -133,7 +149,7 @@ static int smb2_get_data_area_len(unsigned int *off, unsigned int *len,
 	case SMB2_WRITE:
 		if (((struct smb2_write_req *)hdr)->DataOffset ||
 		    ((struct smb2_write_req *)hdr)->Length) {
-			*off = max_t(unsigned int,
+			*off = max_t(unsigned short int,
 				     le16_to_cpu(((struct smb2_write_req *)hdr)->DataOffset),
 				     offsetof(struct smb2_write_req, Buffer));
 			*len = le32_to_cpu(((struct smb2_write_req *)hdr)->Length);
@@ -144,7 +160,9 @@ static int smb2_get_data_area_len(unsigned int *off, unsigned int *len,
 		*len = le16_to_cpu(((struct smb2_write_req *)hdr)->WriteChannelInfoLength);
 		break;
 	case SMB2_QUERY_DIRECTORY:
-		*off = le16_to_cpu(((struct smb2_query_directory_req *)hdr)->FileNameOffset);
+		*off = max_t(unsigned short int,
+			     le16_to_cpu(((struct smb2_query_directory_req *)hdr)->FileNameOffset),
+			     offsetof(struct smb2_query_directory_req, Buffer));
 		*len = le16_to_cpu(((struct smb2_query_directory_req *)hdr)->FileNameLength);
 		break;
 	case SMB2_LOCK:
@@ -159,7 +177,9 @@ static int smb2_get_data_area_len(unsigned int *off, unsigned int *len,
 		break;
 	}
 	case SMB2_IOCTL:
-		*off = le32_to_cpu(((struct smb2_ioctl_req *)hdr)->InputOffset);
+		*off = max_t(unsigned int,
+			     le32_to_cpu(((struct smb2_ioctl_req *)hdr)->InputOffset),
+			     offsetof(struct smb2_ioctl_req, Buffer));
 		*len = le32_to_cpu(((struct smb2_ioctl_req *)hdr)->InputCount);
 		break;
 	default:
@@ -241,8 +261,12 @@ calc_size_exit:
 
 static inline int smb2_query_info_req_len(struct smb2_query_info_req *h)
 {
-	return le32_to_cpu(h->InputBufferLength) +
-		le32_to_cpu(h->OutputBufferLength);
+	return le32_to_cpu(h->InputBufferLength);
+}
+
+static inline int smb2_query_info_resp_len(struct smb2_query_info_req *h)
+{
+	return le32_to_cpu(h->OutputBufferLength);
 }
 
 static inline int smb2_set_info_req_len(struct smb2_set_info_req *h)
@@ -277,9 +301,10 @@ static inline int smb2_ioctl_resp_len(struct smb2_ioctl_req *h)
 		le32_to_cpu(h->MaxOutputResponse);
 }
 
-static int smb2_validate_credit_charge(struct ksmbd_conn *conn,
+static int smb2_validate_credit_charge(struct ksmbd_work *work,
 				       struct smb2_hdr *hdr)
 {
+	struct ksmbd_conn *conn = work->conn;
 	unsigned int req_len = 0, expect_resp_len = 0, calc_credit_num, max_len;
 	unsigned short credit_charge = le16_to_cpu(hdr->CreditCharge);
 	void *__hdr = hdr;
@@ -288,6 +313,7 @@ static int smb2_validate_credit_charge(struct ksmbd_conn *conn,
 	switch (hdr->Command) {
 	case SMB2_QUERY_INFO:
 		req_len = smb2_query_info_req_len(__hdr);
+		expect_resp_len = smb2_query_info_resp_len(__hdr);
 		break;
 	case SMB2_SET_INFO:
 		req_len = smb2_set_info_req_len(__hdr);
@@ -336,11 +362,82 @@ static int smb2_validate_credit_charge(struct ksmbd_conn *conn,
 		ksmbd_debug(SMB, "Limits exceeding the maximum allowable outstanding requests, given : %u, pending : %u\n",
 			    credit_charge, conn->outstanding_credits);
 		ret = 1;
-	} else
+	} else {
 		conn->outstanding_credits += credit_charge;
+		work->credit_charge = credit_charge;
+	}
 
 	spin_unlock(&conn->credits_lock);
 
+	return ret;
+}
+
+/*
+ * Verify that the sequence number(s) consumed by an incoming request fall
+ * within the connection's command sequence window and are not a replay, then
+ * remove them from the window. Returns 0 if the request
+ * may proceed, or 1 if it is invalid and the connection must be torn down.
+ */
+static int smb2_check_sequence_number(struct ksmbd_work *work,
+				      struct smb2_hdr *hdr)
+{
+	struct ksmbd_conn *conn = work->conn;
+	u64 mid = le64_to_cpu(hdr->MessageId);
+	unsigned short charge;
+	u64 i;
+	int ret = 0;
+
+	/* An SMB2 CANCEL consumes no sequence number. */
+	if (hdr->Command == SMB2_CANCEL)
+		return 0;
+
+	/*
+	 * A multi-credit request consumes CreditCharge consecutive sequence
+	 * numbers; every other request consumes exactly one.
+	 */
+	charge = le16_to_cpu(hdr->CreditCharge);
+	if (!(conn->vals->req_capabilities & SMB2_GLOBAL_CAP_LARGE_MTU) ||
+	    charge == 0)
+		charge = 1;
+
+	/* The 64-bit sequence number space must not wrap. */
+	if (mid + charge < mid) {
+		pr_err("SMB2 sequence number wrapped (mid %llu charge %u)\n",
+		       mid, charge);
+		return 1;
+	}
+
+	spin_lock(&conn->credits_lock);
+
+	/* The whole range must lie within the granted window... */
+	if (mid < conn->seq_low || mid + charge > conn->seq_high) {
+		ksmbd_debug(SMB,
+			    "MessageId %llu (charge %u) outside command window [%llu, %llu)\n",
+			    mid, charge, conn->seq_low, conn->seq_high);
+		ret = 1;
+		goto out;
+	}
+
+	/* ...and none of it may have been consumed already (replay). */
+	for (i = mid; i < mid + charge; i++) {
+		if (!test_bit(i & (KSMBD_CMD_SEQ_WINDOW - 1), conn->seq_bitmap)) {
+			ksmbd_debug(SMB,
+				    "replayed sequence number %llu (mid %llu charge %u)\n",
+				    i, mid, charge);
+			ret = 1;
+			goto out;
+		}
+	}
+
+	/* Consume the sequence numbers and slide the low edge forward. */
+	for (i = mid; i < mid + charge; i++)
+		__clear_bit(i & (KSMBD_CMD_SEQ_WINDOW - 1), conn->seq_bitmap);
+	while (conn->seq_low < conn->seq_high &&
+	       !test_bit(conn->seq_low & (KSMBD_CMD_SEQ_WINDOW - 1),
+			 conn->seq_bitmap))
+		conn->seq_low++;
+out:
+	spin_unlock(&conn->credits_lock);
 	return ret;
 }
 
@@ -376,6 +473,11 @@ int ksmbd_smb2_check_message(struct ksmbd_work *work)
 	command = le16_to_cpu(hdr->Command);
 	if (command >= NUMBER_OF_SMB2_COMMANDS) {
 		ksmbd_debug(SMB, "Illegal SMB2 command %d\n", command);
+		return 1;
+	}
+
+	if (len < __SMB2_HEADER_STRUCTURE_SIZE + sizeof(__le16)) {
+		ksmbd_debug(SMB, "Message is too small for StructureSize2\n");
 		return 1;
 	}
 
@@ -439,9 +541,19 @@ int ksmbd_smb2_check_message(struct ksmbd_work *work)
 	}
 
 validate_credit:
-	if ((work->conn->vals->capabilities & SMB2_GLOBAL_CAP_LARGE_MTU) &&
-	    smb2_validate_credit_charge(work->conn, hdr))
+	if ((work->conn->vals->req_capabilities & SMB2_GLOBAL_CAP_LARGE_MTU) &&
+	    smb2_validate_credit_charge(work, hdr))
 		return 1;
+
+	/*
+	 * A sequence number violation (out of window or a replay) is a
+	 * protocol error. tear the connection down rather than
+	 * keep accepting requests on it.
+	 */
+	if (smb2_check_sequence_number(work, hdr)) {
+		ksmbd_conn_set_exiting(work->conn);
+		return 1;
+	}
 
 	return 0;
 }

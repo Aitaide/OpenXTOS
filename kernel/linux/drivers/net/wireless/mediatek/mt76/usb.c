@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: ISC
+// SPDX-License-Identifier: BSD-3-Clause-Clear
 /*
  * Copyright (C) 2018 Lorenzo Bianconi <lorenzo.bianconi83@gmail.com>
  */
@@ -30,18 +30,29 @@ int __mt76u_vendor_request(struct mt76_dev *dev, u8 req, u8 req_type,
 	for (i = 0; i < MT_VEND_REQ_MAX_RETRY; i++) {
 		if (test_bit(MT76_REMOVED, &dev->phy.state))
 			return -EIO;
+		if (dev->usb.ctrl_timeout && atomic_read(&dev->bus_hung))
+			return -EIO;
 
 		ret = usb_control_msg(udev, pipe, req, req_type, val,
 				      offset, buf, len, MT_VEND_REQ_TOUT_MS);
-		if (ret == -ENODEV)
+		if (ret == -ENODEV || ret == -EPROTO)
 			set_bit(MT76_REMOVED, &dev->phy.state);
-		if (ret >= 0 || ret == -ENODEV)
+		if (ret >= 0 || ret == -ENODEV || ret == -EPROTO)
 			return ret;
 		usleep_range(5000, 10000);
 	}
 
 	dev_err(dev->dev, "vendor request req:%02x off:%04x failed:%d\n",
 		req, offset, ret);
+
+	if (dev->usb.ctrl_timeout) {
+		atomic_set(&dev->bus_hung, true);
+		dev_err(dev->dev, "vendor request req:%02x off:%04x timed out, marking bus hung\n",
+			req, offset);
+		dev->usb.ctrl_timeout(dev, ret);
+		return ret;
+	}
+
 	return ret;
 }
 EXPORT_SYMBOL_GPL(__mt76u_vendor_request);
@@ -580,7 +591,11 @@ static void mt76u_complete_rx(struct urb *urb)
 
 	q->head = (q->head + 1) % q->ndesc;
 	q->queued++;
-	mt76_worker_schedule(&dev->usb.rx_worker);
+
+	if (q == &dev->q_rx[MT_RXQ_MAIN])
+		napi_schedule(&dev->napi[MT_RXQ_MAIN]);
+	else
+		mt76_worker_schedule(&dev->usb.rx_worker);
 out:
 	spin_unlock_irqrestore(&q->lock, flags);
 }
@@ -618,11 +633,23 @@ mt76u_process_rx_queue(struct mt76_dev *dev, struct mt76_queue *q)
 		}
 		mt76u_submit_rx_buf(dev, qid, urb);
 	}
-	if (qid == MT_RXQ_MAIN) {
-		local_bh_disable();
-		mt76_rx_poll_complete(dev, MT_RXQ_MAIN, NULL);
-		local_bh_enable();
-	}
+}
+
+/* Threaded NAPI poll for the MAIN RX queue: drain URBs, build skbs, resubmit,
+ * then deliver through napi_gro_receive() and let napi_complete() flush GRO.
+ */
+static int mt76u_napi_poll(struct napi_struct *napi, int budget)
+{
+	struct mt76_dev *dev = mt76_priv(napi->dev);
+
+	rcu_read_lock();
+	mt76u_process_rx_queue(dev, &dev->q_rx[MT_RXQ_MAIN]);
+	mt76_rx_poll_complete(dev, MT_RXQ_MAIN, napi);
+	rcu_read_unlock();
+
+	napi_complete(napi);
+
+	return 0;
 }
 
 static void mt76u_rx_worker(struct mt76_worker *w)
@@ -632,8 +659,13 @@ static void mt76u_rx_worker(struct mt76_worker *w)
 	int i;
 
 	rcu_read_lock();
-	mt76_for_each_q_rx(dev, i)
+	mt76_for_each_q_rx(dev, i) {
+		/* MT_RXQ_MAIN is serviced by the threaded NAPI poll */
+		if (i == MT_RXQ_MAIN)
+			continue;
+
 		mt76u_process_rx_queue(dev, &dev->q_rx[i]);
+	}
 	rcu_read_unlock();
 }
 
@@ -731,6 +763,13 @@ void mt76u_stop_rx(struct mt76_dev *dev)
 		for (j = 0; j < q->ndesc; j++)
 			usb_poison_urb(q->entry[j].urb);
 	}
+
+	/* The MAIN queue napi stays enabled for the device lifetime. The URBs
+	 * are now poisoned, so mt76u_complete_rx() can no longer reschedule it;
+	 * just drain any in-flight poll before the caller frees or resets.
+	 */
+	if (dev->napi_dev)
+		napi_synchronize(&dev->napi[MT_RXQ_MAIN]);
 }
 EXPORT_SYMBOL_GPL(mt76u_stop_rx);
 
@@ -767,7 +806,7 @@ static void mt76u_status_worker(struct mt76_worker *w)
 	if (!test_bit(MT76_STATE_RUNNING, &dev->phy.state))
 		return;
 
-	for (i = 0; i < IEEE80211_NUM_ACS; i++) {
+	for (i = 0; i <= MT_TXQ_PSD; i++) {
 		q = dev->phy.q_tx[i];
 		if (!q)
 			continue;
@@ -850,13 +889,14 @@ mt76u_tx_setup_buffers(struct mt76_dev *dev, struct sk_buff *skb,
 }
 
 static int
-mt76u_tx_queue_skb(struct mt76_dev *dev, struct mt76_queue *q,
+mt76u_tx_queue_skb(struct mt76_phy *phy, struct mt76_queue *q,
 		   enum mt76_txq_id qid, struct sk_buff *skb,
 		   struct mt76_wcid *wcid, struct ieee80211_sta *sta)
 {
 	struct mt76_tx_info tx_info = {
 		.skb = skb,
 	};
+	struct mt76_dev *dev = phy->dev;
 	u16 idx = q->head;
 	int err;
 
@@ -872,9 +912,8 @@ mt76u_tx_queue_skb(struct mt76_dev *dev, struct mt76_queue *q,
 	if (err < 0)
 		return err;
 
-	mt76u_fill_bulk_urb(dev, USB_DIR_OUT, q2ep(q->hw_idx),
-			    q->entry[idx].urb, mt76u_complete_tx,
-			    &q->entry[idx]);
+	mt76u_fill_bulk_urb(dev, USB_DIR_OUT, q->ep, q->entry[idx].urb,
+			    mt76u_complete_tx, &q->entry[idx]);
 
 	q->head = (q->head + 1) % q->ndesc;
 	q->entry[idx].skb = tx_info.skb;
@@ -906,9 +945,13 @@ static void mt76u_tx_kick(struct mt76_dev *dev, struct mt76_queue *q)
 	}
 }
 
-static u8 mt76u_ac_to_hwq(struct mt76_dev *dev, u8 ac)
+static void
+mt76u_ac_to_hwq(struct mt76_dev *dev, struct mt76_queue *q, u8 qid)
 {
-	if (mt76_chip(dev) == 0x7663) {
+	u8 ac = qid < IEEE80211_NUM_ACS ? qid : IEEE80211_AC_BE;
+
+	switch (mt76_chip(dev)) {
+	case 0x7663: {
 		static const u8 lmac_queue_map[] = {
 			/* ac to lmac mapping */
 			[IEEE80211_AC_BK] = 0,
@@ -917,33 +960,38 @@ static u8 mt76u_ac_to_hwq(struct mt76_dev *dev, u8 ac)
 			[IEEE80211_AC_VO] = 4,
 		};
 
-		if (WARN_ON(ac >= ARRAY_SIZE(lmac_queue_map)))
-			return 1; /* BE */
-
-		return lmac_queue_map[ac];
+		q->hw_idx = lmac_queue_map[ac];
+		q->ep = q->hw_idx + 1;
+		break;
 	}
-
-	return mt76_ac_to_hwq(ac);
+	case 0x6639:
+	case 0x7902:
+	case 0x7961:
+	case 0x7925:
+		q->hw_idx = mt76_ac_to_hwq(ac);
+		q->ep = qid == MT_TXQ_PSD ? MT_EP_OUT_HCCA : q->hw_idx + 1;
+		break;
+	default:
+		q->hw_idx = mt76_ac_to_hwq(ac);
+		q->ep = q->hw_idx + 1;
+		break;
+	}
 }
 
 static int mt76u_alloc_tx(struct mt76_dev *dev)
 {
-	struct mt76_queue *q;
-	int i, j, err;
+	int i;
 
 	for (i = 0; i <= MT_TXQ_PSD; i++) {
-		if (i >= IEEE80211_NUM_ACS) {
-			dev->phy.q_tx[i] = dev->phy.q_tx[0];
-			continue;
-		}
+		struct mt76_queue *q;
+		int j, err;
 
 		q = devm_kzalloc(dev->dev, sizeof(*q), GFP_KERNEL);
 		if (!q)
 			return -ENOMEM;
 
 		spin_lock_init(&q->lock);
-		q->hw_idx = mt76u_ac_to_hwq(dev, i);
-
+		mt76u_ac_to_hwq(dev, q, i);
 		dev->phy.q_tx[i] = q;
 
 		q->entry = devm_kcalloc(dev->dev,
@@ -969,7 +1017,7 @@ static void mt76u_free_tx(struct mt76_dev *dev)
 
 	mt76_worker_teardown(&dev->usb.status_worker);
 
-	for (i = 0; i < IEEE80211_NUM_ACS; i++) {
+	for (i = 0; i <= MT_TXQ_PSD; i++) {
 		struct mt76_queue *q;
 		int j;
 
@@ -999,7 +1047,7 @@ void mt76u_stop_tx(struct mt76_dev *dev)
 
 		dev_err(dev->dev, "timed out waiting for pending tx\n");
 
-		for (i = 0; i < IEEE80211_NUM_ACS; i++) {
+		for (i = 0; i <= MT_TXQ_PSD; i++) {
 			q = dev->phy.q_tx[i];
 			if (!q)
 				continue;
@@ -1013,7 +1061,7 @@ void mt76u_stop_tx(struct mt76_dev *dev)
 		/* On device removal we maight queue skb's, but mt76u_tx_kick()
 		 * will fail to submit urb, cleanup those skb's manually.
 		 */
-		for (i = 0; i < IEEE80211_NUM_ACS; i++) {
+		for (i = 0; i <= MT_TXQ_PSD; i++) {
 			q = dev->phy.q_tx[i];
 			if (!q)
 				continue;
@@ -1042,6 +1090,13 @@ void mt76u_queues_deinit(struct mt76_dev *dev)
 	mt76u_stop_rx(dev);
 	mt76u_stop_tx(dev);
 
+	if (dev->napi_dev) {
+		napi_disable(&dev->napi[MT_RXQ_MAIN]);
+		netif_napi_del(&dev->napi[MT_RXQ_MAIN]);
+		free_netdev(dev->napi_dev);
+		dev->napi_dev = NULL;
+	}
+
 	mt76u_free_rx(dev);
 	mt76u_free_tx(dev);
 }
@@ -1069,6 +1124,7 @@ int __mt76u_init(struct mt76_dev *dev, struct usb_interface *intf,
 {
 	struct usb_device *udev = interface_to_usbdev(intf);
 	struct mt76_usb *usb = &dev->usb;
+	struct mt76_dev **priv;
 	int err;
 
 	INIT_WORK(&usb->stat_work, mt76u_tx_status_data);
@@ -1106,6 +1162,20 @@ int __mt76u_init(struct mt76_dev *dev, struct usb_interface *intf,
 	sched_set_fifo_low(usb->rx_worker.task);
 	sched_set_fifo_low(usb->status_worker.task);
 
+	/* threaded NAPI on a dummy netdev (reusing mt76_dev's napi_dev/napi[])
+	 * services the MAIN RX queue and gives the RX path GRO
+	 */
+	dev->napi_dev = alloc_netdev_dummy(sizeof(struct mt76_dev *));
+	if (!dev->napi_dev)
+		return -ENOMEM;
+
+	priv = netdev_priv(dev->napi_dev);
+	*priv = dev;
+	strscpy(dev->napi_dev->name, "mt76u-rx", sizeof(dev->napi_dev->name));
+	dev->napi_dev->threaded = 1;
+	netif_napi_add(dev->napi_dev, &dev->napi[MT_RXQ_MAIN], mt76u_napi_poll);
+	napi_enable(&dev->napi[MT_RXQ_MAIN]);
+
 	return 0;
 }
 EXPORT_SYMBOL_GPL(__mt76u_init);
@@ -1128,4 +1198,5 @@ int mt76u_init(struct mt76_dev *dev, struct usb_interface *intf)
 EXPORT_SYMBOL_GPL(mt76u_init);
 
 MODULE_AUTHOR("Lorenzo Bianconi <lorenzo.bianconi83@gmail.com>");
+MODULE_DESCRIPTION("MediaTek MT76x USB helpers");
 MODULE_LICENSE("Dual BSD/GPL");

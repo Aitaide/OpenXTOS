@@ -7,12 +7,13 @@
  *	Anup Patel <apatel@ventanamicro.com>
  */
 
+#include <linux/irqchip/riscv-aplic.h>
 #include <linux/kvm_host.h>
 #include <linux/math.h>
+#include <linux/nospec.h>
 #include <linux/spinlock.h>
 #include <linux/swab.h>
 #include <kvm/iodev.h>
-#include <asm/kvm_aia_aplic.h>
 
 struct aplic_irq {
 	raw_spinlock_t lock;
@@ -34,7 +35,7 @@ struct aplic {
 
 	u32 nr_irqs;
 	u32 nr_words;
-	struct aplic_irq *irqs;
+	struct aplic_irq irqs[] __counted_by(nr_irqs);
 };
 
 static u32 aplic_read_sourcecfg(struct aplic *aplic, u32 irq)
@@ -45,7 +46,7 @@ static u32 aplic_read_sourcecfg(struct aplic *aplic, u32 irq)
 
 	if (!irq || aplic->nr_irqs <= irq)
 		return 0;
-	irqd = &aplic->irqs[irq];
+	irqd = &aplic->irqs[array_index_nospec(irq, aplic->nr_irqs)];
 
 	raw_spin_lock_irqsave(&irqd->lock, flags);
 	ret = irqd->sourcecfg;
@@ -61,7 +62,7 @@ static void aplic_write_sourcecfg(struct aplic *aplic, u32 irq, u32 val)
 
 	if (!irq || aplic->nr_irqs <= irq)
 		return;
-	irqd = &aplic->irqs[irq];
+	irqd = &aplic->irqs[array_index_nospec(irq, aplic->nr_irqs)];
 
 	if (val & APLIC_SOURCECFG_D)
 		val = 0;
@@ -81,7 +82,7 @@ static u32 aplic_read_target(struct aplic *aplic, u32 irq)
 
 	if (!irq || aplic->nr_irqs <= irq)
 		return 0;
-	irqd = &aplic->irqs[irq];
+	irqd = &aplic->irqs[array_index_nospec(irq, aplic->nr_irqs)];
 
 	raw_spin_lock_irqsave(&irqd->lock, flags);
 	ret = irqd->target;
@@ -97,7 +98,7 @@ static void aplic_write_target(struct aplic *aplic, u32 irq, u32 val)
 
 	if (!irq || aplic->nr_irqs <= irq)
 		return;
-	irqd = &aplic->irqs[irq];
+	irqd = &aplic->irqs[array_index_nospec(irq, aplic->nr_irqs)];
 
 	val &= APLIC_TARGET_EIID_MASK |
 	       (APLIC_TARGET_HART_IDX_MASK << APLIC_TARGET_HART_IDX_SHIFT) |
@@ -116,7 +117,7 @@ static bool aplic_read_pending(struct aplic *aplic, u32 irq)
 
 	if (!irq || aplic->nr_irqs <= irq)
 		return false;
-	irqd = &aplic->irqs[irq];
+	irqd = &aplic->irqs[array_index_nospec(irq, aplic->nr_irqs)];
 
 	raw_spin_lock_irqsave(&irqd->lock, flags);
 	ret = (irqd->state & APLIC_IRQ_STATE_PENDING) ? true : false;
@@ -132,16 +133,27 @@ static void aplic_write_pending(struct aplic *aplic, u32 irq, bool pending)
 
 	if (!irq || aplic->nr_irqs <= irq)
 		return;
-	irqd = &aplic->irqs[irq];
+	irqd = &aplic->irqs[array_index_nospec(irq, aplic->nr_irqs)];
 
 	raw_spin_lock_irqsave(&irqd->lock, flags);
 
 	sm = irqd->sourcecfg & APLIC_SOURCECFG_SM_MASK;
-	if (!pending &&
-	    ((sm == APLIC_SOURCECFG_SM_LEVEL_HIGH) ||
-	     (sm == APLIC_SOURCECFG_SM_LEVEL_LOW)))
+	if (sm == APLIC_SOURCECFG_SM_INACTIVE)
 		goto skip_write_pending;
 
+	if (sm == APLIC_SOURCECFG_SM_LEVEL_HIGH ||
+	    sm == APLIC_SOURCECFG_SM_LEVEL_LOW) {
+		if (!pending)
+			goto noskip_write_pending;
+		if ((irqd->state & APLIC_IRQ_STATE_INPUT) &&
+		    sm == APLIC_SOURCECFG_SM_LEVEL_LOW)
+			goto skip_write_pending;
+		if (!(irqd->state & APLIC_IRQ_STATE_INPUT) &&
+		    sm == APLIC_SOURCECFG_SM_LEVEL_HIGH)
+			goto skip_write_pending;
+	}
+
+noskip_write_pending:
 	if (pending)
 		irqd->state |= APLIC_IRQ_STATE_PENDING;
 	else
@@ -159,7 +171,7 @@ static bool aplic_read_enabled(struct aplic *aplic, u32 irq)
 
 	if (!irq || aplic->nr_irqs <= irq)
 		return false;
-	irqd = &aplic->irqs[irq];
+	irqd = &aplic->irqs[array_index_nospec(irq, aplic->nr_irqs)];
 
 	raw_spin_lock_irqsave(&irqd->lock, flags);
 	ret = (irqd->state & APLIC_IRQ_STATE_ENABLED) ? true : false;
@@ -175,7 +187,7 @@ static void aplic_write_enabled(struct aplic *aplic, u32 irq, bool enabled)
 
 	if (!irq || aplic->nr_irqs <= irq)
 		return;
-	irqd = &aplic->irqs[irq];
+	irqd = &aplic->irqs[array_index_nospec(irq, aplic->nr_irqs)];
 
 	raw_spin_lock_irqsave(&irqd->lock, flags);
 	if (enabled)
@@ -187,16 +199,31 @@ static void aplic_write_enabled(struct aplic *aplic, u32 irq, bool enabled)
 
 static bool aplic_read_input(struct aplic *aplic, u32 irq)
 {
-	bool ret;
-	unsigned long flags;
+	u32 sourcecfg, sm, raw_input, irq_inverted;
 	struct aplic_irq *irqd;
+	unsigned long flags;
+	bool ret = false;
 
 	if (!irq || aplic->nr_irqs <= irq)
 		return false;
-	irqd = &aplic->irqs[irq];
+	irqd = &aplic->irqs[array_index_nospec(irq, aplic->nr_irqs)];
 
 	raw_spin_lock_irqsave(&irqd->lock, flags);
-	ret = (irqd->state & APLIC_IRQ_STATE_INPUT) ? true : false;
+
+	sourcecfg = irqd->sourcecfg;
+	if (sourcecfg & APLIC_SOURCECFG_D)
+		goto skip;
+
+	sm = sourcecfg & APLIC_SOURCECFG_SM_MASK;
+	if (sm == APLIC_SOURCECFG_SM_INACTIVE)
+		goto skip;
+
+	raw_input = (irqd->state & APLIC_IRQ_STATE_INPUT) ? 1 : 0;
+	irq_inverted = (sm == APLIC_SOURCECFG_SM_LEVEL_LOW ||
+			sm == APLIC_SOURCECFG_SM_EDGE_FALL) ? 1 : 0;
+	ret = !!(raw_input ^ irq_inverted);
+
+skip:
 	raw_spin_unlock_irqrestore(&irqd->lock, flags);
 
 	return ret;
@@ -228,7 +255,7 @@ static void aplic_update_irq_range(struct kvm *kvm, u32 first, u32 last)
 	for (irq = first; irq <= last; irq++) {
 		if (!irq || aplic->nr_irqs <= irq)
 			continue;
-		irqd = &aplic->irqs[irq];
+		irqd = &aplic->irqs[array_index_nospec(irq, aplic->nr_irqs)];
 
 		raw_spin_lock_irqsave(&irqd->lock, flags);
 
@@ -257,7 +284,7 @@ int kvm_riscv_aia_aplic_inject(struct kvm *kvm, u32 source, bool level)
 
 	if (!aplic || !source || (aplic->nr_irqs <= source))
 		return -ENODEV;
-	irqd = &aplic->irqs[source];
+	irqd = &aplic->irqs[array_index_nospec(source, aplic->nr_irqs)];
 	ie = (aplic->domaincfg & APLIC_DOMAINCFG_IE) ? true : false;
 
 	raw_spin_lock_irqsave(&irqd->lock, flags);
@@ -554,7 +581,8 @@ int kvm_riscv_aia_aplic_init(struct kvm *kvm)
 		return 0;
 
 	/* Allocate APLIC global state */
-	aplic = kzalloc(sizeof(*aplic), GFP_KERNEL);
+	aplic = kzalloc_flex(*aplic, irqs, kvm->arch.aia.nr_sources + 1,
+			     GFP_KERNEL_ACCOUNT);
 	if (!aplic)
 		return -ENOMEM;
 	kvm->arch.aia.aplic_state = aplic;
@@ -562,12 +590,6 @@ int kvm_riscv_aia_aplic_init(struct kvm *kvm)
 	/* Setup APLIC IRQs */
 	aplic->nr_irqs = kvm->arch.aia.nr_sources + 1;
 	aplic->nr_words = DIV_ROUND_UP(aplic->nr_irqs, 32);
-	aplic->irqs = kcalloc(aplic->nr_irqs,
-			      sizeof(*aplic->irqs), GFP_KERNEL);
-	if (!aplic->irqs) {
-		ret = -ENOMEM;
-		goto fail_free_aplic;
-	}
 	for (i = 0; i < aplic->nr_irqs; i++)
 		raw_spin_lock_init(&aplic->irqs[i].lock);
 
@@ -580,7 +602,7 @@ int kvm_riscv_aia_aplic_init(struct kvm *kvm)
 				      &aplic->iodev);
 	mutex_unlock(&kvm->slots_lock);
 	if (ret)
-		goto fail_free_aplic_irqs;
+		goto fail_free_aplic;
 
 	/* Setup default IRQ routing */
 	ret = kvm_riscv_setup_default_irq_routing(kvm, aplic->nr_irqs);
@@ -593,8 +615,6 @@ fail_unreg_iodev:
 	mutex_lock(&kvm->slots_lock);
 	kvm_io_bus_unregister_dev(kvm, KVM_MMIO_BUS, &aplic->iodev);
 	mutex_unlock(&kvm->slots_lock);
-fail_free_aplic_irqs:
-	kfree(aplic->irqs);
 fail_free_aplic:
 	kvm->arch.aia.aplic_state = NULL;
 	kfree(aplic);
@@ -611,8 +631,6 @@ void kvm_riscv_aia_aplic_cleanup(struct kvm *kvm)
 	mutex_lock(&kvm->slots_lock);
 	kvm_io_bus_unregister_dev(kvm, KVM_MMIO_BUS, &aplic->iodev);
 	mutex_unlock(&kvm->slots_lock);
-
-	kfree(aplic->irqs);
 
 	kvm->arch.aia.aplic_state = NULL;
 	kfree(aplic);

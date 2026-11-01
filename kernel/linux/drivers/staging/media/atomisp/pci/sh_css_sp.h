@@ -2,15 +2,6 @@
 /*
  * Support for Intel Camera Imaging ISP subsystem.
  * Copyright (c) 2015, Intel Corporation.
- *
- * This program is free software; you can redistribute it and/or modify it
- * under the terms and conditions of the GNU General Public License,
- * version 2, as published by the Free Software Foundation.
- *
- * This program is distributed in the hope it will be useful, but WITHOUT
- * ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
- * FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License for
- * more details.
  */
 
 #ifndef _SH_CSS_SP_H_
@@ -18,9 +9,7 @@
 
 #include <system_global.h>
 #include <type_support.h>
-#if !defined(ISP2401)
 #include "input_formatter.h"
-#endif
 
 #include "ia_css_binary.h"
 #include "ia_css_types.h"
@@ -79,7 +68,7 @@ sh_css_read_host2sp_command(void);
 void
 sh_css_init_host2sp_frame_data(void);
 
-/**
+/*
  * @brief Update the offline frame information in host_sp_communication.
  *
  * @param[in] frame_num The offline frame number.
@@ -91,7 +80,7 @@ sh_css_update_host2sp_offline_frame(
     struct ia_css_frame *frame,
     struct ia_css_metadata *metadata);
 
-/**
+/*
  * @brief Update the mipi frame information in host_sp_communication.
  *
  * @param[in] frame_num The mipi frame number.
@@ -102,7 +91,7 @@ sh_css_update_host2sp_mipi_frame(
     unsigned int frame_num,
     struct ia_css_frame *frame);
 
-/**
+/*
  * @brief Update the mipi metadata information in host_sp_communication.
  *
  * @param[in] frame_num The mipi frame number.
@@ -113,7 +102,7 @@ sh_css_update_host2sp_mipi_metadata(
     unsigned int frame_num,
     struct ia_css_metadata *metadata);
 
-/**
+/*
  * @brief Update the nr of mipi frames to use in host_sp_communication.
  *
  * @param[in] num_frames The number of mipi frames to use.
@@ -121,7 +110,7 @@ sh_css_update_host2sp_mipi_metadata(
 void
 sh_css_update_host2sp_num_mipi_frames(unsigned int num_frames);
 
-/**
+/*
  * @brief Update the nr of offline frames to use in host_sp_communication.
  *
  * @param[in] num_frames The number of raw frames to use.
@@ -149,13 +138,11 @@ sh_css_sp_get_debug_state(struct sh_css_sp_debug_state *state);
 
 #endif
 
-#if !defined(ISP2401)
 void
 sh_css_sp_set_if_configs(
     const input_formatter_cfg_t	*config_a,
     const input_formatter_cfg_t	*config_b,
     const uint8_t		if_config_index);
-#endif
 
 void
 sh_css_sp_program_input_circuit(int fmt_type,
@@ -167,13 +154,6 @@ sh_css_sp_configure_sync_gen(int width,
 			     int height,
 			     int hblank_cycles,
 			     int vblank_cycles);
-
-void
-sh_css_sp_configure_tpg(int x_mask,
-			int y_mask,
-			int x_delta,
-			int y_delta,
-			int xy_mask);
 
 void
 sh_css_sp_configure_prbs(int seed);
@@ -190,7 +170,7 @@ sh_css_sp_set_disable_continuous_viewfinder(bool flag);
 void
 sh_css_sp_reset_global_vars(void);
 
-/**
+/*
  * @brief Initialize the DMA software-mask in the debug mode.
  * This API should be ONLY called in the debugging mode.
  * And it should be always called before the first call of
@@ -205,7 +185,7 @@ sh_css_sp_reset_global_vars(void);
 bool
 sh_css_sp_init_dma_sw_reg(int dma_id);
 
-/**
+/*
  * @brief Set the DMA software-mask in the debug mode.
  * This API should be ONLYL called in the debugging mode. Must
  * call "sh_css_set_dma_sw_reg(...)" before this

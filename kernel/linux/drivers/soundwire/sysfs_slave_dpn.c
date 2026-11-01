@@ -2,7 +2,6 @@
 // Copyright(c) 2015-2020 Intel Corporation.
 
 #include <linux/device.h>
-#include <linux/mod_devicetable.h>
 #include <linux/slab.h>
 #include <linux/sysfs.h>
 #include <linux/soundwire/sdw.h>
@@ -282,6 +281,9 @@ int sdw_slave_sysfs_dpn_init(struct sdw_slave *slave)
 	unsigned long mask;
 	int ret;
 	int i;
+
+	if (!slave->prop.source_ports && !slave->prop.sink_ports)
+		return 0;
 
 	mask = slave->prop.source_ports;
 	for_each_set_bit(i, &mask, 32) {

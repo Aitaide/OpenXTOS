@@ -10,7 +10,6 @@
 #include <linux/delay.h>
 #include <linux/slab.h>
 #include <linux/gpio/consumer.h>
-#include <linux/of_device.h>
 #include <sound/core.h>
 #include <sound/pcm.h>
 #include <sound/pcm_params.h>
@@ -42,7 +41,7 @@ static const struct snd_soc_dapm_route uda1334_dapm_routes[] = {
 static int uda1334_put_deemph(struct snd_kcontrol *kcontrol,
 			      struct snd_ctl_elem_value *ucontrol)
 {
-	struct snd_soc_component *component = snd_soc_kcontrol_component(kcontrol);
+	struct snd_soc_component *component = snd_kcontrol_chip(kcontrol);
 	struct uda1334_priv *uda1334 = snd_soc_component_get_drvdata(component);
 	int deemph = ucontrol->value.integer.value[0];
 
@@ -57,7 +56,7 @@ static int uda1334_put_deemph(struct snd_kcontrol *kcontrol,
 static int uda1334_get_deemph(struct snd_kcontrol *kcontrol,
 			      struct snd_ctl_elem_value *ucontrol)
 {
-	struct snd_soc_component *component = snd_soc_kcontrol_component(kcontrol);
+	struct snd_soc_component *component = snd_kcontrol_chip(kcontrol);
 	struct uda1334_priv *uda1334 = snd_soc_component_get_drvdata(component);
 	int ret;
 

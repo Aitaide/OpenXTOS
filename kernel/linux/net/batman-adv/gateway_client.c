@@ -8,8 +8,10 @@
 #include "main.h"
 
 #include <linux/atomic.h>
+#include <linux/bug.h>
 #include <linux/byteorder/generic.h>
 #include <linux/container_of.h>
+#include <linux/err.h>
 #include <linux/errno.h>
 #include <linux/etherdevice.h>
 #include <linux/gfp.h>
@@ -18,7 +20,6 @@
 #include <linux/in.h>
 #include <linux/ip.h>
 #include <linux/ipv6.h>
-#include <linux/kernel.h>
 #include <linux/kref.h>
 #include <linux/list.h>
 #include <linux/lockdep.h>
@@ -29,9 +30,9 @@
 #include <linux/skbuff.h>
 #include <linux/slab.h>
 #include <linux/spinlock.h>
+#include <linux/sprintf.h>
 #include <linux/stddef.h>
 #include <linux/udp.h>
-#include <net/sock.h>
 #include <uapi/linux/batadv_packet.h>
 #include <uapi/linux/batman_adv.h>
 
@@ -40,7 +41,6 @@
 #include "netlink.h"
 #include "originator.h"
 #include "routing.h"
-#include "soft-interface.h"
 #include "translation-table.h"
 
 /* These are the offsets of the "hw type" and "hw address length" in the dhcp
@@ -72,7 +72,7 @@ void batadv_gw_node_release(struct kref *ref)
 
 /**
  * batadv_gw_get_selected_gw_node() - Get currently selected gateway
- * @bat_priv: the bat priv with all the soft interface information
+ * @bat_priv: the bat priv with all the mesh interface information
  *
  * Return: selected gateway (with increased refcnt), NULL on errors
  */
@@ -96,15 +96,15 @@ out:
 
 /**
  * batadv_gw_get_selected_orig() - Get originator of currently selected gateway
- * @bat_priv: the bat priv with all the soft interface information
+ * @bat_priv: the bat priv with all the mesh interface information
  *
  * Return: orig_node of selected gateway (with increased refcnt), NULL on errors
  */
 struct batadv_orig_node *
 batadv_gw_get_selected_orig(struct batadv_priv *bat_priv)
 {
-	struct batadv_gw_node *gw_node;
 	struct batadv_orig_node *orig_node = NULL;
+	struct batadv_gw_node *gw_node;
 
 	gw_node = batadv_gw_get_selected_gw_node(bat_priv);
 	if (!gw_node)
@@ -125,6 +125,14 @@ out:
 	return orig_node;
 }
 
+/**
+ * batadv_gw_select() - select a new currently active gateway
+ * @bat_priv: the bat priv with all the mesh interface information
+ * @new_gw_node: gateway node to be set as the current gateway, may be NULL
+ *
+ * Atomically replace the currently active gateway with @new_gw_node and drop
+ * the reference to the previous one.
+ */
 static void batadv_gw_select(struct batadv_priv *bat_priv,
 			     struct batadv_gw_node *new_gw_node)
 {
@@ -145,7 +153,7 @@ static void batadv_gw_select(struct batadv_priv *bat_priv,
 
 /**
  * batadv_gw_reselect() - force a gateway reselection
- * @bat_priv: the bat priv with all the soft interface information
+ * @bat_priv: the bat priv with all the mesh interface information
  *
  * Set a flag to remind the GW component to perform a new gateway reselection.
  * However this function does not ensure that the current gateway is going to be
@@ -161,7 +169,7 @@ void batadv_gw_reselect(struct batadv_priv *bat_priv)
 
 /**
  * batadv_gw_check_client_stop() - check if client mode has been switched off
- * @bat_priv: the bat priv with all the soft interface information
+ * @bat_priv: the bat priv with all the mesh interface information
  *
  * This function assumes the caller has checked that the gw state *is actually
  * changing*. This function is not supposed to be called when there is no state
@@ -171,7 +179,7 @@ void batadv_gw_check_client_stop(struct batadv_priv *bat_priv)
 {
 	struct batadv_gw_node *curr_gw;
 
-	if (atomic_read(&bat_priv->gw.mode) != BATADV_GW_MODE_CLIENT)
+	if (READ_ONCE(bat_priv->gw.mode) != BATADV_GW_MODE_CLIENT)
 		return;
 
 	curr_gw = batadv_gw_get_selected_gw_node(bat_priv);
@@ -193,17 +201,17 @@ void batadv_gw_check_client_stop(struct batadv_priv *bat_priv)
 
 /**
  * batadv_gw_election() - Elect the best gateway
- * @bat_priv: the bat priv with all the soft interface information
+ * @bat_priv: the bat priv with all the mesh interface information
  */
 void batadv_gw_election(struct batadv_priv *bat_priv)
 {
+	struct batadv_neigh_ifinfo *router_ifinfo = NULL;
+	struct batadv_neigh_node *router = NULL;
 	struct batadv_gw_node *curr_gw = NULL;
 	struct batadv_gw_node *next_gw = NULL;
-	struct batadv_neigh_node *router = NULL;
-	struct batadv_neigh_ifinfo *router_ifinfo = NULL;
 	char gw_addr[18] = { '\0' };
 
-	if (atomic_read(&bat_priv->gw.mode) != BATADV_GW_MODE_CLIENT)
+	if (READ_ONCE(bat_priv->gw.mode) != BATADV_GW_MODE_CLIENT)
 		goto out;
 
 	if (!bat_priv->algo_ops->gw.get_best_gw_node)
@@ -211,7 +219,7 @@ void batadv_gw_election(struct batadv_priv *bat_priv)
 
 	curr_gw = batadv_gw_get_selected_gw_node(bat_priv);
 
-	if (!batadv_atomic_dec_not_zero(&bat_priv->gw.reselect) && curr_gw)
+	if (atomic_xchg(&bat_priv->gw.reselect, 0) == 0 && curr_gw)
 		goto out;
 
 	/* if gw.reselect is set to 1 it means that a previous call to
@@ -281,7 +289,7 @@ out:
 
 /**
  * batadv_gw_check_election() - Elect orig node as best gateway when eligible
- * @bat_priv: the bat priv with all the soft interface information
+ * @bat_priv: the bat priv with all the mesh interface information
  * @orig_node: orig node which is to be checked
  */
 void batadv_gw_check_election(struct batadv_priv *bat_priv,
@@ -315,7 +323,7 @@ out:
 
 /**
  * batadv_gw_node_add() - add gateway node to list of available gateways
- * @bat_priv: the bat priv with all the soft interface information
+ * @bat_priv: the bat priv with all the mesh interface information
  * @orig_node: originator announcing gateway capabilities
  * @gateway: announced bandwidth information
  *
@@ -333,7 +341,7 @@ static void batadv_gw_node_add(struct batadv_priv *bat_priv,
 	if (gateway->bandwidth_down == 0)
 		return;
 
-	gw_node = kzalloc(sizeof(*gw_node), GFP_ATOMIC);
+	gw_node = kzalloc_obj(*gw_node, GFP_ATOMIC);
 	if (!gw_node)
 		return;
 
@@ -362,7 +370,7 @@ static void batadv_gw_node_add(struct batadv_priv *bat_priv,
 
 /**
  * batadv_gw_node_get() - retrieve gateway node from list of available gateways
- * @bat_priv: the bat priv with all the soft interface information
+ * @bat_priv: the bat priv with all the mesh interface information
  * @orig_node: originator announcing gateway capabilities
  *
  * Return: gateway node if found or NULL otherwise.
@@ -370,7 +378,8 @@ static void batadv_gw_node_add(struct batadv_priv *bat_priv,
 struct batadv_gw_node *batadv_gw_node_get(struct batadv_priv *bat_priv,
 					  struct batadv_orig_node *orig_node)
 {
-	struct batadv_gw_node *gw_node_tmp, *gw_node = NULL;
+	struct batadv_gw_node *gw_node = NULL;
+	struct batadv_gw_node *gw_node_tmp;
 
 	rcu_read_lock();
 	hlist_for_each_entry_rcu(gw_node_tmp, &bat_priv->gw.gateway_list,
@@ -392,7 +401,7 @@ struct batadv_gw_node *batadv_gw_node_get(struct batadv_priv *bat_priv,
 /**
  * batadv_gw_node_update() - update list of available gateways with changed
  *  bandwidth information
- * @bat_priv: the bat priv with all the soft interface information
+ * @bat_priv: the bat priv with all the mesh interface information
  * @orig_node: originator announcing gateway capabilities
  * @gateway: announced bandwidth information
  */
@@ -400,7 +409,8 @@ void batadv_gw_node_update(struct batadv_priv *bat_priv,
 			   struct batadv_orig_node *orig_node,
 			   struct batadv_tvlv_gateway_data *gateway)
 {
-	struct batadv_gw_node *gw_node, *curr_gw = NULL;
+	struct batadv_gw_node *curr_gw = NULL;
+	struct batadv_gw_node *gw_node;
 
 	spin_lock_bh(&bat_priv->gw.list_lock);
 	gw_node = batadv_gw_node_get(bat_priv, orig_node);
@@ -459,7 +469,7 @@ out:
 
 /**
  * batadv_gw_node_delete() - Remove orig_node from gateway list
- * @bat_priv: the bat priv with all the soft interface information
+ * @bat_priv: the bat priv with all the mesh interface information
  * @orig_node: orig node which is currently in process of being removed
  */
 void batadv_gw_node_delete(struct batadv_priv *bat_priv,
@@ -474,15 +484,19 @@ void batadv_gw_node_delete(struct batadv_priv *bat_priv,
 }
 
 /**
- * batadv_gw_node_free() - Free gateway information from soft interface
- * @bat_priv: the bat priv with all the soft interface information
+ * batadv_gw_node_free() - Free gateway information from mesh interface
+ * @bat_priv: the bat priv with all the mesh interface information
  */
 void batadv_gw_node_free(struct batadv_priv *bat_priv)
 {
+	struct batadv_gw_node *curr_gw;
 	struct batadv_gw_node *gw_node;
 	struct hlist_node *node_tmp;
 
 	spin_lock_bh(&bat_priv->gw.list_lock);
+	curr_gw = rcu_replace_pointer(bat_priv->gw.curr_gw, NULL, true);
+	batadv_gw_node_put(curr_gw);
+
 	hlist_for_each_entry_safe(gw_node, node_tmp,
 				  &bat_priv->gw.gateway_list, list) {
 		hlist_del_init_rcu(&gw_node->list);
@@ -502,24 +516,15 @@ void batadv_gw_node_free(struct batadv_priv *bat_priv)
 int batadv_gw_dump(struct sk_buff *msg, struct netlink_callback *cb)
 {
 	struct batadv_hard_iface *primary_if = NULL;
-	struct net *net = sock_net(cb->skb->sk);
-	struct net_device *soft_iface;
+	struct net_device *mesh_iface;
 	struct batadv_priv *bat_priv;
-	int ifindex;
 	int ret;
 
-	ifindex = batadv_netlink_get_ifindex(cb->nlh,
-					     BATADV_ATTR_MESH_IFINDEX);
-	if (!ifindex)
-		return -EINVAL;
+	mesh_iface = batadv_netlink_get_meshif(cb);
+	if (IS_ERR(mesh_iface))
+		return PTR_ERR(mesh_iface);
 
-	soft_iface = dev_get_by_index(net, ifindex);
-	if (!soft_iface || !batadv_softif_is_valid(soft_iface)) {
-		ret = -ENODEV;
-		goto out;
-	}
-
-	bat_priv = netdev_priv(soft_iface);
+	bat_priv = netdev_priv(mesh_iface);
 
 	primary_if = batadv_primary_if_get_selected(bat_priv);
 	if (!primary_if || primary_if->if_status != BATADV_IF_ACTIVE) {
@@ -538,7 +543,7 @@ int batadv_gw_dump(struct sk_buff *msg, struct netlink_callback *cb)
 
 out:
 	batadv_hardif_put(primary_if);
-	dev_put(soft_iface);
+	dev_put(mesh_iface);
 
 	return ret;
 }
@@ -550,7 +555,10 @@ out:
  * @chaddr: buffer where the client address will be stored. Valid
  *  only if the function returns BATADV_DHCP_TO_CLIENT
  *
- * This function may re-allocate the data buffer of the skb passed as argument.
+ * Warning: This function may reallocate the skb data buffer via
+ * pskb_may_pull()/... Any pointer into the skb data (e.g.
+ * obtained from skb->data or eth_hdr()) before this call must be considered
+ * invalid afterwards and has to be reacquired.
  *
  * Return:
  * - BATADV_DHCP_NO if the packet is not a dhcp message or if there was an error
@@ -563,11 +571,11 @@ batadv_gw_dhcp_recipient_get(struct sk_buff *skb, unsigned int *header_len,
 			     u8 *chaddr)
 {
 	enum batadv_dhcp_recipient ret = BATADV_DHCP_NO;
-	struct ethhdr *ethhdr;
-	struct iphdr *iphdr;
-	struct ipv6hdr *ipv6hdr;
-	struct udphdr *udphdr;
 	struct vlan_ethhdr *vhdr;
+	struct ipv6hdr *ipv6hdr;
+	struct ethhdr *ethhdr;
+	struct udphdr *udphdr;
+	struct iphdr *iphdr;
 	int chaddr_offset;
 	__be16 proto;
 	u8 *p;
@@ -667,14 +675,18 @@ batadv_gw_dhcp_recipient_get(struct sk_buff *skb, unsigned int *header_len,
 /**
  * batadv_gw_out_of_range() - check if the dhcp request destination is the best
  *  gateway
- * @bat_priv: the bat priv with all the soft interface information
+ * @bat_priv: the bat priv with all the mesh interface information
  * @skb: the outgoing packet
  *
  * Check if the skb is a DHCP request and if it is sent to the current best GW
  * server. Due to topology changes it may be the case that the GW server
  * previously selected is not the best one anymore.
  *
- * This call might reallocate skb data.
+ * Warning: This function may reallocate the skb data buffer via
+ * batadv_get_vid()/... Any pointer into the skb data (e.g. obtained
+ * from skb->data or eth_hdr()) before this call must be considered
+ * invalid afterwards and has to be reacquired.
+ *
  * Must be invoked only when the DHCP packet is going TO a DHCP SERVER.
  *
  * Return: true if the packet destination is unicast and it is not the best gw,
@@ -683,18 +695,20 @@ batadv_gw_dhcp_recipient_get(struct sk_buff *skb, unsigned int *header_len,
 bool batadv_gw_out_of_range(struct batadv_priv *bat_priv,
 			    struct sk_buff *skb)
 {
+	struct batadv_orig_node *orig_dst_node = NULL;
 	struct batadv_neigh_node *neigh_curr = NULL;
 	struct batadv_neigh_node *neigh_old = NULL;
-	struct batadv_orig_node *orig_dst_node = NULL;
+	struct batadv_neigh_ifinfo *curr_ifinfo;
+	struct batadv_neigh_ifinfo *old_ifinfo;
 	struct batadv_gw_node *gw_node = NULL;
 	struct batadv_gw_node *curr_gw = NULL;
-	struct batadv_neigh_ifinfo *curr_ifinfo, *old_ifinfo;
-	struct ethhdr *ethhdr = (struct ethhdr *)skb->data;
 	bool out_of_range = false;
-	u8 curr_tq_avg;
+	struct ethhdr *ethhdr;
 	unsigned short vid;
+	u8 curr_tq_avg;
 
 	vid = batadv_get_vid(skb, 0);
+	ethhdr = (struct ethhdr *)skb->data;
 
 	if (is_multicast_ether_addr(ethhdr->h_dest))
 		goto out;
@@ -708,7 +722,7 @@ bool batadv_gw_out_of_range(struct batadv_priv *bat_priv,
 	if (!gw_node)
 		goto out;
 
-	switch (atomic_read(&bat_priv->gw.mode)) {
+	switch (READ_ONCE(bat_priv->gw.mode)) {
 	case BATADV_GW_MODE_SERVER:
 		/* If we are a GW then we are our best GW. We can artificially
 		 * set the tq towards ourself as the maximum value

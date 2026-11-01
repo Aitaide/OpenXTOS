@@ -5,35 +5,29 @@
 #include <stdlib.h>
 #include <string.h>
 #include "metricgroup.h"
-#include "cpumap.h"
-#include "cputopo.h"
 #include "debug.h"
 #include "evlist.h"
 #include "expr.h"
+#include "smt.h"
+#include "tool_pmu.h"
 #include <util/expr-bison.h>
 #include <util/expr-flex.h>
 #include "util/hashmap.h"
 #include "util/header.h"
 #include "util/pmu.h"
-#include "smt.h"
-#include "tsc.h"
-#include <api/fs/fs.h>
+#include <perf/cpumap.h>
 #include <linux/err.h>
 #include <linux/kernel.h>
 #include <linux/zalloc.h>
 #include <ctype.h>
 #include <math.h>
-#include "pmu.h"
-
-#ifdef PARSER_DEBUG
-extern int expr_debug;
-#endif
 
 struct expr_id_data {
 	union {
 		struct {
 			double val;
 			int source_count;
+			int aggr_nr;
 		} val;
 		struct {
 			double val;
@@ -158,8 +152,8 @@ int expr__add_id_val(struct expr_parse_ctx *ctx, const char *id, double val)
 }
 
 /* Caller must make sure id is allocated */
-int expr__add_id_val_source_count(struct expr_parse_ctx *ctx, const char *id,
-				  double val, int source_count)
+int expr__add_id_val_source_count_aggr_nr(struct expr_parse_ctx *ctx, const char *id,
+					  double val, int source_count, int aggr_nr)
 {
 	struct expr_id_data *data_ptr = NULL, *old_data = NULL;
 	char *old_key = NULL;
@@ -170,14 +164,27 @@ int expr__add_id_val_source_count(struct expr_parse_ctx *ctx, const char *id,
 		return -ENOMEM;
 	data_ptr->val.val = val;
 	data_ptr->val.source_count = source_count;
+	data_ptr->val.aggr_nr = aggr_nr;
 	data_ptr->kind = EXPR_ID_DATA__VALUE;
 
 	ret = hashmap__set(ctx->ids, id, data_ptr, &old_key, &old_data);
-	if (ret)
+	if (ret) {
 		free(data_ptr);
+	} else if (old_data) {
+		data_ptr->val.val += old_data->val.val;
+		data_ptr->val.source_count += old_data->val.source_count;
+		data_ptr->val.aggr_nr += old_data->val.aggr_nr;
+	}
 	free(old_key);
 	free(old_data);
 	return ret;
+}
+
+/* Caller must make sure id is allocated */
+int expr__add_id_val_source_count(struct expr_parse_ctx *ctx, const char *id,
+				  double val, int source_count)
+{
+	return expr__add_id_val_source_count_aggr_nr(ctx, id, val, source_count, 1);
 }
 
 int expr__add_ref(struct expr_parse_ctx *ctx, struct metric_ref *ref)
@@ -222,6 +229,8 @@ int expr__add_ref(struct expr_parse_ctx *ctx, struct metric_ref *ref)
 int expr__get_id(struct expr_parse_ctx *ctx, const char *id,
 		 struct expr_id_data **data)
 {
+	if (!ctx || !id)
+		return -1;
 	return hashmap__find(ctx->ids, id, data) ? 0 : -1;
 }
 
@@ -292,7 +301,7 @@ struct expr_parse_ctx *expr__ctx_new(void)
 {
 	struct expr_parse_ctx *ctx;
 
-	ctx = malloc(sizeof(struct expr_parse_ctx));
+	ctx = calloc(1, sizeof(struct expr_parse_ctx));
 	if (!ctx)
 		return NULL;
 
@@ -301,9 +310,6 @@ struct expr_parse_ctx *expr__ctx_new(void)
 		free(ctx);
 		return NULL;
 	}
-	ctx->sctx.user_requested_cpu_list = NULL;
-	ctx->sctx.runtime = 0;
-	ctx->sctx.system_wide = false;
 
 	return ctx;
 }
@@ -380,7 +386,8 @@ int expr__find_ids(const char *expr, const char *one,
 	if (one)
 		expr__del_id(ctx, one);
 
-	return ret;
+	/* A positive value means syntax error, convert to -EINVAL */
+	return ret > 0 ? -EINVAL : ret;
 }
 
 double expr_id_data__value(const struct expr_id_data *data)
@@ -393,94 +400,36 @@ double expr_id_data__value(const struct expr_id_data *data)
 
 double expr_id_data__source_count(const struct expr_id_data *data)
 {
-	assert(data->kind == EXPR_ID_DATA__VALUE);
-	return data->val.source_count;
+	if (data->kind == EXPR_ID_DATA__VALUE)
+		return data->val.source_count;
+	return 1.0;
 }
 
-#if !defined(__i386__) && !defined(__x86_64__)
-double arch_get_tsc_freq(void)
+double expr_id_data__aggr_nr(const struct expr_id_data *data)
 {
-	return 0.0;
-}
-#endif
-
-static double has_pmem(void)
-{
-	static bool has_pmem, cached;
-	const char *sysfs = sysfs__mountpoint();
-	char path[PATH_MAX];
-
-	if (!cached) {
-		snprintf(path, sizeof(path), "%s/firmware/acpi/tables/NFIT", sysfs);
-		has_pmem = access(path, F_OK) == 0;
-		cached = true;
-	}
-	return has_pmem ? 1.0 : 0.0;
+	if (data->kind == EXPR_ID_DATA__VALUE)
+		return data->val.aggr_nr;
+	return 1.0;
 }
 
 double expr__get_literal(const char *literal, const struct expr_scanner_ctx *ctx)
 {
-	const struct cpu_topology *topology;
 	double result = NAN;
+	enum tool_pmu_event ev = tool_pmu__str_to_event(literal + 1);
 
-	if (!strcmp("#num_cpus", literal)) {
-		result = cpu__max_present_cpu().cpu;
-		goto out;
-	}
-	if (!strcmp("#num_cpus_online", literal)) {
-		struct perf_cpu_map *online = cpu_map__online();
+	if (ev != TOOL_PMU__EVENT_NONE) {
+		u64 count;
 
-		if (online)
-			result = perf_cpu_map__nr(online);
-		goto out;
-	}
-
-	if (!strcasecmp("#system_tsc_freq", literal)) {
-		result = arch_get_tsc_freq();
-		goto out;
+		if (tool_pmu__read_event(ev, /*evsel=*/NULL,
+					 ctx->system_wide, ctx->user_requested_cpu_list,
+					 &count))
+			result = count;
+		else
+			pr_err("Failure to read '%s'\n", literal);
+	} else {
+		pr_err("Unrecognized literal '%s'\n", literal);
 	}
 
-	/*
-	 * Assume that topology strings are consistent, such as CPUs "0-1"
-	 * wouldn't be listed as "0,1", and so after deduplication the number of
-	 * these strings gives an indication of the number of packages, dies,
-	 * etc.
-	 */
-	if (!strcasecmp("#smt_on", literal)) {
-		result = smt_on() ? 1.0 : 0.0;
-		goto out;
-	}
-	if (!strcmp("#core_wide", literal)) {
-		result = core_wide(ctx->system_wide, ctx->user_requested_cpu_list)
-			? 1.0 : 0.0;
-		goto out;
-	}
-	if (!strcmp("#num_packages", literal)) {
-		topology = online_topology();
-		result = topology->package_cpus_lists;
-		goto out;
-	}
-	if (!strcmp("#num_dies", literal)) {
-		topology = online_topology();
-		result = topology->die_cpus_lists;
-		goto out;
-	}
-	if (!strcmp("#num_cores", literal)) {
-		topology = online_topology();
-		result = topology->core_cpus_lists;
-		goto out;
-	}
-	if (!strcmp("#slots", literal)) {
-		result = perf_pmu__cpu_slots_per_cycle();
-		goto out;
-	}
-	if (!strcmp("#has_pmem", literal)) {
-		result = has_pmem();
-		goto out;
-	}
-
-	pr_err("Unrecognized literal '%s'", literal);
-out:
 	pr_debug2("literal: %s = %f\n", literal, result);
 	return result;
 }
@@ -500,8 +449,26 @@ double expr__has_event(const struct expr_parse_ctx *ctx, bool compute_ids, const
 	tmp = evlist__new();
 	if (!tmp)
 		return NAN;
-	ret = parse_event(tmp, id) ? 0 : 1;
-	evlist__delete(tmp);
+
+	if (strchr(id, '@')) {
+		char *tmp_id, *p;
+
+		tmp_id = strdup(id);
+		if (!tmp_id) {
+			ret = NAN;
+			goto out;
+		}
+		p = strchr(tmp_id, '@');
+		*p = '/';
+		p = strrchr(tmp_id, '@');
+		*p = '/';
+		ret = parse_event(tmp, tmp_id) ? 0 : 1;
+		free(tmp_id);
+	} else {
+		ret = parse_event(tmp, id) ? 0 : 1;
+	}
+out:
+	evlist__put(tmp);
 	return ret;
 }
 
@@ -509,8 +476,8 @@ double expr__strcmp_cpuid_str(const struct expr_parse_ctx *ctx __maybe_unused,
 		       bool compute_ids __maybe_unused, const char *test_id)
 {
 	double ret;
-	struct perf_pmu *pmu = pmu__find_core_pmu();
-	char *cpuid = perf_pmu__getcpuid(pmu);
+	struct perf_cpu cpu = {-1};
+	char *cpuid = get_cpuid_allow_env_override(cpu);
 
 	if (!cpuid)
 		return NAN;

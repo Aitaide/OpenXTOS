@@ -22,8 +22,7 @@ config VFIO_DEVICE_CDEV
 	  The VFIO device cdev is another way for userspace to get device
 	  access. Userspace gets device fd by opening device cdev under
 	  /dev/vfio/devices/vfioX, and then bind the device fd with an iommufd
-	  to set up secure DMA context for device access.  This interface does
-	  not support noiommu.
+	  to set up secure DMA context for device access.
 
 	  If you don't know what to do here, say N.
 
@@ -62,7 +61,9 @@ endif
 
 config VFIO_NOIOMMU
 	bool "VFIO No-IOMMU support"
-	depends on VFIO_GROUP
+	depends on VFIO_GROUP || (VFIO_DEVICE_CDEV && !GENERIC_ATOMIC64)
+	depends on !VFIO_GROUP || VFIO_CONTAINER || IOMMUFD_VFIO_CONTAINER
+	select IOMMUFD_NOIOMMU if VFIO_DEVICE_CDEV && !GENERIC_ATOMIC64
 	help
 	  VFIO is built on the ability to isolate devices using the IOMMU.
 	  Only with an IOMMU can userspace access to DMA capable devices be
@@ -79,6 +80,16 @@ config VFIO_VIRQFD
 	bool
 	select EVENTFD
 	default n
+
+config VFIO_DEBUGFS
+	bool "Export VFIO internals in DebugFS"
+	depends on DEBUG_FS
+	help
+	  Allows exposure of VFIO device internals. This option enables
+	  the use of debugfs by VFIO drivers as required. The device can
+	  cause the VFIO code create a top-level debug/vfio directory
+	  during initialization, and then populate a subdirectory with
+	  entries as required.
 
 source "drivers/vfio/pci/Kconfig"
 source "drivers/vfio/platform/Kconfig"

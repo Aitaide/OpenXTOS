@@ -21,6 +21,7 @@
 #include <linux/types.h>
 #include <linux/socket.h>
 #include <linux/sockios.h>
+#include <linux/string.h>
 #include <linux/net.h>
 #include <linux/in6.h>
 #include <linux/netdevice.h>
@@ -51,6 +52,8 @@
 #include <net/dsfield.h>
 #include <net/net_namespace.h>
 #include <net/netns/generic.h>
+#include <net/netdev_lock.h>
+#include <net/inet_dscp.h>
 
 /*
    This version of net/ipv6/sit.c is cloned of net/ipv4/ip_gre.c
@@ -132,8 +135,8 @@ static struct ip_tunnel *ipip6_tunnel_lookup(struct net *net,
 	return NULL;
 }
 
-static struct ip_tunnel __rcu **__ipip6_bucket(struct sit_net *sitn,
-		struct ip_tunnel_parm *parms)
+static struct ip_tunnel __rcu **
+__ipip6_bucket(struct sit_net *sitn, struct ip_tunnel_parm_kern *parms)
 {
 	__be32 remote = parms->iph.daddr;
 	__be32 local = parms->iph.saddr;
@@ -200,14 +203,13 @@ static void ipip6_tunnel_clone_6rd(struct net_device *dev, struct sit_net *sitn)
 static int ipip6_tunnel_create(struct net_device *dev)
 {
 	struct ip_tunnel *t = netdev_priv(dev);
-	struct net *net = dev_net(dev);
-	struct sit_net *sitn = net_generic(net, sit_net_id);
+	struct sit_net *sitn = net_generic(t->net, sit_net_id);
 	int err;
 
 	__dev_addr_set(dev, &t->parms.iph.saddr, 4);
 	memcpy(dev->broadcast, &t->parms.iph.daddr, 4);
 
-	if ((__force u16)t->parms.i_flags & SIT_ISATAP)
+	if (test_bit(IP_TUNNEL_SIT_ISATAP_BIT, t->parms.i_flags))
 		dev->priv_flags |= IFF_ISATAP;
 
 	dev->rtnl_link_ops = &sit_link_ops;
@@ -226,7 +228,8 @@ out:
 }
 
 static struct ip_tunnel *ipip6_tunnel_locate(struct net *net,
-		struct ip_tunnel_parm *parms, int create)
+					     struct ip_tunnel_parm_kern *parms,
+					     int create)
 {
 	__be32 remote = parms->iph.daddr;
 	__be32 local = parms->iph.saddr;
@@ -254,9 +257,9 @@ static struct ip_tunnel *ipip6_tunnel_locate(struct net *net,
 	if (parms->name[0]) {
 		if (!dev_valid_name(parms->name))
 			goto failed;
-		strscpy(name, parms->name, IFNAMSIZ);
+		strscpy(name, parms->name);
 	} else {
-		strcpy(name, "sit%d");
+		strscpy(name, "sit%d");
 	}
 	dev = alloc_netdev(sizeof(*t), name, NET_NAME_UNKNOWN,
 			   ipip6_tunnel_setup);
@@ -267,12 +270,13 @@ static struct ip_tunnel *ipip6_tunnel_locate(struct net *net,
 
 	nt = netdev_priv(dev);
 
+	nt->net = net;
 	nt->parms = *parms;
 	if (ipip6_tunnel_create(dev) < 0)
 		goto failed_free;
 
 	if (!parms->name[0])
-		strcpy(parms->name, dev->name);
+		strscpy(parms->name, dev->name);
 
 	return nt;
 
@@ -305,7 +309,7 @@ static int ipip6_tunnel_get_prl(struct net_device *dev, struct ip_tunnel_prl __u
 	struct ip_tunnel_prl kprl, *kp;
 	struct ip_tunnel_prl_entry *prl;
 	unsigned int cmax, c = 0, ca, len;
-	int ret = 0;
+	int ret;
 
 	if (dev == dev_to_sit_net(dev)->fb_tunnel_dev)
 		return -EINVAL;
@@ -320,7 +324,7 @@ static int ipip6_tunnel_get_prl(struct net_device *dev, struct ip_tunnel_prl __u
 	 * we try harder to allocate.
 	 */
 	kp = (cmax <= 1 || capable(CAP_NET_ADMIN)) ?
-		kcalloc(cmax, sizeof(*kp), GFP_KERNEL_ACCOUNT | __GFP_NOWARN) :
+		kzalloc_objs(*kp, cmax, GFP_KERNEL_ACCOUNT | __GFP_NOWARN) :
 		NULL;
 
 	ca = min(t->prl_count, cmax);
@@ -331,8 +335,8 @@ static int ipip6_tunnel_get_prl(struct net_device *dev, struct ip_tunnel_prl __u
 		 * For root users, retry allocating enough memory for
 		 * the answer.
 		 */
-		kp = kcalloc(ca, sizeof(*kp), GFP_ATOMIC | __GFP_ACCOUNT |
-					      __GFP_NOWARN);
+		kp = kzalloc_objs(*kp, ca,
+				  GFP_ATOMIC | __GFP_ACCOUNT | __GFP_NOWARN);
 		if (!kp) {
 			ret = -ENOMEM;
 			goto out;
@@ -391,7 +395,7 @@ ipip6_tunnel_add_prl(struct ip_tunnel *t, struct ip_tunnel_prl *a, int chg)
 		goto out;
 	}
 
-	p = kzalloc(sizeof(struct ip_tunnel_prl_entry), GFP_KERNEL);
+	p = kzalloc_obj(struct ip_tunnel_prl_entry);
 	if (!p) {
 		err = -ENOBUFS;
 		goto out;
@@ -591,11 +595,11 @@ static int ipip6_err(struct sk_buff *skb, u32 info)
 	if (t->parms.iph.ttl == 0 && type == ICMP_TIME_EXCEEDED)
 		goto out;
 
-	if (time_before(jiffies, t->err_time + IPTUNNEL_ERR_TIMEO))
-		t->err_count++;
+	if (time_before(jiffies, READ_ONCE(t->err_time) + IPTUNNEL_ERR_TIMEO))
+		WRITE_ONCE(t->err_count, READ_ONCE(t->err_count) + 1);
 	else
-		t->err_count = 1;
-	t->err_time = jiffies;
+		WRITE_ONCE(t->err_count, 1);
+	WRITE_ONCE(t->err_time, jiffies);
 out:
 	return err;
 }
@@ -845,6 +849,49 @@ static inline __be32 try_6rd(struct ip_tunnel *tunnel,
 	return dst;
 }
 
+static bool ipip6_tunnel_dst_find(struct sk_buff *skb, __be32 *dst,
+				  bool is_isatap)
+{
+	const struct ipv6hdr *iph6 = ipv6_hdr(skb);
+	struct neighbour *neigh = NULL;
+	const struct in6_addr *addr6;
+	bool found = false;
+	int addr_type;
+
+	if (skb_dst(skb))
+		neigh = dst_neigh_lookup(skb_dst(skb), &iph6->daddr);
+
+	if (!neigh) {
+		net_dbg_ratelimited("nexthop == NULL\n");
+		return false;
+	}
+
+	addr6 = (const struct in6_addr *)&neigh->primary_key;
+	addr_type = ipv6_addr_type(addr6);
+
+	if (is_isatap) {
+		if ((addr_type & IPV6_ADDR_UNICAST) &&
+		    ipv6_addr_is_isatap(addr6)) {
+			*dst = addr6->s6_addr32[3];
+			found = true;
+		}
+	} else {
+		if (addr_type == IPV6_ADDR_ANY) {
+			addr6 = &ipv6_hdr(skb)->daddr;
+			addr_type = ipv6_addr_type(addr6);
+		}
+
+		if ((addr_type & IPV6_ADDR_COMPATv4) != 0) {
+			*dst = addr6->s6_addr32[3];
+			found = true;
+		}
+	}
+
+	neigh_release(neigh);
+
+	return found;
+}
+
 /*
  *	This function assumes it is being called from dev_queue_xmit()
  *	and that skb is filled properly by that function.
@@ -862,10 +909,8 @@ static netdev_tx_t ipip6_tunnel_xmit(struct sk_buff *skb,
 	struct net_device *tdev;	/* Device to other host */
 	unsigned int max_headroom;	/* The extra header space needed */
 	__be32 dst = tiph->daddr;
+	int err_count, mtu;
 	struct flowi4 fl4;
-	int    mtu;
-	const struct in6_addr *addr6;
-	int addr_type;
 	u8 ttl;
 	u8 protocol = IPPROTO_IPV6;
 	int t_hlen = tunnel->hlen + sizeof(struct iphdr);
@@ -874,68 +919,19 @@ static netdev_tx_t ipip6_tunnel_xmit(struct sk_buff *skb,
 		tos = ipv6_get_dsfield(iph6);
 
 	/* ISATAP (RFC4214) - must come before 6to4 */
-	if (dev->priv_flags & IFF_ISATAP) {
-		struct neighbour *neigh = NULL;
-		bool do_tx_error = false;
-
-		if (skb_dst(skb))
-			neigh = dst_neigh_lookup(skb_dst(skb), &iph6->daddr);
-
-		if (!neigh) {
-			net_dbg_ratelimited("nexthop == NULL\n");
-			goto tx_error;
-		}
-
-		addr6 = (const struct in6_addr *)&neigh->primary_key;
-		addr_type = ipv6_addr_type(addr6);
-
-		if ((addr_type & IPV6_ADDR_UNICAST) &&
-		     ipv6_addr_is_isatap(addr6))
-			dst = addr6->s6_addr32[3];
-		else
-			do_tx_error = true;
-
-		neigh_release(neigh);
-		if (do_tx_error)
-			goto tx_error;
-	}
+	if ((dev->priv_flags & IFF_ISATAP) &&
+	    !ipip6_tunnel_dst_find(skb, &dst, true))
+		goto tx_error;
 
 	if (!dst)
 		dst = try_6rd(tunnel, &iph6->daddr);
 
-	if (!dst) {
-		struct neighbour *neigh = NULL;
-		bool do_tx_error = false;
-
-		if (skb_dst(skb))
-			neigh = dst_neigh_lookup(skb_dst(skb), &iph6->daddr);
-
-		if (!neigh) {
-			net_dbg_ratelimited("nexthop == NULL\n");
-			goto tx_error;
-		}
-
-		addr6 = (const struct in6_addr *)&neigh->primary_key;
-		addr_type = ipv6_addr_type(addr6);
-
-		if (addr_type == IPV6_ADDR_ANY) {
-			addr6 = &ipv6_hdr(skb)->daddr;
-			addr_type = ipv6_addr_type(addr6);
-		}
-
-		if ((addr_type & IPV6_ADDR_COMPATv4) != 0)
-			dst = addr6->s6_addr32[3];
-		else
-			do_tx_error = true;
-
-		neigh_release(neigh);
-		if (do_tx_error)
-			goto tx_error;
-	}
+	if (!dst && !ipip6_tunnel_dst_find(skb, &dst, false))
+		goto tx_error;
 
 	flowi4_init_output(&fl4, tunnel->parms.link, tunnel->fwmark,
-			   RT_TOS(tos), RT_SCOPE_UNIVERSE, IPPROTO_IPV6,
-			   0, dst, tiph->saddr, 0, 0,
+			   tos & INET_DSCP_MASK, RT_SCOPE_UNIVERSE,
+			   IPPROTO_IPV6, 0, dst, tiph->saddr, 0, 0,
 			   sock_net_uid(tunnel->net, NULL));
 
 	rt = dst_cache_get_ip4(&tunnel->dst_cache, &fl4.saddr);
@@ -965,9 +961,10 @@ static netdev_tx_t ipip6_tunnel_xmit(struct sk_buff *skb,
 		ip_rt_put(rt);
 		goto tx_error;
 	}
+	iph6 = ipv6_hdr(skb);
 
 	if (df) {
-		mtu = dst_mtu(&rt->dst) - t_hlen;
+		mtu = dst4_mtu(&rt->dst) - t_hlen;
 
 		if (mtu < IPV4_MIN_MTU) {
 			DEV_STATS_INC(dev, collisions);
@@ -990,13 +987,15 @@ static netdev_tx_t ipip6_tunnel_xmit(struct sk_buff *skb,
 		}
 	}
 
-	if (tunnel->err_count > 0) {
+	err_count = READ_ONCE(tunnel->err_count);
+	if (err_count > 0) {
 		if (time_before(jiffies,
-				tunnel->err_time + IPTUNNEL_ERR_TIMEO)) {
-			tunnel->err_count--;
+				READ_ONCE(tunnel->err_time) + IPTUNNEL_ERR_TIMEO)) {
+			WRITE_ONCE(tunnel->err_count, err_count - 1);
 			dst_link_failure(skb);
-		} else
-			tunnel->err_count = 0;
+		} else {
+			WRITE_ONCE(tunnel->err_count,  0);
+		}
 	}
 
 	/*
@@ -1032,7 +1031,7 @@ static netdev_tx_t ipip6_tunnel_xmit(struct sk_buff *skb,
 	skb_set_inner_ipproto(skb, IPPROTO_IPV6);
 
 	iptunnel_xmit(NULL, rt, skb, fl4.saddr, fl4.daddr, protocol, tos, ttl,
-		      df, !net_eq(tunnel->net, dev_net(dev)));
+		      df, !net_eq(tunnel->net, dev_net(dev)), 0);
 	return NETDEV_TX_OK;
 
 tx_error_icmp:
@@ -1110,7 +1109,7 @@ static void ipip6_tunnel_bind_dev(struct net_device *dev)
 							  iph->daddr, iph->saddr,
 							  0, 0,
 							  IPPROTO_IPV6,
-							  RT_TOS(iph->tos),
+							  iph->tos & INET_DSCP_MASK,
 							  tunnel->parms.link);
 
 		if (!IS_ERR(rt)) {
@@ -1132,10 +1131,11 @@ static void ipip6_tunnel_bind_dev(struct net_device *dev)
 		WRITE_ONCE(dev->mtu, mtu);
 		hlen = tdev->hard_header_len + tdev->needed_headroom;
 	}
-	dev->needed_headroom = t_hlen + hlen;
+	dev->needed_headroom = ip_tunnel_limit_headroom(t_hlen + hlen);
 }
 
-static void ipip6_tunnel_update(struct ip_tunnel *t, struct ip_tunnel_parm *p,
+static void ipip6_tunnel_update(struct ip_tunnel *t,
+				struct ip_tunnel_parm_kern *p,
 				__u32 fwmark)
 {
 	struct net *net = t->net;
@@ -1196,11 +1196,11 @@ static int
 ipip6_tunnel_get6rd(struct net_device *dev, struct ip_tunnel_parm __user *data)
 {
 	struct ip_tunnel *t = netdev_priv(dev);
+	struct ip_tunnel_parm_kern p;
 	struct ip_tunnel_6rd ip6rd;
-	struct ip_tunnel_parm p;
 
 	if (dev == dev_to_sit_net(dev)->fb_tunnel_dev) {
-		if (copy_from_user(&p, data, sizeof(p)))
+		if (!ip_tunnel_parm_from_user(&p, data))
 			return -EFAULT;
 		t = ipip6_tunnel_locate(t->net, &p, 0);
 	}
@@ -1251,7 +1251,7 @@ static bool ipip6_valid_ip_proto(u8 ipproto)
 }
 
 static int
-__ipip6_tunnel_ioctl_validate(struct net *net, struct ip_tunnel_parm *p)
+__ipip6_tunnel_ioctl_validate(struct net *net, struct ip_tunnel_parm_kern *p)
 {
 	if (!ns_capable(net->user_ns, CAP_NET_ADMIN))
 		return -EPERM;
@@ -1268,7 +1268,7 @@ __ipip6_tunnel_ioctl_validate(struct net *net, struct ip_tunnel_parm *p)
 }
 
 static int
-ipip6_tunnel_get(struct net_device *dev, struct ip_tunnel_parm *p)
+ipip6_tunnel_get(struct net_device *dev, struct ip_tunnel_parm_kern *p)
 {
 	struct ip_tunnel *t = netdev_priv(dev);
 
@@ -1281,7 +1281,7 @@ ipip6_tunnel_get(struct net_device *dev, struct ip_tunnel_parm *p)
 }
 
 static int
-ipip6_tunnel_add(struct net_device *dev, struct ip_tunnel_parm *p)
+ipip6_tunnel_add(struct net_device *dev, struct ip_tunnel_parm_kern *p)
 {
 	struct ip_tunnel *t = netdev_priv(dev);
 	int err;
@@ -1297,7 +1297,7 @@ ipip6_tunnel_add(struct net_device *dev, struct ip_tunnel_parm *p)
 }
 
 static int
-ipip6_tunnel_change(struct net_device *dev, struct ip_tunnel_parm *p)
+ipip6_tunnel_change(struct net_device *dev, struct ip_tunnel_parm_kern *p)
 {
 	struct ip_tunnel *t = netdev_priv(dev);
 	int err;
@@ -1328,7 +1328,7 @@ ipip6_tunnel_change(struct net_device *dev, struct ip_tunnel_parm *p)
 }
 
 static int
-ipip6_tunnel_del(struct net_device *dev, struct ip_tunnel_parm *p)
+ipip6_tunnel_del(struct net_device *dev, struct ip_tunnel_parm_kern *p)
 {
 	struct ip_tunnel *t = netdev_priv(dev);
 
@@ -1348,7 +1348,8 @@ ipip6_tunnel_del(struct net_device *dev, struct ip_tunnel_parm *p)
 }
 
 static int
-ipip6_tunnel_ctl(struct net_device *dev, struct ip_tunnel_parm *p, int cmd)
+ipip6_tunnel_ctl(struct net_device *dev, struct ip_tunnel_parm_kern *p,
+		 int cmd)
 {
 	switch (cmd) {
 	case SIOCGETTUNNEL:
@@ -1398,7 +1399,6 @@ static const struct net_device_ops ipip6_netdev_ops = {
 	.ndo_uninit	= ipip6_tunnel_uninit,
 	.ndo_start_xmit	= sit_tunnel_xmit,
 	.ndo_siocdevprivate = ipip6_tunnel_siocdevprivate,
-	.ndo_get_stats64 = dev_get_tstats64,
 	.ndo_get_iflink = ip_tunnel_get_iflink,
 	.ndo_tunnel_ctl = ipip6_tunnel_ctl,
 };
@@ -1408,7 +1408,6 @@ static void ipip6_dev_free(struct net_device *dev)
 	struct ip_tunnel *tunnel = netdev_priv(dev);
 
 	dst_cache_destroy(&tunnel->dst_cache);
-	free_percpu(dev->tstats);
 }
 
 #define SIT_FEATURES (NETIF_F_SG	   | \
@@ -1434,9 +1433,11 @@ static void ipip6_tunnel_setup(struct net_device *dev)
 	dev->flags		= IFF_NOARP;
 	netif_keep_dst(dev);
 	dev->addr_len		= 4;
-	dev->features		|= NETIF_F_LLTX;
+	dev->lltx		= true;
 	dev->features		|= SIT_FEATURES;
 	dev->hw_features	|= SIT_FEATURES;
+	dev->pcpu_stat_type	= NETDEV_PCPU_STAT_TSTATS;
+
 }
 
 static int ipip6_tunnel_init(struct net_device *dev)
@@ -1445,21 +1446,16 @@ static int ipip6_tunnel_init(struct net_device *dev)
 	int err;
 
 	tunnel->dev = dev;
-	tunnel->net = dev_net(dev);
-	strcpy(tunnel->parms.name, dev->name);
+	strscpy(tunnel->parms.name, dev->name);
 
 	ipip6_tunnel_bind_dev(dev);
-	dev->tstats = netdev_alloc_pcpu_stats(struct pcpu_sw_netstats);
-	if (!dev->tstats)
-		return -ENOMEM;
 
 	err = dst_cache_init(&tunnel->dst_cache, GFP_KERNEL);
-	if (err) {
-		free_percpu(dev->tstats);
-		dev->tstats = NULL;
+	if (err)
 		return err;
-	}
+
 	netdev_hold(dev, &tunnel->dev_tracker, GFP_KERNEL);
+	netdev_lockdep_set_classes(dev);
 	return 0;
 }
 
@@ -1494,7 +1490,7 @@ static int ipip6_validate(struct nlattr *tb[], struct nlattr *data[],
 }
 
 static void ipip6_netlink_parms(struct nlattr *data[],
-				struct ip_tunnel_parm *parms,
+				struct ip_tunnel_parm_kern *parms,
 				__u32 *fwmark)
 {
 	memset(parms, 0, sizeof(*parms));
@@ -1550,19 +1546,23 @@ static bool ipip6_netlink_6rd_parms(struct nlattr *data[],
 }
 #endif
 
-static int ipip6_newlink(struct net *src_net, struct net_device *dev,
-			 struct nlattr *tb[], struct nlattr *data[],
+static int ipip6_newlink(struct net_device *dev,
+			 struct rtnl_newlink_params *params,
 			 struct netlink_ext_ack *extack)
 {
-	struct net *net = dev_net(dev);
+	struct nlattr **data = params->data;
+	struct nlattr **tb = params->tb;
 	struct ip_tunnel *nt;
 	struct ip_tunnel_encap ipencap;
 #ifdef CONFIG_IPV6_SIT_6RD
 	struct ip_tunnel_6rd ip6rd;
 #endif
+	struct net *net;
 	int err;
 
+	net = params->link_net ? : dev_net(dev);
 	nt = netdev_priv(dev);
+	nt->net = net;
 
 	if (ip_tunnel_netlink_encap_parms(data, &ipencap)) {
 		err = ip_tunnel_encap_setup(nt, &ipencap);
@@ -1603,8 +1603,8 @@ static int ipip6_changelink(struct net_device *dev, struct nlattr *tb[],
 			    struct netlink_ext_ack *extack)
 {
 	struct ip_tunnel *t = netdev_priv(dev);
-	struct ip_tunnel_parm p;
 	struct ip_tunnel_encap ipencap;
+	struct ip_tunnel_parm_kern p;
 	struct net *net = t->net;
 	struct sit_net *sitn = net_generic(net, sit_net_id);
 #ifdef CONFIG_IPV6_SIT_6RD
@@ -1612,6 +1612,9 @@ static int ipip6_changelink(struct net_device *dev, struct nlattr *tb[],
 #endif
 	__u32 fwmark = t->fwmark;
 	int err;
+
+	if (!rtnl_dev_link_net_capable(dev, net))
+		return -EPERM;
 
 	if (dev == sitn->fb_tunnel_dev)
 		return -EINVAL;
@@ -1691,7 +1694,7 @@ static size_t ipip6_get_size(const struct net_device *dev)
 static int ipip6_fill_info(struct sk_buff *skb, const struct net_device *dev)
 {
 	struct ip_tunnel *tunnel = netdev_priv(dev);
-	struct ip_tunnel_parm *parm = &tunnel->parms;
+	struct ip_tunnel_parm_kern *parm = &tunnel->parms;
 
 	if (nla_put_u32(skb, IFLA_IPTUN_LINK, parm->link) ||
 	    nla_put_in_addr(skb, IFLA_IPTUN_LOCAL, parm->iph.saddr) ||
@@ -1701,7 +1704,8 @@ static int ipip6_fill_info(struct sk_buff *skb, const struct net_device *dev)
 	    nla_put_u8(skb, IFLA_IPTUN_PMTUDISC,
 		       !!(parm->iph.frag_off & htons(IP_DF))) ||
 	    nla_put_u8(skb, IFLA_IPTUN_PROTO, parm->iph.protocol) ||
-	    nla_put_be16(skb, IFLA_IPTUN_FLAGS, parm->i_flags) ||
+	    nla_put_be16(skb, IFLA_IPTUN_FLAGS,
+			 ip_tunnel_flags_to_be16(parm->i_flags)) ||
 	    nla_put_u32(skb, IFLA_IPTUN_FWMARK, tunnel->fwmark))
 		goto nla_put_failure;
 
@@ -1799,8 +1803,7 @@ static struct xfrm_tunnel mplsip_handler __read_mostly = {
 };
 #endif
 
-static void __net_exit sit_destroy_tunnels(struct net *net,
-					   struct list_head *head)
+static void __net_exit sit_exit_rtnl_net(struct net *net, struct list_head *head)
 {
 	struct sit_net *sitn = net_generic(net, sit_net_id);
 	struct net_device *dev, *aux;
@@ -1815,15 +1818,15 @@ static void __net_exit sit_destroy_tunnels(struct net *net,
 		for (h = 0; h < (prio ? IP6_SIT_HASH_SIZE : 1); h++) {
 			struct ip_tunnel *t;
 
-			t = rtnl_dereference(sitn->tunnels[prio][h]);
+			t = rtnl_net_dereference(net, sitn->tunnels[prio][h]);
 			while (t) {
 				/* If dev is in the same netns, it has already
 				 * been added to the list by the previous loop.
 				 */
 				if (!net_eq(dev_net(t->dev), net))
-					unregister_netdevice_queue(t->dev,
-								   head);
-				t = rtnl_dereference(t->next);
+					unregister_netdevice_queue(t->dev, head);
+
+				t = rtnl_net_dereference(net, t->next);
 			}
 		}
 	}
@@ -1855,7 +1858,10 @@ static int __net_init sit_init_net(struct net *net)
 	/* FB netdevice is special: we have one, and only one per netns.
 	 * Allowing to move it to another netns is clearly unsafe.
 	 */
-	sitn->fb_tunnel_dev->features |= NETIF_F_NETNS_LOCAL;
+	sitn->fb_tunnel_dev->netns_immutable = true;
+
+	t = netdev_priv(sitn->fb_tunnel_dev);
+	t->net = net;
 
 	err = register_netdev(sitn->fb_tunnel_dev);
 	if (err)
@@ -1864,9 +1870,7 @@ static int __net_init sit_init_net(struct net *net)
 	ipip6_tunnel_clone_6rd(sitn->fb_tunnel_dev, sitn);
 	ipip6_fb_tunnel_init(sitn->fb_tunnel_dev);
 
-	t = netdev_priv(sitn->fb_tunnel_dev);
-
-	strcpy(t->parms.name, sitn->fb_tunnel_dev->name);
+	strscpy(t->parms.name, sitn->fb_tunnel_dev->name);
 	return 0;
 
 err_reg_dev:
@@ -1875,22 +1879,9 @@ err_alloc_dev:
 	return err;
 }
 
-static void __net_exit sit_exit_batch_net(struct list_head *net_list)
-{
-	LIST_HEAD(list);
-	struct net *net;
-
-	rtnl_lock();
-	list_for_each_entry(net, net_list, exit_list)
-		sit_destroy_tunnels(net, &list);
-
-	unregister_netdevice_many(&list);
-	rtnl_unlock();
-}
-
 static struct pernet_operations sit_net_ops = {
 	.init = sit_init_net,
-	.exit_batch = sit_exit_batch_net,
+	.exit_rtnl = sit_exit_rtnl_net,
 	.id   = &sit_net_id,
 	.size = sizeof(struct sit_net),
 };
@@ -1956,6 +1947,7 @@ xfrm_tunnel_failed:
 
 module_init(sit_init);
 module_exit(sit_cleanup);
+MODULE_DESCRIPTION("IPv6-in-IPv4 tunnel SIT driver");
 MODULE_LICENSE("GPL");
 MODULE_ALIAS_RTNL_LINK("sit");
 MODULE_ALIAS_NETDEV("sit0");

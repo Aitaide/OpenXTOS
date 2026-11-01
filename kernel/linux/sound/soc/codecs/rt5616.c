@@ -1015,10 +1015,10 @@ static int rt5616_set_dai_fmt(struct snd_soc_dai *dai, unsigned int fmt)
 	unsigned int reg_val = 0;
 
 	switch (fmt & SND_SOC_DAIFMT_MASTER_MASK) {
-	case SND_SOC_DAIFMT_CBM_CFM:
+	case SND_SOC_DAIFMT_CBP_CFP:
 		rt5616->master[dai->id] = 1;
 		break;
-	case SND_SOC_DAIFMT_CBS_CFS:
+	case SND_SOC_DAIFMT_CBC_CFC:
 		reg_val |= RT5616_I2S_MS_S;
 		rt5616->master[dai->id] = 0;
 		break;
@@ -1159,6 +1159,7 @@ static int rt5616_set_bias_level(struct snd_soc_component *component,
 				 enum snd_soc_bias_level level)
 {
 	struct rt5616_priv *rt5616 = snd_soc_component_get_drvdata(component);
+	struct snd_soc_dapm_context *dapm = snd_soc_component_to_dapm(component);
 	int ret;
 
 	switch (level) {
@@ -1174,10 +1175,7 @@ static int rt5616_set_bias_level(struct snd_soc_component *component,
 		 * away from ON. Disable the clock in that case, otherwise
 		 * enable it.
 		 */
-		if (IS_ERR(rt5616->mclk))
-			break;
-
-		if (snd_soc_component_get_bias_level(component) == SND_SOC_BIAS_ON) {
+		if (snd_soc_dapm_get_bias_level(dapm) == SND_SOC_BIAS_ON) {
 			clk_disable_unprepare(rt5616->mclk);
 		} else {
 			ret = clk_prepare_enable(rt5616->mclk);
@@ -1187,7 +1185,7 @@ static int rt5616_set_bias_level(struct snd_soc_component *component,
 		break;
 
 	case SND_SOC_BIAS_STANDBY:
-		if (snd_soc_component_get_bias_level(component) == SND_SOC_BIAS_OFF) {
+		if (snd_soc_dapm_get_bias_level(dapm) == SND_SOC_BIAS_OFF) {
 			snd_soc_component_update_bits(component, RT5616_PWR_ANLG1,
 					    RT5616_PWR_VREF1 | RT5616_PWR_MB |
 					    RT5616_PWR_BG | RT5616_PWR_VREF2,
@@ -1225,9 +1223,9 @@ static int rt5616_probe(struct snd_soc_component *component)
 	struct rt5616_priv *rt5616 = snd_soc_component_get_drvdata(component);
 
 	/* Check if MCLK provided */
-	rt5616->mclk = devm_clk_get(component->dev, "mclk");
-	if (PTR_ERR(rt5616->mclk) == -EPROBE_DEFER)
-		return -EPROBE_DEFER;
+	rt5616->mclk = devm_clk_get_optional(component->dev, "mclk");
+	if (IS_ERR(rt5616->mclk))
+		return PTR_ERR(rt5616->mclk);
 
 	rt5616->component = component;
 
@@ -1323,7 +1321,7 @@ static const struct regmap_config rt5616_regmap = {
 };
 
 static const struct i2c_device_id rt5616_i2c_id[] = {
-	{ "rt5616", 0 },
+	{ .name = "rt5616" },
 	{ }
 };
 MODULE_DEVICE_TABLE(i2c, rt5616_i2c_id);
@@ -1388,9 +1386,6 @@ static int rt5616_i2c_probe(struct i2c_client *i2c)
 				      rt5616_dai, ARRAY_SIZE(rt5616_dai));
 }
 
-static void rt5616_i2c_remove(struct i2c_client *i2c)
-{}
-
 static void rt5616_i2c_shutdown(struct i2c_client *client)
 {
 	struct rt5616_priv *rt5616 = i2c_get_clientdata(client);
@@ -1405,7 +1400,6 @@ static struct i2c_driver rt5616_i2c_driver = {
 		.of_match_table = of_match_ptr(rt5616_of_match),
 	},
 	.probe = rt5616_i2c_probe,
-	.remove = rt5616_i2c_remove,
 	.shutdown = rt5616_i2c_shutdown,
 	.id_table = rt5616_i2c_id,
 };

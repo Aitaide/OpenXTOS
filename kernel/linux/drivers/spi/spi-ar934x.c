@@ -168,27 +168,21 @@ static int ar934x_spi_probe(struct platform_device *pdev)
 	struct ar934x_spi *sp;
 	void __iomem *base;
 	struct clk *clk;
-	int ret;
 
 	base = devm_platform_ioremap_resource(pdev, 0);
 	if (IS_ERR(base))
 		return PTR_ERR(base);
 
-	clk = devm_clk_get(&pdev->dev, NULL);
+	clk = devm_clk_get_enabled(&pdev->dev, NULL);
 	if (IS_ERR(clk)) {
 		dev_err(&pdev->dev, "failed to get clock\n");
 		return PTR_ERR(clk);
 	}
 
-	ret = clk_prepare_enable(clk);
-	if (ret)
-		return ret;
-
 	ctlr = devm_spi_alloc_host(&pdev->dev, sizeof(*sp));
 	if (!ctlr) {
 		dev_info(&pdev->dev, "failed to allocate spi controller\n");
-		ret = -ENOMEM;
-		goto err_clk_disable;
+		return -ENOMEM;
 	}
 
 	/* disable flash mapping and expose spi controller registers */
@@ -201,7 +195,6 @@ static int ar934x_spi_probe(struct platform_device *pdev)
 	ctlr->transfer_one_message = ar934x_spi_transfer_one_message;
 	ctlr->bits_per_word_mask = SPI_BPW_MASK(32) | SPI_BPW_MASK(24) |
 				   SPI_BPW_MASK(16) | SPI_BPW_MASK(8);
-	ctlr->dev.of_node = pdev->dev.of_node;
 	ctlr->num_chipselect = 3;
 
 	dev_set_drvdata(&pdev->dev, ctlr);
@@ -212,25 +205,15 @@ static int ar934x_spi_probe(struct platform_device *pdev)
 	sp->clk_freq = clk_get_rate(clk);
 	sp->ctlr = ctlr;
 
-	ret = spi_register_controller(ctlr);
-	if (!ret)
-		return 0;
-
-err_clk_disable:
-	clk_disable_unprepare(clk);
-	return ret;
+	return spi_register_controller(ctlr);
 }
 
 static void ar934x_spi_remove(struct platform_device *pdev)
 {
 	struct spi_controller *ctlr;
-	struct ar934x_spi *sp;
 
 	ctlr = dev_get_drvdata(&pdev->dev);
-	sp = spi_controller_get_devdata(ctlr);
-
 	spi_unregister_controller(ctlr);
-	clk_disable_unprepare(sp->clk);
 }
 
 static struct platform_driver ar934x_spi_driver = {
@@ -239,7 +222,7 @@ static struct platform_driver ar934x_spi_driver = {
 		.of_match_table = ar934x_spi_match,
 	},
 	.probe = ar934x_spi_probe,
-	.remove_new = ar934x_spi_remove,
+	.remove = ar934x_spi_remove,
 };
 
 module_platform_driver(ar934x_spi_driver);

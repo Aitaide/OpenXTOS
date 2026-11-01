@@ -5,6 +5,7 @@
  * Copyright (C) 2017 Texas Instruments Incorporated - https://www.ti.com/
  */
 
+#include <linux/bitfield.h>
 #include <linux/module.h>
 #include <linux/platform_device.h>
 #include <linux/regmap.h>
@@ -99,7 +100,7 @@ static int lp87565_buck_set_ramp_delay(struct regulator_dev *rdev,
 
 	ret = regmap_update_bits(rdev->regmap, regulators[id].ctrl2_reg,
 				 LP87565_BUCK_CTRL_2_SLEW_RATE,
-				 reg << __ffs(LP87565_BUCK_CTRL_2_SLEW_RATE));
+				 FIELD_PREP(LP87565_BUCK_CTRL_2_SLEW_RATE, reg));
 	if (ret) {
 		dev_err(&rdev->dev, "SLEW RATE write failed: %d\n", ret);
 		return ret;
@@ -228,8 +229,8 @@ static int lp87565_regulator_probe(struct platform_device *pdev)
 }
 
 static const struct platform_device_id lp87565_regulator_id_table[] = {
-	{ "lp87565-regulator", },
-	{ "lp87565-q1-regulator", },
+	{ .name = "lp87565-regulator" },
+	{ .name = "lp87565-q1-regulator" },
 	{ /* sentinel */ }
 };
 MODULE_DEVICE_TABLE(platform, lp87565_regulator_id_table);

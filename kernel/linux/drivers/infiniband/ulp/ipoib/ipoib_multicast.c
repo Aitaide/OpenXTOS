@@ -74,7 +74,7 @@ static void __ipoib_mcast_schedule_join_thread(struct ipoib_dev_priv *priv,
 					       struct ipoib_mcast *mcast,
 					       bool delay)
 {
-	if (!test_bit(IPOIB_FLAG_OPER_UP, &priv->flags))
+	if (!ipoib_mcast_allowed(priv))
 		return;
 
 	/*
@@ -139,7 +139,7 @@ static struct ipoib_mcast *ipoib_mcast_alloc(struct net_device *dev)
 {
 	struct ipoib_mcast *mcast;
 
-	mcast = kzalloc(sizeof(*mcast), GFP_ATOMIC);
+	mcast = kzalloc_obj(*mcast, GFP_ATOMIC);
 	if (!mcast)
 		return NULL;
 
@@ -287,8 +287,7 @@ static int ipoib_mcast_join_finish(struct ipoib_mcast *mcast,
 
 	ah = ipoib_create_ah(dev, priv->pd, &av);
 	if (IS_ERR(ah)) {
-		ipoib_warn(priv, "ib_address_create failed %ld\n",
-			   -PTR_ERR(ah));
+		ipoib_warn(priv, "ib_address_create failed %pe\n", ah);
 		/* use original error */
 		return PTR_ERR(ah);
 	}
@@ -470,7 +469,7 @@ static int ipoib_mcast_join(struct net_device *dev, struct ipoib_mcast *mcast)
 	int ret = 0;
 
 	if (!priv->broadcast ||
-	    !test_bit(IPOIB_FLAG_OPER_UP, &priv->flags))
+	    !ipoib_mcast_allowed(priv))
 		return -EINVAL;
 
 	init_completion(&mcast->done);
@@ -531,21 +530,18 @@ static int ipoib_mcast_join(struct net_device *dev, struct ipoib_mcast *mcast)
 		if (test_bit(IPOIB_MCAST_FLAG_SENDONLY, &mcast->flags))
 			rec.join_state = SENDONLY_FULLMEMBER_JOIN;
 	}
-	spin_unlock_irq(&priv->lock);
 
 	multicast = ib_sa_join_multicast(&ipoib_sa_client, priv->ca, priv->port,
-					 &rec, comp_mask, GFP_KERNEL,
+					 &rec, comp_mask, GFP_ATOMIC,
 					 ipoib_mcast_join_complete, mcast);
-	spin_lock_irq(&priv->lock);
 	if (IS_ERR(multicast)) {
 		ret = PTR_ERR(multicast);
 		ipoib_warn(priv, "ib_sa_join_multicast failed, status %d\n", ret);
 		/* Requeue this join task with a backoff delay */
 		__ipoib_mcast_schedule_join_thread(priv, mcast, 1);
 		clear_bit(IPOIB_MCAST_FLAG_BUSY, &mcast->flags);
-		spin_unlock_irq(&priv->lock);
 		complete(&mcast->done);
-		spin_lock_irq(&priv->lock);
+		return ret;
 	}
 	return 0;
 }
@@ -559,7 +555,7 @@ void ipoib_mcast_join_task(struct work_struct *work)
 	unsigned long delay_until = 0;
 	struct ipoib_mcast *mcast = NULL;
 
-	if (!test_bit(IPOIB_FLAG_OPER_UP, &priv->flags))
+	if (!ipoib_mcast_allowed(priv))
 		return;
 
 	if (ib_query_port(priv->ca, priv->port, &port_attr)) {
@@ -581,7 +577,7 @@ void ipoib_mcast_join_task(struct work_struct *work)
 	netif_addr_unlock_bh(dev);
 
 	spin_lock_irq(&priv->lock);
-	if (!test_bit(IPOIB_FLAG_OPER_UP, &priv->flags))
+	if (!ipoib_mcast_allowed(priv))
 		goto out;
 
 	if (!priv->broadcast) {
@@ -753,7 +749,7 @@ void ipoib_mcast_send(struct net_device *dev, u8 *daddr, struct sk_buff *skb)
 
 	spin_lock_irqsave(&priv->lock, flags);
 
-	if (!test_bit(IPOIB_FLAG_OPER_UP, &priv->flags)		||
+	if (!ipoib_mcast_allowed(priv)				||
 	    !priv->broadcast					||
 	    !test_bit(IPOIB_MCAST_FLAG_ATTACHED, &priv->broadcast->flags)) {
 		++dev->stats.tx_dropped;
@@ -875,7 +871,7 @@ void ipoib_mcast_restart_task(struct work_struct *work)
 	LIST_HEAD(remove_list);
 	struct ib_sa_mcmember_rec rec;
 
-	if (!test_bit(IPOIB_FLAG_OPER_UP, &priv->flags))
+	if (!ipoib_mcast_allowed(priv))
 		/*
 		 * shortcut...on shutdown flush is called next, just
 		 * let it do all the work
@@ -969,9 +965,9 @@ void ipoib_mcast_restart_task(struct work_struct *work)
 	ipoib_mcast_remove_list(&remove_list);
 
 	/*
-	 * Double check that we are still up
+	 * Double check that we are still up and not flushing
 	 */
-	if (test_bit(IPOIB_FLAG_OPER_UP, &priv->flags)) {
+	if (ipoib_mcast_allowed(priv)) {
 		spin_lock_irq(&priv->lock);
 		__ipoib_mcast_schedule_join_thread(priv, NULL, 0);
 		spin_unlock_irq(&priv->lock);
@@ -984,7 +980,7 @@ struct ipoib_mcast_iter *ipoib_mcast_iter_init(struct net_device *dev)
 {
 	struct ipoib_mcast_iter *iter;
 
-	iter = kmalloc(sizeof(*iter), GFP_KERNEL);
+	iter = kmalloc_obj(*iter);
 	if (!iter)
 		return NULL;
 

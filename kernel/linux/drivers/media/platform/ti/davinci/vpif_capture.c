@@ -113,6 +113,7 @@ static int vpif_buffer_queue_setup(struct vb2_queue *vq,
 	struct channel_obj *ch = vb2_get_drv_priv(vq);
 	struct common_obj *common = &ch->common[VPIF_VIDEO_INDEX];
 	unsigned size = common->fmt.fmt.pix.sizeimage;
+	unsigned int q_num_bufs = vb2_get_num_buffers(vq);
 
 	vpif_dbg(2, debug, "vpif_buffer_setup\n");
 
@@ -122,8 +123,8 @@ static int vpif_buffer_queue_setup(struct vb2_queue *vq,
 		size = sizes[0];
 	}
 
-	if (vq->num_buffers + *nbuffers < 3)
-		*nbuffers = 3 - vq->num_buffers;
+	if (q_num_bufs + *nbuffers < 3)
+		*nbuffers = 3 - q_num_bufs;
 
 	*nplanes = 1;
 	sizes[0] = size;
@@ -309,8 +310,6 @@ static const struct vb2_ops video_qops = {
 	.start_streaming	= vpif_start_streaming,
 	.stop_streaming		= vpif_stop_streaming,
 	.buf_queue		= vpif_buffer_queue,
-	.wait_prepare		= vb2_ops_wait_prepare,
-	.wait_finish		= vb2_ops_wait_finish,
 };
 
 /**
@@ -1131,7 +1130,7 @@ vpif_query_dv_timings(struct file *file, void *priv,
 	if (input.capabilities != V4L2_IN_CAP_DV_TIMINGS)
 		return -ENODATA;
 
-	ret = v4l2_subdev_call(ch->sd, video, query_dv_timings, timings);
+	ret = v4l2_subdev_call(ch->sd, pad, query_dv_timings, 0, timings);
 	if (ret == -ENOIOCTLCMD || ret == -ENODEV)
 		return -ENODATA;
 
@@ -1176,7 +1175,7 @@ static int vpif_s_dv_timings(struct file *file, void *priv,
 		return -EBUSY;
 
 	/* Configure subdevice timings, if any */
-	ret = v4l2_subdev_call(ch->sd, video, s_dv_timings, timings);
+	ret = v4l2_subdev_call(ch->sd, pad, s_dv_timings, 0, timings);
 	if (ret == -ENOIOCTLCMD || ret == -ENODEV)
 		ret = 0;
 	if (ret < 0) {
@@ -1336,8 +1335,7 @@ static int initialize_vpif(void)
 
 	/* Allocate memory for six channel objects */
 	for (i = 0; i < VPIF_CAPTURE_MAX_DEVICES; i++) {
-		vpif_obj.dev[i] =
-		    kzalloc(sizeof(*vpif_obj.dev[i]), GFP_KERNEL);
+		vpif_obj.dev[i] = kzalloc_obj(*vpif_obj.dev[i]);
 		/* If memory allocation fails, return error */
 		if (!vpif_obj.dev[i]) {
 			free_channel_objects_index = i;
@@ -1428,7 +1426,7 @@ static int vpif_probe_complete(void)
 		q->mem_ops = &vb2_dma_contig_memops;
 		q->buf_struct_size = sizeof(struct vpif_cap_buffer);
 		q->timestamp_flags = V4L2_BUF_FLAG_TIMESTAMP_MONOTONIC;
-		q->min_buffers_needed = 1;
+		q->min_queued_buffers = 1;
 		q->lock = &common->lock;
 		q->dev = vpif_dev;
 
@@ -1486,7 +1484,7 @@ static struct vpif_capture_config *
 vpif_capture_get_pdata(struct platform_device *pdev,
 		       struct v4l2_device *v4l2_dev)
 {
-	struct device_node *endpoint = NULL;
+	struct device_node *endpoint;
 	struct device_node *rem = NULL;
 	struct vpif_capture_config *pdata;
 	struct vpif_subdev_info *sdinfo;
@@ -1500,7 +1498,7 @@ vpif_capture_get_pdata(struct platform_device *pdev,
 	 * video ports & endpoints data.
 	 */
 	if (pdev->dev.parent && pdev->dev.parent->of_node)
-		pdev->dev.of_node = pdev->dev.parent->of_node;
+		device_set_of_node_from_dev(&pdev->dev, pdev->dev.parent);
 	if (!IS_ENABLED(CONFIG_OF) || !pdev->dev.of_node)
 		return pdev->dev.platform_data;
 
@@ -1516,15 +1514,11 @@ vpif_capture_get_pdata(struct platform_device *pdev,
 	if (!pdata->subdev_info)
 		return NULL;
 
-	for (i = 0; i < VPIF_CAPTURE_NUM_CHANNELS; i++) {
+	i = 0;
+	for_each_endpoint_of_node(pdev->dev.of_node, endpoint) {
 		struct v4l2_fwnode_endpoint bus_cfg = { .bus_type = 0 };
 		unsigned int flags;
 		int err;
-
-		endpoint = of_graph_get_next_endpoint(pdev->dev.of_node,
-						      endpoint);
-		if (!endpoint)
-			break;
 
 		rem = of_graph_get_remote_port_parent(endpoint);
 		if (!rem) {
@@ -1576,6 +1570,10 @@ vpif_capture_get_pdata(struct platform_device *pdev,
 			goto err_cleanup;
 
 		of_node_put(rem);
+
+		i++;
+		if (i >= VPIF_CAPTURE_NUM_CHANNELS)
+			break;
 	}
 
 done:
@@ -1601,7 +1599,7 @@ err_cleanup:
  * This creates device entries by register itself to the V4L2 driver and
  * initializes fields of each channel objects
  */
-static __init int vpif_probe(struct platform_device *pdev)
+static int vpif_probe(struct platform_device *pdev)
 {
 	struct vpif_subdev_info *subdevdata;
 	struct i2c_adapter *i2c_adap;
@@ -1652,7 +1650,7 @@ static __init int vpif_probe(struct platform_device *pdev)
 	vpif_obj.config = pdev->dev.platform_data;
 
 	subdev_count = vpif_obj.config->subdev_count;
-	vpif_obj.sd = kcalloc(subdev_count, sizeof(*vpif_obj.sd), GFP_KERNEL);
+	vpif_obj.sd = kzalloc_objs(*vpif_obj.sd, subdev_count);
 	if (!vpif_obj.sd) {
 		err = -ENOMEM;
 		goto probe_subdev_out;
@@ -1808,13 +1806,13 @@ static int vpif_resume(struct device *dev)
 
 static SIMPLE_DEV_PM_OPS(vpif_pm_ops, vpif_suspend, vpif_resume);
 
-static __refdata struct platform_driver vpif_driver = {
+static struct platform_driver vpif_driver = {
 	.driver	= {
 		.name	= VPIF_DRIVER_NAME,
 		.pm	= &vpif_pm_ops,
 	},
 	.probe = vpif_probe,
-	.remove_new = vpif_remove,
+	.remove = vpif_remove,
 };
 
 module_platform_driver(vpif_driver);

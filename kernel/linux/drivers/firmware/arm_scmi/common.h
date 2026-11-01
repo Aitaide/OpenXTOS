@@ -4,7 +4,7 @@
  * driver common header file containing some definitions, structures
  * and function prototypes used in all the different SCMI protocols.
  *
- * Copyright (C) 2018-2022 ARM Ltd.
+ * Copyright (C) 2018-2024 ARM Ltd.
  */
 #ifndef _SCMI_COMMON_H
 #define _SCMI_COMMON_H
@@ -17,12 +17,13 @@
 #include <linux/hashtable.h>
 #include <linux/list.h>
 #include <linux/module.h>
+#include <linux/property.h>
 #include <linux/refcount.h>
 #include <linux/scmi_protocol.h>
 #include <linux/spinlock.h>
 #include <linux/types.h>
 
-#include <asm/unaligned.h>
+#include <linux/unaligned.h>
 
 #include "protocols.h"
 #include "notify.h"
@@ -30,6 +31,10 @@
 #define SCMI_MAX_CHANNELS		256
 
 #define SCMI_MAX_RESPONSE_TIMEOUT	(2 * MSEC_PER_SEC)
+
+#define SCMI_SHMEM_MAX_PAYLOAD_SIZE	104
+
+#define SCMI_TRANSPORT_DEVNAME_PREFIX	"__scmi_transport_device"
 
 enum scmi_error_codes {
 	SCMI_SUCCESS = 0,	/* Success */
@@ -136,12 +141,12 @@ static inline void unpack_scmi_header(u32 msg_hdr, struct scmi_msg_hdr *hdr)
 	xfer_;							\
 })
 
-struct scmi_revision_info *
+struct scmi_base_info *
 scmi_revision_area_get(const struct scmi_protocol_handle *ph);
 void scmi_setup_protocol_implemented(const struct scmi_protocol_handle *ph,
 				     u8 *prot_imp);
 
-extern struct bus_type scmi_bus_type;
+extern const struct bus_type scmi_bus_type;
 
 #define SCMI_BUS_NOTIFY_DEVICE_REQUEST		0
 #define SCMI_BUS_NOTIFY_DEVICE_UNREQUEST	1
@@ -163,7 +168,9 @@ void scmi_protocol_release(const struct scmi_handle *handle, u8 protocol_id);
  *      used to initialize this channel
  * @dev: Reference to device in the SCMI hierarchy corresponding to this
  *	 channel
+ * @is_p2a: A flag to identify a channel as P2A (RX)
  * @rx_timeout_ms: The configured RX timeout in milliseconds.
+ * @max_msg_size: Maximum size of message payload.
  * @handle: Pointer to SCMI entity handle
  * @no_completion_irq: Flag to indicate that this channel has no completion
  *		       interrupt mechanism for synchronous commands.
@@ -174,7 +181,9 @@ void scmi_protocol_release(const struct scmi_handle *handle, u8 protocol_id);
 struct scmi_chan_info {
 	int id;
 	struct device *dev;
+	bool is_p2a;
 	unsigned int rx_timeout_ms;
+	unsigned int max_msg_size;
 	struct scmi_handle *handle;
 	bool no_completion_irq;
 	void *transport_info;
@@ -183,7 +192,6 @@ struct scmi_chan_info {
 /**
  * struct scmi_transport_ops - Structure representing a SCMI transport ops
  *
- * @link_supplier: Optional callback to add link to a supplier device
  * @chan_available: Callback to check if channel is available or not
  * @chan_setup: Callback to allocate and setup a channel
  * @chan_free: Callback to free a channel
@@ -198,7 +206,6 @@ struct scmi_chan_info {
  * @poll_done: Callback to poll transfer status
  */
 struct scmi_transport_ops {
-	int (*link_supplier)(struct device *dev);
 	bool (*chan_available)(struct device_node *of_node, int idx);
 	int (*chan_setup)(struct scmi_chan_info *cinfo, struct device *dev,
 			  bool tx);
@@ -219,18 +226,21 @@ struct scmi_transport_ops {
 /**
  * struct scmi_desc - Description of SoC integration
  *
- * @transport_init: An optional function that a transport can provide to
- *		    initialize some transport-specific setup during SCMI core
- *		    initialization, so ahead of SCMI core probing.
- * @transport_exit: An optional function that a transport can provide to
- *		    de-initialize some transport-specific setup during SCMI core
- *		    de-initialization, so after SCMI core removal.
  * @ops: Pointer to the transport specific ops structure
  * @max_rx_timeout_ms: Timeout for communication with SoC (in Milliseconds)
  * @max_msg: Maximum number of messages for a channel type (tx or rx) that can
  *	be pending simultaneously in the system. May be overridden by the
  *	get_max_msg op.
- * @max_msg_size: Maximum size of data per message that can be handled.
+ * @max_msg_size: Maximum size of data payload per message that can be handled.
+ * @atomic_threshold: Optional system wide DT-configured threshold, expressed
+ *		      in microseconds, for atomic operations.
+ *		      Only SCMI synchronous commands reported by the platform
+ *		      to have an execution latency lesser-equal to the threshold
+ *		      should be considered for atomic mode operation: such
+ *		      decision is finally left up to the SCMI drivers.
+ * @no_completion_irq: Flag to indicate that this transport has no completion
+ *		       interrupt and has to be polled. This is similar to the
+ *		       force_polling below, except this is set via DT property.
  * @force_polling: Flag to force this whole transport to use SCMI core polling
  *		   mechanism instead of completion interrupts even if available.
  * @sync_cmds_completed_on_ret: Flag to indicate that the transport assures
@@ -245,12 +255,12 @@ struct scmi_transport_ops {
  *		    when requested.
  */
 struct scmi_desc {
-	int (*transport_init)(void);
-	void (*transport_exit)(void);
 	const struct scmi_transport_ops *ops;
 	int max_rx_timeout_ms;
 	int max_msg;
 	int max_msg_size;
+	unsigned int atomic_threshold;
+	bool no_completion_irq;
 	const bool force_polling;
 	const bool sync_cmds_completed_on_ret;
 	const bool atomic_enabled;
@@ -286,34 +296,128 @@ int scmi_xfer_raw_inflight_register(const struct scmi_handle *handle,
 int scmi_xfer_raw_wait_for_message_response(struct scmi_chan_info *cinfo,
 					    struct scmi_xfer *xfer,
 					    unsigned int timeout_ms);
-#ifdef CONFIG_ARM_SCMI_TRANSPORT_MAILBOX
-extern const struct scmi_desc scmi_mailbox_desc;
-#endif
-#ifdef CONFIG_ARM_SCMI_TRANSPORT_SMC
-extern const struct scmi_desc scmi_smc_desc;
-#endif
-#ifdef CONFIG_ARM_SCMI_TRANSPORT_VIRTIO
-extern const struct scmi_desc scmi_virtio_desc;
-#endif
-#ifdef CONFIG_ARM_SCMI_TRANSPORT_OPTEE
-extern const struct scmi_desc scmi_optee_desc;
-#endif
 
-void scmi_rx_callback(struct scmi_chan_info *cinfo, u32 msg_hdr, void *priv);
+enum debug_counters {
+	SENT_OK,
+	SENT_FAIL,
+	SENT_FAIL_POLLING_UNSUPPORTED,
+	SENT_FAIL_CHANNEL_NOT_FOUND,
+	RESPONSE_OK,
+	NOTIFICATION_OK,
+	DELAYED_RESPONSE_OK,
+	XFERS_RESPONSE_TIMEOUT,
+	XFERS_RESPONSE_POLLED_TIMEOUT,
+	RESPONSE_POLLED_OK,
+	ERR_MSG_UNEXPECTED,
+	ERR_MSG_INVALID,
+	ERR_MSG_NOMEM,
+	ERR_PROTOCOL,
+	XFERS_INFLIGHT,
+	SCMI_DEBUG_COUNTERS_LAST
+};
+
+/**
+ * struct scmi_debug_info  - Debug common info
+ * @top_dentry: A reference to the top debugfs dentry
+ * @name: Name of this SCMI instance
+ * @type: Type of this SCMI instance
+ * @is_atomic: Flag to state if the transport of this instance is atomic
+ * @counters: An array of atomic_c's used for tracking statistics (if enabled)
+ */
+struct scmi_debug_info {
+	struct dentry *top_dentry;
+	const char *name;
+	const char *type;
+	bool is_atomic;
+	atomic_t counters[SCMI_DEBUG_COUNTERS_LAST];
+};
+
+static inline void scmi_inc_count(struct scmi_debug_info *dbg, int stat)
+{
+	if (IS_ENABLED(CONFIG_ARM_SCMI_DEBUG_COUNTERS)) {
+		if (dbg)
+			atomic_inc(&dbg->counters[stat]);
+	}
+}
+
+static inline void scmi_dec_count(struct scmi_debug_info *dbg, int stat)
+{
+	if (IS_ENABLED(CONFIG_ARM_SCMI_DEBUG_COUNTERS)) {
+		if (dbg)
+			atomic_dec(&dbg->counters[stat]);
+	}
+}
+
+enum scmi_bad_msg {
+	MSG_UNEXPECTED = -1,
+	MSG_INVALID = -2,
+	MSG_UNKNOWN = -3,
+	MSG_NOMEM = -4,
+	MSG_MBOX_SPURIOUS = -5,
+};
+
+/* Used for compactness and signature validation of the function pointers being
+ * passed.
+ */
+typedef void (*shmem_copy_toio_t)(void __iomem *to, const void *from,
+				  size_t count);
+typedef void (*shmem_copy_fromio_t)(void *to, const void __iomem *from,
+				    size_t count);
+
+/**
+ * struct scmi_shmem_io_ops  - I/O operations to read from/write to
+ * Shared Memory
+ *
+ * @toio: Copy data to the shared memory area
+ * @fromio: Copy data from the shared memory area
+ */
+struct scmi_shmem_io_ops {
+	shmem_copy_fromio_t fromio;
+	shmem_copy_toio_t toio;
+};
 
 /* shmem related declarations */
 struct scmi_shared_mem;
 
-void shmem_tx_prepare(struct scmi_shared_mem __iomem *shmem,
-		      struct scmi_xfer *xfer, struct scmi_chan_info *cinfo);
-u32 shmem_read_header(struct scmi_shared_mem __iomem *shmem);
-void shmem_fetch_response(struct scmi_shared_mem __iomem *shmem,
+/**
+ * struct scmi_shared_mem_operations  - Transport core operations for
+ * Shared Memory
+ *
+ * @tx_prepare: Prepare the @xfer message for transmission on the chosen @shmem
+ * @read_header: Read header of the message currently hold in @shmem
+ * @fetch_response: Copy the message response from @shmem into @xfer
+ * @fetch_notification: Copy the message notification from @shmem into @xfer
+ * @clear_channel: Clear the @shmem channel busy flag
+ * @poll_done: Check if poll has completed for @xfer on @shmem
+ * @channel_free: Check if @shmem channel is marked as free
+ * @channel_intr_enabled: Check is @shmem channel has requested a completion irq
+ * @setup_iomap: Setup IO shared memory for channel @cinfo
+ */
+struct scmi_shared_mem_operations {
+	void (*tx_prepare)(struct scmi_shared_mem __iomem *shmem,
+			   struct scmi_xfer *xfer,
+			   struct scmi_chan_info *cinfo,
+			   shmem_copy_toio_t toio);
+	u32 (*read_header)(struct scmi_shared_mem __iomem *shmem);
+
+	void (*fetch_response)(struct scmi_shared_mem __iomem *shmem,
+			       struct scmi_xfer *xfer,
+			       shmem_copy_fromio_t fromio);
+	void (*fetch_notification)(struct scmi_shared_mem __iomem *shmem,
+				   size_t max_len, struct scmi_xfer *xfer,
+				   shmem_copy_fromio_t fromio);
+	void (*clear_channel)(struct scmi_shared_mem __iomem *shmem);
+	bool (*poll_done)(struct scmi_shared_mem __iomem *shmem,
 			  struct scmi_xfer *xfer);
-void shmem_fetch_notification(struct scmi_shared_mem __iomem *shmem,
-			      size_t max_len, struct scmi_xfer *xfer);
-void shmem_clear_channel(struct scmi_shared_mem __iomem *shmem);
-bool shmem_poll_done(struct scmi_shared_mem __iomem *shmem,
-		     struct scmi_xfer *xfer);
+	bool (*channel_free)(struct scmi_shared_mem __iomem *shmem);
+	bool (*channel_intr_enabled)(struct scmi_shared_mem __iomem *shmem);
+	void __iomem *(*setup_iomap)(struct scmi_chan_info *cinfo,
+				     struct device *dev,
+				     bool tx, struct resource *res,
+				     struct scmi_shmem_io_ops **ops);
+};
+
+const struct scmi_shared_mem_operations *scmi_shared_mem_operations_get(void);
 
 /* declarations for message passing transports */
 struct scmi_msg_payld;
@@ -321,16 +425,266 @@ struct scmi_msg_payld;
 /* Maximum overhead of message w.r.t. struct scmi_desc.max_msg_size */
 #define SCMI_MSG_MAX_PROT_OVERHEAD (2 * sizeof(__le32))
 
-size_t msg_response_size(struct scmi_xfer *xfer);
-size_t msg_command_size(struct scmi_xfer *xfer);
-void msg_tx_prepare(struct scmi_msg_payld *msg, struct scmi_xfer *xfer);
-u32 msg_read_header(struct scmi_msg_payld *msg);
-void msg_fetch_response(struct scmi_msg_payld *msg, size_t len,
-			struct scmi_xfer *xfer);
-void msg_fetch_notification(struct scmi_msg_payld *msg, size_t len,
-			    size_t max_len, struct scmi_xfer *xfer);
+/**
+ * struct scmi_message_operations  - Transport core operations for Message
+ *
+ * @response_size: Get calculated response size for @xfer
+ * @command_size: Get calculated command size for @xfer
+ * @tx_prepare: Prepare the @xfer message for transmission on the provided @msg
+ * @read_header: Read header of the message currently hold in @msg
+ * @fetch_response: Copy the message response from @msg into @xfer
+ * @fetch_notification: Copy the message notification from @msg into @xfer
+ */
+struct scmi_message_operations {
+	size_t (*response_size)(struct scmi_xfer *xfer);
+	size_t (*command_size)(struct scmi_xfer *xfer);
+	void (*tx_prepare)(struct scmi_msg_payld *msg, struct scmi_xfer *xfer);
+	u32 (*read_header)(struct scmi_msg_payld *msg);
+	void (*fetch_response)(struct scmi_msg_payld *msg, size_t len,
+			       struct scmi_xfer *xfer);
+	void (*fetch_notification)(struct scmi_msg_payld *msg, size_t len,
+				   size_t max_len, struct scmi_xfer *xfer);
+};
+
+const struct scmi_message_operations *scmi_message_operations_get(void);
+
+/**
+ * struct scmi_transport_core_operations  - Transpoert core operations
+ *
+ * @bad_message_trace: An helper to report a malformed/unexpected message
+ * @rx_callback: Callback to report received messages
+ * @shmem: Datagram operations for shared memory based transports
+ * @msg: Datagram operations for message based transports
+ */
+struct scmi_transport_core_operations {
+	void (*bad_message_trace)(struct scmi_chan_info *cinfo,
+				  u32 msg_hdr, enum scmi_bad_msg err);
+	void (*rx_callback)(struct scmi_chan_info *cinfo, u32 msg_hdr,
+			    void *priv);
+	const struct scmi_shared_mem_operations *shmem;
+	const struct scmi_message_operations *msg;
+};
+
+/**
+ * struct scmi_transport_handle  - Transport instance handle
+ * @supplier_get: A helper to retrieve the device descriptor, identifying the
+ *		  transport driver serving this SCMI instance, which will be
+ *		  used as a supplier for the core SCMI driver: returning an
+ *		  error here causes the probe sequence to be interrupted and
+ *		  return that same error code, so that each transport can decide
+ *		  which policy to implement by choosing an appropriate error.
+ * @supplier_put: A helper to signal that the specified transport supplier is
+ *		  no more being used and it is made available again.
+ *
+ * Note that these helpers are needed and provided only by those transports
+ * whose initialization relies on some other subsystem and whose relations to
+ * the core SCMI driver is not tracked by firmware descriptions.
+ */
+struct scmi_transport_handle {
+	struct device __must_check *(*supplier_get)
+		(const struct scmi_transport_handle *th);
+	int (*supplier_put)(const struct scmi_transport_handle *th,
+			    struct device *dev);
+};
+
+/**
+ * struct scmi_transport  - A structure representing a configured transport
+ *
+ * @supplier: Device representing the transport and acting as a supplier for
+ *	      the core SCMI stack
+ * @desc: Transport descriptor
+ * @core_ops: A pointer to a pointer used by the core SCMI stack to make the
+ *	      core transport operations accessible to the transports.
+ * @th: An optional pointer to the transport handle
+ */
+struct scmi_transport {
+	struct device *supplier;
+	struct scmi_desc desc;
+	struct scmi_transport_core_operations **core_ops;
+	const struct scmi_transport_handle *th;
+};
+
+/**
+ * struct scmi_transport_supplier  - Transport descriptor
+ * @mtx: A mutex to protect @available
+ * @available: A reference to an initialized transport device, when available.
+ *	       This reference is implicitly used to track the status of the
+ *	       supplier and it can cycle through the following 3 states:
+ *	       1. NOT_READY - PTR_ERR(-EPROBE_DEFER): no supplier available;
+ *		  this is the transport initial state.
+ *	       2. AVAILABLE - <supplier_dev>: a transport supplier has been
+ *		  initialized and it is available, ready to use.
+ *	       3. BUSY _ PTR_ERR(-EBUSY): transport supplier is currently in use.
+ * @th: An embedded transport handle object that embeds the helpers
+ *	implementing the above mentioned logic
+ *
+ * Note that this transport driver enforces single instance probing.
+ */
+struct scmi_transport_supplier {
+	/* Protect @available */
+	struct mutex mtx;
+	struct device *available;
+	const struct scmi_transport_handle th;
+};
+
+#define to_sup(t)	container_of(t, struct scmi_transport_supplier, th)
+
+/**
+ * scmi_transport_supplier_put  - A helper to dispose of a supplier
+ * @th: A reference to the transport handle to use
+ * @supplier: A reference to the device supplier to manage, cannot be NULL
+ *	      or ERR_PTR.
+ *
+ * Note that putting a supplier will have different effect based on the
+ * current state of scmi_transport_supplier.available:
+ *  - NOT_READY/BUSY: @supplier will be set as the new available device: this
+ *		      can be used to made available a supplier OR stop using one.
+ *  - AVAILABLE: if the @supplier we are disposing of matches the currently
+ *		 available one, roll back to NOT_READY state.
+ *		 Any other attempt to override an available supplier with a
+ *		 new one is rejected, effectively enforcing one single supplier.
+ *
+ * Return: 0 on Success, errno otherwise.
+ */
+static inline int
+scmi_transport_supplier_put(const struct scmi_transport_handle *th,
+			    struct device *supplier)
+{
+	struct scmi_transport_supplier *sup = to_sup(th);
+
+	/* Nothing to do when the provided supplier was never real */
+	if (IS_ERR_OR_NULL(supplier))
+		return 0;
+
+	guard(mutex)(&sup->mtx);
+	switch (PTR_ERR_OR_ZERO(sup->available)) {
+	case -EPROBE_DEFER:
+	case -EBUSY:
+		sup->available = supplier;
+		break;
+	case 0:
+		/* Putting a supplier when in the AVAILABLE state causes a
+		 * transition back to the NOT_READY state, BUT only if the
+		 * supplier we are disposing of was exactly the device that was
+		 * previously made readily available.
+		 */
+		if (supplier != sup->available)
+			return -EINVAL;
+		sup->available = ERR_PTR(-EPROBE_DEFER);
+		break;
+	default:
+		return -EINVAL;
+	}
+
+	return 0;
+}
+
+/**
+ * scmi_transport_supplier_get  - A helper to get hold of a supplier
+ * @th: A reference to the transport handle to use
+ *
+ * Note that, trying to get a supplier device can return:
+ *  - a ready to use supplier device, (subsequently made unavailable)
+ *  - PTR_ERR(-EPROBE_DEFER): no supplier is available
+ *  - PTR_ERR(-BUSY): supplier was already taken by a previous get
+ *
+ *  This allows the probe to defer and wait when a possible device can
+ *  be reasonably expected to appear.
+ *
+ * Return: a usable supplier device on Success or PTR_ERR on Failure.
+ */
+static inline struct device *
+scmi_transport_supplier_get(const struct scmi_transport_handle *th)
+{
+	struct scmi_transport_supplier *sup = to_sup(th);
+	struct device *supplier;
+
+	guard(mutex)(&sup->mtx);
+	supplier = sup->available;
+	if (!IS_ERR(sup->available))
+		sup->available = ERR_PTR(-EBUSY);
+
+	return supplier;
+}
+
+#define DEFINE_SCMI_TRANSPORT_SUPPLIER(__supplier)		\
+struct scmi_transport_supplier __supplier = {			\
+	.mtx = __MUTEX_INITIALIZER(__supplier.mtx),		\
+	.available = INIT_ERR_PTR(-EPROBE_DEFER),		\
+	.th.supplier_get = scmi_transport_supplier_get,		\
+	.th.supplier_put = scmi_transport_supplier_put,		\
+}
+
+#define DEFINE_SCMI_TRANSPORT_DRIVER(__tag, __drv, __desc, __match, __core_ops)\
+static void __tag##_dev_free(void *data)				       \
+{									       \
+	struct platform_device *spdev = data;				       \
+	struct scmi_transport *strans;					       \
+									       \
+	strans = dev_get_platdata(&spdev->dev);				       \
+	if (strans && strans->th)					       \
+		strans->th->supplier_put(strans->th, strans->supplier);	       \
+									       \
+	platform_device_unregister(spdev);				       \
+}									       \
+									       \
+static int __tag##_probe(struct platform_device *pdev)			       \
+{									       \
+	struct device *dev = &pdev->dev, *supplier;			       \
+	struct platform_device *spdev;					       \
+	struct scmi_transport strans;					       \
+	int ret;							       \
+									       \
+	supplier = dev;							       \
+	strans.th = device_get_match_data(dev);				       \
+	if (strans.th) {						       \
+		supplier = strans.th->supplier_get(strans.th);		       \
+		if (IS_ERR(supplier))					       \
+			return PTR_ERR(supplier);			       \
+	}								       \
+									       \
+	spdev = platform_device_alloc("arm-scmi", PLATFORM_DEVID_AUTO);	       \
+	if (!spdev) {							       \
+		ret = -ENOMEM;						       \
+		goto err_mem;						       \
+	}								       \
+									       \
+	device_set_of_node_from_dev(&spdev->dev, dev);			       \
+									       \
+	strans.supplier = supplier;					       \
+	memcpy(&strans.desc, &(__desc), sizeof(strans.desc));		       \
+	strans.core_ops = &(__core_ops);				       \
+									       \
+	ret = platform_device_add_data(spdev, &strans, sizeof(strans));	       \
+	if (ret)							       \
+		goto err;						       \
+									       \
+	spdev->dev.parent = dev;					       \
+	ret = platform_device_add(spdev);				       \
+	if (ret)							       \
+		goto err;						       \
+									       \
+	return devm_add_action_or_reset(dev, __tag##_dev_free, spdev);	       \
+									       \
+err:									       \
+	platform_device_put(spdev);					       \
+err_mem:								       \
+	if (strans.th)							       \
+		strans.th->supplier_put(strans.th, supplier);			       \
+									       \
+	return ret;							       \
+}									       \
+									       \
+static struct platform_driver __drv = {					       \
+	.driver = {							       \
+		   .name = #__tag "_transport",				       \
+		   .of_match_table = __match,				       \
+		   },							       \
+	.probe = __tag##_probe,						       \
+}
 
 void scmi_notification_instance_data_set(const struct scmi_handle *handle,
 					 void *priv);
 void *scmi_notification_instance_data_get(const struct scmi_handle *handle);
+int scmi_inflight_count(const struct scmi_handle *handle);
 #endif /* _SCMI_COMMON_H */

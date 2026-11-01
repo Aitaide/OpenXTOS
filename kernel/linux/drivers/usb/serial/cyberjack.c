@@ -28,11 +28,9 @@
 #include <linux/errno.h>
 #include <linux/slab.h>
 #include <linux/tty.h>
-#include <linux/tty_driver.h>
 #include <linux/tty_flip.h>
 #include <linux/module.h>
 #include <linux/spinlock.h>
-#include <linux/uaccess.h>
 #include <linux/usb.h>
 #include <linux/usb/serial.h>
 
@@ -67,7 +65,6 @@ MODULE_DEVICE_TABLE(usb, id_table);
 
 static struct usb_serial_driver cyberjack_device = {
 	.driver = {
-		.owner =	THIS_MODULE,
 		.name =		"cyberjack",
 	},
 	.description =		"Reiner SCT Cyberjack USB card reader",
@@ -102,7 +99,7 @@ static int cyberjack_port_probe(struct usb_serial_port *port)
 	struct cyberjack_private *priv;
 	int result;
 
-	priv = kmalloc(sizeof(struct cyberjack_private), GFP_KERNEL);
+	priv = kmalloc_obj(struct cyberjack_private);
 	if (!priv)
 		return -ENOMEM;
 

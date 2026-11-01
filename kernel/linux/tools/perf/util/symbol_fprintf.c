@@ -11,8 +11,8 @@ size_t symbol__fprintf(struct symbol *sym, FILE *fp)
 {
 	return fprintf(fp, " %" PRIx64 "-%" PRIx64 " %c %s\n",
 		       sym->start, sym->end,
-		       sym->binding == STB_GLOBAL ? 'g' :
-		       sym->binding == STB_LOCAL  ? 'l' : 'w',
+		       symbol__binding(sym) == STB_GLOBAL ? 'g' :
+		       symbol__binding(sym) == STB_LOCAL  ? 'l' : 'w',
 		       sym->name);
 }
 
@@ -64,8 +64,8 @@ size_t dso__fprintf_symbols_by_name(struct dso *dso,
 {
 	size_t ret = 0;
 
-	for (size_t i = 0; i < dso->symbol_names_len; i++) {
-		struct symbol *pos = dso->symbol_names[i];
+	for (size_t i = 0; i < dso__symbol_names_len(dso); i++) {
+		struct symbol *pos = dso__symbol_names(dso)[i];
 
 		ret += fprintf(fp, "%s\n", pos->name);
 	}

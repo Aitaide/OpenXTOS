@@ -51,7 +51,7 @@ static int pds_vdpa_register_event_handler(struct pds_vdpa_device *pdsv)
 		err = pdsc_register_notify(nb);
 		if (err) {
 			nb->notifier_call = NULL;
-			dev_err(dev, "failed to register pds event handler: %ps\n",
+			dev_err(dev, "failed to register pds event handler: %pe\n",
 				ERR_PTR(err));
 			return -EINVAL;
 		}
@@ -318,9 +318,8 @@ static int pds_vdpa_set_driver_features(struct vdpa_device *vdpa_dev, u64 featur
 		return -EOPNOTSUPP;
 	}
 
-	pdsv->negotiated_features = nego_features;
-
 	driver_features = pds_vdpa_get_driver_features(vdpa_dev);
+	pdsv->negotiated_features = nego_features;
 	dev_dbg(dev, "%s: %#llx => %#llx\n",
 		__func__, driver_features, nego_features);
 
@@ -427,11 +426,17 @@ err_release:
 	return err;
 }
 
-static void pds_vdpa_release_irqs(struct pds_vdpa_device *pdsv)
+void pds_vdpa_release_irqs(struct pds_vdpa_device *pdsv)
 {
-	struct pci_dev *pdev = pdsv->vdpa_aux->padev->vf_pdev;
-	struct pds_vdpa_aux *vdpa_aux = pdsv->vdpa_aux;
+	struct pds_vdpa_aux *vdpa_aux;
+	struct pci_dev *pdev;
 	int qid;
+
+	if (!pdsv)
+		return;
+
+	pdev = pdsv->vdpa_aux->padev->vf_pdev;
+	vdpa_aux = pdsv->vdpa_aux;
 
 	if (!vdpa_aux->nintrs)
 		return;
@@ -461,8 +466,10 @@ static void pds_vdpa_set_status(struct vdpa_device *vdpa_dev, u8 status)
 
 	pds_vdpa_cmd_set_status(pdsv, status);
 
-	/* Note: still working with FW on the need for this reset cmd */
 	if (status == 0) {
+		struct vdpa_callback null_cb = { };
+
+		pds_vdpa_set_config_cb(vdpa_dev, &null_cb);
 		pds_vdpa_cmd_reset(pdsv);
 
 		for (i = 0; i < pdsv->num_vqs; i++) {
@@ -611,6 +618,7 @@ static int pds_vdpa_dev_add(struct vdpa_mgmt_dev *mdev, const char *name,
 	struct device *dma_dev;
 	struct pci_dev *pdev;
 	struct device *dev;
+	u8 status;
 	int err;
 	int i;
 
@@ -624,7 +632,8 @@ static int pds_vdpa_dev_add(struct vdpa_mgmt_dev *mdev, const char *name,
 	}
 
 	pdsv = vdpa_alloc_device(struct pds_vdpa_device, vdpa_dev,
-				 dev, &pds_vdpa_ops, 1, 1, name, false);
+				 dev, &pds_vdpa_ops, NULL,
+				 1, 1, name, false);
 	if (IS_ERR(pdsv)) {
 		dev_err(dev, "Failed to allocate vDPA structure: %pe\n", pdsv);
 		return PTR_ERR(pdsv);
@@ -635,7 +644,14 @@ static int pds_vdpa_dev_add(struct vdpa_mgmt_dev *mdev, const char *name,
 
 	pdev = vdpa_aux->padev->vf_pdev;
 	dma_dev = &pdev->dev;
-	pdsv->vdpa_dev.dma_dev = dma_dev;
+	pdsv->vdpa_dev.vmap.dma_dev = dma_dev;
+
+	status = pds_vdpa_get_status(&pdsv->vdpa_dev);
+	if (status == 0xff) {
+		dev_err(dev, "Broken PCI - status %#x\n", status);
+		err = -ENXIO;
+		goto err_unmap;
+	}
 
 	pdsv->supported_features = mgmt->supported_features;
 
@@ -715,6 +731,12 @@ static int pds_vdpa_dev_add(struct vdpa_mgmt_dev *mdev, const char *name,
 
 		notify = vp_modern_map_vq_notify(&pdsv->vdpa_aux->vd_mdev,
 						 i, &pdsv->vqs[i].notify_pa);
+		if (!notify) {
+			err = -EINVAL;
+			dev_err(dev, "Fail to map vq notify %d\n", i);
+			goto err_unmap;
+		}
+
 		pds_vdpa_init_vqs_entry(pdsv, i, notify);
 	}
 

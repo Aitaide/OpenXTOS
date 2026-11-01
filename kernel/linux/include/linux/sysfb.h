@@ -7,9 +7,15 @@
  * Copyright (c) 2012-2013 David Herrmann <dh.herrmann@gmail.com>
  */
 
-#include <linux/kernel.h>
+#include <linux/err.h>
 #include <linux/platform_data/simplefb.h>
+#include <linux/screen_info.h>
+#include <linux/types.h>
 
+#include <video/edid.h>
+
+struct device;
+struct platform_device;
 struct screen_info;
 
 enum {
@@ -56,14 +62,31 @@ struct efifb_dmi_info {
 	int flags;
 };
 
+struct sysfb_display_info {
+	struct screen_info screen;
+
+#if defined(CONFIG_FIRMWARE_EDID)
+	struct edid_info edid;
+#endif
+};
+
+extern struct sysfb_display_info sysfb_primary_display;
+
 #ifdef CONFIG_SYSFB
 
-void sysfb_disable(void);
+void sysfb_disable(struct device *dev);
+
+bool sysfb_handles_screen_info(void);
 
 #else /* CONFIG_SYSFB */
 
-static inline void sysfb_disable(void)
+static inline void sysfb_disable(struct device *dev)
 {
+}
+
+static inline bool sysfb_handles_screen_info(void)
+{
+	return false;
 }
 
 #endif /* CONFIG_SYSFB */
@@ -71,16 +94,17 @@ static inline void sysfb_disable(void)
 #ifdef CONFIG_EFI
 
 extern struct efifb_dmi_info efifb_dmi_list[];
-void sysfb_apply_efi_quirks(void);
-void sysfb_set_efifb_fwnode(struct platform_device *pd);
+void sysfb_apply_efi_quirks(struct screen_info *si);
+void sysfb_set_efifb_fwnode(const struct screen_info *si, struct platform_device *pd);
 
 #else /* CONFIG_EFI */
 
-static inline void sysfb_apply_efi_quirks(void)
+static inline void sysfb_apply_efi_quirks(struct screen_info *si)
 {
 }
 
-static inline void sysfb_set_efifb_fwnode(struct platform_device *pd)
+static inline void sysfb_set_efifb_fwnode(const struct screen_info *si,
+					  struct platform_device *pd)
 {
 }
 
@@ -91,9 +115,10 @@ static inline void sysfb_set_efifb_fwnode(struct platform_device *pd)
 bool sysfb_parse_mode(const struct screen_info *si,
 		      struct simplefb_platform_data *mode);
 struct platform_device *sysfb_create_simplefb(const struct screen_info *si,
-					      const struct simplefb_platform_data *mode);
+					      const struct simplefb_platform_data *mode,
+					      struct device *parent);
 
-#else /* CONFIG_SYSFB_SIMPLE */
+#else /* CONFIG_SYSFB_SIMPLEFB */
 
 static inline bool sysfb_parse_mode(const struct screen_info *si,
 				    struct simplefb_platform_data *mode)
@@ -102,11 +127,12 @@ static inline bool sysfb_parse_mode(const struct screen_info *si,
 }
 
 static inline struct platform_device *sysfb_create_simplefb(const struct screen_info *si,
-							    const struct simplefb_platform_data *mode)
+							    const struct simplefb_platform_data *mode,
+							    struct device *parent)
 {
 	return ERR_PTR(-EINVAL);
 }
 
-#endif /* CONFIG_SYSFB_SIMPLE */
+#endif /* CONFIG_SYSFB_SIMPLEFB */
 
 #endif /* _LINUX_SYSFB_H */

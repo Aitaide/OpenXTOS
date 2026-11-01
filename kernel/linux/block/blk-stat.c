@@ -27,7 +27,7 @@ void blk_rq_stat_init(struct blk_rq_stat *stat)
 /* src is a per-cpu stat, mean isn't initialized */
 void blk_rq_stat_sum(struct blk_rq_stat *dst, struct blk_rq_stat *src)
 {
-	if (!src->nr_samples)
+	if (dst->nr_samples + src->nr_samples <= dst->nr_samples)
 		return;
 
 	dst->min = min(dst->min, src->min);
@@ -57,9 +57,6 @@ void blk_stat_add(struct request *rq, u64 now)
 
 	value = (now >= rq->io_start_time_ns) ? now - rq->io_start_time_ns : 0;
 
-	if (req_op(rq) == REQ_OP_READ || req_op(rq) == REQ_OP_WRITE)
-		blk_throtl_stat_add(rq, value);
-
 	rcu_read_lock();
 	cpu = get_cpu();
 	list_for_each_entry_rcu(cb, &q->stats->callbacks, list) {
@@ -79,14 +76,14 @@ void blk_stat_add(struct request *rq, u64 now)
 
 static void blk_stat_timer_fn(struct timer_list *t)
 {
-	struct blk_stat_callback *cb = from_timer(cb, t, timer);
+	struct blk_stat_callback *cb = timer_container_of(cb, t, timer);
 	unsigned int bucket;
 	int cpu;
 
 	for (bucket = 0; bucket < cb->buckets; bucket++)
 		blk_rq_stat_init(&cb->stat[bucket]);
 
-	for_each_online_cpu(cpu) {
+	for_each_possible_cpu(cpu) {
 		struct blk_rq_stat *cpu_stat;
 
 		cpu_stat = per_cpu_ptr(cb->cpu_stat, cpu);
@@ -106,12 +103,11 @@ blk_stat_alloc_callback(void (*timer_fn)(struct blk_stat_callback *),
 {
 	struct blk_stat_callback *cb;
 
-	cb = kmalloc(sizeof(*cb), GFP_KERNEL);
+	cb = kmalloc_obj(*cb);
 	if (!cb)
 		return NULL;
 
-	cb->stat = kmalloc_array(buckets, sizeof(struct blk_rq_stat),
-				 GFP_KERNEL);
+	cb->stat = kmalloc_objs(struct blk_rq_stat, buckets);
 	if (!cb->stat) {
 		kfree(cb);
 		return NULL;
@@ -165,7 +161,7 @@ void blk_stat_remove_callback(struct request_queue *q,
 		blk_queue_flag_clear(QUEUE_FLAG_STATS, q);
 	spin_unlock_irqrestore(&q->stats->lock, flags);
 
-	del_timer_sync(&cb->timer);
+	timer_delete_sync(&cb->timer);
 }
 
 static void blk_stat_free_callback_rcu(struct rcu_head *head)
@@ -210,7 +206,7 @@ struct blk_queue_stats *blk_alloc_queue_stats(void)
 {
 	struct blk_queue_stats *stats;
 
-	stats = kmalloc(sizeof(*stats), GFP_KERNEL);
+	stats = kmalloc_obj(*stats);
 	if (!stats)
 		return NULL;
 

@@ -45,7 +45,7 @@ struct axp20x_ac_power {
 	struct iio_channel *acin_i;
 	bool has_acin_path_sel;
 	unsigned int num_irqs;
-	unsigned int irqs[];
+	unsigned int irqs[] __counted_by(num_irqs);
 };
 
 static irqreturn_t axp20x_ac_power_irq(int irq, void *devid)
@@ -364,7 +364,7 @@ static int axp20x_ac_power_probe(struct platform_device *pdev)
 
 	platform_set_drvdata(pdev, power);
 
-	psy_cfg.of_node = pdev->dev.of_node;
+	psy_cfg.fwnode = dev_fwnode(&pdev->dev);
 	psy_cfg.drv_data = power;
 
 	power->supply = devm_power_supply_register(&pdev->dev,
@@ -383,11 +383,8 @@ static int axp20x_ac_power_probe(struct platform_device *pdev)
 		ret = devm_request_any_context_irq(&pdev->dev, power->irqs[i],
 						   axp20x_ac_power_irq, 0,
 						   DRVNAME, power);
-		if (ret < 0) {
-			dev_err(&pdev->dev, "Error requesting %s IRQ: %d\n",
-				axp_data->irq_names[i], ret);
+		if (ret < 0)
 			return ret;
-		}
 	}
 
 	return 0;
@@ -421,3 +418,4 @@ module_platform_driver(axp20x_ac_power_driver);
 MODULE_AUTHOR("Quentin Schulz <quentin.schulz@free-electrons.com>");
 MODULE_DESCRIPTION("AXP20X and AXP22X PMICs' AC power supply driver");
 MODULE_LICENSE("GPL");
+MODULE_IMPORT_NS("IIO_CONSUMER");

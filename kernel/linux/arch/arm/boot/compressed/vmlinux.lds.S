@@ -21,6 +21,7 @@ SECTIONS
     COMMON_DISCARDS
     *(.ARM.exidx*)
     *(.ARM.extab*)
+    *(.modinfo)
     *(.note.*)
     *(.rel.*)
     *(.printk_index)
@@ -125,7 +126,7 @@ SECTIONS
 
   . = BSS_START;
   __bss_start = .;
-  .bss			: { *(.bss) }
+  .bss			: { *(.bss .bss.*) }
   _end = .;
 
   . = ALIGN(8);		/* the stack must be 64-bit aligned */

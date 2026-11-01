@@ -393,7 +393,7 @@ static int mpc52xx_bcom_probe(struct platform_device *op)
 	}
 
 	/* Get a clean struct */
-	bcom_eng = kzalloc(sizeof(struct bcom_engine), GFP_KERNEL);
+	bcom_eng = kzalloc_obj(struct bcom_engine);
 	if (!bcom_eng) {
 		rv = -ENOMEM;
 		goto error_sramclean;
@@ -455,7 +455,7 @@ error_ofput:
 }
 
 
-static int mpc52xx_bcom_remove(struct platform_device *op)
+static void mpc52xx_bcom_remove(struct platform_device *op)
 {
 	/* Clean up the engine */
 	bcom_engine_cleanup();
@@ -473,8 +473,6 @@ static int mpc52xx_bcom_remove(struct platform_device *op)
 	/* Release memory */
 	kfree(bcom_eng);
 	bcom_eng = NULL;
-
-	return 0;
 }
 
 static const struct of_device_id mpc52xx_bcom_of_match[] = {

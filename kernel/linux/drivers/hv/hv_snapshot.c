@@ -12,7 +12,7 @@
 #include <linux/connector.h>
 #include <linux/workqueue.h>
 #include <linux/hyperv.h>
-#include <asm/hyperv-tlfs.h>
+#include <hyperv/hvhdk.h>
 
 #include "hyperv_vmbus.h"
 #include "hv_utils_transport.h"
@@ -184,7 +184,7 @@ static void vss_send_op(void)
 		return;
 	}
 
-	vss_msg = kzalloc(sizeof(*vss_msg), GFP_KERNEL);
+	vss_msg = kzalloc_obj(*vss_msg);
 	if (!vss_msg)
 		return;
 
@@ -193,7 +193,8 @@ static void vss_send_op(void)
 	vss_transaction.state = HVUTIL_USERSPACE_REQ;
 
 	schedule_delayed_work(&vss_timeout_work, op == VSS_OP_FREEZE ?
-			VSS_FREEZE_TIMEOUT * HZ : HV_UTIL_TIMEOUT * HZ);
+				secs_to_jiffies(VSS_FREEZE_TIMEOUT) :
+				secs_to_jiffies(HV_UTIL_TIMEOUT));
 
 	rc = hvutil_transport_send(hvt, vss_msg, sizeof(*vss_msg), NULL);
 	if (rc) {
@@ -371,11 +372,6 @@ static void vss_on_reset(void)
 int
 hv_vss_init(struct hv_util_service *srv)
 {
-	if (vmbus_proto_version < VERSION_WIN8_1) {
-		pr_warn("Integration service 'Backup (volume snapshot)'"
-			" not supported on this host version.\n");
-		return -ENOTSUPP;
-	}
 	recv_buffer = srv->recv_buffer;
 	vss_transaction.recv_channel = srv->channel;
 	vss_transaction.recv_channel->max_pkt_size = VSS_MAX_PKT_SIZE;
@@ -388,6 +384,12 @@ hv_vss_init(struct hv_util_service *srv)
 	 */
 	vss_transaction.state = HVUTIL_DEVICE_INIT;
 
+	return 0;
+}
+
+int
+hv_vss_init_transport(void)
+{
 	hvt = hvutil_transport_init(vss_devname, CN_VSS_IDX, CN_VSS_VAL,
 				    vss_on_msg, vss_on_reset);
 	if (!hvt) {
@@ -417,7 +419,7 @@ int hv_vss_pre_suspend(void)
 	 * write() will fail with EINVAL (see vss_on_msg()), and the daemon
 	 * will reset the device by closing and re-opening it.
 	 */
-	vss_msg = kzalloc(sizeof(*vss_msg), GFP_KERNEL);
+	vss_msg = kzalloc_obj(*vss_msg);
 	if (!vss_msg)
 		return -ENOMEM;
 

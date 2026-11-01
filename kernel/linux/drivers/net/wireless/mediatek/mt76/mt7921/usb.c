@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: ISC
+// SPDX-License-Identifier: BSD-3-Clause-Clear
 /* Copyright (C) 2022 MediaTek Inc.
  *
  * Author: Lorenzo Bianconi <lorenzo@kernel.org>
@@ -13,6 +13,8 @@
 #include "../mt76_connac2_mac.h"
 
 static const struct usb_device_id mt7921u_device_table[] = {
+	{ USB_DEVICE_AND_INTERFACE_INFO(0x0e8d, 0x7902, 0xff, 0xff, 0xff),
+		.driver_info = (kernel_ulong_t)MT7902_FIRMWARE_WM },
 	{ USB_DEVICE_AND_INTERFACE_INFO(0x0e8d, 0x7961, 0xff, 0xff, 0xff),
 		.driver_info = (kernel_ulong_t)MT7921_FIRMWARE_WM },
 	/* Comfast CF-952AX */
@@ -20,6 +22,12 @@ static const struct usb_device_id mt7921u_device_table[] = {
 		.driver_info = (kernel_ulong_t)MT7921_FIRMWARE_WM },
 	/* Netgear, Inc. [A8000,AXE3000] */
 	{ USB_DEVICE_AND_INTERFACE_INFO(0x0846, 0x9060, 0xff, 0xff, 0xff),
+		.driver_info = (kernel_ulong_t)MT7921_FIRMWARE_WM },
+	/* Netgear, Inc. A7500 */
+	{ USB_DEVICE_AND_INTERFACE_INFO(0x0846, 0x9065, 0xff, 0xff, 0xff),
+		.driver_info = (kernel_ulong_t)MT7921_FIRMWARE_WM },
+	/* TP-Link TXE50UH */
+	{ USB_DEVICE_AND_INTERFACE_INFO(0x35bc, 0x0107, 0xff, 0xff, 0xff),
 		.driver_info = (kernel_ulong_t)MT7921_FIRMWARE_WM },
 	{ },
 };
@@ -43,7 +51,7 @@ mt7921u_mcu_send_message(struct mt76_dev *mdev, struct sk_buff *skb,
 	else
 		ep = MT_EP_OUT_AC_BE;
 
-	mt7921_skb_add_usb_sdio_hdr(dev, skb, 0);
+	mt792x_skb_add_usb_sdio_hdr(dev, skb, 0);
 	pad = round_up(skb->len, 4) + 4 - skb->len;
 	__skb_put_zero(skb, pad);
 
@@ -81,6 +89,10 @@ static int mt7921u_mcu_init(struct mt792x_dev *dev)
 static int mt7921u_mac_reset(struct mt792x_dev *dev)
 {
 	int err;
+
+	mt792xu_reset_on_bus_error(dev);
+	if (atomic_read(&dev->mt76.bus_hung))
+		return 0;
 
 	mt76_txq_schedule_all(&dev->mphy);
 	mt76_worker_disable(&dev->mt76.tx_worker);
@@ -135,14 +147,6 @@ out:
 	return err;
 }
 
-static void mt7921u_stop(struct ieee80211_hw *hw)
-{
-	struct mt792x_dev *dev = mt792x_hw_dev(hw);
-
-	mt76u_stop_tx(&dev->mt76);
-	mt7921_stop(hw);
-}
-
 static int mt7921u_probe(struct usb_interface *usb_intf,
 			 const struct usb_device_id *id)
 {
@@ -159,9 +163,10 @@ static int mt7921u_probe(struct usb_interface *usb_intf,
 		.rx_skb = mt7921_queue_rx_skb,
 		.rx_check = mt7921_rx_check,
 		.sta_add = mt7921_mac_sta_add,
-		.sta_assoc = mt7921_mac_sta_assoc,
+		.sta_event = mt7921_mac_sta_event,
 		.sta_remove = mt7921_mac_sta_remove,
 		.update_survey = mt792x_update_channel,
+		.set_channel = mt7921_set_channel,
 	};
 	static const struct mt792x_hif_ops hif_ops = {
 		.mcu_init = mt7921u_mcu_init,
@@ -189,7 +194,7 @@ static int mt7921u_probe(struct usb_interface *usb_intf,
 	if (!ops)
 		return -ENOMEM;
 
-	ops->stop = mt7921u_stop;
+	ops->stop = mt792xu_stop;
 	mdev = mt76_alloc_device(&usb_intf->dev, sizeof(*dev), ops, &drv_ops);
 	if (!mdev)
 		return -ENOMEM;
@@ -197,8 +202,9 @@ static int mt7921u_probe(struct usb_interface *usb_intf,
 	dev = container_of(mdev, struct mt792x_dev, mt76);
 	dev->fw_features = features;
 	dev->hif_ops = &hif_ops;
+	atomic_set(&dev->mt76.bus_hung, false);
+	mt792xu_reset_work_init(dev);
 
-	udev = usb_get_dev(udev);
 	usb_reset_device(udev);
 
 	usb_set_intfdata(usb_intf, dev);
@@ -245,9 +251,9 @@ static int mt7921u_probe(struct usb_interface *usb_intf,
 
 error:
 	mt76u_queues_deinit(&dev->mt76);
+	mt792xu_reset_work_cleanup(dev);
 
 	usb_set_intfdata(usb_intf, NULL);
-	usb_put_dev(interface_to_usbdev(usb_intf));
 
 	mt76_free_device(&dev->mt76);
 
@@ -264,7 +270,7 @@ static int mt7921u_suspend(struct usb_interface *intf, pm_message_t state)
 	pm->suspended = true;
 	flush_work(&dev->reset_work);
 
-	err = mt76_connac_mcu_set_hif_suspend(&dev->mt76, true);
+	err = mt76_connac_mcu_set_hif_suspend(&dev->mt76, true, true);
 	if (err)
 		goto failed;
 
@@ -314,7 +320,7 @@ static int mt7921u_resume(struct usb_interface *intf)
 	if (err < 0)
 		goto failed;
 
-	err = mt76_connac_mcu_set_hif_suspend(&dev->mt76, false);
+	err = mt76_connac_mcu_set_hif_suspend(&dev->mt76, false, true);
 failed:
 	pm->suspended = false;
 
@@ -344,5 +350,6 @@ static struct usb_driver mt7921u_driver = {
 };
 module_usb_driver(mt7921u_driver);
 
+MODULE_DESCRIPTION("MediaTek MT7921U (USB) wireless driver");
 MODULE_AUTHOR("Lorenzo Bianconi <lorenzo@kernel.org>");
 MODULE_LICENSE("Dual BSD/GPL");

@@ -46,7 +46,7 @@
 
 static struct dentry *ocrdma_dbgfs_dir;
 
-static int ocrdma_add_stat(char *start, char *pcur,
+static noinline_for_stack int ocrdma_add_stat(char *start, char *pcur,
 				char *name, u64 count)
 {
 	char buff[128] = {0};
@@ -99,7 +99,7 @@ void ocrdma_release_stats_resources(struct ocrdma_dev *dev)
 	kfree(mem->debugfs_mem);
 }
 
-static char *ocrdma_resource_stats(struct ocrdma_dev *dev)
+static noinline_for_stack char *ocrdma_resource_stats(struct ocrdma_dev *dev)
 {
 	char *stats = dev->stats_mem.debugfs_mem, *pcur;
 	struct ocrdma_rdma_stats_resp *rdma_stats =
@@ -216,7 +216,7 @@ static char *ocrdma_resource_stats(struct ocrdma_dev *dev)
 	return stats;
 }
 
-static char *ocrdma_rx_stats(struct ocrdma_dev *dev)
+static noinline_for_stack char *ocrdma_rx_stats(struct ocrdma_dev *dev)
 {
 	char *stats = dev->stats_mem.debugfs_mem, *pcur;
 	struct ocrdma_rdma_stats_resp *rdma_stats =
@@ -284,7 +284,7 @@ static u64 ocrdma_sysfs_rcv_data(struct ocrdma_dev *dev)
 		rx_stats->roce_frame_bytes_hi))/4;
 }
 
-static char *ocrdma_tx_stats(struct ocrdma_dev *dev)
+static noinline_for_stack char *ocrdma_tx_stats(struct ocrdma_dev *dev)
 {
 	char *stats = dev->stats_mem.debugfs_mem, *pcur;
 	struct ocrdma_rdma_stats_resp *rdma_stats =
@@ -358,7 +358,7 @@ static u64 ocrdma_sysfs_xmit_data(struct ocrdma_dev *dev)
 				 tx_stats->read_rsp_bytes_hi))/4;
 }
 
-static char *ocrdma_wqe_stats(struct ocrdma_dev *dev)
+static noinline_for_stack char *ocrdma_wqe_stats(struct ocrdma_dev *dev)
 {
 	char *stats = dev->stats_mem.debugfs_mem, *pcur;
 	struct ocrdma_rdma_stats_resp *rdma_stats =
@@ -391,7 +391,7 @@ static char *ocrdma_wqe_stats(struct ocrdma_dev *dev)
 	return stats;
 }
 
-static char *ocrdma_db_errstats(struct ocrdma_dev *dev)
+static noinline_for_stack char *ocrdma_db_errstats(struct ocrdma_dev *dev)
 {
 	char *stats = dev->stats_mem.debugfs_mem, *pcur;
 	struct ocrdma_rdma_stats_resp *rdma_stats =
@@ -412,7 +412,7 @@ static char *ocrdma_db_errstats(struct ocrdma_dev *dev)
 	return stats;
 }
 
-static char *ocrdma_rxqp_errstats(struct ocrdma_dev *dev)
+static noinline_for_stack char *ocrdma_rxqp_errstats(struct ocrdma_dev *dev)
 {
 	char *stats = dev->stats_mem.debugfs_mem, *pcur;
 	struct ocrdma_rdma_stats_resp *rdma_stats =
@@ -438,7 +438,7 @@ static char *ocrdma_rxqp_errstats(struct ocrdma_dev *dev)
 	return stats;
 }
 
-static char *ocrdma_txqp_errstats(struct ocrdma_dev *dev)
+static noinline_for_stack char *ocrdma_txqp_errstats(struct ocrdma_dev *dev)
 {
 	char *stats = dev->stats_mem.debugfs_mem, *pcur;
 	struct ocrdma_rdma_stats_resp *rdma_stats =
@@ -462,7 +462,7 @@ static char *ocrdma_txqp_errstats(struct ocrdma_dev *dev)
 	return stats;
 }
 
-static char *ocrdma_tx_dbg_stats(struct ocrdma_dev *dev)
+static noinline_for_stack char *ocrdma_tx_dbg_stats(struct ocrdma_dev *dev)
 {
 	int i;
 	char *pstats = dev->stats_mem.debugfs_mem;
@@ -480,7 +480,7 @@ static char *ocrdma_tx_dbg_stats(struct ocrdma_dev *dev)
 	return dev->stats_mem.debugfs_mem;
 }
 
-static char *ocrdma_rx_dbg_stats(struct ocrdma_dev *dev)
+static noinline_for_stack char *ocrdma_rx_dbg_stats(struct ocrdma_dev *dev)
 {
 	int i;
 	char *pstats = dev->stats_mem.debugfs_mem;
@@ -498,7 +498,7 @@ static char *ocrdma_rx_dbg_stats(struct ocrdma_dev *dev)
 	return dev->stats_mem.debugfs_mem;
 }
 
-static char *ocrdma_driver_dbg_stats(struct ocrdma_dev *dev)
+static noinline_for_stack char *ocrdma_driver_dbg_stats(struct ocrdma_dev *dev)
 {
 	char *stats = dev->stats_mem.debugfs_mem, *pcur;
 
@@ -635,39 +635,29 @@ static ssize_t ocrdma_dbgfs_ops_write(struct file *filp,
 					const char __user *buffer,
 					size_t count, loff_t *ppos)
 {
-	char tmp_str[32];
-	long reset;
+	bool reset;
 	int status;
 	struct ocrdma_stats *pstats = filp->private_data;
 	struct ocrdma_dev *dev = pstats->dev;
 
-	if (*ppos != 0 || count == 0 || count > sizeof(tmp_str))
-		goto err;
-
-	if (copy_from_user(tmp_str, buffer, count))
-		goto err;
-
-	tmp_str[count-1] = '\0';
-	if (kstrtol(tmp_str, 10, &reset))
-		goto err;
+	status = kstrtobool_from_user(buffer, count, &reset);
+	if (status)
+		return status;
 
 	switch (pstats->type) {
 	case OCRDMA_RESET_STATS:
 		if (reset) {
 			status = ocrdma_mbx_rdma_stats(dev, true);
-			if (status) {
+			if (status)
 				pr_err("Failed to reset stats = %d\n", status);
-				goto err;
-			}
 		}
 		break;
 	default:
-		goto err;
+		status = -EINVAL;
+		break;
 	}
 
-	return count;
-err:
-	return -EFAULT;
+	return status ? status : count;
 }
 
 void ocrdma_pma_counters(struct ocrdma_dev *dev, struct ib_mad *out_mad)

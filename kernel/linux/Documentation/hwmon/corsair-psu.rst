@@ -15,11 +15,11 @@ Supported devices:
 
   Corsair HX850i
 
-  Corsair HX1000i (Series 2022 and 2023)
+  Corsair HX1000i (Legacy and Series 2023)
 
-  Corsair HX1200i
+  Corsair HX1200i (Legacy, Series 2023 and Series 2025)
 
-  Corsair HX1500i (Series 2022 and 2023)
+  Corsair HX1500i (Legacy, Series 2023 and Series 2025)
 
   Corsair RM550i
 
@@ -93,8 +93,8 @@ Debugfs entries
 ---------------
 
 =======================	========================================================
-ocpmode                 Single or multi rail mode of the PCIe power connectors
-product                 Product name of the psu
+ocpmode			Single or multi rail mode of the PCIe power connectors
+product			Product name of the psu
 uptime			Session uptime of the psu
 uptime_total		Total uptime of the psu
 vendor			Vendor name of the psu

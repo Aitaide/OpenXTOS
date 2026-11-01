@@ -107,9 +107,10 @@ static unsigned int mcp16502_of_map_mode(unsigned int mode)
 	return REGULATOR_MODE_INVALID;
 }
 
-#define MCP16502_REGULATOR(_name, _id, _ranges, _ops, _ramp_table)	\
+#define MCP16502_REGULATOR(_name, _id, _sn, _ranges, _ops, _ramp_table)	\
 	[_id] = {							\
 		.name			= _name,			\
+		.supply_name		= #_sn,				\
 		.regulators_node	= "regulators",			\
 		.id			= _id,				\
 		.ops			= &(_ops),			\
@@ -467,18 +468,18 @@ static const struct linear_range b234_ranges[] = {
 };
 
 static const struct regulator_desc mcp16502_desc[] = {
-	/* MCP16502_REGULATOR(_name, _id, ranges, regulator_ops, ramp_table) */
-	MCP16502_REGULATOR("VDD_IO", BUCK1, b1l12_ranges, mcp16502_buck_ops,
+	/* MCP16502_REGULATOR(_name, _id, _sn, _ranges, _ops, _ramp_table) */
+	MCP16502_REGULATOR("VDD_IO", BUCK1, pvin1, b1l12_ranges, mcp16502_buck_ops,
 			   mcp16502_ramp_b1l12),
-	MCP16502_REGULATOR("VDD_DDR", BUCK2, b234_ranges, mcp16502_buck_ops,
+	MCP16502_REGULATOR("VDD_DDR", BUCK2, pvin2, b234_ranges, mcp16502_buck_ops,
 			   mcp16502_ramp_b234),
-	MCP16502_REGULATOR("VDD_CORE", BUCK3, b234_ranges, mcp16502_buck_ops,
+	MCP16502_REGULATOR("VDD_CORE", BUCK3, pvin3, b234_ranges, mcp16502_buck_ops,
 			   mcp16502_ramp_b234),
-	MCP16502_REGULATOR("VDD_OTHER", BUCK4, b234_ranges, mcp16502_buck_ops,
+	MCP16502_REGULATOR("VDD_OTHER", BUCK4, pvin4, b234_ranges, mcp16502_buck_ops,
 			   mcp16502_ramp_b234),
-	MCP16502_REGULATOR("LDO1", LDO1, b1l12_ranges, mcp16502_ldo_ops,
+	MCP16502_REGULATOR("LDO1", LDO1, lvin, b1l12_ranges, mcp16502_ldo_ops,
 			   mcp16502_ramp_b1l12),
-	MCP16502_REGULATOR("LDO2", LDO2, b1l12_ranges, mcp16502_ldo_ops,
+	MCP16502_REGULATOR("LDO2", LDO2, lvin, b1l12_ranges, mcp16502_ldo_ops,
 			   mcp16502_ramp_b1l12)
 };
 
@@ -507,7 +508,7 @@ static int mcp16502_probe(struct i2c_client *client)
 	struct device *dev;
 	struct mcp16502 *mcp;
 	struct regmap *rmap;
-	int i, ret;
+	int i;
 
 	dev = &client->dev;
 	config.dev = dev;
@@ -517,30 +518,23 @@ static int mcp16502_probe(struct i2c_client *client)
 		return -ENOMEM;
 
 	rmap = devm_regmap_init_i2c(client, &mcp16502_regmap_config);
-	if (IS_ERR(rmap)) {
-		ret = PTR_ERR(rmap);
-		dev_err(dev, "regmap init failed: %d\n", ret);
-		return ret;
-	}
+	if (IS_ERR(rmap))
+		return dev_err_probe(dev, PTR_ERR(rmap), "regmap init failed\n");
 
 	i2c_set_clientdata(client, mcp);
 	config.regmap = rmap;
 	config.driver_data = mcp;
 
 	mcp->lpm = devm_gpiod_get_optional(dev, "lpm", GPIOD_OUT_LOW);
-	if (IS_ERR(mcp->lpm)) {
-		dev_err(dev, "failed to get lpm pin: %ld\n", PTR_ERR(mcp->lpm));
-		return PTR_ERR(mcp->lpm);
-	}
+	if (IS_ERR(mcp->lpm))
+		return dev_err_probe(dev, PTR_ERR(mcp->lpm), "failed to get lpm pin\n");
 
 	for (i = 0; i < NUM_REGULATORS; i++) {
 		rdev = devm_regulator_register(dev, &mcp16502_desc[i], &config);
-		if (IS_ERR(rdev)) {
-			dev_err(dev,
-				"failed to register %s regulator %ld\n",
-				mcp16502_desc[i].name, PTR_ERR(rdev));
-			return PTR_ERR(rdev);
-		}
+		if (IS_ERR(rdev))
+			return dev_err_probe(dev, PTR_ERR(rdev),
+					     "failed to register %s regulator\n",
+					     mcp16502_desc[i].name);
 	}
 
 	mcp16502_gpio_set_mode(mcp, MCP16502_OPMODE_ACTIVE);
@@ -577,7 +571,7 @@ static const struct dev_pm_ops mcp16502_pm_ops = {
 };
 #endif
 static const struct i2c_device_id mcp16502_i2c_id[] = {
-	{ "mcp16502", 0 },
+	{ .name = "mcp16502" },
 	{ }
 };
 MODULE_DEVICE_TABLE(i2c, mcp16502_i2c_id);

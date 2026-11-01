@@ -4,6 +4,9 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
 export PYTHONDONTWRITEBYTECODE=1
+for suite in test_kernel_migration.py test_kernel_source_pin.py test_kernel_scheduler_baseline.py test_kernel_cross_config.py test_kernel_rt_status.py test_kernel_release_packaging.py test_kernel_sched_rt.py test_native_tools_rt_kernel.py test_kernel_maintenance_wiring.py; do
+    python3 -B -m unittest discover -s "$ROOT/tests" -p "$suite" -v
+done
 python3 "$ROOT/tests/test_scheduler_docs_currentness.py"
 python3 "$ROOT/tests/test_sched_periodic.py"
 python3 "$ROOT/tests/test_sched_bench_runner.py"

@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Kernel source/config/patch integration, separate from device acceptance."""
 from pathlib import Path
+import json
 import re
 import unittest
 
@@ -11,7 +12,7 @@ class CytonKernelIntegrationTests(unittest.TestCase):
     def test_serdev_tty_controller_is_reachable_in_maintained_fragment(self):
         config = (ROOT / 'kernel/xtos_defconfig').read_text().splitlines()
         build = (ROOT / 'scripts/build_kernel.sh').read_text()
-        # Linux 6.6 SERIAL_DEV_CTRL_TTYPORT depends on SERIAL_DEV_BUS != m.
+        # The selected upstream SERIAL_DEV_CTRL_TTYPORT requires built-in bus.
         for required in ('CONFIG_SERIAL_DEV_BUS=y', 'CONFIG_SERIAL_DEV_CTRL_TTYPORT=y'):
             self.assertIn(required, config)
             self.assertIn(required, build)
@@ -19,7 +20,8 @@ class CytonKernelIntegrationTests(unittest.TestCase):
         self.assertIn('depends on SERIAL_DEV_BUS != m', kconfig)
 
     def test_integration_patch_embeds_current_cyton_sources(self):
-        patch = (ROOT / 'kernel/patches/xtos-linux-6.6.patch').read_text()
+        pin = json.loads((ROOT / 'kernel/source-pin.json').read_bytes())
+        patch = (ROOT / pin['xtos_patch']).read_text()
         sections = re.split(r'(?=^diff --git )', patch, flags=re.M)
         added = {}
         for section in sections:

@@ -86,6 +86,12 @@
  */
 #define ADDR(x)		(u32)(unsigned long)(x)
 
+/*
+ * Current Power system firmware caps the PVR list array size at 16 entries
+ * during CAS (Client Architecture Support) negotiation.
+ */
+#define CAS_MAX_PVR_ENTRIES	16
+
 #ifdef CONFIG_PPC64
 #define OF_WORKAROUNDS	0
 #else
@@ -817,8 +823,8 @@ static void __init early_cmdline_parse(void)
 		opt += 4;
 		prom_memory_limit = prom_memparse(opt, (const char **)&opt);
 #ifdef CONFIG_PPC64
-		/* Align to 16 MB == size of ppc64 large page */
-		prom_memory_limit = ALIGN(prom_memory_limit, 0x1000000);
+		/* Align down to 16 MB which is large page size with hash page translation */
+		prom_memory_limit = ALIGN_DOWN(prom_memory_limit, SZ_16M);
 #endif
 	}
 
@@ -947,7 +953,7 @@ struct option_vector7 {
 } __packed;
 
 struct ibm_arch_vec {
-	struct { u32 mask, val; } pvrs[14];
+	struct { __be32 mask, val; } pvrs[18];
 
 	u8 num_vectors;
 
@@ -980,6 +986,10 @@ static const struct ibm_arch_vec ibm_architecture_vec_template __initconst = {
 			.val  = cpu_to_be32(0x003a0000),
 		},
 		{
+			.mask = cpu_to_be32(0xffffffff), /* all 2.04-compliant and earlier */
+			.val  = cpu_to_be32(0x0f000001),
+		},
+		{
 			.mask = cpu_to_be32(0xffff0000), /* POWER6 */
 			.val  = cpu_to_be32(0x003e0000),
 		},
@@ -1008,6 +1018,22 @@ static const struct ibm_arch_vec ibm_architecture_vec_template __initconst = {
 			.val  = cpu_to_be32(0x00800000),
 		},
 		{
+			.mask = cpu_to_be32(0xffff0000), /* POWER11 */
+			.val  = cpu_to_be32(0x00820000),
+		},
+		{
+			.mask = cpu_to_be32(0xffff0000), /* POWER12 */
+			.val  = cpu_to_be32(0x00830000),
+		},
+		{
+			.mask = cpu_to_be32(0xffffffff), /* all 3.2-compliant */
+			.val  = cpu_to_be32(0x0f000008),
+		},
+		{
+			.mask = cpu_to_be32(0xffffffff), /* P11 compliant */
+			.val  = cpu_to_be32(0x0f000007),
+		},
+		{
 			.mask = cpu_to_be32(0xffffffff), /* all 3.1-compliant */
 			.val  = cpu_to_be32(0x0f000006),
 		},
@@ -1024,12 +1050,8 @@ static const struct ibm_arch_vec ibm_architecture_vec_template __initconst = {
 			.val  = cpu_to_be32(0x0f000003),
 		},
 		{
-			.mask = cpu_to_be32(0xffffffff), /* all 2.05-compliant */
+			.mask = cpu_to_be32(0xfffffffd), /* all 2.05-compliant */
 			.val  = cpu_to_be32(0x0f000002),
-		},
-		{
-			.mask = cpu_to_be32(0xfffffffe), /* all 2.04-compliant and earlier */
-			.val  = cpu_to_be32(0x0f000001),
 		},
 	},
 
@@ -1040,7 +1062,7 @@ static const struct ibm_arch_vec ibm_architecture_vec_template __initconst = {
 		.byte1 = 0,
 		.arch_versions = OV1_PPC_2_00 | OV1_PPC_2_01 | OV1_PPC_2_02 | OV1_PPC_2_03 |
 				 OV1_PPC_2_04 | OV1_PPC_2_05 | OV1_PPC_2_06 | OV1_PPC_2_07,
-		.arch_versions3 = OV1_PPC_3_00 | OV1_PPC_3_1,
+		.arch_versions3 = OV1_PPC_3_00 | OV1_PPC_3_1 | OV1_PPC_3_2,
 	},
 
 	.vec2_len = VECTOR_LENGTH(sizeof(struct option_vector2)),
@@ -1053,7 +1075,7 @@ static const struct ibm_arch_vec ibm_architecture_vec_template __initconst = {
 		.virt_base = cpu_to_be32(0xffffffff),
 		.virt_size = cpu_to_be32(0xffffffff),
 		.load_base = cpu_to_be32(0xffffffff),
-		.min_rma = cpu_to_be32(512),		/* 512MB min RMA */
+		.min_rma = cpu_to_be32(MIN_RMA / SZ_1M),
 		.min_load = cpu_to_be32(0xffffffff),	/* full client load */
 		.min_rma_percent = 0,	/* min RMA percentage of total RAM */
 		.max_pft_size = 48,	/* max log_2(hash table size) */
@@ -1395,6 +1417,22 @@ static void __init prom_send_capabilities(void)
 	ihandle root;
 	prom_arg_t ret;
 	u32 cores;
+	int start_index = 0;
+
+	/*
+	 * Ensure that when running on Power11 or below hardware, the number
+	 * of PVR entries passed during CAS negotiation does not exceed the
+	 * firmware-imposed limit of 16.
+	 *
+	 * Compute the start_index to skip the oldest leading pvrs[] entries
+	 * when running on Power11 or below hardware, so that the pointer
+	 * passed to ibm,client-architecture-support points to
+	 * ibm_architecture_vec.pvrs[start_index], presenting exactly 16
+	 * entries to firmware.
+	 */
+	if ((ARRAY_SIZE(ibm_architecture_vec_template.pvrs) > CAS_MAX_PVR_ENTRIES) &&
+	    (PVR_VER(mfspr(SPRN_PVR)) <= PVR_POWER11))
+		start_index = ARRAY_SIZE(ibm_architecture_vec_template.pvrs) - CAS_MAX_PVR_ENTRIES;
 
 	/* Check ibm,arch-vec-5-platform-support and fixup vec5 if required */
 	prom_check_platform_support();
@@ -1419,7 +1457,7 @@ static void __init prom_send_capabilities(void)
 		if (call_prom_ret("call-method", 3, 2, &ret,
 				  ADDR("ibm,client-architecture-support"),
 				  root,
-				  ADDR(&ibm_architecture_vec)) == 0) {
+				  ADDR(&ibm_architecture_vec.pvrs[start_index])) == 0) {
 			/* the call exists... */
 			if (ret)
 				prom_printf("\nWARNING: ibm,client-architecture"
@@ -2784,91 +2822,6 @@ static void __init flatten_device_tree(void)
 		    dt_struct_start, dt_struct_end);
 }
 
-#ifdef CONFIG_PPC_MAPLE
-/* PIBS Version 1.05.0000 04/26/2005 has an incorrect /ht/isa/ranges property.
- * The values are bad, and it doesn't even have the right number of cells. */
-static void __init fixup_device_tree_maple(void)
-{
-	phandle isa;
-	u32 rloc = 0x01002000; /* IO space; PCI device = 4 */
-	u32 isa_ranges[6];
-	char *name;
-
-	name = "/ht@0/isa@4";
-	isa = call_prom("finddevice", 1, 1, ADDR(name));
-	if (!PHANDLE_VALID(isa)) {
-		name = "/ht@0/isa@6";
-		isa = call_prom("finddevice", 1, 1, ADDR(name));
-		rloc = 0x01003000; /* IO space; PCI device = 6 */
-	}
-	if (!PHANDLE_VALID(isa))
-		return;
-
-	if (prom_getproplen(isa, "ranges") != 12)
-		return;
-	if (prom_getprop(isa, "ranges", isa_ranges, sizeof(isa_ranges))
-		== PROM_ERROR)
-		return;
-
-	if (isa_ranges[0] != 0x1 ||
-		isa_ranges[1] != 0xf4000000 ||
-		isa_ranges[2] != 0x00010000)
-		return;
-
-	prom_printf("Fixing up bogus ISA range on Maple/Apache...\n");
-
-	isa_ranges[0] = 0x1;
-	isa_ranges[1] = 0x0;
-	isa_ranges[2] = rloc;
-	isa_ranges[3] = 0x0;
-	isa_ranges[4] = 0x0;
-	isa_ranges[5] = 0x00010000;
-	prom_setprop(isa, name, "ranges",
-			isa_ranges, sizeof(isa_ranges));
-}
-
-#define CPC925_MC_START		0xf8000000
-#define CPC925_MC_LENGTH	0x1000000
-/* The values for memory-controller don't have right number of cells */
-static void __init fixup_device_tree_maple_memory_controller(void)
-{
-	phandle mc;
-	u32 mc_reg[4];
-	char *name = "/hostbridge@f8000000";
-	u32 ac, sc;
-
-	mc = call_prom("finddevice", 1, 1, ADDR(name));
-	if (!PHANDLE_VALID(mc))
-		return;
-
-	if (prom_getproplen(mc, "reg") != 8)
-		return;
-
-	prom_getprop(prom.root, "#address-cells", &ac, sizeof(ac));
-	prom_getprop(prom.root, "#size-cells", &sc, sizeof(sc));
-	if ((ac != 2) || (sc != 2))
-		return;
-
-	if (prom_getprop(mc, "reg", mc_reg, sizeof(mc_reg)) == PROM_ERROR)
-		return;
-
-	if (mc_reg[0] != CPC925_MC_START || mc_reg[1] != CPC925_MC_LENGTH)
-		return;
-
-	prom_printf("Fixing up bogus hostbridge on Maple...\n");
-
-	mc_reg[0] = 0x0;
-	mc_reg[1] = CPC925_MC_START;
-	mc_reg[2] = 0x0;
-	mc_reg[3] = CPC925_MC_LENGTH;
-	prom_setprop(mc, name, "reg", mc_reg, sizeof(mc_reg));
-}
-#else
-#define fixup_device_tree_maple()
-#define fixup_device_tree_maple_memory_controller()
-#endif
-
-#ifdef CONFIG_PPC_CHRP
 /*
  * Pegasos and BriQ lacks the "ranges" property in the isa node
  * Pegasos needs decimal IRQ 14/15, not hexadecimal
@@ -2919,12 +2872,8 @@ static void __init fixup_device_tree_chrp(void)
 		}
 	}
 }
-#else
-#define fixup_device_tree_chrp()
-#endif
 
-#if defined(CONFIG_PPC64) && defined(CONFIG_PPC_PMAC)
-static void __init fixup_device_tree_pmac(void)
+static void __init fixup_device_tree_pmac64(void)
 {
 	phandle u3, i2c, mpic;
 	u32 u3_rev;
@@ -2963,11 +2912,28 @@ static void __init fixup_device_tree_pmac(void)
 	prom_setprop(i2c, "/u3@0,f8000000/i2c@f8001000", "interrupt-parent",
 		     &parent, sizeof(parent));
 }
-#else
-#define fixup_device_tree_pmac()
-#endif
 
-#ifdef CONFIG_PPC_EFIKA
+static void __init fixup_device_tree_pmac(void)
+{
+	__be32 val = 1;
+	char type[8];
+	phandle node;
+
+	// Some pmacs are missing #size-cells on escc or i2s nodes
+	for (node = 0; prom_next_node(&node); ) {
+		type[0] = '\0';
+		prom_getprop(node, "device_type", type, sizeof(type));
+		if (prom_strcmp(type, "escc") && prom_strcmp(type, "i2s") &&
+		    prom_strcmp(type, "media-bay"))
+			continue;
+
+		if (prom_getproplen(node, "#size-cells") != PROM_ERROR)
+			continue;
+
+		prom_setprop(node, NULL, "#size-cells", &val, sizeof(val));
+	}
+}
+
 /*
  * The MPC5200 FEC driver requires an phy-handle property to tell it how
  * to talk to the phy.  If the phy-handle property is missing, then this
@@ -3099,11 +3065,7 @@ static void __init fixup_device_tree_efika(void)
 	/* Make sure ethernet phy-handle property exists */
 	fixup_device_tree_efika_add_phy();
 }
-#else
-#define fixup_device_tree_efika()
-#endif
 
-#ifdef CONFIG_PPC_PASEMI_NEMO
 /*
  * CFE supplied on Nemo is broken in several ways, biggest
  * problem is that it reassigns ISA interrupts to unused mpic ints.
@@ -3179,18 +3141,23 @@ static void __init fixup_device_tree_pasemi(void)
 
 	prom_setprop(iob, name, "device_type", "isa", sizeof("isa"));
 }
-#else	/* !CONFIG_PPC_PASEMI_NEMO */
-static inline void fixup_device_tree_pasemi(void) { }
-#endif
 
 static void __init fixup_device_tree(void)
 {
-	fixup_device_tree_maple();
-	fixup_device_tree_maple_memory_controller();
-	fixup_device_tree_chrp();
-	fixup_device_tree_pmac();
-	fixup_device_tree_efika();
-	fixup_device_tree_pasemi();
+	if (IS_ENABLED(CONFIG_PPC_CHRP))
+		fixup_device_tree_chrp();
+
+	if (IS_ENABLED(CONFIG_PPC_PMAC))
+		fixup_device_tree_pmac();
+
+	if (IS_ENABLED(CONFIG_PPC_PMAC) && IS_ENABLED(CONFIG_PPC64))
+		fixup_device_tree_pmac64();
+
+	if (IS_ENABLED(CONFIG_PPC_EFIKA))
+		fixup_device_tree_efika();
+
+	if (IS_ENABLED(CONFIG_PPC_PASEMI_NEMO))
+		fixup_device_tree_pasemi();
 }
 
 static void __init prom_find_boot_cpu(void)

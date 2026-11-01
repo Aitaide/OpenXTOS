@@ -45,12 +45,10 @@
 #include <linux/dmaengine.h>
 #include <linux/dma-mapping.h>
 #include <linux/list.h>
-#include <linux/mod_devicetable.h>
 #include <linux/module.h>
 #include <linux/platform_device.h>
 #include <linux/slab.h>
 #include <linux/spinlock.h>
-#include <linux/of_dma.h>
 #include <linux/property.h>
 #include <linux/delay.h>
 #include <linux/acpi.h>
@@ -353,7 +351,7 @@ static int hidma_alloc_chan_resources(struct dma_chan *dmach)
 
 	/* Alloc descriptors for this channel */
 	for (i = 0; i < dmadev->nr_descriptors; i++) {
-		mdesc = kzalloc(sizeof(struct hidma_desc), GFP_NOWAIT);
+		mdesc = kzalloc_obj(struct hidma_desc, GFP_NOWAIT);
 		if (!mdesc) {
 			rc = -ENOMEM;
 			break;
@@ -625,12 +623,10 @@ static ssize_t hidma_show_values(struct device *dev,
 {
 	struct hidma_dev *mdev = dev_get_drvdata(dev);
 
-	buf[0] = 0;
-
 	if (strcmp(attr->attr.name, "chid") == 0)
-		sprintf(buf, "%d\n", mdev->chidx);
+		return sysfs_emit(buf, "%d\n", mdev->chidx);
 
-	return strlen(buf);
+	return 0;
 }
 
 static inline void  hidma_sysfs_uninit(struct hidma_dev *dev)
@@ -696,7 +692,7 @@ static void hidma_free_msis(struct hidma_dev *dmadev)
 			devm_free_irq(dev, virq, &dmadev->lldev);
 	}
 
-	platform_msi_domain_free_irqs(dev);
+	platform_device_msi_free_irqs_all(dev);
 #endif
 }
 
@@ -706,8 +702,8 @@ static int hidma_request_msi(struct hidma_dev *dmadev,
 #ifdef CONFIG_GENERIC_MSI_IRQ
 	int rc, i, virq;
 
-	rc = platform_msi_domain_alloc_irqs(&pdev->dev, HIDMA_MSI_INTS,
-					    hidma_write_msi_msg);
+	rc = platform_device_msi_init_and_alloc_irqs(&pdev->dev, HIDMA_MSI_INTS,
+						     hidma_write_msi_msg);
 	if (rc)
 		return rc;
 
@@ -745,7 +741,7 @@ static bool hidma_test_capability(struct device *dev, enum hidma_cap test_cap)
 {
 	enum hidma_cap cap;
 
-	cap = (enum hidma_cap) device_get_match_data(dev);
+	cap = (uintptr_t) device_get_match_data(dev);
 	return cap ? ((cap & test_cap) > 0) : 0;
 }
 
@@ -915,7 +911,7 @@ static void hidma_shutdown(struct platform_device *pdev)
 
 }
 
-static int hidma_remove(struct platform_device *pdev)
+static void hidma_remove(struct platform_device *pdev)
 {
 	struct hidma_dev *dmadev = platform_get_drvdata(pdev);
 
@@ -935,8 +931,6 @@ static int hidma_remove(struct platform_device *pdev)
 	dev_info(&pdev->dev, "HI-DMA engine removed\n");
 	pm_runtime_put_sync_suspend(&pdev->dev);
 	pm_runtime_disable(&pdev->dev);
-
-	return 0;
 }
 
 #if IS_ENABLED(CONFIG_ACPI)
@@ -949,25 +943,16 @@ static const struct acpi_device_id hidma_acpi_ids[] = {
 MODULE_DEVICE_TABLE(acpi, hidma_acpi_ids);
 #endif
 
-static const struct of_device_id hidma_match[] = {
-	{.compatible = "qcom,hidma-1.0",},
-	{.compatible = "qcom,hidma-1.1", .data = (void *)(HIDMA_MSI_CAP),},
-	{.compatible = "qcom,hidma-1.2",
-	 .data = (void *)(HIDMA_MSI_CAP | HIDMA_IDENTITY_CAP),},
-	{},
-};
-MODULE_DEVICE_TABLE(of, hidma_match);
-
 static struct platform_driver hidma_driver = {
 	.probe = hidma_probe,
 	.remove = hidma_remove,
 	.shutdown = hidma_shutdown,
 	.driver = {
 		   .name = "hidma",
-		   .of_match_table = hidma_match,
 		   .acpi_match_table = ACPI_PTR(hidma_acpi_ids),
 	},
 };
 
 module_platform_driver(hidma_driver);
+MODULE_DESCRIPTION("Qualcomm Technologies HIDMA Channel support");
 MODULE_LICENSE("GPL v2");

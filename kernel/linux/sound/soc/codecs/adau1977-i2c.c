@@ -7,19 +7,15 @@
  */
 
 #include <linux/i2c.h>
-#include <linux/mod_devicetable.h>
 #include <linux/module.h>
 #include <linux/regmap.h>
 #include <sound/soc.h>
 
 #include "adau1977.h"
 
-static const struct i2c_device_id adau1977_i2c_ids[];
-
 static int adau1977_i2c_probe(struct i2c_client *client)
 {
 	struct regmap_config config;
-	const struct i2c_device_id *id = i2c_match_id(adau1977_i2c_ids, client);
 
 	config = adau1977_regmap_config;
 	config.val_bits = 8;
@@ -27,20 +23,29 @@ static int adau1977_i2c_probe(struct i2c_client *client)
 
 	return adau1977_probe(&client->dev,
 		devm_regmap_init_i2c(client, &config),
-		id->driver_data, NULL);
+		(uintptr_t)i2c_get_match_data(client), NULL);
 }
 
 static const struct i2c_device_id adau1977_i2c_ids[] = {
-	{ "adau1977", ADAU1977 },
-	{ "adau1978", ADAU1978 },
-	{ "adau1979", ADAU1978 },
+	{ .name = "adau1977", .driver_data = ADAU1977 },
+	{ .name = "adau1978", .driver_data = ADAU1978 },
+	{ .name = "adau1979", .driver_data = ADAU1978 },
 	{ }
 };
 MODULE_DEVICE_TABLE(i2c, adau1977_i2c_ids);
 
+static const struct of_device_id adau1977_i2c_of_match[] = {
+	{ .compatible = "adi,adau1977" },
+	{ .compatible = "adi,adau1978" },
+	{ .compatible = "adi,adau1979" },
+	{ },
+};
+MODULE_DEVICE_TABLE(of, adau1977_i2c_of_match);
+
 static struct i2c_driver adau1977_i2c_driver = {
 	.driver = {
 		.name = "adau1977",
+		.of_match_table = adau1977_i2c_of_match,
 	},
 	.probe = adau1977_i2c_probe,
 	.id_table = adau1977_i2c_ids,

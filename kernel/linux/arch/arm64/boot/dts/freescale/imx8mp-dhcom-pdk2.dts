@@ -69,6 +69,18 @@
 		};
 	};
 
+	hdmi-connector {
+		compatible = "hdmi-connector";
+		label = "X38";
+		type = "a";
+
+		port {
+			hdmi_connector_in: endpoint {
+				remote-endpoint = <&hdmi_tx_out>;
+			};
+		};
+	};
+
 	led {
 		compatible = "gpio-leds";
 
@@ -76,6 +88,7 @@
 			color = <LED_COLOR_ID_GREEN>;
 			default-state = "off";
 			function = LED_FUNCTION_INDICATOR;
+			function-enumerator = <0>;
 			gpios = <&gpio5 22 GPIO_ACTIVE_HIGH>; /* GPIO E */
 			pinctrl-0 = <&pinctrl_dhcom_e>;
 			pinctrl-names = "default";
@@ -85,6 +98,7 @@
 			color = <LED_COLOR_ID_GREEN>;
 			default-state = "off";
 			function = LED_FUNCTION_INDICATOR;
+			function-enumerator = <1>;
 			gpios = <&gpio5 23 GPIO_ACTIVE_HIGH>; /* GPIO F */
 			pinctrl-0 = <&pinctrl_dhcom_f>;
 			pinctrl-names = "default";
@@ -94,6 +108,7 @@
 			color = <LED_COLOR_ID_GREEN>;
 			default-state = "off";
 			function = LED_FUNCTION_INDICATOR;
+			function-enumerator = <2>;
 			gpios = <&gpio1 11 GPIO_ACTIVE_HIGH>; /* GPIO H */
 			pinctrl-0 = <&pinctrl_dhcom_h>;
 			pinctrl-names = "default";
@@ -103,6 +118,7 @@
 			color = <LED_COLOR_ID_GREEN>;
 			default-state = "off";
 			function = LED_FUNCTION_INDICATOR;
+			function-enumerator = <3>;
 			gpios = <&gpio1 5 GPIO_ACTIVE_HIGH>; /* GPIO I */
 			pinctrl-0 = <&pinctrl_dhcom_i>;
 			pinctrl-names = "default";
@@ -136,7 +152,7 @@
 	};
 };
 
-&i2c5 {
+i2c_dhpdk_panel: &i2c5 {
 	sgtl5000: codec@a {
 		compatible = "fsl,sgtl5000";
 		reg = <0x0a>;
@@ -184,11 +200,38 @@
 	status = "okay";
 };
 
+&hdmi_pvi {
+	status = "okay";
+};
+
+&hdmi_tx {
+	ddc-i2c-bus = <&i2c5>;
+	pinctrl-names = "default";
+	pinctrl-0 = <&pinctrl_hdmi>;
+	status = "okay";
+
+	ports {
+		port@1 {
+			hdmi_tx_out: endpoint {
+				remote-endpoint = <&hdmi_connector_in>;
+			};
+		};
+	};
+};
+
+&hdmi_tx_phy {
+	status = "okay";
+};
+
+&lcdif3 {
+	status = "okay";
+};
+
 &pcie_phy {
 	clock-names = "ref";
-	clocks = <&clk IMX8MP_SYS_PLL2_100M>;
+	clocks = <&hsio_blk_ctrl>;
 	fsl,clkreq-unsupported;
-	fsl,refclk-pad-mode = <IMX8_PCIE_REFCLK_PAD_UNUSED>;
+	fsl,refclk-pad-mode = <IMX8_PCIE_REFCLK_PAD_OUTPUT>;
 	status = "okay";
 };
 

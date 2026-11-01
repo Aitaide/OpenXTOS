@@ -13,9 +13,17 @@
 #define NVME_TCP_ADMIN_CCSZ	SZ_8K
 #define NVME_TCP_DIGEST_LENGTH	4
 #define NVME_TCP_MIN_MAXH2CDATA 4096
+#define NVME_TCP_MIN_C2HTERM_PLEN	24
+#define NVME_TCP_MAX_C2HTERM_PLEN	152
 
 enum nvme_tcp_pfv {
 	NVME_TCP_PFV_1_0 = 0x0,
+};
+
+enum nvme_tcp_tls_cipher {
+	NVME_TCP_TLS_CIPHER_INVALID     = 0,
+	NVME_TCP_TLS_CIPHER_SHA256      = 1,
+	NVME_TCP_TLS_CIPHER_SHA384      = 2,
 };
 
 enum nvme_tcp_fatal_error_status {
@@ -69,7 +77,7 @@ struct nvme_tcp_hdr {
 	__le32	plen;
 };
 
-/**
+/*
  * struct nvme_tcp_icreq_pdu - nvme tcp initialize connection request pdu
  *
  * @hdr:           pdu generic header
@@ -87,7 +95,7 @@ struct nvme_tcp_icreq_pdu {
 	__u8			rsvd2[112];
 };
 
-/**
+/*
  * struct nvme_tcp_icresp_pdu - nvme tcp initialize connection response pdu
  *
  * @hdr:           pdu common header
@@ -105,12 +113,13 @@ struct nvme_tcp_icresp_pdu {
 	__u8			rsvd[112];
 };
 
-/**
+/*
  * struct nvme_tcp_term_pdu - nvme tcp terminate connection pdu
  *
  * @hdr:           pdu common header
  * @fes:           fatal error status
- * @fei:           fatal error information
+ * @feil:          fatal error information (low 16 bits)
+ * @feih:          fatal error information (high 16 bits)
  */
 struct nvme_tcp_term_pdu {
 	struct nvme_tcp_hdr	hdr;
@@ -120,7 +129,7 @@ struct nvme_tcp_term_pdu {
 	__u8			rsvd[10];
 };
 
-/**
+/*
  * struct nvme_tcp_cmd_pdu - nvme tcp command capsule pdu
  *
  * @hdr:           pdu common header
@@ -131,10 +140,9 @@ struct nvme_tcp_cmd_pdu {
 	struct nvme_command	cmd;
 };
 
-/**
+/*
  * struct nvme_tcp_rsp_pdu - nvme tcp response capsule pdu
  *
- * @hdr:           pdu common header
  * @hdr:           nvme-tcp generic header
  * @cqe:           nvme completion queue entry
  */
@@ -143,7 +151,7 @@ struct nvme_tcp_rsp_pdu {
 	struct nvme_completion	cqe;
 };
 
-/**
+/*
  * struct nvme_tcp_r2t_pdu - nvme tcp ready-to-transfer pdu
  *
  * @hdr:           pdu common header
@@ -161,7 +169,7 @@ struct nvme_tcp_r2t_pdu {
 	__u8			rsvd[4];
 };
 
-/**
+/*
  * struct nvme_tcp_data_pdu - nvme tcp data pdu
  *
  * @hdr:           pdu common header

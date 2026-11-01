@@ -18,7 +18,15 @@
 #include <linux/i2c.h>
 #include <linux/gpio/driver.h>
 #include <linux/iio/iio.h>
+#include <linux/minmax.h>
+#include <linux/moduleparam.h>
 #include "hid-ids.h"
+
+static bool gpio_mode_enforce;
+
+module_param(gpio_mode_enforce, bool, 0644);
+MODULE_PARM_DESC(gpio_mode_enforce,
+	 "Enforce GPIO mode for GP0 thru GP3 (default: false, will be used for IIO)");
 
 /* Commands codes in a raw output report */
 enum {
@@ -49,10 +57,32 @@ enum {
 	MCP2221_I2C_MASK_ADDR_NACK = 0x40,
 	MCP2221_I2C_WRADDRL_SEND = 0x21,
 	MCP2221_I2C_ADDR_NACK = 0x25,
+	MCP2221_I2C_READ_PARTIAL = 0x54,
 	MCP2221_I2C_READ_COMPL = 0x55,
 	MCP2221_ALT_F_NOT_GPIOV = 0xEE,
 	MCP2221_ALT_F_NOT_GPIOD = 0xEF,
 };
+
+/* MCP SRAM read offsets cmd: MCP2221_GET_SRAM_SETTINGS */
+enum {
+	MCP2221_SRAM_RD_GP0 = 22,
+	MCP2221_SRAM_RD_GP1 = 23,
+	MCP2221_SRAM_RD_GP2 = 24,
+	MCP2221_SRAM_RD_GP3 = 25,
+};
+
+/* MCP SRAM write offsets cmd: MCP2221_SET_SRAM_SETTINGS */
+enum {
+	MCP2221_SRAM_WR_GP_ENA_ALTER = 7,
+	MCP2221_SRAM_WR_GP0 = 8,
+	MCP2221_SRAM_WR_GP1 = 9,
+	MCP2221_SRAM_WR_GP2 = 10,
+	MCP2221_SRAM_WR_GP3 = 11,
+};
+
+#define MCP2221_SRAM_GP_DESIGN_MASK		0x07
+#define MCP2221_SRAM_GP_DIRECTION_MASK		0x08
+#define MCP2221_SRAM_GP_VALUE_MASK		0x10
 
 /* MCP GPIO direction encoding */
 enum {
@@ -98,6 +128,7 @@ struct mcp2221 {
 	u8 *rxbuf;
 	u8 txbuf[64];
 	int rxbuf_idx;
+	int rxbuf_size;
 	int status;
 	u8 cur_i2c_clk_div;
 	struct gpio_chip *gc;
@@ -187,6 +218,25 @@ static int mcp_cancel_last_cmd(struct mcp2221 *mcp)
 	return mcp_send_data_req_status(mcp, mcp->txbuf, 8);
 }
 
+/* Check if the last command succeeded or failed and return the result.
+ * If the command did fail, cancel that command which will free the i2c bus.
+ */
+static int mcp_chk_last_cmd_status_free_bus(struct mcp2221 *mcp)
+{
+	int ret;
+
+	ret = mcp_chk_last_cmd_status(mcp);
+	if (ret) {
+		/* The last command was a failure.
+		 * Send a cancel which will also free the bus.
+		 */
+		usleep_range(980, 1000);
+		mcp_cancel_last_cmd(mcp);
+	}
+
+	return ret;
+}
+
 static int mcp_set_i2c_speed(struct mcp2221 *mcp)
 {
 	int ret;
@@ -221,10 +271,7 @@ static int mcp_i2c_write(struct mcp2221 *mcp,
 
 	idx = 0;
 	sent  = 0;
-	if (msg->len < 60)
-		len = msg->len;
-	else
-		len = 60;
+	len = min(msg->len, 60);
 
 	do {
 		mcp->txbuf[0] = type;
@@ -241,7 +288,7 @@ static int mcp_i2c_write(struct mcp2221 *mcp,
 		usleep_range(980, 1000);
 
 		if (last_status) {
-			ret = mcp_chk_last_cmd_status(mcp);
+			ret = mcp_chk_last_cmd_status_free_bus(mcp);
 			if (ret)
 				return ret;
 		}
@@ -251,10 +298,7 @@ static int mcp_i2c_write(struct mcp2221 *mcp,
 			break;
 
 		idx = idx + len;
-		if ((msg->len - sent) < 60)
-			len = msg->len - sent;
-		else
-			len = 60;
+		len = min(msg->len - sent, 60);
 
 		/*
 		 * Testing shows delay is needed between successive writes
@@ -278,6 +322,7 @@ static int mcp_i2c_smbus_read(struct mcp2221 *mcp,
 {
 	int ret;
 	u16 total_len;
+	int retries = 0;
 
 	mcp->txbuf[0] = type;
 	if (msg) {
@@ -286,34 +331,53 @@ static int mcp_i2c_smbus_read(struct mcp2221 *mcp,
 		mcp->txbuf[3] = (u8)(msg->addr << 1);
 		total_len = msg->len;
 		mcp->rxbuf = msg->buf;
+		mcp->rxbuf_size = msg->len;
 	} else {
 		mcp->txbuf[1] = smbus_len;
 		mcp->txbuf[2] = 0;
 		mcp->txbuf[3] = (u8)(smbus_addr << 1);
 		total_len = smbus_len;
 		mcp->rxbuf = smbus_buf;
+		mcp->rxbuf_size = smbus_len;
 	}
 
 	ret = mcp_send_data_req_status(mcp, mcp->txbuf, 4);
 	if (ret)
-		return ret;
+		goto out;
 
 	mcp->rxbuf_idx = 0;
 
 	do {
+		/* Wait for the data to be read by the device */
+		usleep_range(980, 1000);
+
 		memset(mcp->txbuf, 0, 4);
 		mcp->txbuf[0] = MCP2221_I2C_GET_DATA;
 
 		ret = mcp_send_data_req_status(mcp, mcp->txbuf, 1);
-		if (ret)
-			return ret;
-
-		ret = mcp_chk_last_cmd_status(mcp);
-		if (ret)
-			return ret;
-
-		usleep_range(980, 1000);
+		if (ret) {
+			if (retries < 5) {
+				/* The data wasn't ready to read.
+				 * Wait a bit longer and try again.
+				 */
+				usleep_range(90, 100);
+				retries++;
+			} else {
+				usleep_range(980, 1000);
+				mcp_cancel_last_cmd(mcp);
+				goto out;
+			}
+		} else {
+			retries = 0;
+		}
 	} while (mcp->rxbuf_idx < total_len);
+
+	usleep_range(980, 1000);
+	ret = mcp_chk_last_cmd_status_free_bus(mcp);
+
+out:
+	mcp->rxbuf = NULL;
+	mcp->rxbuf_size = 0;
 
 	return ret;
 }
@@ -327,11 +391,6 @@ static int mcp_i2c_xfer(struct i2c_adapter *adapter,
 	hid_hw_power(mcp->hdev, PM_HINT_FULLON);
 
 	mutex_lock(&mcp->lock);
-
-	/* Setting speed before every transaction is required for mcp2221 */
-	ret = mcp_set_i2c_speed(mcp);
-	if (ret)
-		goto exit;
 
 	if (num == 1) {
 		if (msgs->flags & I2C_M_RD) {
@@ -417,9 +476,7 @@ static int mcp_smbus_write(struct mcp2221 *mcp, u16 addr,
 	if (last_status) {
 		usleep_range(980, 1000);
 
-		ret = mcp_chk_last_cmd_status(mcp);
-		if (ret)
-			return ret;
+		ret = mcp_chk_last_cmd_status_free_bus(mcp);
 	}
 
 	return ret;
@@ -436,10 +493,6 @@ static int mcp_smbus_xfer(struct i2c_adapter *adapter, u16 addr,
 	hid_hw_power(mcp->hdev, PM_HINT_FULLON);
 
 	mutex_lock(&mcp->lock);
-
-	ret = mcp_set_i2c_speed(mcp);
-	if (ret)
-		goto exit;
 
 	switch (size) {
 
@@ -497,10 +550,10 @@ static int mcp_smbus_xfer(struct i2c_adapter *adapter, u16 addr,
 			if (ret)
 				goto exit;
 
-			mcp->rxbuf_idx = 0;
-			mcp->rxbuf = data->block;
-			mcp->txbuf[0] = MCP2221_I2C_GET_DATA;
-			ret = mcp_send_data_req_status(mcp, mcp->txbuf, 1);
+			ret = mcp_i2c_smbus_read(mcp, NULL,
+						MCP2221_I2C_RD_RPT_START,
+						addr, data->block[0] + 1,
+						data->block);
 			if (ret)
 				goto exit;
 		} else {
@@ -516,14 +569,14 @@ static int mcp_smbus_xfer(struct i2c_adapter *adapter, u16 addr,
 	case I2C_SMBUS_I2C_BLOCK_DATA:
 		if (read_write == I2C_SMBUS_READ) {
 			ret = mcp_smbus_write(mcp, addr, command, NULL,
-						0, MCP2221_I2C_WR_NO_STOP, 1);
+						0, MCP2221_I2C_WR_NO_STOP, 0);
 			if (ret)
 				goto exit;
 
-			mcp->rxbuf_idx = 0;
-			mcp->rxbuf = data->block;
-			mcp->txbuf[0] = MCP2221_I2C_GET_DATA;
-			ret = mcp_send_data_req_status(mcp, mcp->txbuf, 1);
+			ret = mcp_i2c_smbus_read(mcp, NULL,
+						MCP2221_I2C_RD_RPT_START,
+						addr, data->block[0],
+						&data->block[1]);
 			if (ret)
 				goto exit;
 		} else {
@@ -586,6 +639,80 @@ static const struct i2c_algorithm mcp_i2c_algo = {
 };
 
 #if IS_REACHABLE(CONFIG_GPIOLIB)
+static int mcp_gpio_read_sram(struct mcp2221 *mcp)
+{
+	int ret;
+
+	memset(mcp->txbuf, 0, 64);
+	mcp->txbuf[0] = MCP2221_GET_SRAM_SETTINGS;
+
+	mutex_lock(&mcp->lock);
+	ret = mcp_send_data_req_status(mcp, mcp->txbuf, 64);
+	mutex_unlock(&mcp->lock);
+
+	return ret;
+}
+
+/*
+ * If CONFIG_IIO is not enabled, check for the gpio pins
+ * if they are in gpio mode. For the ones which are not
+ * in gpio mode, set them into gpio mode.
+ */
+static int mcp2221_check_gpio_pinfunc(struct mcp2221 *mcp)
+{
+	int i;
+	int needgpiofix = 0;
+	int ret;
+
+	if (IS_ENABLED(CONFIG_IIO) && !gpio_mode_enforce)
+		return 0;
+
+	ret = mcp_gpio_read_sram(mcp);
+	if (ret)
+		return ret;
+
+	for (i = 0; i < MCP_NGPIO; i++) {
+		if ((mcp->mode[i] & MCP2221_SRAM_GP_DESIGN_MASK) != 0x0) {
+			dev_warn(&mcp->hdev->dev,
+				 "GPIO %d not in gpio mode\n", i);
+			needgpiofix = 1;
+		}
+	}
+
+	if (!needgpiofix)
+		return 0;
+
+	/*
+	 * Set all bytes to 0, so Bit 7 is not set. The chip
+	 * only changes content of a register when bit 7 is set.
+	 */
+	memset(mcp->txbuf, 0, 64);
+	mcp->txbuf[0] = MCP2221_SET_SRAM_SETTINGS;
+
+	/*
+	 * Set bit 7 in MCP2221_SRAM_WR_GP_ENA_ALTER to enable
+	 * loading of a new set of gpio settings to GP SRAM
+	 */
+	mcp->txbuf[MCP2221_SRAM_WR_GP_ENA_ALTER] = 0x80;
+	for (i = 0; i < MCP_NGPIO; i++) {
+		if ((mcp->mode[i] & MCP2221_SRAM_GP_DESIGN_MASK) == 0x0) {
+			/* write current GPIO mode */
+			mcp->txbuf[MCP2221_SRAM_WR_GP0 + i] = mcp->mode[i];
+		} else {
+			/* pin is not in gpio mode, set it to input mode */
+			mcp->txbuf[MCP2221_SRAM_WR_GP0 + i] = 0x08;
+			dev_warn(&mcp->hdev->dev,
+				 "Set GPIO mode for gpio pin %d!\n", i);
+		}
+	}
+
+	mutex_lock(&mcp->lock);
+	ret = mcp_send_data_req_status(mcp, mcp->txbuf, 64);
+	mutex_unlock(&mcp->lock);
+
+	return ret;
+}
+
 static int mcp_gpio_get(struct gpio_chip *gc,
 				unsigned int offset)
 {
@@ -603,10 +730,10 @@ static int mcp_gpio_get(struct gpio_chip *gc,
 	return ret;
 }
 
-static void mcp_gpio_set(struct gpio_chip *gc,
-				unsigned int offset, int value)
+static int mcp_gpio_set(struct gpio_chip *gc, unsigned int offset, int value)
 {
 	struct mcp2221 *mcp = gpiochip_get_data(gc);
+	int ret;
 
 	memset(mcp->txbuf, 0, 18);
 	mcp->txbuf[0] = MCP2221_GPIO_SET;
@@ -617,8 +744,10 @@ static void mcp_gpio_set(struct gpio_chip *gc,
 	mcp->txbuf[mcp->gp_idx] = !!value;
 
 	mutex_lock(&mcp->lock);
-	mcp_send_data_req_status(mcp, mcp->txbuf, 18);
+	ret = mcp_send_data_req_status(mcp, mcp->txbuf, 18);
 	mutex_unlock(&mcp->lock);
+
+	return ret;
 }
 
 static int mcp_gpio_dir_set(struct mcp2221 *mcp,
@@ -736,6 +865,9 @@ static int mcp2221_raw_event(struct hid_device *hdev,
 	u8 *buf;
 	struct mcp2221 *mcp = hid_get_drvdata(hdev);
 
+	if (size < 4)
+		return 0;
+
 	switch (data[0]) {
 
 	case MCP2221_I2C_WR_DATA:
@@ -791,7 +923,20 @@ static int mcp2221_raw_event(struct hid_device *hdev,
 				mcp->status = -EIO;
 				break;
 			}
-			if (data[2] == MCP2221_I2C_READ_COMPL) {
+			if (data[2] == MCP2221_I2C_READ_COMPL ||
+			    data[2] == MCP2221_I2C_READ_PARTIAL) {
+				if (!mcp->rxbuf || mcp->rxbuf_idx < 0 || data[3] > 60) {
+					mcp->status = -EINVAL;
+					break;
+				}
+				if (mcp->rxbuf_idx + data[3] > mcp->rxbuf_size) {
+					mcp->status = -EINVAL;
+					break;
+				}
+				if (4 + data[3] > size) {
+					mcp->status = -EINVAL;
+					break;
+				}
 				buf = mcp->rxbuf;
 				memcpy(&buf[mcp->rxbuf_idx], &data[4], data[3]);
 				mcp->rxbuf_idx = mcp->rxbuf_idx + data[3];
@@ -915,6 +1060,8 @@ static void mcp2221_hid_unregister(void *ptr)
 {
 	struct hid_device *hdev = ptr;
 
+	if (hdev->io_started)
+		hid_device_io_stop(hdev);
 	hid_hw_close(hdev);
 	hid_hw_stop(hdev);
 }
@@ -922,9 +1069,12 @@ static void mcp2221_hid_unregister(void *ptr)
 /* This is needed to be sure hid_hw_stop() isn't called twice by the subsystem */
 static void mcp2221_remove(struct hid_device *hdev)
 {
+#if IS_REACHABLE(CONFIG_IIO)
 	struct mcp2221 *mcp = hid_get_drvdata(hdev);
 
-	cancel_delayed_work_sync(&mcp->init_work);
+	if (!gpio_mode_enforce)
+		cancel_delayed_work_sync(&mcp->init_work);
+#endif
 }
 
 #if IS_REACHABLE(CONFIG_IIO)
@@ -1024,7 +1174,7 @@ static int mcp_iio_channels(struct mcp2221 *mcp)
 			break;
 		default:
 			continue;
-		};
+		}
 
 		chan->type = IIO_VOLTAGE;
 		chan->indexed = 1;
@@ -1142,27 +1292,35 @@ static int mcp2221_probe(struct hid_device *hdev,
 	if (ret)
 		return ret;
 
+	hid_device_io_start(hdev);
+
 	/* Set I2C bus clock diviser */
 	if (i2c_clk_freq > 400)
 		i2c_clk_freq = 400;
 	if (i2c_clk_freq < 50)
 		i2c_clk_freq = 50;
 	mcp->cur_i2c_clk_div = (12000000 / (i2c_clk_freq * 1000)) - 3;
+	ret = mcp_set_i2c_speed(mcp);
+	if (ret) {
+		hid_err(hdev, "can't set i2c speed: %d\n", ret);
+		return ret;
+	}
 
 	mcp->adapter.owner = THIS_MODULE;
 	mcp->adapter.class = I2C_CLASS_HWMON;
 	mcp->adapter.algo = &mcp_i2c_algo;
 	mcp->adapter.retries = 1;
 	mcp->adapter.dev.parent = &hdev->dev;
+	ACPI_COMPANION_SET(&mcp->adapter.dev, ACPI_COMPANION(hdev->dev.parent));
 	snprintf(mcp->adapter.name, sizeof(mcp->adapter.name),
 			"MCP2221 usb-i2c bridge");
 
+	i2c_set_adapdata(&mcp->adapter, mcp);
 	ret = devm_i2c_add_adapter(&hdev->dev, &mcp->adapter);
 	if (ret) {
 		hid_err(hdev, "can't add usb-i2c adapter: %d\n", ret);
 		return ret;
 	}
-	i2c_set_adapdata(&mcp->adapter, mcp);
 
 #if IS_REACHABLE(CONFIG_GPIOLIB)
 	/* Setup GPIO chip */
@@ -1184,11 +1342,15 @@ static int mcp2221_probe(struct hid_device *hdev,
 	ret = devm_gpiochip_add_data(&hdev->dev, mcp->gc, mcp);
 	if (ret)
 		return ret;
+
+	mcp2221_check_gpio_pinfunc(mcp);
 #endif
 
 #if IS_REACHABLE(CONFIG_IIO)
-	INIT_DELAYED_WORK(&mcp->init_work, mcp_init_work);
-	schedule_delayed_work(&mcp->init_work, msecs_to_jiffies(100));
+	if (!gpio_mode_enforce) {
+		INIT_DELAYED_WORK(&mcp->init_work, mcp_init_work);
+		schedule_delayed_work(&mcp->init_work, msecs_to_jiffies(100));
+	}
 #endif
 
 	return 0;

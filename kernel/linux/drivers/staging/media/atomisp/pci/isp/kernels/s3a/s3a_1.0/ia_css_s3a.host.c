@@ -2,15 +2,6 @@
 /*
  * Support for Intel Camera Imaging ISP subsystem.
  * Copyright (c) 2015, Intel Corporation.
- *
- * This program is free software; you can redistribute it and/or modify it
- * under the terms and conditions of the GNU General Public License,
- * version 2, as published by the Free Software Foundation.
- *
- * This program is distributed in the hope it will be useful, but WITHOUT
- * ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
- * FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License for
- * more details.
  */
 
 #include "ia_css_types.h"
@@ -249,9 +240,8 @@ ia_css_s3a_hmem_decode(
 	/* Calculate sum of histogram of R,
 	   which should not be less than count_for_3a */
 	sum_r = 0;
-	for (i = 0; i < HMEM_UNIT_SIZE; i++) {
+	for (i = 0; i < HMEM_UNIT_SIZE; i++)
 		sum_r += out_ptr[i].r;
-	}
 	if (sum_r < count_for_3a) {
 		/* histogram is invalid */
 		return;

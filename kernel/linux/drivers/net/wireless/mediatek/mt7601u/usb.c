@@ -274,7 +274,6 @@ static int mt7601u_probe(struct usb_interface *usb_intf,
 	if (!dev)
 		return -ENOMEM;
 
-	usb_dev = usb_get_dev(usb_dev);
 	usb_reset_device(usb_dev);
 
 	usb_set_intfdata(usb_intf, dev);
@@ -319,7 +318,6 @@ err_hw:
 	mt7601u_cleanup(dev);
 err:
 	usb_set_intfdata(usb_intf, NULL);
-	usb_put_dev(interface_to_usbdev(usb_intf));
 
 	destroy_workqueue(dev->stat_wq);
 	ieee80211_free_hw(dev->hw);
@@ -334,7 +332,6 @@ static void mt7601u_disconnect(struct usb_interface *usb_intf)
 	mt7601u_cleanup(dev);
 
 	usb_set_intfdata(usb_intf, NULL);
-	usb_put_dev(interface_to_usbdev(usb_intf));
 
 	destroy_workqueue(dev->stat_wq);
 	ieee80211_free_hw(dev->hw);
@@ -365,6 +362,7 @@ static int mt7601u_resume(struct usb_interface *usb_intf)
 
 MODULE_DEVICE_TABLE(usb, mt7601u_device_table);
 MODULE_FIRMWARE(MT7601U_FIRMWARE);
+MODULE_DESCRIPTION("MediaTek MT7601U USB Wireless LAN driver");
 MODULE_LICENSE("GPL");
 
 static struct usb_driver mt7601u_driver = {

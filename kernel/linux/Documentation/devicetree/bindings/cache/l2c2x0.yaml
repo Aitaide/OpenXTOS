@@ -66,6 +66,9 @@ properties:
   reg:
     maxItems: 1
 
+  power-domains:
+    maxItems: 1
+
   arm,data-latency:
     description: Cycles of latency for Data RAM accesses. Specifies 3 cells of
       read, write and setup latencies. Minimum valid values are 1. Controllers
@@ -100,9 +103,8 @@ properties:
       filter. Addresses in the filter window are directed to the M1 port. Other
       addresses will go to the M0 port.
     $ref: /schemas/types.yaml#/definitions/uint32-array
-    items:
-      minItems: 2
-      maxItems: 2
+    minItems: 2
+    maxItems: 2
 
   arm,io-coherent:
     description: indicates that the system is operating in an hardware

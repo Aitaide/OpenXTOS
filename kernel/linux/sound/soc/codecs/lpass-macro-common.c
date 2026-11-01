@@ -1,15 +1,19 @@
 // SPDX-License-Identifier: GPL-2.0-only
 // Copyright (c) 2022, The Linux Foundation. All rights reserved.
 
+#include <linux/cleanup.h>
 #include <linux/export.h>
 #include <linux/module.h>
 #include <linux/init.h>
-#include <linux/of_platform.h>
+#include <linux/of.h>
 #include <linux/platform_device.h>
 #include <linux/pm_domain.h>
 #include <linux/pm_runtime.h>
 
 #include "lpass-macro-common.h"
+
+static DEFINE_MUTEX(lpass_codec_mutex);
+static enum lpass_codec_version lpass_codec_version;
 
 struct lpass_macro *lpass_macro_pds_init(struct device *dev)
 {
@@ -65,6 +69,21 @@ void lpass_macro_pds_exit(struct lpass_macro *pds)
 	}
 }
 EXPORT_SYMBOL_GPL(lpass_macro_pds_exit);
+
+void lpass_macro_set_codec_version(enum lpass_codec_version version)
+{
+	guard(mutex)(&lpass_codec_mutex);
+	lpass_codec_version = version;
+}
+EXPORT_SYMBOL_GPL(lpass_macro_set_codec_version);
+
+enum lpass_codec_version lpass_macro_get_codec_version(void)
+{
+	guard(mutex)(&lpass_codec_mutex);
+
+	return lpass_codec_version;
+}
+EXPORT_SYMBOL_GPL(lpass_macro_get_codec_version);
 
 MODULE_DESCRIPTION("Common macro driver");
 MODULE_LICENSE("GPL");

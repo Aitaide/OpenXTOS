@@ -5,6 +5,7 @@
 #include <bpf/btf.h>
 #include "bind4_prog.skel.h"
 #include "freplace_progmap.skel.h"
+#include "fentry_sleepable.skel.h"
 #include "xdp_dummy.skel.h"
 
 typedef int (*test_cb)(struct bpf_object *obj);
@@ -111,7 +112,7 @@ static void test_fexit_bpf2bpf_common(const char *obj_file,
 		struct bpf_link_info link_info;
 		struct bpf_program *pos;
 		const char *pos_sec_name;
-		char *tgt_name;
+		const char *tgt_name;
 		__s32 btf_id;
 
 		tgt_name = strstr(prog_name[i], "/");
@@ -335,20 +336,20 @@ out:
 	bpf_object__close(pkt_obj);
 }
 
-
-static void test_func_sockmap_update(void)
+static void test_func_replace_void(void)
 {
 	const char *prog_name[] = {
-		"freplace/cls_redirect",
+		"freplace/foo",
 	};
-	test_fexit_bpf2bpf_common("./freplace_cls_redirect.bpf.o",
-				  "./test_cls_redirect.bpf.o",
+	test_fexit_bpf2bpf_common("./freplace_void.bpf.o",
+				  "./test_global_func7.bpf.o",
 				  ARRAY_SIZE(prog_name),
 				  prog_name, false, NULL);
 }
 
 static void test_obj_load_failure_common(const char *obj_file,
-					 const char *target_obj_file)
+					 const char *target_obj_file,
+					 const char *exp_msg)
 {
 	/*
 	 * standalone test that asserts failure to load freplace prog
@@ -356,6 +357,7 @@ static void test_obj_load_failure_common(const char *obj_file,
 	 */
 	struct bpf_object *obj = NULL, *pkt_obj;
 	struct bpf_program *prog;
+	char log_buf[64 * 1024];
 	int err, pkt_fd;
 	__u32 duration = 0;
 
@@ -374,11 +376,21 @@ static void test_obj_load_failure_common(const char *obj_file,
 	err = bpf_program__set_attach_target(prog, pkt_fd, NULL);
 	ASSERT_OK(err, "set_attach_target");
 
+	log_buf[0] = '\0';
+	if (exp_msg)
+		bpf_program__set_log_buf(prog, log_buf, sizeof(log_buf));
+	if (env.verbosity > VERBOSE_NONE)
+		bpf_program__set_log_level(prog, 2);
+
 	/* It should fail to load the program */
 	err = bpf_object__load(obj);
+	if (env.verbosity > VERBOSE_NONE && exp_msg) /* we overtook log */
+		printf("VERIFIER LOG:\n================\n%s\n================\n", log_buf);
 	if (CHECK(!err, "bpf_obj_load should fail", "err %d\n", err))
 		goto close_prog;
 
+	if (exp_msg)
+		ASSERT_HAS_SUBSTR(log_buf, exp_msg, "fail_msg");
 close_prog:
 	bpf_object__close(obj);
 	bpf_object__close(pkt_obj);
@@ -388,14 +400,24 @@ static void test_func_replace_return_code(void)
 {
 	/* test invalid return code in the replaced program */
 	test_obj_load_failure_common("./freplace_connect_v4_prog.bpf.o",
-				     "./connect4_prog.bpf.o");
+				     "./connect4_prog.bpf.o", NULL);
 }
 
 static void test_func_map_prog_compatibility(void)
 {
 	/* test with spin lock map value in the replaced program */
 	test_obj_load_failure_common("./freplace_attach_probe.bpf.o",
-				     "./test_attach_probe.bpf.o");
+				     "./test_attach_probe.bpf.o", NULL);
+}
+
+static void test_func_replace_unreliable(void)
+{
+	/* freplace'ing unreliable main prog should fail with error
+	 * "Cannot replace static functions"
+	 */
+	test_obj_load_failure_common("freplace_unreliable_prog.bpf.o",
+				     "./verifier_btf_unreliable_prog.bpf.o",
+				     "Cannot replace static functions");
 }
 
 static void test_func_replace_global_func(void)
@@ -408,6 +430,15 @@ static void test_func_replace_global_func(void)
 				  "./test_pkt_access.bpf.o",
 				  ARRAY_SIZE(prog_name),
 				  prog_name, false, NULL);
+}
+
+static void test_func_replace_int_with_void(void)
+{
+	/* Make sure we can't freplace with the wrong type */
+	test_obj_load_failure_common("freplace_int_with_void.bpf.o",
+				     "./test_global_func2.bpf.o",
+				     "Return type UNKNOWN of test_freplace_int_with_void()"
+				     " doesn't match type INT of global_func2()");
 }
 
 static int find_prog_btf_id(const char *name, __u32 attach_prog_fd)
@@ -546,6 +577,60 @@ out:
 	freplace_progmap__destroy(skel);
 }
 
+static void test_sleepable_fentry_to_xdp(void)
+{
+	struct fentry_sleepable *skel = NULL;
+	struct xdp_dummy *skel_xdp = NULL;
+	int ifindex, prog_fd, err;
+	char buff[64] = {};
+
+#ifndef __x86_64__
+	test__skip();
+	return;
+#endif
+
+	ifindex = if_nametoindex("lo");
+	if (!ASSERT_GT(ifindex, 0, "if_nametoindex"))
+		return;
+
+	skel_xdp = xdp_dummy__open_and_load();
+	if (!ASSERT_OK_PTR(skel_xdp, "xdp_dummy__open_and_load"))
+		return;
+
+	skel = fentry_sleepable__open();
+	if (!ASSERT_OK_PTR(skel, "fentry_sleepable__open"))
+		goto out;
+
+	skel->bss->user_ptr = buff;
+
+	prog_fd = bpf_program__fd(skel_xdp->progs.__x64_sys_nop);
+	err = bpf_program__set_attach_target(skel->progs.fentry_xdp, prog_fd, "__x64_sys_nop");
+	if (!ASSERT_OK(err, "bpf_program__set_attach_target"))
+		goto out;
+
+	err = fentry_sleepable__load(skel);
+	ASSERT_ERR(err, "fentry_sleepable__load");
+	if (err)
+		goto out;
+
+	skel->links.fentry_xdp = bpf_program__attach_trace(skel->progs.fentry_xdp);
+	if (!ASSERT_OK_PTR(skel->links.fentry_xdp, "bpf_program__attach_trace"))
+		goto out;
+
+	skel_xdp->links.__x64_sys_nop = bpf_program__attach_xdp(skel_xdp->progs.__x64_sys_nop,
+								ifindex);
+	if (!ASSERT_OK_PTR(skel_xdp->links.__x64_sys_nop, "bpf_program__attach_xdp"))
+		goto out;
+
+	err = system("ping -q -c 1 -W 1 127.0.0.1 > /dev/null");
+	ASSERT_OK(err, "ping");
+	ASSERT_ERR(skel->bss->retval, "retval");
+
+out:
+	fentry_sleepable__destroy(skel);
+	xdp_dummy__destroy(skel_xdp);
+}
+
 /* NOTE: affect other tests, must run in serial mode */
 void serial_test_fexit_bpf2bpf(void)
 {
@@ -557,12 +642,12 @@ void serial_test_fexit_bpf2bpf(void)
 		test_func_replace();
 	if (test__start_subtest("func_replace_verify"))
 		test_func_replace_verify();
-	if (test__start_subtest("func_sockmap_update"))
-		test_func_sockmap_update();
 	if (test__start_subtest("func_replace_return_code"))
 		test_func_replace_return_code();
 	if (test__start_subtest("func_map_prog_compatibility"))
 		test_func_map_prog_compatibility();
+	if (test__start_subtest("func_replace_unreliable"))
+		test_func_replace_unreliable();
 	if (test__start_subtest("func_replace_multi"))
 		test_func_replace_multi();
 	if (test__start_subtest("fmod_ret_freplace"))
@@ -573,4 +658,10 @@ void serial_test_fexit_bpf2bpf(void)
 		test_fentry_to_cgroup_bpf();
 	if (test__start_subtest("func_replace_progmap"))
 		test_func_replace_progmap();
+	if (test__start_subtest("freplace_int_with_void"))
+		test_func_replace_int_with_void();
+	if (test__start_subtest("freplace_void"))
+		test_func_replace_void();
+	if (test__start_subtest("sleepable_fentry_to_xdp"))
+		test_sleepable_fentry_to_xdp();
 }

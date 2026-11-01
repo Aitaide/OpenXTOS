@@ -26,7 +26,8 @@
 #include <linux/hwmon.h>
 #include <linux/hwmon-sysfs.h>
 #include <linux/err.h>
-#include <linux/of_device.h>
+#include <linux/of.h>
+#include <linux/sysfs.h>
 #include <linux/thermal.h>
 
 /*
@@ -312,7 +313,7 @@ static ssize_t alarm_show(struct device *dev,
 		mutex_unlock(&data->update_lock);
 	}
 
-	return sprintf(buf, "%d\n", alarm);
+	return sysfs_emit(buf, "%d\n", alarm);
 }
 
 static SENSOR_DEVICE_ATTR_RO(gpio1_alarm, alarm, MAX6650_ALRM_GPIO1);
@@ -763,8 +764,6 @@ static int max6650_probe(struct i2c_client *client)
 {
 	struct thermal_cooling_device *cooling_dev;
 	struct device *dev = &client->dev;
-	const struct of_device_id *of_id =
-		of_match_device(of_match_ptr(max6650_dt_match), dev);
 	struct max6650_data *data;
 	struct device *hwmon_dev;
 	int err;
@@ -776,8 +775,8 @@ static int max6650_probe(struct i2c_client *client)
 	data->client = client;
 	i2c_set_clientdata(client, data);
 	mutex_init(&data->update_lock);
-	data->nr_fans = of_id ? (int)(uintptr_t)of_id->data :
-				i2c_match_id(max6650_id, client)->driver_data;
+
+	data->nr_fans = (uintptr_t)i2c_get_match_data(client);
 
 	/*
 	 * Initialize the max6650 chip
@@ -795,9 +794,9 @@ static int max6650_probe(struct i2c_client *client)
 		return err;
 
 	if (IS_ENABLED(CONFIG_THERMAL)) {
-		cooling_dev = devm_thermal_of_cooling_device_register(dev,
-						dev->of_node, client->name,
-						data, &max6650_cooling_ops);
+		cooling_dev = devm_thermal_of_child_cooling_device_register(dev, dev->of_node,
+									    client->name, data,
+									    &max6650_cooling_ops);
 		if (IS_ERR(cooling_dev)) {
 			dev_warn(dev, "thermal cooling device register failed: %ld\n",
 				 PTR_ERR(cooling_dev));
@@ -808,8 +807,8 @@ static int max6650_probe(struct i2c_client *client)
 }
 
 static const struct i2c_device_id max6650_id[] = {
-	{ "max6650", 1 },
-	{ "max6651", 4 },
+	{ .name = "max6650", .driver_data = 1 },
+	{ .name = "max6651", .driver_data = 4 },
 	{ }
 };
 MODULE_DEVICE_TABLE(i2c, max6650_id);

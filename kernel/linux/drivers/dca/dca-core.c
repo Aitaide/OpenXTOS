@@ -17,6 +17,7 @@
 #define DCA_VERSION "1.12.1"
 
 MODULE_VERSION(DCA_VERSION);
+MODULE_DESCRIPTION("Intel Direct Cache Access (DCA) service module");
 MODULE_LICENSE("GPL");
 MODULE_AUTHOR("Intel Corporation");
 
@@ -43,7 +44,7 @@ static struct dca_domain *dca_allocate_domain(struct pci_bus *rc)
 {
 	struct dca_domain *domain;
 
-	domain = kzalloc(sizeof(*domain), GFP_NOWAIT);
+	domain = kzalloc_obj(*domain, GFP_NOWAIT);
 	if (!domain)
 		return NULL;
 

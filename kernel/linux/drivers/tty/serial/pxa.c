@@ -151,7 +151,7 @@ static inline void receive_chars(struct uart_pxa_port *up, int *status)
 				flag = TTY_FRAME;
 		}
 
-		if (uart_handle_sysrq_char(&up->port, ch))
+		if (uart_prepare_sysrq_char(&up->port, ch))
 			goto ignore_char;
 
 		uart_insert_char(&up->port, *status, UART_LSR_OE, ch, flag);
@@ -232,7 +232,7 @@ static inline irqreturn_t serial_pxa_irq(int irq, void *dev_id)
 	check_modem_status(up);
 	if (lsr & UART_LSR_THRE)
 		transmit_chars(up);
-	uart_port_unlock(&up->port);
+	uart_unlock_and_check_sysrq(&up->port);
 	return IRQ_HANDLED;
 }
 
@@ -573,7 +573,7 @@ static void wait_for_xmitr(struct uart_pxa_port *up)
 	} while (!uart_lsr_tx_empty(status));
 
 	/* Wait up to 1s for flow control if necessary */
-	if (up->port.flags & UPF_CONS_FLOW) {
+	if (uart_cons_flow_enabled(&up->port)) {
 		tmout = 1000000;
 		while (--tmout &&
 		       ((serial_in(up, UART_MSR) & UART_MSR_CTS) == 0))
@@ -604,13 +604,10 @@ serial_pxa_console_write(struct console *co, const char *s, unsigned int count)
 	int locked = 1;
 
 	clk_enable(up->clk);
-	local_irq_save(flags);
-	if (up->port.sysrq)
-		locked = 0;
-	else if (oops_in_progress)
-		locked = uart_port_trylock(&up->port);
+	if (oops_in_progress)
+		locked = uart_port_trylock_irqsave(&up->port, &flags);
 	else
-		uart_port_lock(&up->port);
+		uart_port_lock_irqsave(&up->port, &flags);
 
 	/*
 	 *	First save the IER then disable the interrupts
@@ -628,10 +625,8 @@ serial_pxa_console_write(struct console *co, const char *s, unsigned int count)
 	serial_out(up, UART_IER, ier);
 
 	if (locked)
-		uart_port_unlock(&up->port);
-	local_irq_restore(flags);
+		uart_port_unlock_irqrestore(&up->port, flags);
 	clk_disable(up->clk);
-
 }
 
 #ifdef CONFIG_CONSOLE_POLL
@@ -816,7 +811,7 @@ static int serial_pxa_probe(struct platform_device *dev)
 	if (irq < 0)
 		return irq;
 
-	sport = kzalloc(sizeof(struct uart_pxa_port), GFP_KERNEL);
+	sport = kzalloc_obj(struct uart_pxa_port);
 	if (!sport)
 		return -ENOMEM;
 

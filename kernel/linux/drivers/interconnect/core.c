@@ -20,6 +20,8 @@
 
 #include "internal.h"
 
+#define ICC_DYN_ID_START 100000
+
 #define CREATE_TRACE_POINTS
 #include "trace.h"
 
@@ -170,11 +172,13 @@ static struct icc_path *path_init(struct device *dev, struct icc_node *dst,
 	struct icc_path *path;
 	int i;
 
-	path = kzalloc(struct_size(path, reqs, num_nodes), GFP_KERNEL);
+	path = kzalloc_flex(*path, reqs, num_nodes);
 	if (!path)
 		return ERR_PTR(-ENOMEM);
 
 	path->num_nodes = num_nodes;
+
+	mutex_lock(&icc_bw_lock);
 
 	for (i = num_nodes - 1; i >= 0; i--) {
 		node->provider->users++;
@@ -185,6 +189,8 @@ static struct icc_path *path_init(struct device *dev, struct icc_node *dst,
 		/* reference to previous node was saved during path traversal */
 		node = node->reverse;
 	}
+
+	mutex_unlock(&icc_bw_lock);
 
 	return path;
 }
@@ -343,7 +349,7 @@ EXPORT_SYMBOL_GPL(icc_std_aggregate);
  * an array of icc nodes specified in the icc_onecell_data struct when
  * registering the provider.
  */
-struct icc_node *of_icc_xlate_onecell(struct of_phandle_args *spec,
+struct icc_node *of_icc_xlate_onecell(const struct of_phandle_args *spec,
 				      void *data)
 {
 	struct icc_onecell_data *icc_data = data;
@@ -368,7 +374,7 @@ EXPORT_SYMBOL_GPL(of_icc_xlate_onecell);
  * Returns a valid pointer to struct icc_node_data on success or ERR_PTR()
  * on failure.
  */
-struct icc_node_data *of_icc_get_from_provider(struct of_phandle_args *spec)
+struct icc_node_data *of_icc_get_from_provider(const struct of_phandle_args *spec)
 {
 	struct icc_node *node = ERR_PTR(-EPROBE_DEFER);
 	struct icc_node_data *data = NULL;
@@ -379,7 +385,7 @@ struct icc_node_data *of_icc_get_from_provider(struct of_phandle_args *spec)
 
 	mutex_lock(&icc_lock);
 	list_for_each_entry(provider, &icc_providers, provider_list) {
-		if (provider->dev->of_node == spec->np) {
+		if (device_match_of_node(provider->dev, spec->np)) {
 			if (provider->xlate_extended) {
 				data = provider->xlate_extended(spec, provider->data);
 				if (!IS_ERR(data)) {
@@ -395,11 +401,14 @@ struct icc_node_data *of_icc_get_from_provider(struct of_phandle_args *spec)
 	}
 	mutex_unlock(&icc_lock);
 
+	if (!node)
+		return ERR_PTR(-EINVAL);
+
 	if (IS_ERR(node))
 		return ERR_CAST(node);
 
 	if (!data) {
-		data = kzalloc(sizeof(*data), GFP_KERNEL);
+		data = kzalloc_obj(*data);
 		if (!data)
 			return ERR_PTR(-ENOMEM);
 		data->node = node;
@@ -423,7 +432,7 @@ struct icc_path *devm_of_icc_get(struct device *dev, const char *name)
 		return ERR_PTR(-ENOMEM);
 
 	path = of_icc_get(dev, name);
-	if (!IS_ERR(path)) {
+	if (!IS_ERR_OR_NULL(path)) {
 		*ptr = path;
 		devres_add(dev, ptr);
 	} else {
@@ -433,6 +442,26 @@ struct icc_path *devm_of_icc_get(struct device *dev, const char *name)
 	return path;
 }
 EXPORT_SYMBOL_GPL(devm_of_icc_get);
+
+struct icc_path *devm_of_icc_get_by_index(struct device *dev, int idx)
+{
+	struct icc_path **ptr, *path;
+
+	ptr = devres_alloc(devm_icc_release, sizeof(*ptr), GFP_KERNEL);
+	if (!ptr)
+		return ERR_PTR(-ENOMEM);
+
+	path = of_icc_get_by_index(dev, idx);
+	if (!IS_ERR(path)) {
+		*ptr = path;
+		devres_add(dev, ptr);
+	} else {
+		devres_free(ptr);
+	}
+
+	return path;
+}
+EXPORT_SYMBOL_GPL(devm_of_icc_get_by_index);
 
 /**
  * of_icc_get_by_index() - get a path handle from a DT node based on index
@@ -519,7 +548,7 @@ struct icc_path *of_icc_get_by_index(struct device *dev, int idx)
 	path->name = kasprintf(GFP_KERNEL, "%s-%s",
 			       src_data->node->name, dst_data->node->name);
 	if (!path->name) {
-		kfree(path);
+		icc_put(path);
 		path = ERR_PTR(-ENOMEM);
 	}
 
@@ -617,8 +646,9 @@ struct icc_path *icc_get(struct device *dev, const char *src, const char *dst)
 
 	path->name = kasprintf(GFP_KERNEL, "%s-%s", src_node->name, dst_node->name);
 	if (!path->name) {
-		kfree(path);
-		path = ERR_PTR(-ENOMEM);
+		mutex_unlock(&icc_lock);
+		icc_put(path);
+		return ERR_PTR(-ENOMEM);
 	}
 out:
 	mutex_unlock(&icc_lock);
@@ -789,15 +819,19 @@ void icc_put(struct icc_path *path)
 		pr_err("%s: error (%d)\n", __func__, ret);
 
 	mutex_lock(&icc_lock);
+	mutex_lock(&icc_bw_lock);
+
 	for (i = 0; i < path->num_nodes; i++) {
 		node = path->reqs[i].node;
 		hlist_del(&path->reqs[i].req_node);
 		if (!WARN_ON(!node->provider->users))
 			node->provider->users--;
 	}
+
+	mutex_unlock(&icc_bw_lock);
 	mutex_unlock(&icc_lock);
 
-	kfree_const(path->name);
+	kfree(path->name);
 	kfree(path);
 }
 EXPORT_SYMBOL_GPL(icc_put);
@@ -806,16 +840,24 @@ static struct icc_node *icc_node_create_nolock(int id)
 {
 	struct icc_node *node;
 
+	if (id >= ICC_DYN_ID_START)
+		return ERR_PTR(-EINVAL);
+
 	/* check if node already exists */
 	node = node_find(id);
 	if (node)
 		return node;
 
-	node = kzalloc(sizeof(*node), GFP_KERNEL);
+	node = kzalloc_obj(*node);
 	if (!node)
 		return ERR_PTR(-ENOMEM);
 
-	id = idr_alloc(&icc_idr, node, id, id + 1, GFP_KERNEL);
+	/* dynamic id allocation */
+	if (id == ICC_ALLOC_DYN_ID)
+		id = idr_alloc(&icc_idr, node, ICC_DYN_ID_START, 0, GFP_KERNEL);
+	else
+		id = idr_alloc(&icc_idr, node, id, id + 1, GFP_KERNEL);
+
 	if (id < 0) {
 		WARN(1, "%s: couldn't get idr\n", __func__);
 		kfree(node);
@@ -826,6 +868,25 @@ static struct icc_node *icc_node_create_nolock(int id)
 
 	return node;
 }
+
+/**
+ * icc_node_create_dyn() - create a node with dynamic id
+ *
+ * Return: icc_node pointer on success, or ERR_PTR() on error
+ */
+struct icc_node *icc_node_create_dyn(void)
+{
+	struct icc_node *node;
+
+	mutex_lock(&icc_lock);
+
+	node = icc_node_create_nolock(ICC_ALLOC_DYN_ID);
+
+	mutex_unlock(&icc_lock);
+
+	return node;
+}
+EXPORT_SYMBOL_GPL(icc_node_create_dyn);
 
 /**
  * icc_node_create() - create a node
@@ -869,9 +930,84 @@ void icc_node_destroy(int id)
 		return;
 
 	kfree(node->links);
+	if (node->id >= ICC_DYN_ID_START)
+		kfree(node->name);
 	kfree(node);
 }
 EXPORT_SYMBOL_GPL(icc_node_destroy);
+
+/**
+ * icc_node_set_name() - set node name
+ * @node: node
+ * @provider: node provider
+ * @name: node name
+ *
+ * Return: 0 on success, or -ENOMEM on allocation failure
+ */
+int icc_node_set_name(struct icc_node *node, const struct icc_provider *provider, const char *name)
+{
+	if (node->id >= ICC_DYN_ID_START) {
+		node->name = kasprintf(GFP_KERNEL, "%s@%s", name,
+				       dev_name(provider->dev));
+		if (!node->name)
+			return -ENOMEM;
+	} else {
+		node->name = name;
+	}
+
+	return 0;
+}
+EXPORT_SYMBOL_GPL(icc_node_set_name);
+
+/**
+ * icc_link_nodes() - create link between two nodes
+ * @src_node: source node
+ * @dst_node: destination node
+ *
+ * Create a link between two nodes. The nodes might belong to different
+ * interconnect providers and the @dst_node might not exist (if the
+ * provider driver has not probed yet). So just create the @dst_node
+ * and when the actual provider driver is probed, the rest of the node
+ * data is filled.
+ *
+ * Return: 0 on success, or an error code otherwise
+ */
+int icc_link_nodes(struct icc_node *src_node, struct icc_node **dst_node)
+{
+	struct icc_node **new;
+	int ret = 0;
+
+	if (!src_node->provider)
+		return -EINVAL;
+
+	mutex_lock(&icc_lock);
+
+	if (!*dst_node) {
+		*dst_node = icc_node_create_nolock(ICC_ALLOC_DYN_ID);
+
+		if (IS_ERR(*dst_node)) {
+			ret = PTR_ERR(*dst_node);
+			goto out;
+		}
+	}
+
+	new = krealloc(src_node->links,
+		       (src_node->num_links + 1) * sizeof(*src_node->links),
+		       GFP_KERNEL);
+	if (!new) {
+		ret = -ENOMEM;
+		goto out;
+	}
+
+	src_node->links = new;
+	src_node->links[src_node->num_links++] = *dst_node;
+
+out:
+	mutex_unlock(&icc_lock);
+
+	return ret;
+}
+EXPORT_SYMBOL_GPL(icc_link_nodes);
 
 /**
  * icc_link_create() - create a link between two nodes
@@ -1070,7 +1206,7 @@ static int of_count_icc_providers(struct device_node *np)
 	int count = 0;
 
 	for_each_available_child_of_node(np, child) {
-		if (of_property_read_bool(child, "#interconnect-cells") &&
+		if (of_property_present(child, "#interconnect-cells") &&
 		    likely(!of_match_node(ignore_list, child)))
 			count++;
 		count += of_count_icc_providers(child);

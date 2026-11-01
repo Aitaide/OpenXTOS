@@ -31,81 +31,6 @@ static struct device *next_device(struct klist_iter *i)
 }
 
 /**
- * driver_set_override() - Helper to set or clear driver override.
- * @dev: Device to change
- * @override: Address of string to change (e.g. &device->driver_override);
- *            The contents will be freed and hold newly allocated override.
- * @s: NUL-terminated string, new driver name to force a match, pass empty
- *     string to clear it ("" or "\n", where the latter is only for sysfs
- *     interface).
- * @len: length of @s
- *
- * Helper to set or clear driver override in a device, intended for the cases
- * when the driver_override field is allocated by driver/bus code.
- *
- * Returns: 0 on success or a negative error code on failure.
- */
-int driver_set_override(struct device *dev, const char **override,
-			const char *s, size_t len)
-{
-	const char *new, *old;
-	char *cp;
-
-	if (!override || !s)
-		return -EINVAL;
-
-	/*
-	 * The stored value will be used in sysfs show callback (sysfs_emit()),
-	 * which has a length limit of PAGE_SIZE and adds a trailing newline.
-	 * Thus we can store one character less to avoid truncation during sysfs
-	 * show.
-	 */
-	if (len >= (PAGE_SIZE - 1))
-		return -EINVAL;
-
-	/*
-	 * Compute the real length of the string in case userspace sends us a
-	 * bunch of \0 characters like python likes to do.
-	 */
-	len = strlen(s);
-
-	if (!len) {
-		/* Empty string passed - clear override */
-		device_lock(dev);
-		old = *override;
-		*override = NULL;
-		device_unlock(dev);
-		kfree(old);
-
-		return 0;
-	}
-
-	cp = strnchr(s, len, '\n');
-	if (cp)
-		len = cp - s;
-
-	new = kstrndup(s, len, GFP_KERNEL);
-	if (!new)
-		return -ENOMEM;
-
-	device_lock(dev);
-	old = *override;
-	if (cp != s) {
-		*override = new;
-	} else {
-		/* "\n" passed - clear override */
-		kfree(new);
-		*override = NULL;
-	}
-	device_unlock(dev);
-
-	kfree(old);
-
-	return 0;
-}
-EXPORT_SYMBOL_GPL(driver_set_override);
-
-/**
  * driver_for_each_device - Iterator for devices bound to a driver.
  * @drv: Driver we're iterating.
  * @start: Device to begin with
@@ -115,7 +40,7 @@ EXPORT_SYMBOL_GPL(driver_set_override);
  * Iterate over the @drv's list of devices calling @fn for each one.
  */
 int driver_for_each_device(struct device_driver *drv, struct device *start,
-			   void *data, int (*fn)(struct device *, void *))
+			   void *data, device_iter_t fn)
 {
 	struct klist_iter i;
 	struct device *dev;
@@ -148,9 +73,9 @@ EXPORT_SYMBOL_GPL(driver_for_each_device);
  * if it does.  If the callback returns non-zero, this function will
  * return to the caller and not iterate over any more devices.
  */
-struct device *driver_find_device(struct device_driver *drv,
+struct device *driver_find_device(const struct device_driver *drv,
 				  struct device *start, const void *data,
-				  int (*match)(struct device *dev, const void *data))
+				  device_match_t match)
 {
 	struct klist_iter i;
 	struct device *dev;
@@ -160,9 +85,12 @@ struct device *driver_find_device(struct device_driver *drv,
 
 	klist_iter_init_node(&drv->p->klist_devices, &i,
 			     (start ? &start->p->knode_driver : NULL));
-	while ((dev = next_device(&i)))
-		if (match(dev, data) && get_device(dev))
+	while ((dev = next_device(&i))) {
+		if (match(dev, data)) {
+			get_device(dev);
 			break;
+		}
+	}
 	klist_iter_exit(&i);
 	return dev;
 }
@@ -173,7 +101,7 @@ EXPORT_SYMBOL_GPL(driver_find_device);
  * @drv: driver.
  * @attr: driver attribute descriptor.
  */
-int driver_create_file(struct device_driver *drv,
+int driver_create_file(const struct device_driver *drv,
 		       const struct driver_attribute *attr)
 {
 	int error;
@@ -191,7 +119,7 @@ EXPORT_SYMBOL_GPL(driver_create_file);
  * @drv: driver.
  * @attr: driver attribute descriptor.
  */
-void driver_remove_file(struct device_driver *drv,
+void driver_remove_file(const struct device_driver *drv,
 			const struct driver_attribute *attr)
 {
 	if (drv)
@@ -199,14 +127,14 @@ void driver_remove_file(struct device_driver *drv,
 }
 EXPORT_SYMBOL_GPL(driver_remove_file);
 
-int driver_add_groups(struct device_driver *drv,
-		      const struct attribute_group **groups)
+int driver_add_groups(const struct device_driver *drv,
+		      const struct attribute_group *const *groups)
 {
 	return sysfs_create_groups(&drv->p->kobj, groups);
 }
 
-void driver_remove_groups(struct device_driver *drv,
-			  const struct attribute_group **groups)
+void driver_remove_groups(const struct device_driver *drv,
+			  const struct attribute_group *const *groups)
 {
 	sysfs_remove_groups(&drv->p->kobj, groups);
 }

@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0
 
+#include <kunit/visibility.h>
 #include <linux/kernel.h>
 #include <linux/irqflags.h>
 #include <linux/string.h>
@@ -13,7 +14,7 @@
  *
  * Data Structure
  * --------------
- * The printk_ringbuffer is made up of 3 internal ringbuffers:
+ * The printk_ringbuffer is made up of 2 internal ringbuffers:
  *
  *   desc_ring
  *     A ring of descriptors and their meta data (such as sequence number,
@@ -223,7 +224,7 @@
  *
  *	prb_rec_init_rd(&r, &info, &text_buf[0], sizeof(text_buf));
  *
- *	prb_for_each_record(0, &test_rb, &seq, &r) {
+ *	prb_for_each_record(0, &test_rb, seq, &r) {
  *		if (info.seq != seq)
  *			pr_warn("lost %llu records\n", info.seq - seq);
  *
@@ -393,25 +394,38 @@ static unsigned int to_blk_size(unsigned int size)
  * Sanity checker for reserve size. The ringbuffer code assumes that a data
  * block does not exceed the maximum possible size that could fit within the
  * ringbuffer. This function provides that basic size check so that the
- * assumption is safe.
+ * assumption is safe. In particular, it guarantees that data_push_tail() will
+ * never attempt to push the tail beyond the head.
  */
 static bool data_check_size(struct prb_data_ring *data_ring, unsigned int size)
 {
-	struct prb_data_block *db = NULL;
-
+	/* Data-less blocks take no space. */
 	if (size == 0)
 		return true;
 
 	/*
-	 * Ensure the alignment padded size could possibly fit in the data
-	 * array. The largest possible data block must still leave room for
-	 * at least the ID of the next block.
+	 * If data blocks were allowed to be larger than half the data ring
+	 * size, a wrapping data block could require more space than the full
+	 * ringbuffer.
 	 */
-	size = to_blk_size(size);
-	if (size > DATA_SIZE(data_ring) - sizeof(db->id))
-		return false;
+	return to_blk_size(size) <= DATA_SIZE(data_ring) / 2;
+}
 
-	return true;
+/*
+ * Compare the current and requested logical position and decide
+ * whether more space is needed.
+ *
+ * Return false when @lpos_current is already at or beyond @lpos_target.
+ *
+ * Also return false when the difference between the positions is bigger
+ * than the size of the data buffer. It might happen only when the caller
+ * raced with another CPU(s) which already made and used the space.
+ */
+static bool need_more_space(struct prb_data_ring *data_ring,
+			    unsigned long lpos_current,
+			    unsigned long lpos_target)
+{
+	return lpos_target - lpos_current - 1 < DATA_SIZE(data_ring);
 }
 
 /* Query the state of a descriptor. */
@@ -580,7 +594,7 @@ static bool data_make_reusable(struct printk_ringbuffer *rb,
 	unsigned long id;
 
 	/* Loop until @lpos_begin has advanced to or beyond @lpos_end. */
-	while ((lpos_end - lpos_begin) - 1 < DATA_SIZE(data_ring)) {
+	while (need_more_space(data_ring, lpos_begin, lpos_end)) {
 		blk = to_block(data_ring, lpos_begin);
 
 		/*
@@ -671,7 +685,7 @@ static bool data_push_tail(struct printk_ringbuffer *rb, unsigned long lpos)
 	 * sees the new tail lpos, any descriptor states that transitioned to
 	 * the reusable state must already be visible.
 	 */
-	while ((lpos - tail_lpos) - 1 < DATA_SIZE(data_ring)) {
+	while (need_more_space(data_ring, tail_lpos, lpos)) {
 		/*
 		 * Make all descriptors reusable that are associated with
 		 * data blocks before @lpos.
@@ -1002,6 +1016,17 @@ static bool desc_reserve(struct printk_ringbuffer *rb, unsigned long *id_out)
 	return true;
 }
 
+static bool is_blk_wrapped(struct prb_data_ring *data_ring,
+			   unsigned long begin_lpos, unsigned long next_lpos)
+{
+	/*
+	 * Subtract one from next_lpos since it's not actually part of this data
+	 * block. This allows perfectly fitting records to not wrap.
+	 */
+	return DATA_WRAPS(data_ring, begin_lpos) !=
+	       DATA_WRAPS(data_ring, next_lpos - 1);
+}
+
 /* Determine the end of a data block. */
 static unsigned long get_next_lpos(struct prb_data_ring *data_ring,
 				   unsigned long lpos, unsigned int size)
@@ -1013,7 +1038,7 @@ static unsigned long get_next_lpos(struct prb_data_ring *data_ring,
 	next_lpos = lpos + size;
 
 	/* First check if the data block does not wrap. */
-	if (DATA_WRAPS(data_ring, begin_lpos) == DATA_WRAPS(data_ring, next_lpos))
+	if (!is_blk_wrapped(data_ring, begin_lpos, next_lpos))
 		return next_lpos;
 
 	/* Wrapping data blocks store their data at the beginning. */
@@ -1051,8 +1076,17 @@ static char *data_alloc(struct printk_ringbuffer *rb, unsigned int size,
 	do {
 		next_lpos = get_next_lpos(data_ring, begin_lpos, size);
 
-		if (!data_push_tail(rb, next_lpos - DATA_SIZE(data_ring))) {
-			/* Failed to allocate, specify a data-less block. */
+		/*
+		 * data_check_size() prevents data block allocation that could
+		 * cause illegal ringbuffer states. But double check that the
+		 * used space will not be bigger than the ring buffer. Wrapped
+		 * messages need to reserve more space, see get_next_lpos().
+		 *
+		 * Specify a data-less block when the check or the allocation
+		 * fails.
+		 */
+		if (WARN_ON_ONCE(next_lpos - begin_lpos > DATA_SIZE(data_ring)) ||
+		    !data_push_tail(rb, next_lpos - DATA_SIZE(data_ring))) {
 			blk_lpos->begin = FAILED_LPOS;
 			blk_lpos->next = FAILED_LPOS;
 			return NULL;
@@ -1081,7 +1115,7 @@ static char *data_alloc(struct printk_ringbuffer *rb, unsigned int size,
 	blk = to_block(data_ring, begin_lpos);
 	blk->id = id; /* LMM(data_alloc:B) */
 
-	if (DATA_WRAPS(data_ring, begin_lpos) != DATA_WRAPS(data_ring, next_lpos)) {
+	if (is_blk_wrapped(data_ring, begin_lpos, next_lpos)) {
 		/* Wrapping data blocks store their data at the beginning. */
 		blk = to_block(data_ring, 0);
 
@@ -1125,14 +1159,21 @@ static char *data_realloc(struct printk_ringbuffer *rb, unsigned int size,
 		return NULL;
 
 	/* Keep track if @blk_lpos was a wrapping data block. */
-	wrapped = (DATA_WRAPS(data_ring, blk_lpos->begin) != DATA_WRAPS(data_ring, blk_lpos->next));
+	wrapped = is_blk_wrapped(data_ring, blk_lpos->begin, blk_lpos->next);
 
 	size = to_blk_size(size);
 
 	next_lpos = get_next_lpos(data_ring, blk_lpos->begin, size);
 
-	/* If the data block does not increase, there is nothing to do. */
-	if (head_lpos - next_lpos < DATA_SIZE(data_ring)) {
+	/*
+	 * Use the current data block when the size does not increase, i.e.
+	 * when @head_lpos is already able to accommodate the new @next_lpos.
+	 *
+	 * Note that need_more_space() could never return false here because
+	 * the difference between the positions was bigger than the data
+	 * buffer size. The data block is reopened and can't get reused.
+	 */
+	if (!need_more_space(data_ring, head_lpos, next_lpos)) {
 		if (wrapped)
 			blk = to_block(data_ring, 0);
 		else
@@ -1140,8 +1181,18 @@ static char *data_realloc(struct printk_ringbuffer *rb, unsigned int size,
 		return &blk->data[0];
 	}
 
-	if (!data_push_tail(rb, next_lpos - DATA_SIZE(data_ring)))
+	/*
+	 * data_check_size() prevents data block reallocation that could
+	 * cause illegal ringbuffer states. But double check that the
+	 * new used space will not be bigger than the ring buffer. Wrapped
+	 * messages need to reserve more space, see get_next_lpos().
+	 *
+	 * Specify failure when the check or the allocation fails.
+	 */
+	if (WARN_ON_ONCE(next_lpos - blk_lpos->begin > DATA_SIZE(data_ring)) ||
+	    !data_push_tail(rb, next_lpos - DATA_SIZE(data_ring))) {
 		return NULL;
+	}
 
 	/* The memory barrier involvement is the same as data_alloc:A. */
 	if (!atomic_long_try_cmpxchg(&data_ring->head_lpos, &head_lpos,
@@ -1151,7 +1202,7 @@ static char *data_realloc(struct printk_ringbuffer *rb, unsigned int size,
 
 	blk = to_block(data_ring, blk_lpos->begin);
 
-	if (DATA_WRAPS(data_ring, blk_lpos->begin) != DATA_WRAPS(data_ring, next_lpos)) {
+	if (is_blk_wrapped(data_ring, blk_lpos->begin, next_lpos)) {
 		struct prb_data_block *old_blk = blk;
 
 		/* Wrapping data blocks store their data at the beginning. */
@@ -1187,7 +1238,7 @@ static unsigned int space_used(struct prb_data_ring *data_ring,
 	if (BLK_DATALESS(blk_lpos))
 		return 0;
 
-	if (DATA_WRAPS(data_ring, blk_lpos->begin) == DATA_WRAPS(data_ring, blk_lpos->next)) {
+	if (!is_blk_wrapped(data_ring, blk_lpos->begin, blk_lpos->next)) {
 		/* Data block does not wrap. */
 		return (DATA_INDEX(data_ring, blk_lpos->next) -
 			DATA_INDEX(data_ring, blk_lpos->begin));
@@ -1233,15 +1284,15 @@ static const char *get_data(struct prb_data_ring *data_ring,
 		return NULL;
 	}
 
-	/* Regular data block: @begin less than @next and in same wrap. */
-	if (DATA_WRAPS(data_ring, blk_lpos->begin) == DATA_WRAPS(data_ring, blk_lpos->next) &&
-	    blk_lpos->begin < blk_lpos->next) {
+	/* Regular data block: @begin and @next in the same wrap. */
+	if (!is_blk_wrapped(data_ring, blk_lpos->begin, blk_lpos->next)) {
 		db = to_block(data_ring, blk_lpos->begin);
 		*data_size = blk_lpos->next - blk_lpos->begin;
 
 	/* Wrapping data block: @begin is one wrap behind @next. */
-	} else if (DATA_WRAPS(data_ring, blk_lpos->begin + DATA_SIZE(data_ring)) ==
-		   DATA_WRAPS(data_ring, blk_lpos->next)) {
+	} else if (!is_blk_wrapped(data_ring,
+				   blk_lpos->begin + DATA_SIZE(data_ring),
+				   blk_lpos->next)) {
 		db = to_block(data_ring, 0);
 		*data_size = DATA_INDEX(data_ring, blk_lpos->next);
 
@@ -1257,12 +1308,19 @@ static const char *get_data(struct prb_data_ring *data_ring,
 		return NULL;
 	}
 
-	/* A valid data block will always have at least an ID. */
-	if (WARN_ON_ONCE(*data_size < sizeof(db->id)))
+	/*
+	 * A regular data block will always have an ID and at least
+	 * 1 byte of data. Data-less blocks were handled earlier.
+	 */
+	if (WARN_ON_ONCE(*data_size <= sizeof(db->id)))
 		return NULL;
 
 	/* Subtract block ID space from size to reflect data size. */
 	*data_size -= sizeof(db->id);
+
+	/* Sanity check the max size of the regular data block. */
+	if (WARN_ON_ONCE(!data_check_size(data_ring, *data_size)))
+		return NULL;
 
 	return &db->data[0];
 }
@@ -1310,7 +1368,7 @@ static struct prb_desc *desc_reopen_last(struct prb_desc_ring *desc_ring,
 	 *
 	 * WMB from _prb_commit:A to _prb_commit:B
 	 *    matching
-	 * MB If desc_reopen_last:A to prb_reserve_in_last:A
+	 * MB from desc_reopen_last:A to prb_reserve_in_last:A
 	 */
 	if (!atomic_long_try_cmpxchg(&d->state_var, &prev_state_val,
 			DESC_SV(id, desc_reserved))) { /* LMM(desc_reopen_last:A) */
@@ -1457,33 +1515,6 @@ fail_reopen:
 	return false;
 }
 
-#ifdef CONFIG_64BIT
-
-#define __u64seq_to_ulseq(u64seq) (u64seq)
-#define __ulseq_to_u64seq(ulseq) (ulseq)
-
-#else /* CONFIG_64BIT */
-
-static u64 prb_first_seq(struct printk_ringbuffer *rb);
-
-#define __u64seq_to_ulseq(u64seq) ((u32)u64seq)
-static inline u64 __ulseq_to_u64seq(u32 ulseq)
-{
-	u64 rb_first_seq = prb_first_seq(prb);
-	u64 seq;
-
-	/*
-	 * The provided sequence is only the lower 32 bits of the ringbuffer
-	 * sequence. It needs to be expanded to 64bit. Get the first sequence
-	 * number from the ringbuffer and fold it.
-	 */
-	seq = rb_first_seq - ((s32)((u32)rb_first_seq - ulseq));
-
-	return seq;
-}
-
-#endif /* CONFIG_64BIT */
-
 /*
  * @last_finalized_seq value guarantees that all records up to and including
  * this sequence number are finalized and can be read. The only exception are
@@ -1501,8 +1532,9 @@ static inline u64 __ulseq_to_u64seq(u32 ulseq)
  * directly print or trigger deferred printing of all available unprinted
  * records, all printk() messages will get printed.
  */
-static u64 desc_last_finalized_seq(struct prb_desc_ring *desc_ring)
+static u64 desc_last_finalized_seq(struct printk_ringbuffer *rb)
 {
+	struct prb_desc_ring *desc_ring = &rb->desc_ring;
 	unsigned long ulseq;
 
 	/*
@@ -1513,7 +1545,7 @@ static u64 desc_last_finalized_seq(struct prb_desc_ring *desc_ring)
 	ulseq = atomic_long_read_acquire(&desc_ring->last_finalized_seq
 					); /* LMM(desc_last_finalized_seq:A) */
 
-	return __ulseq_to_u64seq(ulseq);
+	return __ulseq_to_u64seq(rb, ulseq);
 }
 
 static bool _prb_read_valid(struct printk_ringbuffer *rb, u64 *seq,
@@ -1527,7 +1559,7 @@ static bool _prb_read_valid(struct printk_ringbuffer *rb, u64 *seq,
 static void desc_update_last_finalized(struct printk_ringbuffer *rb)
 {
 	struct prb_desc_ring *desc_ring = &rb->desc_ring;
-	u64 old_seq = desc_last_finalized_seq(desc_ring);
+	u64 old_seq = desc_last_finalized_seq(rb);
 	unsigned long oldval;
 	unsigned long newval;
 	u64 finalized_seq;
@@ -1576,7 +1608,7 @@ try_again:
 	 */
 	if (!atomic_long_try_cmpxchg_release(&desc_ring->last_finalized_seq,
 				&oldval, newval)) { /* LMM(desc_update_last_finalized:A) */
-		old_seq = __ulseq_to_u64seq(oldval);
+		old_seq = __ulseq_to_u64seq(rb, oldval);
 		goto try_again;
 	}
 }
@@ -1711,6 +1743,7 @@ fail:
 	memset(r, 0, sizeof(*r));
 	return false;
 }
+EXPORT_SYMBOL_IF_KUNIT(prb_reserve);
 
 /* Commit the data (possibly finalizing it) and restore interrupts. */
 static void _prb_commit(struct prb_reserved_entry *e, unsigned long state_val)
@@ -1740,9 +1773,9 @@ static void _prb_commit(struct prb_reserved_entry *e, unsigned long state_val)
 	 *
 	 *    Relies on:
 	 *
-	 *    MB _prb_commit:B to prb_commit:A
+	 *    MB from _prb_commit:B to prb_commit:A
 	 *       matching
-	 *    MB desc_reserve:D to desc_make_final:A
+	 *    MB from desc_reserve:D to desc_make_final:A
 	 */
 	if (!atomic_long_try_cmpxchg(&d->state_var, &prev_state_val,
 			DESC_SV(e->id, state_val))) { /* LMM(_prb_commit:B) */
@@ -1785,6 +1818,7 @@ void prb_commit(struct prb_reserved_entry *e)
 	if (head_id != e->id)
 		desc_make_final(e->rb, e->id);
 }
+EXPORT_SYMBOL_IF_KUNIT(prb_commit);
 
 /**
  * prb_final_commit() - Commit and finalize (previously reserved) data to
@@ -1969,7 +2003,7 @@ static int prb_read(struct printk_ringbuffer *rb, u64 seq,
 }
 
 /* Get the sequence number of the tail descriptor. */
-static u64 prb_first_seq(struct printk_ringbuffer *rb)
+u64 prb_first_seq(struct printk_ringbuffer *rb)
 {
 	struct prb_desc_ring *desc_ring = &rb->desc_ring;
 	enum desc_state d_state;
@@ -2004,7 +2038,7 @@ static u64 prb_first_seq(struct printk_ringbuffer *rb)
 		 *
 		 * MB from desc_push_tail:B to desc_reserve:F
 		 *    matching
-		 * RMB prb_first_seq:B to prb_first_seq:A
+		 * RMB from prb_first_seq:B to prb_first_seq:A
 		 */
 		smp_rmb(); /* LMM(prb_first_seq:C) */
 	}
@@ -2047,11 +2081,11 @@ u64 prb_next_reserve_seq(struct printk_ringbuffer *rb)
 	 */
 
 try_again:
-	last_finalized_seq = desc_last_finalized_seq(desc_ring);
+	last_finalized_seq = desc_last_finalized_seq(rb);
 
 	/*
-	 * @head_id is loaded after @last_finalized_seq to ensure that it is
-	 * at or beyond @last_finalized_seq.
+	 * @head_id is loaded after @last_finalized_seq to ensure that
+	 * it points to the record with @last_finalized_seq or newer.
 	 *
 	 * Memory barrier involvement:
 	 *
@@ -2084,18 +2118,21 @@ try_again:
 	if (err == -EINVAL) {
 		if (last_finalized_seq == 0) {
 			/*
-			 * @last_finalized_seq still contains its initial
-			 * value. Probably no record has been finalized yet.
-			 * This means the ringbuffer is not yet full and the
-			 * @head_id value can be used directly (subtracting
-			 * off its initial value).
+			 * No record has been finalized or even reserved yet.
 			 *
-			 * Because of hack#2 of the bootstrapping phase, the
-			 * @head_id initial value must be handled separately.
+			 * The @head_id is initialized such that the first
+			 * increment will yield the first record (seq=0).
+			 * Handle it separately to avoid a negative @diff
+			 * below.
 			 */
 			if (head_id == DESC0_ID(desc_ring->count_bits))
 				return 0;
 
+			/*
+			 * One or more descriptors are already reserved. Use
+			 * the descriptor ID of the first one (@seq=0) for
+			 * the @diff below.
+			 */
 			last_finalized_id = DESC0_ID(desc_ring->count_bits) + 1;
 		} else {
 			/* Record must have been overwritten. Try again. */
@@ -2103,8 +2140,14 @@ try_again:
 		}
 	}
 
+	/* Diff of known descriptor IDs to compute related sequence numbers. */
 	diff = head_id - last_finalized_id;
 
+	/*
+	 * @head_id points to the most recently reserved record, but this
+	 * function returns the sequence number that will be assigned to the
+	 * next (not yet reserved) record. Thus +1 is needed.
+	 */
 	return (last_finalized_seq + diff + 1);
 }
 
@@ -2150,14 +2193,23 @@ static bool _prb_read_valid(struct printk_ringbuffer *rb, u64 *seq,
 			 * there may be other finalized records beyond that
 			 * need to be printed for a panic situation. If this
 			 * is the panic CPU, skip this
-			 * non-existent/non-finalized record unless it is
-			 * at or beyond the head, in which case it is not
-			 * possible to continue.
+			 * non-existent/non-finalized record unless non-panic
+			 * CPUs are still running and their debugging is
+			 * explicitly enabled.
+			 *
+			 * Note that new messages printed on panic CPU are
+			 * finalized when we are here. The only exception
+			 * might be the last message without trailing newline.
+			 * But it would have the sequence number returned
+			 * by "prb_next_reserve_seq() - 1".
 			 */
-			if (this_cpu_in_panic() && ((*seq + 1) < prb_next_reserve_seq(rb)))
+			if (panic_on_this_cpu() &&
+			    (!debug_non_panic_cpus || legacy_allow_panic_sync) &&
+			    ((*seq + 1) < prb_next_reserve_seq(rb))) {
 				(*seq)++;
-			else
+			} else {
 				return false;
+			}
 		}
 	}
 
@@ -2192,6 +2244,7 @@ bool prb_read_valid(struct printk_ringbuffer *rb, u64 seq,
 {
 	return _prb_read_valid(rb, &seq, r, NULL);
 }
+EXPORT_SYMBOL_IF_KUNIT(prb_read_valid);
 
 /**
  * prb_read_valid_info() - Non-blocking read of meta data for a requested
@@ -2271,10 +2324,9 @@ u64 prb_first_valid_seq(struct printk_ringbuffer *rb)
  */
 u64 prb_next_seq(struct printk_ringbuffer *rb)
 {
-	struct prb_desc_ring *desc_ring = &rb->desc_ring;
 	u64 seq;
 
-	seq = desc_last_finalized_seq(desc_ring);
+	seq = desc_last_finalized_seq(rb);
 
 	/*
 	 * Begin searching after the last finalized record.
@@ -2342,6 +2394,7 @@ void prb_init(struct printk_ringbuffer *rb,
 	infos[0].seq = -(u64)_DESCS_COUNT(descbits);
 	infos[_DESCS_COUNT(descbits) - 1].seq = 0;
 }
+EXPORT_SYMBOL_IF_KUNIT(prb_init);
 
 /**
  * prb_record_text_space() - Query the full actual used ringbuffer space for

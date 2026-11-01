@@ -42,6 +42,7 @@ enum switchtec_gen {
 	SWITCHTEC_GEN3,
 	SWITCHTEC_GEN4,
 	SWITCHTEC_GEN5,
+	SWITCHTEC_GEN6,
 };
 
 struct mrpc_regs {
@@ -521,6 +522,6 @@ static inline struct switchtec_dev *to_stdev(struct device *dev)
 	return container_of(dev, struct switchtec_dev, dev);
 }
 
-extern struct class *switchtec_class;
+extern const struct class switchtec_class;
 
 #endif

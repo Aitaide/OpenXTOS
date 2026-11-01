@@ -95,11 +95,11 @@ struct generic_pm_domain *dt_idle_pd_alloc(struct device_node *np,
 	struct genpd_power_state *states = NULL;
 	int ret, state_count = 0;
 
-	pd = kzalloc(sizeof(*pd), GFP_KERNEL);
+	pd = kzalloc_obj(*pd);
 	if (!pd)
 		goto out;
 
-	pd->name = kasprintf(GFP_KERNEL, "%pOF", np);
+	pd->name = kstrdup(kbasename(of_node_full_name(np)), GFP_KERNEL);
 	if (!pd->name)
 		goto free_pd;
 
@@ -112,7 +112,6 @@ struct generic_pm_domain *dt_idle_pd_alloc(struct device_node *np,
 		goto free_name;
 
 	pd->free_states = pd_free_states;
-	pd->name = kbasename(pd->name);
 	pd->states = states;
 	pd->state_count = state_count;
 
@@ -130,11 +129,10 @@ out:
 
 int dt_idle_pd_init_topology(struct device_node *np)
 {
-	struct device_node *node;
 	struct of_phandle_args child, parent;
 	int ret;
 
-	for_each_child_of_node(np, node) {
+	for_each_child_of_node_scoped(np, node) {
 		if (of_parse_phandle_with_args(node, "power-domains",
 					"#power-domain-cells", 0, &parent))
 			continue;
@@ -143,10 +141,8 @@ int dt_idle_pd_init_topology(struct device_node *np)
 		child.args_count = 0;
 		ret = of_genpd_add_subdomain(&parent, &child);
 		of_node_put(parent.np);
-		if (ret) {
-			of_node_put(node);
+		if (ret)
 			return ret;
-		}
 	}
 
 	return 0;
@@ -154,11 +150,10 @@ int dt_idle_pd_init_topology(struct device_node *np)
 
 int dt_idle_pd_remove_topology(struct device_node *np)
 {
-	struct device_node *node;
 	struct of_phandle_args child, parent;
 	int ret;
 
-	for_each_child_of_node(np, node) {
+	for_each_child_of_node_scoped(np, node) {
 		if (of_parse_phandle_with_args(node, "power-domains",
 					"#power-domain-cells", 0, &parent))
 			continue;
@@ -167,10 +162,8 @@ int dt_idle_pd_remove_topology(struct device_node *np)
 		child.args_count = 0;
 		ret = of_genpd_remove_subdomain(&parent, &child);
 		of_node_put(parent.np);
-		if (ret) {
-			of_node_put(node);
+		if (ret)
 			return ret;
-		}
 	}
 
 	return 0;

@@ -1,8 +1,9 @@
 # XTOS 专用调度类开发设计
 
 状态：设计候选 v0.1，尚未实现
-基线源码：OpenXTOS v1.0.1，Linux 6.6.0-rt15，PREEMPT_RT
-基线提交：`3894b4f90ba48e05061019ce6603929feced48b2`
+当前基线源码：Linux 7.3.1，PREEMPT_RT 主线内置，精确 source pin 和源码哈希见 `scheduler-class-baseline.json`。
+本次为 `source_inspection_only`，不代表 build、guest 或 physical 验收。M0/M1 物理目标机 go/no-go 未通过，M2 未开始。
+历史参考：OpenXTOS v1.0.1 / Linux 6.6.0-rt15，提交 `3894b4f90ba48e05061019ce6603929feced48b2`；原 baseline 原字节保存在 `history/scheduler-class-baseline-6.6.0-rt15.json`。旧 RT patch 和 `localversion-rt` 不属于当前版本依赖。
 
 ## 1. 目标
 
@@ -13,10 +14,10 @@
 候选调度类次序：
 
 ```text
-stop > deadline > RT (FIFO/RR) > XTOS > fair > idle
+stop > deadline > RT (FIFO/RR) > XTOS > fair > ext > idle
 ```
 
-此位置使 stop、`SCHED_DEADLINE` 和 `SCHED_FIFO/RR` 任务保持高于 XTOS 类；XTOS 策略高于普通 fair 类。必须通过 Linux 链接脚本和运行时测试验证真实次序，不能仅凭源码声明推断。若工作负载要求 XTOS 抢占 Linux RT 类，须另立安全论证和需求评审，不纳入当前方案。
+当前 SCHED_DATA 实际段次序是 stop > dl > rt > fair > ext > idle，helper 未注册类。ext 的链接存在取决于 CONFIG_SCHED_CLASS_EXT，运行参与还取决于 scx 状态；候选必须审查 fair/ext 与 fast path。此位置使 stop、`SCHED_DEADLINE` 和 `SCHED_FIFO/RR` 任务保持高于 XTOS 类；XTOS 策略高于普通 fair 类。必须通过 Linux 链接脚本和运行时测试验证真实次序，不能仅凭源码声明推断。若工作负载要求 XTOS 抢占 Linux RT 类，须另立安全论证和需求评审，不纳入当前方案。
 
 ## 2. 当前实现事实
 
@@ -56,7 +57,7 @@ stop > deadline > RT (FIFO/RR) > XTOS > fair > idle
 - 可用 CPU mask 非空，所有 CPU online 且允许任务运行
 - 单调时钟和预算耗尽/补充语义固定
 
-现有字段是否足够表达 XTOS 的分区与事件模型，需在实现前做 ABI 审查。不要私自复用 `sched_attr` 保留字段或当前 Linux 6.6 中已有/保留的 policy ID。若标准字段不能完整表达契约，应先写 UAPI 提案并进行兼容性评审。
+现有字段是否足够表达 XTOS 的分区与事件模型，需在实现前做 ABI 审查。不要私自复用 `sched_attr` 保留字段或当前 Linux 7.3.1 中已有/保留的 policy ID。若标准字段不能完整表达契约，应先写 UAPI 提案并进行兼容性评审。
 
 ### 4.3 Admission control
 
@@ -73,7 +74,7 @@ stop > deadline > RT (FIFO/RR) > XTOS > fair > idle
 
 ## 5. Linux 内核集成范围
 
-Linux 6.6 的 `struct sched_class` 包含多项生命周期和 SMP 钩子；完整实现不止 `pick_next_task`。候选工作面包括：
+Linux 7.3.1 的 `struct sched_class` 包含多项生命周期和 SMP 钩子；完整实现不止 `pick_next_task`。候选工作面包括：
 
 - `kernel/sched/xtos_sched.c`：策略队列、预算、时钟、节流和每 CPU runqueue。
 - `kernel/sched/sched.h`、`kernel/sched/core.c`：policy 映射、任务入/出队、状态改变、调度切换和属性更新。
@@ -104,8 +105,8 @@ Linux 6.6 的 `struct sched_class` 包含多项生命周期和 SMP 钩子；完�
 
 在同一台裸机、同一 BIOS/固件、内核配置、CPU/IRQ 亲和性、电源设置、温度/频率条件和输入 trace 下，对比：
 
-1. 当前 Linux 6.6.0-rt15 + `SCHED_FIFO/RR`。
-2. 当前 Linux 6.6.0-rt15 + `SCHED_DEADLINE`。
+1. 当前 Linux 7.3.1 + `SCHED_FIFO/RR`。
+2. 当前 Linux 7.3.1 + `SCHED_DEADLINE`。
 3. 候选 XTOS policy。
 
 每个结果记录源 SHA、内核配置/镜像 SHA、硬件标识、CPU topology、IRQ placement、测试脚本与版本、运行时长、任务参数、负载、raw trace 和分析程序 SHA。至少观察 deadline miss、p50/p95/p99/p99.9/max release-to-run latency、job completion latency、吞吐、调度/锁开销、CPU 利用率、overload/recovery、功耗/温度影响。性能结论按预先登记的业务门槛和测量噪声判断，报告重复次数、置信区间和失败样本；不得只挑最好一轮或只报平均值。真实硬件长时间测试是性能结论的必要门槛；既有 24 小时 `tools/realtime-test/rt_cyclictest.sh` 可作为基础，但需新增与周期任务契约匹配的 workload benchmark，且不应静默修改主机电源或 BIOS 配置。
@@ -125,7 +126,8 @@ Linux 6.6 的 `struct sched_class` 包含多项生命周期和 SMP 钩子；完�
 - `SCHED_FIFO/RR` 与 `SCHED_DEADLINE` 已提供可用 RT 模型；XTOS 必须有 workload-specific 证据，不能因“自有调度器”本身增加风险。
 - 固定优先级/O(1) 查找不等于低调度延迟或正确的过载控制；数据结构复杂度不代表端到端保证。
 - 目前目标硬件延迟和真实 OpenBCI acquisition 未验证；BCI/AI/GPU/医学安全均不能由该内核类推出。
-- `sched_ext` 从 Linux 6.12 发展为主线可扩展调度类，而 XTOS 基线为 Linux 6.6.0-rt15，当前树没有 `kernel/sched/ext/`。移植/升级 sched_ext 与 PREEMPT_RT 是另一条独立内核维护项目，不能当作开关或本方案默认依赖。
+- 当前 7.3.1 树含 `kernel/sched/ext/` 和 `CONFIG_SCHED_CLASS_EXT`，该选项依赖 BPF_SYSCALL、BPF_JIT、DEBUG_INFO_BTF，无显式 default y。源码存在不能证明已启用、已附着 BPF scheduler 或具备 PREEMPT_RT 性能；是否采用 sched_ext 需独立设计和实机比较。
+- 完整 30 项 callback 及 guard 见 RFC/生命周期矩阵。当前 `pick_task` 是无条件 callback，core 的 `pick_next_task` 不是 callback；wakeup_preempt、switching_from/to、get_prio、reweight_task 和 bool dequeue、u64 oldprio、next/rq_flags 参数都需重新审查。
 
 ## 9. 参考资料
 

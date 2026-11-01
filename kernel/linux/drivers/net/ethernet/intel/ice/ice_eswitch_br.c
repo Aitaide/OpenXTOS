@@ -73,7 +73,7 @@ ice_eswitch_br_ingress_rule_setup(struct ice_adv_rule_info *rule_info,
 	rule_info->sw_act.vsi_handle = vf_vsi_idx;
 	rule_info->sw_act.flag |= ICE_FLTR_RX;
 	rule_info->sw_act.src = pf_id;
-	rule_info->priority = 5;
+	rule_info->priority = 2;
 }
 
 static void
@@ -84,7 +84,7 @@ ice_eswitch_br_egress_rule_setup(struct ice_adv_rule_info *rule_info,
 	rule_info->sw_act.flag |= ICE_FLTR_TX;
 	rule_info->flags_info.act = ICE_SINGLE_ACT_LAN_ENABLE;
 	rule_info->flags_info.act_valid = true;
-	rule_info->priority = 5;
+	rule_info->priority = 2;
 }
 
 static int
@@ -129,11 +129,11 @@ ice_eswitch_br_fwd_rule_create(struct ice_hw *hw, int vsi_idx, int port_type,
 
 	lkups_cnt = ice_eswitch_br_get_lkups_cnt(vid);
 
-	rule = kzalloc(sizeof(*rule), GFP_KERNEL);
+	rule = kzalloc_obj(*rule);
 	if (!rule)
 		return ERR_PTR(-ENOMEM);
 
-	list = kcalloc(lkups_cnt, sizeof(*list), GFP_ATOMIC);
+	list = kzalloc_objs(*list, lkups_cnt, GFP_ATOMIC);
 	if (!list) {
 		err = -ENOMEM;
 		goto err_list_alloc;
@@ -190,11 +190,11 @@ ice_eswitch_br_guard_rule_create(struct ice_hw *hw, u16 vsi_idx,
 
 	lkups_cnt = ice_eswitch_br_get_lkups_cnt(vid);
 
-	rule = kzalloc(sizeof(*rule), GFP_KERNEL);
+	rule = kzalloc_obj(*rule);
 	if (!rule)
 		goto err_exit;
 
-	list = kcalloc(lkups_cnt, sizeof(*list), GFP_ATOMIC);
+	list = kzalloc_objs(*list, lkups_cnt, GFP_ATOMIC);
 	if (!list)
 		goto err_list_alloc;
 
@@ -207,7 +207,7 @@ ice_eswitch_br_guard_rule_create(struct ice_hw *hw, u16 vsi_idx,
 	rule_info.allow_pass_l2 = true;
 	rule_info.sw_act.vsi_handle = vsi_idx;
 	rule_info.sw_act.fltr_act = ICE_NOP;
-	rule_info.priority = 5;
+	rule_info.priority = 2;
 
 	err = ice_add_adv_rule(hw, list, lkups_cnt, &rule_info, rule);
 	if (err)
@@ -233,7 +233,7 @@ ice_eswitch_br_flow_create(struct device *dev, struct ice_hw *hw, int vsi_idx,
 	struct ice_esw_br_flow *flow;
 	int err;
 
-	flow = kzalloc(sizeof(*flow), GFP_KERNEL);
+	flow = kzalloc_obj(*flow);
 	if (!flow)
 		return ERR_PTR(-ENOMEM);
 
@@ -418,7 +418,7 @@ ice_eswitch_br_fdb_entry_create(struct net_device *netdev,
 	if (fdb_entry)
 		ice_eswitch_br_fdb_entry_notify_and_cleanup(bridge, fdb_entry);
 
-	fdb_entry = kzalloc(sizeof(*fdb_entry), GFP_KERNEL);
+	fdb_entry = kzalloc_obj(*fdb_entry);
 	if (!fdb_entry) {
 		err = -ENOMEM;
 		goto err_exit;
@@ -513,7 +513,7 @@ ice_eswitch_br_fdb_work_alloc(struct switchdev_notifier_fdb_info *fdb_info,
 	struct ice_esw_br_fdb_work *work;
 	unsigned char *mac;
 
-	work = kzalloc(sizeof(*work), GFP_ATOMIC);
+	work = kzalloc_obj(*work, GFP_ATOMIC);
 	if (!work)
 		return ERR_PTR(-ENOMEM);
 
@@ -582,9 +582,12 @@ ice_eswitch_br_switchdev_event(struct notifier_block *nb,
 	return NOTIFY_DONE;
 }
 
-static void ice_eswitch_br_fdb_flush(struct ice_esw_br *bridge)
+void ice_eswitch_br_fdb_flush(struct ice_esw_br *bridge)
 {
 	struct ice_esw_br_fdb_entry *entry, *tmp;
+
+	if (!bridge)
+		return;
 
 	list_for_each_entry_safe(entry, tmp, &bridge->fdb_list, list)
 		ice_eswitch_br_fdb_entry_notify_and_cleanup(bridge, entry);
@@ -695,7 +698,7 @@ ice_eswitch_br_vlan_create(u16 vid, u16 flags, struct ice_esw_br_port *port)
 	struct ice_esw_br_vlan *vlan;
 	int err;
 
-	vlan = kzalloc(sizeof(*vlan), GFP_KERNEL);
+	vlan = kzalloc_obj(*vlan);
 	if (!vlan)
 		return ERR_PTR(-ENOMEM);
 
@@ -893,10 +896,15 @@ ice_eswitch_br_port_deinit(struct ice_esw_br *bridge,
 			ice_eswitch_br_fdb_entry_delete(bridge, fdb_entry);
 	}
 
-	if (br_port->type == ICE_ESWITCH_BR_UPLINK_PORT && vsi->back)
+	if (br_port->type == ICE_ESWITCH_BR_UPLINK_PORT && vsi->back) {
 		vsi->back->br_port = NULL;
-	else if (vsi->vf && vsi->vf->repr)
-		vsi->vf->repr->br_port = NULL;
+	} else {
+		struct ice_repr *repr =
+			ice_repr_get(vsi->back, br_port->repr_id);
+
+		if (repr)
+			repr->br_port = NULL;
+	}
 
 	xa_erase(&bridge->ports, br_port->vsi_idx);
 	ice_eswitch_br_port_vlans_flush(br_port);
@@ -908,7 +916,7 @@ ice_eswitch_br_port_init(struct ice_esw_br *bridge)
 {
 	struct ice_esw_br_port *br_port;
 
-	br_port = kzalloc(sizeof(*br_port), GFP_KERNEL);
+	br_port = kzalloc_obj(*br_port);
 	if (!br_port)
 		return ERR_PTR(-ENOMEM);
 
@@ -933,6 +941,7 @@ ice_eswitch_br_vf_repr_port_init(struct ice_esw_br *bridge,
 	br_port->vsi = repr->src_vsi;
 	br_port->vsi_idx = br_port->vsi->idx;
 	br_port->type = ICE_ESWITCH_BR_VF_REPR_PORT;
+	br_port->repr_id = repr->id;
 	repr->br_port = br_port;
 
 	err = xa_insert(&bridge->ports, br_port->vsi_idx, br_port, GFP_KERNEL);
@@ -947,7 +956,7 @@ ice_eswitch_br_vf_repr_port_init(struct ice_esw_br *bridge,
 static int
 ice_eswitch_br_uplink_port_init(struct ice_esw_br *bridge, struct ice_pf *pf)
 {
-	struct ice_vsi *vsi = pf->switchdev.uplink_vsi;
+	struct ice_vsi *vsi = pf->eswitch.uplink_vsi;
 	struct ice_esw_br_port *br_port;
 	int err;
 
@@ -1004,7 +1013,7 @@ ice_eswitch_br_init(struct ice_esw_br_offloads *br_offloads, int ifindex)
 	struct ice_esw_br *bridge;
 	int err;
 
-	bridge = kzalloc(sizeof(*bridge), GFP_KERNEL);
+	bridge = kzalloc_obj(*bridge);
 	if (!bridge)
 		return ERR_PTR(-ENOMEM);
 
@@ -1185,7 +1194,7 @@ ice_eswitch_br_port_event(struct notifier_block *nb,
 static void
 ice_eswitch_br_offloads_dealloc(struct ice_pf *pf)
 {
-	struct ice_esw_br_offloads *br_offloads = pf->switchdev.br_offloads;
+	struct ice_esw_br_offloads *br_offloads = pf->eswitch.br_offloads;
 
 	ASSERT_RTNL();
 
@@ -1194,7 +1203,7 @@ ice_eswitch_br_offloads_dealloc(struct ice_pf *pf)
 
 	ice_eswitch_br_deinit(br_offloads, br_offloads->bridge);
 
-	pf->switchdev.br_offloads = NULL;
+	pf->eswitch.br_offloads = NULL;
 	kfree(br_offloads);
 }
 
@@ -1205,14 +1214,14 @@ ice_eswitch_br_offloads_alloc(struct ice_pf *pf)
 
 	ASSERT_RTNL();
 
-	if (pf->switchdev.br_offloads)
+	if (pf->eswitch.br_offloads)
 		return ERR_PTR(-EEXIST);
 
-	br_offloads = kzalloc(sizeof(*br_offloads), GFP_KERNEL);
+	br_offloads = kzalloc_obj(*br_offloads);
 	if (!br_offloads)
 		return ERR_PTR(-ENOMEM);
 
-	pf->switchdev.br_offloads = br_offloads;
+	pf->eswitch.br_offloads = br_offloads;
 	br_offloads->pf = pf;
 
 	return br_offloads;
@@ -1223,7 +1232,7 @@ ice_eswitch_br_offloads_deinit(struct ice_pf *pf)
 {
 	struct ice_esw_br_offloads *br_offloads;
 
-	br_offloads = pf->switchdev.br_offloads;
+	br_offloads = pf->eswitch.br_offloads;
 	if (!br_offloads)
 		return;
 

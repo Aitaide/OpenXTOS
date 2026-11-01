@@ -91,7 +91,7 @@ static int i2c_slave_eeprom_slave_cb(struct i2c_client *client,
 }
 
 static ssize_t i2c_slave_eeprom_bin_read(struct file *filp, struct kobject *kobj,
-		struct bin_attribute *attr, char *buf, loff_t off, size_t count)
+		const struct bin_attribute *attr, char *buf, loff_t off, size_t count)
 {
 	struct eeprom_data *eeprom;
 	unsigned long flags;
@@ -106,7 +106,7 @@ static ssize_t i2c_slave_eeprom_bin_read(struct file *filp, struct kobject *kobj
 }
 
 static ssize_t i2c_slave_eeprom_bin_write(struct file *filp, struct kobject *kobj,
-		struct bin_attribute *attr, char *buf, loff_t off, size_t count)
+		const struct bin_attribute *attr, char *buf, loff_t off, size_t count)
 {
 	struct eeprom_data *eeprom;
 	unsigned long flags;
@@ -191,14 +191,14 @@ static void i2c_slave_eeprom_remove(struct i2c_client *client)
 }
 
 static const struct i2c_device_id i2c_slave_eeprom_id[] = {
-	{ "slave-24c02", I2C_SLAVE_DEVICE_MAGIC(2048 / 8,  0) },
-	{ "slave-24c02ro", I2C_SLAVE_DEVICE_MAGIC(2048 / 8,  I2C_SLAVE_FLAG_RO) },
-	{ "slave-24c32", I2C_SLAVE_DEVICE_MAGIC(32768 / 8, I2C_SLAVE_FLAG_ADDR16) },
-	{ "slave-24c32ro", I2C_SLAVE_DEVICE_MAGIC(32768 / 8, I2C_SLAVE_FLAG_ADDR16 | I2C_SLAVE_FLAG_RO) },
-	{ "slave-24c64", I2C_SLAVE_DEVICE_MAGIC(65536 / 8, I2C_SLAVE_FLAG_ADDR16) },
-	{ "slave-24c64ro", I2C_SLAVE_DEVICE_MAGIC(65536 / 8, I2C_SLAVE_FLAG_ADDR16 | I2C_SLAVE_FLAG_RO) },
-	{ "slave-24c512", I2C_SLAVE_DEVICE_MAGIC(524288 / 8, I2C_SLAVE_FLAG_ADDR16) },
-	{ "slave-24c512ro", I2C_SLAVE_DEVICE_MAGIC(524288 / 8, I2C_SLAVE_FLAG_ADDR16 | I2C_SLAVE_FLAG_RO) },
+	{ .name = "slave-24c02", .driver_data = I2C_SLAVE_DEVICE_MAGIC(2048 / 8,  0) },
+	{ .name = "slave-24c02ro", .driver_data = I2C_SLAVE_DEVICE_MAGIC(2048 / 8,  I2C_SLAVE_FLAG_RO) },
+	{ .name = "slave-24c32", .driver_data = I2C_SLAVE_DEVICE_MAGIC(32768 / 8, I2C_SLAVE_FLAG_ADDR16) },
+	{ .name = "slave-24c32ro", .driver_data = I2C_SLAVE_DEVICE_MAGIC(32768 / 8, I2C_SLAVE_FLAG_ADDR16 | I2C_SLAVE_FLAG_RO) },
+	{ .name = "slave-24c64", .driver_data = I2C_SLAVE_DEVICE_MAGIC(65536 / 8, I2C_SLAVE_FLAG_ADDR16) },
+	{ .name = "slave-24c64ro", .driver_data = I2C_SLAVE_DEVICE_MAGIC(65536 / 8, I2C_SLAVE_FLAG_ADDR16 | I2C_SLAVE_FLAG_RO) },
+	{ .name = "slave-24c512", .driver_data = I2C_SLAVE_DEVICE_MAGIC(524288 / 8, I2C_SLAVE_FLAG_ADDR16) },
+	{ .name = "slave-24c512ro", .driver_data = I2C_SLAVE_DEVICE_MAGIC(524288 / 8, I2C_SLAVE_FLAG_ADDR16 | I2C_SLAVE_FLAG_RO) },
 	{ }
 };
 MODULE_DEVICE_TABLE(i2c, i2c_slave_eeprom_id);

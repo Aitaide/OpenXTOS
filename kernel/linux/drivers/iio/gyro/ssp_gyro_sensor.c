@@ -76,7 +76,7 @@ static const struct iio_chan_spec ssp_gyro_channels[] = {
 	SSP_CHANNEL_AG(IIO_ANGL_VEL, IIO_MOD_X, SSP_CHANNEL_SCAN_INDEX_X),
 	SSP_CHANNEL_AG(IIO_ANGL_VEL, IIO_MOD_Y, SSP_CHANNEL_SCAN_INDEX_Y),
 	SSP_CHANNEL_AG(IIO_ANGL_VEL, IIO_MOD_Z, SSP_CHANNEL_SCAN_INDEX_Z),
-	SSP_CHAN_TIMESTAMP(SSP_CHANNEL_SCAN_INDEX_TIME),
+	IIO_CHAN_SOFT_TIMESTAMP(SSP_CHANNEL_SCAN_INDEX_TIME),
 };
 
 static int ssp_process_gyro_data(struct iio_dev *indio_dev, void *buf,
@@ -141,4 +141,4 @@ module_platform_driver(ssp_gyro_driver);
 MODULE_AUTHOR("Karol Wrona <k.wrona@samsung.com>");
 MODULE_DESCRIPTION("Samsung sensorhub gyroscopes driver");
 MODULE_LICENSE("GPL");
-MODULE_IMPORT_NS(IIO_SSP_SENSORS);
+MODULE_IMPORT_NS("IIO_SSP_SENSORS");

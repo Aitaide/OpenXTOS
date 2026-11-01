@@ -21,6 +21,7 @@
 #include <limits.h>
 #include <ctype.h>
 #include "xtos_ui.h"
+#include "xtos_rt_state.h"
 
 #define LINE_MAX_LEN 512
 
@@ -344,9 +345,9 @@ int main(int argc, char **argv) {
     struct xtos_identity id;
     load_identity(&id);
 
-    struct utsname uts;
+    struct utsname uts = {0};
     uname(&uts);
-    int realtime = (int)read_int_from("/sys/kernel/realtime");
+    int realtime = xtos_rt_active();
     int cpus = count_cpus();
     long mem_total = meminfo_value("MemTotal");
     long mem_avail = meminfo_value("MemAvailable");

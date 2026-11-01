@@ -291,8 +291,8 @@ static inline int imr_address_overlap(phys_addr_t addr, struct imr_regs *imr)
  *
  * @base:	physical base address of region aligned to 1KiB.
  * @size:	physical size of region in bytes must be aligned to 1KiB.
- * @read_mask:	read access mask.
- * @write_mask:	write access mask.
+ * @rmask:	read access mask.
+ * @wmask:	write access mask.
  * @return:	zero on success or negative value indicating error.
  */
 int imr_add_range(phys_addr_t base, size_t size,
@@ -569,7 +569,7 @@ static void __init imr_fixup_memmap(struct imr_device *idev)
 }
 
 static const struct x86_cpu_id imr_ids[] __initconst = {
-	X86_MATCH_VENDOR_FAM_MODEL(INTEL, 5, INTEL_FAM5_QUARK_X1000, NULL),
+	X86_MATCH_VFM(INTEL_QUARK_X1000, NULL),
 	{}
 };
 

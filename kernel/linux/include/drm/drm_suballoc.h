@@ -37,7 +37,7 @@ struct drm_suballoc_manager {
  * @manager: The drm_suballoc_manager.
  * @soffset: Start offset.
  * @eoffset: End offset + 1 so that @eoffset - @soffset = size.
- * @dma_fence: The fence protecting the allocation.
+ * @fence: The fence protecting the allocation.
  */
 struct drm_suballoc {
 	struct list_head olist;
@@ -52,6 +52,12 @@ void drm_suballoc_manager_init(struct drm_suballoc_manager *sa_manager,
 			       size_t size, size_t align);
 
 void drm_suballoc_manager_fini(struct drm_suballoc_manager *sa_manager);
+
+struct drm_suballoc *drm_suballoc_alloc(gfp_t gfp);
+
+int drm_suballoc_insert(struct drm_suballoc_manager *sa_manager,
+			struct drm_suballoc *sa, size_t size, bool intr,
+			size_t align);
 
 struct drm_suballoc *
 drm_suballoc_new(struct drm_suballoc_manager *sa_manager, size_t size,

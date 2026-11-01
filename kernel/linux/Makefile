@@ -1,9 +1,9 @@
 # SPDX-License-Identifier: GPL-2.0
-VERSION = 6
-PATCHLEVEL = 6
-SUBLEVEL = 0
+VERSION = 7
+PATCHLEVEL = 3
+SUBLEVEL = 1
 EXTRAVERSION =
-NAME = Hurr durr I'ma ninja sloth
+NAME = Baby Opossum Posse
 
 # *DOCUMENTATION*
 # To see a list of typical targets execute "make help"
@@ -11,8 +11,8 @@ NAME = Hurr durr I'ma ninja sloth
 # Comments in this file are targeted only to the developer, do not
 # expect to learn how to build the kernel reading this file.
 
-ifeq ($(filter undefine,$(.FEATURES)),)
-$(error GNU Make >= 3.82 is required. Your Make version is $(MAKE_VERSION))
+ifeq ($(filter output-sync,$(.FEATURES)),)
+$(error GNU Make >= 4.0 is required. Your Make version is $(MAKE_VERSION))
 endif
 
 $(if $(filter __%, $(MAKECMDGOALS)), \
@@ -39,8 +39,8 @@ __all:
 # prepare rule.
 
 this-makefile := $(lastword $(MAKEFILE_LIST))
-export abs_srctree := $(realpath $(dir $(this-makefile)))
-export abs_objtree := $(CURDIR)
+abs_srctree := $(realpath $(dir $(this-makefile)))
+abs_output := $(CURDIR)
 
 ifneq ($(sub_make_done),1)
 
@@ -93,15 +93,7 @@ endif
 
 # If the user is running make -s (silent mode), suppress echoing of
 # commands
-# make-4.0 (and later) keep single letter options in the 1st word of MAKEFLAGS.
-
-ifeq ($(filter 3.%,$(MAKE_VERSION)),)
-short-opts := $(firstword -$(MAKEFLAGS))
-else
-short-opts := $(filter-out --%,$(MAKEFLAGS))
-endif
-
-ifneq ($(findstring s,$(short-opts)),)
+ifneq ($(findstring s,$(firstword -$(MAKEFLAGS))),)
 quiet=silent_
 override KBUILD_VERBOSE :=
 endif
@@ -142,6 +134,10 @@ ifeq ("$(origin M)", "command line")
   KBUILD_EXTMOD := $(M)
 endif
 
+ifeq ("$(origin MO)", "command line")
+  KBUILD_EXTMOD_OUTPUT := $(MO)
+endif
+
 $(if $(word 2, $(KBUILD_EXTMOD)), \
 	$(error building multiple external modules is not supported))
 
@@ -154,6 +150,12 @@ KBUILD_EXTMOD := $(shell dirname $(KBUILD_EXTMOD).)
 endif
 
 export KBUILD_EXTMOD
+
+ifeq ("$(origin W)", "command line")
+  KBUILD_EXTRA_WARN := $(W)
+endif
+
+export KBUILD_EXTRA_WARN
 
 # Kbuild will save output files in the current working directory.
 # This does not need to match to the root of the kernel source tree.
@@ -175,39 +177,51 @@ export KBUILD_EXTMOD
 # The O= assignment takes precedence over the KBUILD_OUTPUT environment
 # variable.
 
-# Do we want to change the working directory?
 ifeq ("$(origin O)", "command line")
   KBUILD_OUTPUT := $(O)
 endif
 
-ifneq ($(KBUILD_OUTPUT),)
-# Make's built-in functions such as $(abspath ...), $(realpath ...) cannot
-# expand a shell special character '~'. We use a somewhat tedious way here.
-abs_objtree := $(shell mkdir -p $(KBUILD_OUTPUT) && cd $(KBUILD_OUTPUT) && pwd)
-$(if $(abs_objtree),, \
-     $(error failed to create output directory "$(KBUILD_OUTPUT)"))
+ifdef KBUILD_EXTMOD
+    ifdef KBUILD_OUTPUT
+        objtree := $(realpath $(KBUILD_OUTPUT))
+        $(if $(objtree),,$(error specified kernel directory "$(KBUILD_OUTPUT)" does not exist))
+    else
+        objtree := $(abs_srctree)
+    endif
+    # If Make is invoked from the kernel directory (either kernel
+    # source directory or kernel build directory), external modules
+    # are built in $(KBUILD_EXTMOD) for backward compatibility,
+    # otherwise, built in the current directory.
+    output := $(or $(KBUILD_EXTMOD_OUTPUT),$(if $(filter $(CURDIR),$(objtree) $(abs_srctree)),$(KBUILD_EXTMOD)))
+    # KBUILD_EXTMOD might be a relative path. Remember its absolute path before
+    # Make changes the working directory.
+    srcroot := $(realpath $(KBUILD_EXTMOD))
+    $(if $(srcroot),,$(error specified external module directory "$(KBUILD_EXTMOD)" does not exist))
+else
+    objtree := .
+    output := $(KBUILD_OUTPUT)
+endif
 
+export objtree srcroot
+
+# Do we want to change the working directory?
+ifneq ($(output),)
+# $(realpath ...) gets empty if the path does not exist. Run 'mkdir -p' first.
+$(shell mkdir -p "$(output)")
 # $(realpath ...) resolves symlinks
-abs_objtree := $(realpath $(abs_objtree))
-endif # ifneq ($(KBUILD_OUTPUT),)
+abs_output := $(realpath $(output))
+$(if $(abs_output),,$(error failed to create output directory "$(output)"))
+endif
 
 ifneq ($(words $(subst :, ,$(abs_srctree))), 1)
 $(error source directory cannot contain spaces or colons)
-endif
-
-ifneq ($(filter 3.%,$(MAKE_VERSION)),)
-# 'MAKEFLAGS += -rR' does not immediately become effective for GNU Make 3.x
-# We need to invoke sub-make to avoid implicit rules in the top Makefile.
-need-sub-make := 1
-# Cancel implicit rules for this Makefile.
-$(this-makefile): ;
 endif
 
 export sub_make_done := 1
 
 endif # sub_make_done
 
-ifeq ($(abs_objtree),$(CURDIR))
+ifeq ($(abs_output),$(CURDIR))
 # Suppress "Entering directory ..." if we are at the final work directory.
 no-print-directory := --no-print-directory
 else
@@ -231,35 +245,40 @@ $(filter-out $(this-makefile), $(MAKECMDGOALS)) __all: __sub-make
 
 # Invoke a second make in the output directory, passing relevant variables
 __sub-make:
-	$(Q)$(MAKE) $(no-print-directory) -C $(abs_objtree) \
+	$(Q)$(MAKE) $(no-print-directory) -C $(abs_output) \
 	-f $(abs_srctree)/Makefile $(MAKECMDGOALS)
 
 else # need-sub-make
 
 # We process the rest of the Makefile if this is the final invocation of make
 
-ifeq ($(abs_srctree),$(abs_objtree))
-        # building in the source tree
-        srctree := .
-	building_out_of_srctree :=
+ifndef KBUILD_EXTMOD
+srcroot := $(abs_srctree)
+endif
+
+ifeq ($(srcroot),$(CURDIR))
+building_out_of_srctree :=
 else
-        ifeq ($(abs_srctree)/,$(dir $(abs_objtree)))
-                # building in a subdirectory of the source tree
-                srctree := ..
-        else
-                srctree := $(abs_srctree)
-        endif
-	building_out_of_srctree := 1
+export building_out_of_srctree := 1
 endif
 
-ifneq ($(KBUILD_ABS_SRCTREE),)
-srctree := $(abs_srctree)
+ifdef KBUILD_ABS_SRCTREE
+    # Do nothing. Use the absolute path.
+else ifeq ($(srcroot),$(CURDIR))
+    # Building in the source.
+    srcroot := .
+else ifeq ($(srcroot)/,$(dir $(CURDIR)))
+    # Building in a subdirectory of the source.
+    srcroot := ..
 endif
 
-objtree		:= .
-VPATH		:= $(srctree)
+export srctree := $(if $(KBUILD_EXTMOD),$(abs_srctree),$(srcroot))
 
-export building_out_of_srctree srctree objtree VPATH
+ifdef building_out_of_srctree
+export VPATH := $(srcroot)
+else
+VPATH :=
+endif
 
 # To make sure we do not include .config for any of the *config targets
 # catch them early, and hand them over to scripts/kconfig/Makefile
@@ -274,75 +293,69 @@ version_h := include/generated/uapi/linux/version.h
 clean-targets := %clean mrproper cleandocs
 no-dot-config-targets := $(clean-targets) \
 			 cscope gtags TAGS tags help% %docs check% coccicheck \
+			 kconfig-sym-check \
 			 $(version_h) headers headers_% archheaders archscripts \
 			 %asm-generic kernelversion %src-pkg dt_binding_check \
-			 outputmakefile rustavailable rustfmt rustfmtcheck
-# Installation targets should not require compiler. Unfortunately, vdso_install
-# is an exception where build artifacts may be updated. This must be fixed.
-no-compiler-targets := $(no-dot-config-targets) install dtbs_install \
-			headers_install modules_install modules_sign kernelrelease image_name
+			 dt_style_selftest \
+			 outputmakefile rustavailable rustfmt rustfmtcheck \
+			 run-command
 no-sync-config-targets := $(no-dot-config-targets) %install modules_sign kernelrelease \
 			  image_name
-single-targets := %.a %.i %.ko %.lds %.ll %.lst %.mod %.o %.rsi %.s %.symtypes %/
+single-targets := %.a %.i %.ko %.lds %.ll %.lst %.mod %.o %.rsi %.s %/
 
 config-build	:=
 mixed-build	:=
 need-config	:= 1
-need-compiler	:= 1
 may-sync-config	:= 1
 single-build	:=
 
 ifneq ($(filter $(no-dot-config-targets), $(MAKECMDGOALS)),)
-	ifeq ($(filter-out $(no-dot-config-targets), $(MAKECMDGOALS)),)
-		need-config :=
-	endif
-endif
-
-ifneq ($(filter $(no-compiler-targets), $(MAKECMDGOALS)),)
-	ifeq ($(filter-out $(no-compiler-targets), $(MAKECMDGOALS)),)
-		need-compiler :=
-	endif
+    ifeq ($(filter-out $(no-dot-config-targets), $(MAKECMDGOALS)),)
+        need-config :=
+    endif
 endif
 
 ifneq ($(filter $(no-sync-config-targets), $(MAKECMDGOALS)),)
-	ifeq ($(filter-out $(no-sync-config-targets), $(MAKECMDGOALS)),)
-		may-sync-config :=
-	endif
+    ifeq ($(filter-out $(no-sync-config-targets), $(MAKECMDGOALS)),)
+        may-sync-config :=
+    endif
 endif
 
+need-compiler := $(may-sync-config)
+
 ifneq ($(KBUILD_EXTMOD),)
-	may-sync-config :=
+    may-sync-config :=
 endif
 
 ifeq ($(KBUILD_EXTMOD),)
-        ifneq ($(filter %config,$(MAKECMDGOALS)),)
-		config-build := 1
-                ifneq ($(words $(MAKECMDGOALS)),1)
-			mixed-build := 1
-                endif
+    ifneq ($(filter %config,$(MAKECMDGOALS)),)
+        config-build := 1
+        ifneq ($(words $(MAKECMDGOALS)),1)
+            mixed-build := 1
         endif
+    endif
 endif
 
 # We cannot build single targets and the others at the same time
 ifneq ($(filter $(single-targets), $(MAKECMDGOALS)),)
-	single-build := 1
-	ifneq ($(filter-out $(single-targets), $(MAKECMDGOALS)),)
-		mixed-build := 1
-	endif
+    single-build := 1
+    ifneq ($(filter-out $(single-targets), $(MAKECMDGOALS)),)
+        mixed-build := 1
+    endif
 endif
 
 # For "make -j clean all", "make -j mrproper defconfig all", etc.
 ifneq ($(filter $(clean-targets),$(MAKECMDGOALS)),)
-        ifneq ($(filter-out $(clean-targets),$(MAKECMDGOALS)),)
-		mixed-build := 1
-        endif
+    ifneq ($(filter-out $(clean-targets),$(MAKECMDGOALS)),)
+        mixed-build := 1
+    endif
 endif
 
 # install and modules_install need also be processed one by one
 ifneq ($(filter install,$(MAKECMDGOALS)),)
-        ifneq ($(filter modules_install,$(MAKECMDGOALS)),)
-		mixed-build := 1
-        endif
+    ifneq ($(filter modules_install,$(MAKECMDGOALS)),)
+        mixed-build := 1
+    endif
 endif
 
 ifdef mixed-build
@@ -366,7 +379,7 @@ else # !mixed-build
 include $(srctree)/scripts/Kbuild.include
 
 # Read KERNELRELEASE from include/config/kernel.release (if it exists)
-KERNELRELEASE = $(call read-file, include/config/kernel.release)
+KERNELRELEASE = $(call read-file, $(objtree)/include/config/kernel.release)
 KERNELVERSION = $(VERSION)$(if $(PATCHLEVEL),.$(PATCHLEVEL)$(if $(SUBLEVEL),.$(SUBLEVEL)))$(EXTRAVERSION)
 export VERSION PATCHLEVEL SUBLEVEL KERNELRELEASE KERNELVERSION
 
@@ -378,7 +391,7 @@ include $(srctree)/scripts/subarch.include
 # When performing cross compilation for other architectures ARCH shall be set
 # to the target architecture. (See arch/* for the possibilities).
 # ARCH can be set during invocation of make:
-# make ARCH=ia64
+# make ARCH=arm64
 # Another way is to have ARCH set in the environment.
 # The default ARCH is the host where make is executed.
 
@@ -386,7 +399,7 @@ include $(srctree)/scripts/subarch.include
 # during compilation. Only gcc and related bin-utils executables
 # are prefixed with $(CROSS_COMPILE).
 # CROSS_COMPILE can be set on the command line
-# make CROSS_COMPILE=ia64-linux-
+# make CROSS_COMPILE=aarch64-linux-gnu-
 # Alternatively CROSS_COMPILE can be set in the environment.
 # Default value for CROSS_COMPILE is not to prefix executables
 # Note: Some architectures assign CROSS_COMPILE in their arch/*/Makefile
@@ -437,6 +450,8 @@ ifneq ($(filter %/,$(LLVM)),)
 LLVM_PREFIX := $(LLVM)
 else ifneq ($(filter -%,$(LLVM)),)
 LLVM_SUFFIX := $(LLVM)
+else ifneq ($(LLVM),1)
+$(error Invalid value for LLVM, see Documentation/kbuild/llvm.rst)
 endif
 
 HOSTCC	= $(LLVM_PREFIX)clang$(LLVM_SUFFIX)
@@ -448,6 +463,11 @@ endif
 HOSTRUSTC = rustc
 HOSTPKG_CONFIG	= pkg-config
 
+# the KERNELDOC macro needs to be exported, as scripts/Makefile.build
+# has a logic to call it
+KERNELDOC       = $(srctree)/tools/docs/kernel-doc
+export KERNELDOC
+
 KBUILD_USERHOSTCFLAGS := -Wall -Wmissing-prototypes -Wstrict-prototypes \
 			 -O2 -fomit-frame-pointer -std=gnu11
 KBUILD_USERCFLAGS  := $(KBUILD_USERHOSTCFLAGS) $(USERCFLAGS)
@@ -455,27 +475,51 @@ KBUILD_USERLDFLAGS := $(USERLDFLAGS)
 
 # These flags apply to all Rust code in the tree, including the kernel and
 # host programs.
+#
+# `-Aclippy::unwrap_or_default`: the lint is buggy [1] and ignores our
+# MSRV. It can trigger depending on the optimization level.
+# [1] https://github.com/rust-lang/rust-clippy/issues/17379
 export rust_common_flags := --edition=2021 \
 			    -Zbinary_dep_depinfo=y \
-			    -Dunsafe_op_in_unsafe_fn -Drust_2018_idioms \
-			    -Dunreachable_pub -Dnon_ascii_idents \
+			    -Astable_features \
+			    -Aunused_features \
+			    -Dnon_ascii_idents \
+			    -Dunsafe_op_in_unsafe_fn \
 			    -Wmissing_docs \
-			    -Drustdoc::missing_crate_level_docs \
-			    -Dclippy::correctness -Dclippy::style \
-			    -Dclippy::suspicious -Dclippy::complexity \
-			    -Dclippy::perf \
-			    -Dclippy::let_unit_value -Dclippy::mut_mut \
-			    -Dclippy::needless_bitwise_bool \
-			    -Dclippy::needless_continue \
-			    -Dclippy::no_mangle_with_rust_abi \
-			    -Wclippy::dbg_macro
+			    -Wrust_2018_idioms \
+			    -Wunreachable_pub \
+			    -Wclippy::all \
+			    -Wclippy::as_ptr_cast_mut \
+			    -Wclippy::as_underscore \
+			    -Wclippy::cast_lossless \
+			    -Aclippy::collapsible_if \
+			    -Aclippy::collapsible_match \
+			    -Wclippy::ignored_unit_patterns \
+			    -Aclippy::incompatible_msrv \
+			    -Wclippy::mut_mut \
+			    -Wclippy::needless_bitwise_bool \
+			    -Aclippy::needless_lifetimes \
+			    -Wclippy::no_mangle_with_rust_abi \
+			    -Wclippy::ptr_as_ptr \
+			    -Wclippy::ptr_cast_constness \
+			    -Wclippy::ref_as_ptr \
+			    -Wclippy::undocumented_unsafe_blocks \
+			    -Aclippy::uninlined_format_args \
+			    -Wclippy::unnecessary_safety_comment \
+			    -Wclippy::unnecessary_safety_doc \
+			    -Aclippy::unwrap_or_default \
+			    -Wrustdoc::missing_crate_level_docs \
+			    -Wrustdoc::unescaped_backticks
 
-KBUILD_HOSTCFLAGS   := $(KBUILD_USERHOSTCFLAGS) $(HOST_LFS_CFLAGS) $(HOSTCFLAGS)
-KBUILD_HOSTCXXFLAGS := -Wall -O2 $(HOST_LFS_CFLAGS) $(HOSTCXXFLAGS)
+KBUILD_HOSTCFLAGS   := $(KBUILD_USERHOSTCFLAGS) $(HOST_LFS_CFLAGS) \
+		       $(HOSTCFLAGS) -I $(srctree)/scripts/include
+KBUILD_HOSTCXXFLAGS := -Wall -O2 $(HOST_LFS_CFLAGS) $(HOSTCXXFLAGS) \
+		       -I $(srctree)/scripts/include
 KBUILD_HOSTRUSTFLAGS := $(rust_common_flags) -O -Cstrip=debuginfo \
-			-Zallow-features= $(HOSTRUSTFLAGS)
+			-Zallow-features=
 KBUILD_HOSTLDFLAGS  := $(HOST_LFS_LDFLAGS) $(HOSTLDFLAGS)
 KBUILD_HOSTLDLIBS   := $(HOST_LFS_LIBS) $(HOSTLDLIBS)
+KBUILD_PROCMACROLDFLAGS := $(or $(PROCMACROLDFLAGS),$(KBUILD_HOSTLDFLAGS))
 
 # Make variables (CC, etc...)
 CPP		= $(CC) -E
@@ -483,11 +527,15 @@ ifneq ($(LLVM),)
 CC		= $(LLVM_PREFIX)clang$(LLVM_SUFFIX)
 LD		= $(LLVM_PREFIX)ld.lld$(LLVM_SUFFIX)
 AR		= $(LLVM_PREFIX)llvm-ar$(LLVM_SUFFIX)
+LLVM_LINK	= $(LLVM_PREFIX)llvm-link$(LLVM_SUFFIX)
 NM		= $(LLVM_PREFIX)llvm-nm$(LLVM_SUFFIX)
 OBJCOPY		= $(LLVM_PREFIX)llvm-objcopy$(LLVM_SUFFIX)
 OBJDUMP		= $(LLVM_PREFIX)llvm-objdump$(LLVM_SUFFIX)
 READELF		= $(LLVM_PREFIX)llvm-readelf$(LLVM_SUFFIX)
 STRIP		= $(LLVM_PREFIX)llvm-strip$(LLVM_SUFFIX)
+ifeq ($(filter -fuse-ld=% --ld-path=%,$(KBUILD_HOSTLDFLAGS)),)
+KBUILD_HOSTLDFLAGS += -fuse-ld=lld
+endif
 else
 CC		= $(CROSS_COMPILE)gcc
 LD		= $(CROSS_COMPILE)ld
@@ -503,7 +551,6 @@ RUSTDOC		= rustdoc
 RUSTFMT		= rustfmt
 CLIPPY_DRIVER	= clippy-driver
 BINDGEN		= bindgen
-CARGO		= cargo
 PAHOLE		= pahole
 RESOLVE_BTFIDS	= $(objtree)/tools/bpf/resolve_btfids/resolve_btfids
 LEX		= flex
@@ -518,11 +565,10 @@ KGZIP		= gzip
 KBZIP2		= bzip2
 KLZOP		= lzop
 LZMA		= lzma
-LZ4		= lz4c
+LZ4		= lz4
 XZ		= xz
 ZSTD		= zstd
-
-PAHOLE_FLAGS	= $(shell PAHOLE=$(PAHOLE) $(srctree)/scripts/pahole-flags.sh)
+TAR		= tar
 
 CHECKFLAGS     := -D__linux__ -Dlinux -D__STDC__ -Dunix -D__unix__ \
 		  -Wbitwise -Wno-return-void -Wno-unknown-attribute $(CF)
@@ -550,14 +596,13 @@ USERINCLUDE    := \
 LINUXINCLUDE    := \
 		-I$(srctree)/arch/$(SRCARCH)/include \
 		-I$(objtree)/arch/$(SRCARCH)/include/generated \
-		$(if $(building_out_of_srctree),-I$(srctree)/include) \
+		-I$(srctree)/include \
 		-I$(objtree)/include \
 		$(USERINCLUDE)
 
 KBUILD_AFLAGS   := -D__ASSEMBLY__ -fno-PIE
 
 KBUILD_CFLAGS :=
-KBUILD_CFLAGS += -std=gnu11
 KBUILD_CFLAGS += -fshort-wchar
 KBUILD_CFLAGS += -funsigned-char
 KBUILD_CFLAGS += -fno-common
@@ -566,13 +611,13 @@ KBUILD_CFLAGS += -fno-strict-aliasing
 
 KBUILD_CPPFLAGS := -D__KERNEL__
 KBUILD_RUSTFLAGS := $(rust_common_flags) \
-		    --target=$(objtree)/scripts/target.json \
 		    -Cpanic=abort -Cembed-bitcode=n -Clto=n \
 		    -Cforce-unwind-tables=n -Ccodegen-units=1 \
 		    -Csymbol-mangling-version=v0 \
 		    -Crelocation-model=static \
 		    -Zfunction-sections=n \
-		    -Dclippy::float_arithmetic
+		    -Wclippy::float_arithmetic
+KBUILD_RUSTFLAGS_OPTION_CHKS :=
 
 KBUILD_AFLAGS_KERNEL :=
 KBUILD_CFLAGS_KERNEL :=
@@ -592,43 +637,41 @@ else
 	RUSTC_OR_CLIPPY = $(RUSTC)
 endif
 
-ifdef RUST_LIB_SRC
-	export RUST_LIB_SRC
-endif
-
 # Allows the usage of unstable features in stable compilers.
 export RUSTC_BOOTSTRAP := 1
 
+# Allows finding `.clippy.toml` in out-of-srctree builds.
+export CLIPPY_CONF_DIR := $(srctree)
+
 export ARCH SRCARCH CONFIG_SHELL BASH HOSTCC KBUILD_HOSTCFLAGS CROSS_COMPILE LD CC HOSTPKG_CONFIG
-export RUSTC RUSTDOC RUSTFMT RUSTC_OR_CLIPPY_QUIET RUSTC_OR_CLIPPY BINDGEN CARGO
+export RUSTC RUSTDOC RUSTFMT RUSTC_OR_CLIPPY_QUIET RUSTC_OR_CLIPPY BINDGEN LLVM_LINK
 export HOSTRUSTC KBUILD_HOSTRUSTFLAGS
 export CPP AR NM STRIP OBJCOPY OBJDUMP READELF PAHOLE RESOLVE_BTFIDS LEX YACC AWK INSTALLKERNEL
 export PERL PYTHON3 CHECK CHECKFLAGS MAKE UTS_MACHINE HOSTCXX
-export KGZIP KBZIP2 KLZOP LZMA LZ4 XZ ZSTD
-export KBUILD_HOSTCXXFLAGS KBUILD_HOSTLDFLAGS KBUILD_HOSTLDLIBS LDFLAGS_MODULE
+export KGZIP KBZIP2 KLZOP LZMA LZ4 XZ ZSTD TAR
+export KBUILD_HOSTCXXFLAGS KBUILD_HOSTLDFLAGS KBUILD_HOSTLDLIBS KBUILD_PROCMACROLDFLAGS LDFLAGS_MODULE
 export KBUILD_USERCFLAGS KBUILD_USERLDFLAGS
 
 export KBUILD_CPPFLAGS NOSTDINC_FLAGS LINUXINCLUDE OBJCOPYFLAGS KBUILD_LDFLAGS
 export KBUILD_CFLAGS CFLAGS_KERNEL CFLAGS_MODULE
-export KBUILD_RUSTFLAGS RUSTFLAGS_KERNEL RUSTFLAGS_MODULE
+export KBUILD_RUSTFLAGS RUSTFLAGS_KERNEL RUSTFLAGS_MODULE KBUILD_RUSTFLAGS_OPTION_CHKS
 export KBUILD_AFLAGS AFLAGS_KERNEL AFLAGS_MODULE
 export KBUILD_AFLAGS_MODULE KBUILD_CFLAGS_MODULE KBUILD_RUSTFLAGS_MODULE KBUILD_LDFLAGS_MODULE
 export KBUILD_AFLAGS_KERNEL KBUILD_CFLAGS_KERNEL KBUILD_RUSTFLAGS_KERNEL
-export PAHOLE_FLAGS
 
 # Files to ignore in find ... statements
 
 export RCS_FIND_IGNORE := \( -name SCCS -o -name BitKeeper -o -name .svn -o    \
 			  -name CVS -o -name .pc -o -name .hg -o -name .git \) \
 			  -prune -o
-export RCS_TAR_IGNORE := --exclude SCCS --exclude BitKeeper --exclude .svn \
-			 --exclude CVS --exclude .pc --exclude .hg --exclude .git
 
 # ===========================================================================
 # Rules shared between *config targets and build targets
 
 # Basic helpers built in scripts/basic/
 PHONY += scripts_basic
+scripts_basic: KBUILD_HOSTCFLAGS := $(KBUILD_HOSTCFLAGS)
+scripts_basic: KBUILD_HOSTLDFLAGS := $(KBUILD_HOSTLDFLAGS)
 scripts_basic:
 	$(Q)$(MAKE) $(build)=scripts/basic
 
@@ -641,13 +684,28 @@ ifdef building_out_of_srctree
 # At the same time when output Makefile generated, generate .gitignore to
 # ignore whole output directory
 
-quiet_cmd_makefile = GEN     Makefile
-      cmd_makefile = { \
-	echo "\# Automatically generated by $(srctree)/Makefile: don't edit"; \
-	echo "include $(srctree)/Makefile"; \
-	} > Makefile
+ifdef KBUILD_EXTMOD
+print_env_for_makefile = \
+	echo "export KBUILD_OUTPUT = $(objtree)"; \
+	echo "export KBUILD_EXTMOD = $(realpath $(srcroot))" ; \
+	echo "export KBUILD_EXTMOD_OUTPUT = $(CURDIR)"
+else
+print_env_for_makefile = \
+	echo "export KBUILD_OUTPUT = $(CURDIR)"
+endif
 
-outputmakefile:
+filechk_makefile = { \
+	echo "\# Automatically generated by $(abs_srctree)/Makefile: don't edit"; \
+	$(print_env_for_makefile); \
+	echo "include $(abs_srctree)/Makefile"; \
+	}
+
+PHONY += $(CURDIR)/Makefile
+$(CURDIR)/Makefile: FORCE
+	$(call filechk,makefile)
+
+outputmakefile: $(CURDIR)/Makefile
+ifeq ($(KBUILD_EXTMOD),)
 	@if [ -f $(srctree)/.config -o \
 		 -d $(srctree)/include/config -o \
 		 -d $(srctree)/arch/$(SRCARCH)/include/generated ]; then \
@@ -657,17 +715,28 @@ outputmakefile:
 		echo >&2 "***"; \
 		false; \
 	fi
-	$(Q)ln -fsn $(srctree) source
-	$(call cmd,makefile)
+else
+	@if [ -f $(srcroot)/modules.order ]; then \
+		echo >&2 "***"; \
+		echo >&2 "*** The external module source tree is not clean."; \
+		echo >&2 "*** Please run 'make -C $(abs_srctree) M=$(realpath $(srcroot)) clean'"; \
+		echo >&2 "***"; \
+		false; \
+	fi
+endif
+	$(Q)ln -fsn $(srcroot) source
 	$(Q)test -e .gitignore || \
 	{ echo "# this is build directory, ignore it"; echo "*"; } > .gitignore
 endif
 
 # The expansion should be delayed until arch/$(SRCARCH)/Makefile is included.
 # Some architectures define CROSS_COMPILE in arch/$(SRCARCH)/Makefile.
-# CC_VERSION_TEXT is referenced from Kconfig (so it needs export),
-# and from include/config/auto.conf.cmd to detect the compiler upgrade.
+# CC_VERSION_TEXT, RUSTC_VERSION_TEXT and PAHOLE_VERSION are referenced from
+# Kconfig (so they need export), and from include/config/auto.conf.cmd to
+# detect the version changes between builds.
 CC_VERSION_TEXT = $(subst $(pound),,$(shell LC_ALL=C $(CC) --version 2>/dev/null | head -n 1))
+RUSTC_VERSION_TEXT = $(subst $(pound),,$(shell $(RUSTC) --version 2>/dev/null))
+PAHOLE_VERSION = $(shell $(srctree)/scripts/pahole-version.sh $(PAHOLE))
 
 ifneq ($(findstring clang,$(CC_VERSION_TEXT)),)
 include $(srctree)/scripts/Makefile.clang
@@ -684,11 +753,11 @@ ifdef config-build
 # *config targets only - make sure prerequisites are updated, and descend
 # in scripts/kconfig to make the *config target
 
-# Read arch specific Makefile to set KBUILD_DEFCONFIG as needed.
+# Read arch-specific Makefile to set KBUILD_DEFCONFIG as needed.
 # KBUILD_DEFCONFIG may point out an alternative default configuration
 # used for 'make defconfig'
 include $(srctree)/arch/$(SRCARCH)/Makefile
-export KBUILD_DEFCONFIG KBUILD_KCONFIG CC_VERSION_TEXT
+export KBUILD_DEFCONFIG KBUILD_KCONFIG CC_VERSION_TEXT RUSTC_VERSION_TEXT PAHOLE_VERSION
 
 config: outputmakefile scripts_basic FORCE
 	$(Q)$(MAKE) $(build)=scripts/kconfig $@
@@ -698,7 +767,7 @@ config: outputmakefile scripts_basic FORCE
 
 else #!config-build
 # ===========================================================================
-# Build targets only - this includes vmlinux, arch specific targets, clean
+# Build targets only - this includes vmlinux, arch-specific targets, clean
 # targets and others. In general all targets except *config targets.
 
 # If building an external module we do not care about the all: rule
@@ -716,7 +785,7 @@ targets :=
 # Normally, just do built-in.
 
 KBUILD_MODULES :=
-KBUILD_BUILTIN := 1
+KBUILD_BUILTIN := y
 
 # If we have only "make modules", don't compile built-in objects.
 ifeq ($(MAKECMDGOALS),modules)
@@ -727,19 +796,31 @@ endif
 # in addition to whatever we do anyway.
 # Just "make" or "make all" shall build modules as well
 
-ifneq ($(filter all modules nsdeps %compile_commands.json clang-%,$(MAKECMDGOALS)),)
-  KBUILD_MODULES := 1
+ifneq ($(filter all modules nsdeps compile_commands.json clang-% sbom,$(MAKECMDGOALS)),)
+  KBUILD_MODULES := y
 endif
 
 ifeq ($(MAKECMDGOALS),)
-  KBUILD_MODULES := 1
+  KBUILD_MODULES := y
 endif
 
 export KBUILD_MODULES KBUILD_BUILTIN
 
 ifdef need-config
-include include/config/auto.conf
+include $(objtree)/include/config/auto.conf
 endif
+
+CC_FLAGS_DIALECT := -std=gnu11
+# Allow including a tagged struct or union anonymously in another struct/union.
+CC_FLAGS_DIALECT += $(CONFIG_CC_MS_EXTENSIONS)
+# Clang enables warnings about GNU and Microsoft extensions by default, disable
+# them because this is expected with the above options.
+ifdef CONFIG_CC_IS_CLANG
+CC_FLAGS_DIALECT += -Wno-gnu
+CC_FLAGS_DIALECT += -Wno-microsoft-anon-tag
+endif
+export CC_FLAGS_DIALECT
+KBUILD_CFLAGS += $(CC_FLAGS_DIALECT)
 
 ifeq ($(KBUILD_EXTMOD),)
 # Objects we will link into vmlinux / subdirs we need to visit
@@ -754,16 +835,43 @@ endif # KBUILD_EXTMOD
 # Defaults to vmlinux, but the arch makefile usually adds further targets
 all: vmlinux
 
-CFLAGS_GCOV	:= -fprofile-arcs -ftest-coverage
-ifdef CONFIG_CC_IS_GCC
-CFLAGS_GCOV	+= -fno-tree-loop-im
-endif
-export CFLAGS_GCOV
-
 # The arch Makefiles can override CC_FLAGS_FTRACE. We may also append it later.
 ifdef CONFIG_FUNCTION_TRACER
   CC_FLAGS_FTRACE := -pg
 endif
+
+ifdef CONFIG_TRACEPOINTS
+# To check for unused tracepoints (tracepoints that are defined but never
+# called), run with:
+#
+# make UT=1
+#
+# Each unused tracepoints can take up to 5KB of memory in the running kernel.
+# It is best to remove any that are not used.
+#
+# This command line option will be removed when all current unused
+# tracepoints are removed.
+
+ifeq ("$(origin UT)", "command line")
+  WARN_ON_UNUSED_TRACEPOINTS := $(UT)
+endif
+endif # CONFIG_TRACEPOINTS
+
+export WARN_ON_UNUSED_TRACEPOINTS
+
+# Per-version Rust flags. These are like `rust_common_flags`, but may
+# depend on the Rust compiler version (e.g. using `rustc-min-version`).
+#
+# `-Aclippy::precedence`: the lint was extended in Rust 1.85.0 to
+# include bitmasking and shift operations. However, because it generated
+# many hits, in Rust 1.86.0 it was split into a new `precedence_bits`
+# lint which is not enabled by default.
+rust_common_flags_per_version := \
+    $(if $(call rustc-min-version,108600),,-Aclippy::precedence)
+
+rust_common_flags += $(rust_common_flags_per_version)
+KBUILD_HOSTRUSTFLAGS += $(rust_common_flags_per_version) $(HOSTRUSTFLAGS)
+KBUILD_RUSTFLAGS += $(rust_common_flags_per_version)
 
 include $(srctree)/arch/$(SRCARCH)/Makefile
 
@@ -799,17 +907,22 @@ $(KCONFIG_CONFIG):
 else # !may-sync-config
 # External modules and some install targets need include/generated/autoconf.h
 # and include/config/auto.conf but do not care if they are up-to-date.
-# Use auto.conf to trigger the test
-PHONY += include/config/auto.conf
+# Use auto.conf to show the error message
 
-include/config/auto.conf:
-	@test -e include/generated/autoconf.h -a -e $@ || (		\
-	echo >&2;							\
-	echo >&2 "  ERROR: Kernel configuration is invalid.";		\
-	echo >&2 "         include/generated/autoconf.h or $@ are missing.";\
-	echo >&2 "         Run 'make oldconfig && make prepare' on kernel src to fix it.";	\
-	echo >&2 ;							\
-	/bin/false)
+checked-configs := $(addprefix $(objtree)/, include/generated/autoconf.h include/generated/rustc_cfg include/config/auto.conf)
+missing-configs := $(filter-out $(wildcard $(checked-configs)), $(checked-configs))
+
+ifdef missing-configs
+PHONY += $(objtree)/include/config/auto.conf
+
+$(objtree)/include/config/auto.conf:
+	@echo   >&2 '***'
+	@echo   >&2 '***  ERROR: Kernel configuration is invalid. The following files are missing:'
+	@printf >&2 '***    - %s\n' $(missing-configs)
+	@echo   >&2 '***  Run "make oldconfig && make prepare" on kernel source to fix it.'
+	@echo   >&2 '***'
+	@/bin/false
+endif
 
 endif # may-sync-config
 endif # need-config
@@ -851,12 +964,12 @@ stackp-flags-$(CONFIG_STACKPROTECTOR_STRONG)      := -fstack-protector-strong
 
 KBUILD_CFLAGS += $(stackp-flags-y)
 
-KBUILD_RUSTFLAGS-$(CONFIG_WERROR) += -Dwarnings
-KBUILD_RUSTFLAGS += $(KBUILD_RUSTFLAGS-y)
-
 ifdef CONFIG_FRAME_POINTER
 KBUILD_CFLAGS	+= -fno-omit-frame-pointer -fno-optimize-sibling-calls
 KBUILD_RUSTFLAGS += -Cforce-frame-pointers=y
+# Work around rustc bug on compilers without
+# https://github.com/rust-lang/rust/pull/156980.
+KBUILD_RUSTFLAGS += $(if $(call rustc-min-version,109800),,-Zllvm_module_flag=frame-pointer:u32:2:max)
 else
 # Some targets (ARM with Thumb2, for example), can't be built with frame
 # pointers.  For those, we don't have FUNCTION_TRACER automatically
@@ -886,9 +999,30 @@ KBUILD_CFLAGS	+= $(CC_AUTO_VAR_INIT_ZERO_ENABLER)
 endif
 endif
 
+ifdef CONFIG_KMALLOC_PARTITION_TYPED
+# KMALLOC_PARTITION_CACHES_NR + 1
+KBUILD_CFLAGS	+= -falloc-token-max=16
+endif
+
+ifdef CONFIG_CC_IS_CLANG
+ifdef CONFIG_CC_HAS_COUNTED_BY_PTR
+KBUILD_CFLAGS	+= -fexperimental-late-parse-attributes
+endif
+endif
+
+# Explicitly clear padding bits during variable initialization
+KBUILD_CFLAGS += $(call cc-option,-fzero-init-padding-bits=all)
+
 # While VLAs have been removed, GCC produces unreachable stack probes
 # for the randomize_kstack_offset feature. Disable it for all compilers.
 KBUILD_CFLAGS	+= $(call cc-option, -fno-stack-clash-protection)
+
+# Get details on warnings generated due to GCC value tracking.
+KBUILD_CFLAGS	+= $(call cc-option, -fdiagnostics-show-context=2)
+
+# Show inlining notes for __attribute__((warning/error)) call chains.
+# GCC supports this unconditionally while Clang 23+ provides a flag.
+KBUILD_CFLAGS	+= $(call cc-option, -fdiagnostics-show-inlining-chain)
 
 # Clear used registers at func exit (to reduce data lifetime and ROP gadgets).
 ifdef CONFIG_ZERO_CALL_USED_REGS
@@ -944,29 +1078,37 @@ ifdef CONFIG_SHADOW_CALL_STACK
 ifndef CONFIG_DYNAMIC_SCS
 CC_FLAGS_SCS	:= -fsanitize=shadow-call-stack
 KBUILD_CFLAGS	+= $(CC_FLAGS_SCS)
+KBUILD_RUSTFLAGS += -Zsanitizer=shadow-call-stack
 endif
 export CC_FLAGS_SCS
 endif
 
+ifdef CONFIG_RUST_INLINE_HELPERS
+# `rustc` normally emits traps for unreachable paths during code generation.
+# With inline helpers, Clang performs code generation from the linked bitcode
+# instead, so request the same behavior explicitly. Otherwise `objtool` may
+# follow an impossible Rust path into the next function.
+CC_FLAGS_RUST_INLINE_HELPERS := -mllvm -trap-unreachable \
+				-mllvm -no-trap-after-noreturn
+export CC_FLAGS_RUST_INLINE_HELPERS
+endif
+
 ifdef CONFIG_LTO_CLANG
-ifdef CONFIG_LTO_CLANG_THIN
-CC_FLAGS_LTO	:= -flto=thin -fsplit-lto-unit
-KBUILD_LDFLAGS	+= --thinlto-cache-dir=$(extmod_prefix).thinlto-cache
-else
+ifdef CONFIG_LTO_CLANG_FULL
 CC_FLAGS_LTO	:= -flto
+else
+CC_FLAGS_LTO	:= -flto=thin -fsplit-lto-unit
+
+# These LLVM options were initially added with only in-process ThinLTO
+# support, so avoid distributed ThinLTO support for now.
+ifdef CONFIG_LTO_CLANG_THIN
+KBUILD_LDFLAGS += $(call ld-option,--lto-whole-program-visibility -mllvm -always-rename-promoted-locals=false)
+endif
 endif
 CC_FLAGS_LTO	+= -fvisibility=hidden
 
 # Limit inlining across translation units to reduce binary size
 KBUILD_LDFLAGS += -mllvm -import-instr-limit=5
-
-# Check for frame size exceeding threshold during prolog/epilog insertion
-# when using lld < 13.0.0.
-ifneq ($(CONFIG_FRAME_WARN),0)
-ifeq ($(call test-lt, $(CONFIG_LLD_VERSION), 130000),y)
-KBUILD_LDFLAGS	+= -plugin-opt=-warn-stack-size=$(CONFIG_FRAME_WARN)
-endif
-endif
 endif
 
 ifdef CONFIG_LTO
@@ -975,14 +1117,40 @@ KBUILD_AFLAGS	+= -fno-lto
 export CC_FLAGS_LTO
 endif
 
-ifdef CONFIG_CFI_CLANG
+ifdef CONFIG_CFI
 CC_FLAGS_CFI	:= -fsanitize=kcfi
+ifdef CONFIG_CFI_ICALL_NORMALIZE_INTEGERS
+	CC_FLAGS_CFI	+= -fsanitize-cfi-icall-experimental-normalize-integers
+endif
+ifdef CONFIG_FINEIBT_BHI
+	CC_FLAGS_CFI	+= -fsanitize-kcfi-arity
+endif
+ifdef CONFIG_RUST
+	# Always pass -Zsanitizer-cfi-normalize-integers as CONFIG_RUST selects
+	# CONFIG_CFI_ICALL_NORMALIZE_INTEGERS.
+	# Disable function merging as LLVM incorrectly merges functions with different KCFI types.
+	RUSTC_FLAGS_CFI   := -Zsanitizer=kcfi -Zsanitizer-cfi-normalize-integers -Zmerge-functions=disabled
+	KBUILD_RUSTFLAGS += $(RUSTC_FLAGS_CFI)
+	export RUSTC_FLAGS_CFI
+endif
 KBUILD_CFLAGS	+= $(CC_FLAGS_CFI)
 export CC_FLAGS_CFI
 endif
 
+# Architectures can define flags to add/remove for floating-point support
+CC_FLAGS_FPU	+= -D_LINUX_FPU_COMPILATION_UNIT
+export CC_FLAGS_FPU
+export CC_FLAGS_NO_FPU
+
 ifneq ($(CONFIG_FUNCTION_ALIGNMENT),0)
+# Set the minimal function alignment. Use the newer GCC option
+# -fmin-function-alignment if it is available, or fall back to -falign-funtions.
+# See also CONFIG_CC_HAS_SANE_FUNCTION_ALIGNMENT.
+ifdef CONFIG_CC_HAS_MIN_FUNCTION_ALIGNMENT
+KBUILD_CFLAGS += -fmin-function-alignment=$(CONFIG_FUNCTION_ALIGNMENT)
+else
 KBUILD_CFLAGS += -falign-functions=$(CONFIG_FUNCTION_ALIGNMENT)
+endif
 endif
 
 # arch Makefile may override CC so keep this after arch Makefile is included
@@ -1005,18 +1173,52 @@ ifdef CONFIG_CC_IS_GCC
 KBUILD_CFLAGS   += -fconserve-stack
 endif
 
-# change __FILE__ to the relative path from the srctree
-KBUILD_CPPFLAGS += $(call cc-option,-fmacro-prefix-map=$(srctree)/=)
+# Ensure compilers do not transform certain loops into calls to wcslen()
+KBUILD_CFLAGS += -fno-builtin-wcslen
+
+CFLAGS_GCOV	:= -fprofile-arcs -ftest-coverage
+ifdef CONFIG_CC_IS_GCC
+CFLAGS_GCOV	+= -fno-tree-loop-im
+# Use atomic counter updates to avoid concurrent-access crashes in GCOV.
+# Only enable if -fprofile-update=prefer-atomic does not introduce new
+# undefined symbols (e.g. libatomic calls that the kernel cannot link).
+CFLAGS_GCOV	+= $(call try-run,\
+	echo 'long long x; void f(void){x++;}' | \
+	$(CC) $(KBUILD_CPPFLAGS) $(KBUILD_CFLAGS) -w -fprofile-arcs \
+	-ftest-coverage -x c - -c -o "$$TMP.base" && \
+	echo 'long long x; void f(void){x++;}' | \
+	$(CC) $(KBUILD_CPPFLAGS) $(KBUILD_CFLAGS) -w -fprofile-arcs \
+	-ftest-coverage -fprofile-update=prefer-atomic \
+	-x c - -c -o "$$TMP" && \
+	$(NM) "$$TMP.base" | grep ' U ' > "$$TMP.ubase" || true ; \
+	$(NM) "$$TMP" | grep ' U ' > "$$TMP.utest" || true ; \
+	cmp -s "$$TMP.ubase" "$$TMP.utest",\
+	-fprofile-update=prefer-atomic)
+endif
+export CFLAGS_GCOV
+
+# change __FILE__ to the relative path to the source directory
+ifdef building_out_of_srctree
+KBUILD_CPPFLAGS += -fmacro-prefix-map=$(srcroot)/=
+ifeq ($(call rustc-option-yn, --remap-path-scope=macro),y)
+KBUILD_RUSTFLAGS += --remap-path-prefix=$(srcroot)/= --remap-path-scope=macro
+endif
+endif
 
 # include additional Makefiles when needed
-include-y			:= scripts/Makefile.extrawarn
+include-y			:= scripts/Makefile.warn
 include-$(CONFIG_DEBUG_INFO)	+= scripts/Makefile.debug
+include-$(CONFIG_DEBUG_INFO_BTF)+= scripts/Makefile.btf
 include-$(CONFIG_KASAN)		+= scripts/Makefile.kasan
 include-$(CONFIG_KCSAN)		+= scripts/Makefile.kcsan
 include-$(CONFIG_KMSAN)		+= scripts/Makefile.kmsan
 include-$(CONFIG_UBSAN)		+= scripts/Makefile.ubsan
 include-$(CONFIG_KCOV)		+= scripts/Makefile.kcov
 include-$(CONFIG_RANDSTRUCT)	+= scripts/Makefile.randstruct
+include-$(CONFIG_KSTACK_ERASE)	+= scripts/Makefile.kstack_erase
+include-$(CONFIG_AUTOFDO_CLANG)	+= scripts/Makefile.autofdo
+include-$(CONFIG_PROPELLER_CLANG)	+= scripts/Makefile.propeller
+include-$(CONFIG_WARN_CONTEXT_ANALYSIS) += scripts/Makefile.context-analysis
 include-$(CONFIG_GCC_PLUGINS)	+= scripts/Makefile.gcc-plugins
 
 include $(addprefix $(srctree)/, $(include-y))
@@ -1033,6 +1235,12 @@ KBUILD_RUSTFLAGS += $(KRUSTFLAGS)
 
 KBUILD_LDFLAGS_MODULE += --build-id=sha1
 LDFLAGS_vmlinux += --build-id=sha1
+
+# Specific code, such as outlined KASAN checks, may be placed in
+# COMDAT-deduplicated sections. Use --force-group-allocation to resolve these
+# groups when linking modules. The option is available from ld.bfd 2.29 and
+# ld.lld 19.1.0.
+KBUILD_LDFLAGS_MODULE += $(call ld-option,--force-group-allocation)
 
 KBUILD_LDFLAGS	+= -z noexecstack
 ifeq ($(CONFIG_LD_IS_BFD),y)
@@ -1054,9 +1262,28 @@ ifdef CONFIG_LD_ORPHAN_WARN
 LDFLAGS_vmlinux += --orphan-handling=$(CONFIG_LD_ORPHAN_WARN_LEVEL)
 endif
 
-# Align the bit size of userspace programs with the kernel
-KBUILD_USERCFLAGS  += $(filter -m32 -m64 --target=%, $(KBUILD_CFLAGS))
-KBUILD_USERLDFLAGS += $(filter -m32 -m64 --target=%, $(KBUILD_CFLAGS))
+ifneq ($(CONFIG_ARCH_VMLINUX_NEEDS_RELOCS),)
+LDFLAGS_vmlinux	+= --emit-relocs --discard-none
+endif
+
+# Align the architecture of userspace programs with the kernel
+USERFLAGS_FROM_KERNEL := --target=%
+
+ifdef CONFIG_ARCH_USERFLAGS
+KBUILD_USERCFLAGS += $(CONFIG_ARCH_USERFLAGS)
+KBUILD_USERLDFLAGS += $(CONFIG_ARCH_USERFLAGS)
+else
+# If not overridden also inherit the bit size
+USERFLAGS_FROM_KERNEL += -m32 -m64
+endif
+
+KBUILD_USERCFLAGS  += $(filter $(USERFLAGS_FROM_KERNEL), $(KBUILD_CPPFLAGS) $(KBUILD_CFLAGS))
+KBUILD_USERLDFLAGS += $(filter $(USERFLAGS_FROM_KERNEL), $(KBUILD_CPPFLAGS) $(KBUILD_CFLAGS))
+
+# userspace programs are linked via the compiler, use the correct linker
+ifdef CONFIG_CC_IS_CLANG
+KBUILD_USERLDFLAGS += --ld-path=$(LD)
+endif
 
 # make the checker run with the right architecture
 CHECKFLAGS += --arch=$(ARCH)
@@ -1066,6 +1293,14 @@ CHECKFLAGS += $(if $(CONFIG_CPU_BIG_ENDIAN),-mbig-endian,-mlittle-endian)
 
 # the checker needs the correct machine size
 CHECKFLAGS += $(if $(CONFIG_64BIT),-m64,-m32)
+
+# Validate the checker is available and functional
+ifneq ($(KBUILD_CHECKSRC), 0)
+  ifneq ($(shell $(srctree)/scripts/checker-valid.sh $(CHECK) $(CHECKFLAGS)), 1)
+    $(warning C=$(KBUILD_CHECKSRC) specified, but $(CHECK) is not available or not up to date)
+    KBUILD_CHECKSRC = 0
+  endif
+endif
 
 # Default kernel image to build when no specific target is given.
 # KBUILD_IMAGE may be overruled on the command line or
@@ -1097,10 +1332,6 @@ export MODLIB
 
 PHONY += prepare0
 
-export extmod_prefix = $(if $(KBUILD_EXTMOD),$(KBUILD_EXTMOD)/)
-export MODORDER := $(extmod_prefix)modules.order
-export MODULES_NSDEPS := $(extmod_prefix)modules.nsdeps
-
 ifeq ($(KBUILD_EXTMOD),)
 
 build-dir	:= .
@@ -1113,39 +1344,30 @@ export ARCH_LIB		:= $(filter %/, $(libs-y))
 export ARCH_DRIVERS	:= $(drivers-y) $(drivers-m)
 # Externally visible symbols (used by link-vmlinux.sh)
 
-KBUILD_VMLINUX_OBJS := ./built-in.a
-ifdef CONFIG_MODULES
-KBUILD_VMLINUX_OBJS += $(patsubst %/, %/lib.a, $(filter %/, $(libs-y)))
+KBUILD_VMLINUX_OBJS := built-in.a $(patsubst %/, %/lib.a, $(filter %/, $(libs-y)))
 KBUILD_VMLINUX_LIBS := $(filter-out %/, $(libs-y))
-else
-KBUILD_VMLINUX_LIBS := $(patsubst %/,%/lib.a, $(libs-y))
-endif
 
-export KBUILD_VMLINUX_LIBS
+export KBUILD_VMLINUX_OBJS KBUILD_VMLINUX_LIBS
 export KBUILD_LDS          := arch/$(SRCARCH)/kernel/vmlinux.lds
 
 ifdef CONFIG_TRIM_UNUSED_KSYMS
 # For the kernel to actually contain only the needed exported symbols,
 # we have to build modules as well to determine what those symbols are.
-KBUILD_MODULES := 1
+KBUILD_MODULES := y
 endif
 
-# '$(AR) mPi' needs 'T' to workaround the bug of llvm-ar <= 14
-quiet_cmd_ar_vmlinux.a = AR      $@
-      cmd_ar_vmlinux.a = \
-	rm -f $@; \
-	$(AR) cDPrST $@ $(KBUILD_VMLINUX_OBJS); \
-	$(AR) mPiT $$($(AR) t $@ | sed -n 1p) $@ $$($(AR) t $@ | grep -F -f $(srctree)/scripts/head-object-list.txt)
+PHONY += vmlinux_a
+vmlinux_a: $(KBUILD_VMLINUX_OBJS) scripts/head-object-list.txt FORCE
+	$(Q)$(MAKE) -f $(srctree)/scripts/Makefile.vmlinux_a
 
-targets += vmlinux.a
-vmlinux.a: $(KBUILD_VMLINUX_OBJS) scripts/head-object-list.txt FORCE
-	$(call if_changed,ar_vmlinux.a)
+vmlinux.a: vmlinux_a
+	@:
 
 PHONY += vmlinux_o
 vmlinux_o: vmlinux.a $(KBUILD_VMLINUX_LIBS)
 	$(Q)$(MAKE) -f $(srctree)/scripts/Makefile.vmlinux_o
 
-vmlinux.o modules.builtin.modinfo modules.builtin: vmlinux_o
+vmlinux.o: vmlinux_o
 	@:
 
 PHONY += vmlinux
@@ -1195,7 +1417,8 @@ PHONY += prepare archprepare
 
 archprepare: outputmakefile archheaders archscripts scripts include/config/kernel.release \
 	asm-generic $(version_h) include/generated/utsrelease.h \
-	include/generated/compile.h include/generated/autoconf.h remove-stale-files
+	include/generated/compile.h include/generated/autoconf.h \
+	include/generated/rustc_cfg remove-stale-files
 
 prepare0: archprepare
 	$(Q)$(MAKE) $(build)=scripts/mod
@@ -1204,7 +1427,7 @@ prepare0: archprepare
 # All the preparing..
 prepare: prepare0
 ifdef CONFIG_RUST
-	$(Q)$(CONFIG_SHELL) $(srctree)/scripts/rust_is_available.sh
+	+$(Q)$(CONFIG_SHELL) $(srctree)/scripts/rust_is_available.sh
 	$(Q)$(MAKE) $(build)=rust
 endif
 
@@ -1213,7 +1436,7 @@ remove-stale-files:
 	$(Q)$(srctree)/scripts/remove-stale-files
 
 # Support for using generic headers in asm-generic
-asm-generic := -f $(srctree)/scripts/Makefile.asm-generic obj
+asm-generic := -f $(srctree)/scripts/Makefile.asm-headers obj
 
 PHONY += asm-generic uapi-asm-generic
 asm-generic: uapi-asm-generic
@@ -1253,8 +1476,8 @@ define filechk_version.h
 	echo \#define LINUX_VERSION_SUBLEVEL $(SUBLEVEL)
 endef
 
-$(version_h): PATCHLEVEL := $(or $(PATCHLEVEL), 0)
-$(version_h): SUBLEVEL := $(or $(SUBLEVEL), 0)
+$(version_h): private PATCHLEVEL := $(or $(PATCHLEVEL), 0)
+$(version_h): private SUBLEVEL := $(or $(SUBLEVEL), 0)
 $(version_h): FORCE
 	$(call filechk,version.h)
 
@@ -1293,18 +1516,29 @@ PHONY += archheaders archscripts
 hdr-inst := -f $(srctree)/scripts/Makefile.headersinst obj
 
 PHONY += headers
-headers: $(version_h) scripts_unifdef uapi-asm-generic archheaders archscripts
-	$(if $(filter um, $(SRCARCH)), $(error Headers not exportable for UML))
+headers: $(version_h) scripts_unifdef uapi-asm-generic archheaders
+ifdef HEADER_ARCH
+	$(Q)$(MAKE) -f $(srctree)/Makefile HEADER_ARCH= SRCARCH=$(HEADER_ARCH) headers
+else
 	$(Q)$(MAKE) $(hdr-inst)=include/uapi
 	$(Q)$(MAKE) $(hdr-inst)=arch/$(SRCARCH)/include/uapi
+endif
 
 ifdef CONFIG_HEADERS_INSTALL
 prepare: headers
 endif
 
+PHONY += usr_gen_init_cpio
+usr_gen_init_cpio: scripts_basic
+	$(Q)$(MAKE) $(build)=usr usr/gen_init_cpio
+
 PHONY += scripts_unifdef
 scripts_unifdef: scripts_basic
 	$(Q)$(MAKE) $(build)=scripts scripts/unifdef
+
+PHONY += scripts_gen_packed_field_checks
+scripts_gen_packed_field_checks: scripts_basic
+	$(Q)$(MAKE) $(build)=scripts scripts/gen_packed_field_checks
 
 # ---------------------------------------------------------------------------
 # Install
@@ -1316,6 +1550,14 @@ scripts_unifdef: scripts_basic
 
 quiet_cmd_install = INSTALL $(INSTALL_PATH)
       cmd_install = unset sub_make_done; $(srctree)/scripts/install.sh
+
+# ---------------------------------------------------------------------------
+# vDSO install
+
+PHONY += vdso_install
+vdso_install: export INSTALL_FILES = $(vdso-install-y)
+vdso_install:
+	$(Q)$(MAKE) -f $(srctree)/scripts/Makefile.vdsoinst
 
 # ---------------------------------------------------------------------------
 # Tools
@@ -1330,6 +1572,28 @@ prepare: tools/bpf/resolve_btfids
 endif
 endif
 
+# tools/bootconfig renders the embedded bootconfig into a cmdline at build time.
+ifdef CONFIG_CMDLINE_FROM_BOOTCONFIG
+prepare: tools/bootconfig
+endif
+
+# tools/bootconfig is run on the build host during prepare, so force a host
+# binary here; its own Makefile keeps $(CC) for standalone and cross builds.
+# CROSS_COMPILE= is cleared so tools/scripts/Makefile.include does not inject
+# the target's --target=/--sysroot= flags into the host clang invocation under
+# LLVM=1 cross builds (which would produce a target binary that fails to exec).
+tools/bootconfig: export CC := $(HOSTCC)
+tools/bootconfig: FORCE
+	$(Q)mkdir -p $(objtree)/tools
+	$(Q)$(MAKE) O=$(abspath $(objtree)) subdir=tools -C $(srctree)/tools/ \
+		bootconfig CROSS_COMPILE=
+
+# The tools build system is not a part of Kbuild and tends to introduce
+# its own unique issues. If you need to integrate a new tool into Kbuild,
+# please consider locating that tool outside the tools/ tree and using the
+# standard Kbuild "hostprogs" syntax instead of adding a new tools/* entry
+# here. See Documentation/kbuild/makefiles.rst for details.
+
 PHONY += resolve_btfids_clean
 
 resolve_btfids_O = $(abspath $(objtree))/tools/bpf/resolve_btfids
@@ -1341,34 +1605,47 @@ ifneq ($(wildcard $(resolve_btfids_O)),)
 	$(Q)$(MAKE) -sC $(srctree)/tools/bpf/resolve_btfids O=$(resolve_btfids_O) clean
 endif
 
-# Clear a bunch of variables before executing the submake
-ifeq ($(quiet),silent_)
-tools_silent=s
+PHONY += objtool_clean objtool_mrproper
+
+objtool_O = $(abspath $(objtree))/tools/objtool
+
+objtool_clean objtool_mrproper:
+ifneq ($(wildcard $(objtool_O)),)
+	$(Q)$(MAKE) -sC $(abs_srctree)/tools/objtool O=$(objtool_O) srctree=$(abs_srctree) $(patsubst objtool_%,%,$@)
+endif
+
+PHONY += bootconfig_clean
+
+bootconfig_O = $(abspath $(objtree))/tools/bootconfig
+
+bootconfig_clean:
+ifneq ($(wildcard $(bootconfig_O)),)
+	$(Q)$(MAKE) -sC $(srctree)/tools/bootconfig O=$(bootconfig_O) clean
 endif
 
 tools/: FORCE
 	$(Q)mkdir -p $(objtree)/tools
-	$(Q)$(MAKE) LDFLAGS= MAKEFLAGS="$(tools_silent) $(filter --j% -j,$(MAKEFLAGS))" O=$(abspath $(objtree)) subdir=tools -C $(srctree)/tools/
+	$(Q)$(MAKE) O=$(abspath $(objtree)) subdir=tools -C $(srctree)/tools/
 
 tools/%: FORCE
 	$(Q)mkdir -p $(objtree)/tools
-	$(Q)$(MAKE) LDFLAGS= MAKEFLAGS="$(tools_silent) $(filter --j% -j,$(MAKEFLAGS))" O=$(abspath $(objtree)) subdir=tools -C $(srctree)/tools/ $*
+	$(Q)$(MAKE) O=$(abspath $(objtree)) subdir=tools -C $(srctree)/tools/ $*
 
 # ---------------------------------------------------------------------------
 # Kernel selftest
 
 PHONY += kselftest
 kselftest: headers
-	$(Q)$(MAKE) -C $(srctree)/tools/testing/selftests run_tests
+	$(Q)unset sub_make_done; $(MAKE) -C $(srctree)/tools/testing/selftests run_tests
 
 kselftest-%: headers FORCE
-	$(Q)$(MAKE) -C $(srctree)/tools/testing/selftests $*
+	$(Q)unset sub_make_done; $(MAKE) -C $(srctree)/tools/testing/selftests $*
 
 PHONY += kselftest-merge
 kselftest-merge:
 	$(if $(wildcard $(objtree)/.config),, $(error No .config exists, config your kernel first!))
-	$(Q)find $(srctree)/tools/testing/selftests -name config | \
-		xargs $(srctree)/scripts/kconfig/merge_config.sh -m $(objtree)/.config
+	$(Q)find $(srctree)/tools/testing/selftests -name config -o -name config.$(UTS_MACHINE) | \
+		xargs $(srctree)/scripts/kconfig/merge_config.sh -y -m $(objtree)/.config
 	$(Q)$(MAKE) -f $(srctree)/Makefile olddefconfig
 
 # ---------------------------------------------------------------------------
@@ -1377,6 +1654,12 @@ kselftest-merge:
 ifneq ($(wildcard $(srctree)/arch/$(SRCARCH)/boot/dts/),)
 dtstree := arch/$(SRCARCH)/boot/dts
 endif
+
+dtbindingtree := Documentation/devicetree/bindings
+
+%.yaml: dtbs_prepare
+	$(Q)$(MAKE) $(build)=$(dtbindingtree) \
+		    $(dtbindingtree)/$(patsubst %.yaml,%.example.dtb,$@) dt_binding_check_one
 
 ifneq ($(dtstree),)
 
@@ -1388,28 +1671,32 @@ ifneq ($(dtstree),)
 
 PHONY += dtbs dtbs_prepare dtbs_install dtbs_check
 dtbs: dtbs_prepare
-	$(Q)$(MAKE) $(build)=$(dtstree)
+	$(Q)$(MAKE) $(build)=$(dtstree) need-dtbslist=1
 
 # include/config/kernel.release is actually needed when installing DTBs because
 # INSTALL_DTBS_PATH contains $(KERNELRELEASE). However, we do not want to make
 # dtbs_install depend on it as dtbs_install may run as root.
 dtbs_prepare: include/config/kernel.release scripts_dtc
 
-ifneq ($(filter dtbs_check, $(MAKECMDGOALS)),)
+ifneq ($(filter dtbs_check %.yaml, $(MAKECMDGOALS)),)
 export CHECK_DTBS=y
 endif
 
 ifneq ($(CHECK_DTBS),)
-dtbs_prepare: dt_binding_check
+dtbs_prepare: dt_binding_schemas
 endif
 
 dtbs_check: dtbs
 
 dtbs_install:
-	$(Q)$(MAKE) $(dtbinst)=$(dtstree) dst=$(INSTALL_DTBS_PATH)
+	$(Q)$(MAKE) -f $(srctree)/scripts/Makefile.dtbinst obj=$(dtstree)
 
 ifdef CONFIG_OF_EARLY_FLATTREE
 all: dtbs
+endif
+
+ifdef CONFIG_GENERIC_BUILTIN_DTB
+vmlinux: dtbs
 endif
 
 endif
@@ -1419,16 +1706,23 @@ scripts_dtc: scripts_basic
 	$(Q)$(MAKE) $(build)=scripts/dtc
 
 ifneq ($(filter dt_binding_check, $(MAKECMDGOALS)),)
-export CHECK_DT_BINDING=y
+export CHECK_DTBS=y
 endif
 
-PHONY += dt_binding_check
-dt_binding_check: scripts_dtc
-	$(Q)$(MAKE) $(build)=Documentation/devicetree/bindings
+PHONY += dt_binding_check dt_binding_schemas
+dt_binding_check: dt_binding_schemas scripts_dtc
+	$(Q)$(MAKE) $(build)=$(dtbindingtree) $@
+
+dt_binding_schemas:
+	$(Q)$(MAKE) $(build)=$(dtbindingtree)
 
 PHONY += dt_compatible_check
-dt_compatible_check: dt_binding_check
-	$(Q)$(MAKE) $(build)=Documentation/devicetree/bindings $@
+dt_compatible_check: dt_binding_schemas
+	$(Q)$(MAKE) $(build)=$(dtbindingtree) $@
+
+PHONY += dt_style_selftest
+dt_style_selftest:
+	$(Q)$(srctree)/scripts/dtc/dt-style-selftest/run.sh
 
 # ---------------------------------------------------------------------------
 # Modules
@@ -1443,7 +1737,7 @@ all: modules
 # the built-in objects during the descend as well, in order to
 # make sure the checksums are up to date before we record them.
 ifdef CONFIG_MODVERSIONS
-  KBUILD_BUILTIN := 1
+  KBUILD_BUILTIN := y
 endif
 
 # Build modules
@@ -1452,7 +1746,7 @@ endif
 # *.ko are usually independent of vmlinux, but CONFIG_DEBUG_INFO_BTF_MODULES
 # is an exception.
 ifdef CONFIG_DEBUG_INFO_BTF_MODULES
-KBUILD_BUILTIN := 1
+KBUILD_BUILTIN := y
 modules: vmlinux
 endif
 
@@ -1474,24 +1768,29 @@ endif # CONFIG_MODULES
 # Directories & files removed with 'make clean'
 CLEAN_FILES += vmlinux.symvers modules-only.symvers \
 	       modules.builtin modules.builtin.modinfo modules.nsdeps \
-	       compile_commands.json .thinlto-cache rust/test \
-	       rust-project.json .vmlinux.objs .vmlinux.export.c
+	       modules.builtin.ranges vmlinux.o.map vmlinux.unstripped \
+	       vmlinux.thinlto-index builtin.order \
+	       compile_commands.json rust/test \
+	       rust-project.json .vmlinux.objs .vmlinux.export.c \
+	       .builtin-dtbs-list .builtin-dtbs.S sbom-*.spdx.json
 
 # Directories & files removed with 'make mrproper'
 MRPROPER_FILES += include/config include/generated          \
 		  arch/$(SRCARCH)/include/generated .objdiff \
-		  debian snap tar-install \
+		  debian snap tar-install PKGBUILD pacman \
 		  .config .config.old .version \
 		  Module.symvers \
 		  certs/signing_key.pem \
 		  certs/x509.genkey \
 		  vmlinux-gdb.py \
-		  kernel.spec rpmbuild \
-		  rust/libmacros.so
+		  rpmbuild \
+		  rust/libmacros.so rust/libmacros.dylib \
+		  rust/libpin_init_internal.so rust/libpin_init_internal.dylib \
+		  rust/libzerocopy_derive.so rust/libzerocopy_derive.dylib
 
 # clean - Delete most, but leave enough to build external modules
 #
-clean: rm-files := $(CLEAN_FILES)
+clean: private rm-files := $(CLEAN_FILES)
 
 PHONY += archclean vmlinuxclean
 
@@ -1499,18 +1798,18 @@ vmlinuxclean:
 	$(Q)$(CONFIG_SHELL) $(srctree)/scripts/link-vmlinux.sh clean
 	$(Q)$(if $(ARCH_POSTLINK), $(MAKE) -f $(ARCH_POSTLINK) clean)
 
-clean: archclean vmlinuxclean resolve_btfids_clean
+clean: archclean vmlinuxclean resolve_btfids_clean objtool_clean bootconfig_clean
 
 # mrproper - Delete all generated files, including .config
 #
-mrproper: rm-files := $(wildcard $(MRPROPER_FILES))
+mrproper: private rm-files := $(MRPROPER_FILES)
 mrproper-dirs      := $(addprefix _mrproper_,scripts)
 
 PHONY += $(mrproper-dirs) mrproper
 $(mrproper-dirs):
 	$(Q)$(MAKE) $(clean)=$(patsubst _mrproper_%,%,$@)
 
-mrproper: clean $(mrproper-dirs)
+mrproper: clean objtool_mrproper $(mrproper-dirs)
 	$(call cmd,rmfiles)
 	@find . $(RCS_FIND_IGNORE) \
 		\( -name '*.rmeta' \) \
@@ -1531,6 +1830,8 @@ distclean: mrproper
 
 # Packaging of the kernel to various formats
 # ---------------------------------------------------------------------------
+
+modules-cpio-pkg: usr_gen_init_cpio
 
 %src-pkg: FORCE
 	$(Q)$(MAKE) -f $(srctree)/scripts/Makefile.package $@
@@ -1560,6 +1861,7 @@ help:
 	@echo  '* vmlinux	  - Build the bare kernel'
 	@echo  '* modules	  - Build all modules'
 	@echo  '  modules_install - Install all modules to INSTALL_MOD_PATH (default: /)'
+	@echo  '  vdso_install    - Install unstripped vdso to INSTALL_MOD_PATH (default: /)'
 	@echo  '  dir/            - Build all files in dir and below'
 	@echo  '  dir/file.[ois]  - Build specified target only'
 	@echo  '  dir/file.ll     - Build the LLVM assembly file'
@@ -1574,21 +1876,24 @@ help:
 	@echo  '  kernelrelease	  - Output the release version string (use with make -s)'
 	@echo  '  kernelversion	  - Output the version stored in Makefile (use with make -s)'
 	@echo  '  image_name	  - Output the image name (use with make -s)'
-	@echo  '  headers_install - Install sanitised kernel headers to INSTALL_HDR_PATH'; \
+	@echo  '  headers	  - Build ready-to-install UAPI headers in usr/include'
+	@echo  '  headers_install - Install sanitised kernel UAPI headers to INSTALL_HDR_PATH'; \
 	 echo  '                    (default: $(INSTALL_HDR_PATH))'; \
 	 echo  ''
 	@echo  'Static analysers:'
-	@echo  '  checkstack      - Generate a list of stack hogs'
-	@echo  '  versioncheck    - Sanity check on version.h usage'
-	@echo  '  includecheck    - Check for duplicate included header files'
-	@echo  '  export_report   - List the usages of all exported symbols'
-	@echo  '  headerdep       - Detect inclusion cycles in headers'
-	@echo  '  coccicheck      - Check with Coccinelle'
-	@echo  '  clang-analyzer  - Check with clang static analyzer'
-	@echo  '  clang-tidy      - Check with clang-tidy'
+	@echo  '  checkstack        - Generate a list of stack hogs and consider all functions'
+	@echo  '                      with a stack size larger than MINSTACKSIZE (default: 100)'
+	@echo  '  versioncheck      - Sanity check on version.h usage'
+	@echo  '  includecheck      - Check for duplicate included header files'
+	@echo  '  headerdep         - Detect inclusion cycles in headers'
+	@echo  '  coccicheck        - Check with Coccinelle'
+	@echo  '  kconfig-sym-check - Check for dangling Kconfig symbol references'
+	@echo  '  clang-analyzer    - Check with clang static analyzer'
+	@echo  '  clang-tidy        - Check with clang-tidy'
 	@echo  ''
 	@echo  'Tools:'
 	@echo  '  nsdeps          - Generate missing symbol namespace dependencies'
+	@echo  '  sbom            - Generate Software Bill of Materials'
 	@echo  ''
 	@echo  'Kernel selftest:'
 	@echo  '  kselftest         - Build and run kernel selftest'
@@ -1621,10 +1926,12 @@ help:
 	@echo  ''
 	@$(if $(dtstree), \
 		echo 'Devicetree:'; \
-		echo '* dtbs             - Build device tree blobs for enabled boards'; \
-		echo '  dtbs_install     - Install dtbs to $(INSTALL_DTBS_PATH)'; \
-		echo '  dt_binding_check - Validate device tree binding documents'; \
-		echo '  dtbs_check       - Validate device tree source files';\
+		echo '* dtbs               - Build device tree blobs for enabled boards'; \
+		echo '  dtbs_install       - Install dtbs to $(INSTALL_DTBS_PATH)'; \
+		echo '  dt_binding_check   - Validate device tree binding documents and examples'; \
+		echo '  dt_binding_schemas - Build processed device tree binding schemas'; \
+		echo '  dt_style_selftest  - Run dt-check-style fixture tests'; \
+		echo '  dtbs_check         - Validate device tree source files';\
 		echo '')
 
 	@echo 'Userspace tools targets:'
@@ -1637,9 +1944,9 @@ help:
 	@echo  'Documentation targets:'
 	@$(MAKE) -f $(srctree)/Documentation/Makefile dochelp
 	@echo  ''
-	@echo  'Architecture specific targets ($(SRCARCH)):'
+	@echo  'Architecture-specific targets ($(SRCARCH)):'
 	@$(or $(archhelp),\
-		echo '  No architecture specific help defined for $(SRCARCH)')
+		echo '  No architecture-specific help defined for $(SRCARCH)')
 	@echo  ''
 	@$(if $(boards), \
 		$(foreach b, $(boards), \
@@ -1659,12 +1966,15 @@ help:
 	@echo  '                       (sparse by default)'
 	@echo  '  make C=2   [targets] Force check of all c source with $$CHECK'
 	@echo  '  make RECORDMCOUNT_WARN=1 [targets] Warn about ignored mcount sections'
-	@echo  '  make W=n   [targets] Enable extra build checks, n=1,2,3 where'
+	@echo  '  make W=n   [targets] Enable extra build checks, n=1,2,3,c,e where'
 	@echo  '		1: warnings which may be relevant and do not occur too often'
 	@echo  '		2: warnings which occur quite often but may still be relevant'
 	@echo  '		3: more obscure warnings, can most likely be ignored'
+	@echo  '		c: extra checks in the configuration stage (Kconfig)'
 	@echo  '		e: warnings are being treated as errors'
 	@echo  '		Multiple levels can be combined with W=12 or W=123'
+	@echo  '  make UT=1   [targets] Warn if a tracepoint is defined but not used.'
+	@echo  '          [ This will be removed when all current unused tracepoints are eliminated. ]'
 	@$(if $(dtstree), \
 		echo '  make CHECK_DTBS=1 [targets] Check all generated dtb files against schema'; \
 		echo '         This can be applied both to "dtbs" and to individual "foo.dtb" targets' ; \
@@ -1681,7 +1991,7 @@ help-boards: $(help-board-dirs)
 boards-per-dir = $(sort $(notdir $(wildcard $(srctree)/arch/$(SRCARCH)/configs/$*/*_defconfig)))
 
 $(help-board-dirs): help-%:
-	@echo  'Architecture specific targets ($(SRCARCH) $*):'
+	@echo  'Architecture-specific targets ($(SRCARCH) $*):'
 	@$(if $(boards-per-dir), \
 		$(foreach b, $(boards-per-dir), \
 		printf "  %-24s - Build for %s\\n" $*/$(b) $(subst _defconfig,,$(b));) \
@@ -1691,7 +2001,9 @@ $(help-board-dirs): help-%:
 # Documentation targets
 # ---------------------------------------------------------------------------
 DOC_TARGETS := xmldocs latexdocs pdfdocs htmldocs epubdocs cleandocs \
-	       linkcheckdocs dochelp refcheckdocs texinfodocs infodocs
+	       linkcheckdocs dochelp refcheckdocs texinfodocs infodocs mandocs \
+	       htmldocs-redirects
+
 PHONY += $(DOC_TARGETS)
 $(DOC_TARGETS):
 	$(Q)$(MAKE) $(build)=Documentation $@
@@ -1703,7 +2015,7 @@ $(DOC_TARGETS):
 # "Is Rust available?" target
 PHONY += rustavailable
 rustavailable:
-	$(Q)$(CONFIG_SHELL) $(srctree)/scripts/rust_is_available.sh && echo "Rust is available!"
+	+$(Q)$(CONFIG_SHELL) $(srctree)/scripts/rust_is_available.sh && echo "Rust is available!"
 
 # Documentation target
 #
@@ -1718,20 +2030,20 @@ rusttest: prepare
 	$(Q)$(MAKE) $(build)=rust $@
 
 # Formatting targets
+#
+# Generated files as well as vendored crates are skipped.
 PHONY += rustfmt rustfmtcheck
 
-# We skip `rust/alloc` since we want to minimize the diff w.r.t. upstream.
-#
-# We match using absolute paths since `find` does not resolve them
-# when matching, which is a problem when e.g. `srctree` is `..`.
-# We `grep` afterwards in order to remove the directory entry itself.
 rustfmt:
-	$(Q)find $(abs_srctree) -type f -name '*.rs' \
-		-o -path $(abs_srctree)/rust/alloc -prune \
-		-o -path $(abs_objtree)/rust/test -prune \
-		| grep -Fv $(abs_srctree)/rust/alloc \
-		| grep -Fv $(abs_objtree)/rust/test \
-		| grep -Fv generated \
+	$(Q)find $(srctree) $(RCS_FIND_IGNORE) \
+		\( \
+			-path $(srctree)/rust/proc-macro2 \
+			-o -path $(srctree)/rust/quote \
+			-o -path $(srctree)/rust/syn \
+			-o -path $(srctree)/rust/zerocopy \
+			-o -path $(srctree)/rust/zerocopy-derive \
+		\) -prune -o \
+		-type f -a -name '*.rs' -a ! -name '*generated*' -print \
 		| xargs $(RUSTFMT) $(rustfmt_flags)
 
 rustfmtcheck: rustfmt_flags = --check
@@ -1768,25 +2080,27 @@ filechk_kernel.release = echo $(KERNELRELEASE)
 
 # We are always building only modules.
 KBUILD_BUILTIN :=
-KBUILD_MODULES := 1
+KBUILD_MODULES := y
 
-build-dir := $(KBUILD_EXTMOD)
+build-dir := .
 
-compile_commands.json: $(extmod_prefix)compile_commands.json
-PHONY += compile_commands.json
-
-clean-dirs := $(KBUILD_EXTMOD)
-clean: rm-files := $(KBUILD_EXTMOD)/Module.symvers $(KBUILD_EXTMOD)/modules.nsdeps \
-	$(KBUILD_EXTMOD)/compile_commands.json $(KBUILD_EXTMOD)/.thinlto-cache
+clean-dirs := .
+clean: private rm-files := Module.symvers modules.nsdeps compile_commands.json
 
 PHONY += prepare
 # now expand this into a simple variable to reduce the cost of shell evaluations
 prepare: CC_VERSION_TEXT := $(CC_VERSION_TEXT)
+prepare: PAHOLE_VERSION := $(PAHOLE_VERSION)
 prepare:
 	@if [ "$(CC_VERSION_TEXT)" != "$(CONFIG_CC_VERSION_TEXT)" ]; then \
 		echo >&2 "warning: the compiler differs from the one used to build the kernel"; \
 		echo >&2 "  The kernel was built by: $(CONFIG_CC_VERSION_TEXT)"; \
 		echo >&2 "  You are using:           $(CC_VERSION_TEXT)"; \
+	fi
+	@if [ "$(PAHOLE_VERSION)" != "$(CONFIG_PAHOLE_VERSION)" ]; then \
+		echo >&2 "warning: pahole version differs from the one used to build the kernel"; \
+		echo >&2 "  The kernel was built with: $(CONFIG_PAHOLE_VERSION)"; \
+		echo >&2 "  You are using:             $(PAHOLE_VERSION)"; \
 	fi
 
 PHONY += help
@@ -1836,7 +2150,7 @@ endif
 
 ifdef CONFIG_MODULES
 
-$(MODORDER): $(build-dir)
+modules.order: $(build-dir)
 	@:
 
 # KBUILD_MODPOST_NOFINAL can be set to skip the final link of modules.
@@ -1847,7 +2161,7 @@ ifneq ($(KBUILD_MODPOST_NOFINAL),1)
 endif
 
 PHONY += modules_check
-modules_check: $(MODORDER)
+modules_check: modules.order
 	$(Q)$(CONFIG_SHELL) $(srctree)/scripts/modules-check.sh $<
 
 else # CONFIG_MODULES
@@ -1888,21 +2202,23 @@ $(single-ko): single_modules
 $(single-no-ko): $(build-dir)
 	@:
 
-# Remove MODORDER when done because it is not the real one.
+# Remove modules.order when done because it is not the real one.
 PHONY += single_modules
 single_modules: $(single-no-ko) modules_prepare
-	$(Q){ $(foreach m, $(single-ko), echo $(extmod_prefix)$(m:%.ko=%.o);) } > $(MODORDER)
+	$(Q){ $(foreach m, $(single-ko), echo $(m:%.ko=%.o);) } > modules.order
 	$(Q)$(MAKE) -f $(srctree)/scripts/Makefile.modpost
 ifneq ($(KBUILD_MODPOST_NOFINAL),1)
 	$(Q)$(MAKE) -f $(srctree)/scripts/Makefile.modfinal
 endif
-	$(Q)rm -f $(MODORDER)
+	$(Q)rm -f modules.order
 
 single-goals := $(addprefix $(build-dir)/, $(single-no-ko))
 
-KBUILD_MODULES := 1
+KBUILD_MODULES := y
 
 endif
+
+prepare: outputmakefile
 
 # Preset locale variables to speed up the build process. Limit locale
 # tweaks to this spot to avoid wrong language settings when running
@@ -1919,12 +2235,12 @@ $(clean-dirs):
 
 clean: $(clean-dirs)
 	$(call cmd,rmfiles)
-	@find $(or $(KBUILD_EXTMOD), .) $(RCS_FIND_IGNORE) \
+	@find . $(RCS_FIND_IGNORE) \
 		\( -name '*.[aios]' -o -name '*.rsi' -o -name '*.ko' -o -name '.*.cmd' \
-		-o -name '*.ko.*' \
+		-o -name '*.ko.*' -o -name '*.o.thinlto.bc' \
 		-o -name '*.dtb' -o -name '*.dtbo' \
 		-o -name '*.dtb.S' -o -name '*.dtbo.S' \
-		-o -name '*.dt.yaml' \
+		-o -name '*.dt.yaml' -o -name 'dtbs-list' \
 		-o -name '*.dwo' -o -name '*.lst' \
 		-o -name '*.su' -o -name '*.mod' \
 		-o -name '.*.d' -o -name '.*.tmp' -o -name '*.mod.c' \
@@ -1934,7 +2250,8 @@ clean: $(clean-dirs)
 		-o -name '*.c.[012]*.*' \
 		-o -name '*.ll' \
 		-o -name '*.gcno' \
-		-o -name '*.*.symversions' \) -type f -print \
+		-o -name '*.long-type-*.txt' \
+		\) -type f -print \
 		-o -name '.tmp_*' -print \
 		| xargs rm -rf
 
@@ -1946,10 +2263,18 @@ quiet_cmd_tags = GEN     $@
 tags TAGS cscope gtags: FORCE
 	$(call cmd,tags)
 
-# IDE support targets
+# Generate rust-project.json (a file that describes the structure of non-Cargo
+# Rust projects) for rust-analyzer (an implementation of the Language Server
+# Protocol).
 PHONY += rust-analyzer
 rust-analyzer:
+	+$(Q)$(CONFIG_SHELL) $(srctree)/scripts/rust_is_available.sh
+ifdef KBUILD_EXTMOD
+# FIXME: external modules must not descend into a sub-directory of the kernel
+	$(Q)$(MAKE) $(build)=$(objtree)/rust src=$(srctree)/rust $@
+else
 	$(Q)$(MAKE) $(build)=rust $@
+endif
 
 # Script to generate missing namespace dependencies
 # ---------------------------------------------------------------------------
@@ -1959,18 +2284,41 @@ nsdeps: export KBUILD_NSDEPS=1
 nsdeps: modules
 	$(Q)$(CONFIG_SHELL) $(srctree)/scripts/nsdeps
 
+# Script to generate .spdx.json SBOM documents describing the build
+# ---------------------------------------------------------------------------
+
+ifdef building_out_of_srctree
+sbom_targets := sbom-source.spdx.json
+endif
+sbom_targets += sbom-build.spdx.json sbom-output.spdx.json
+quiet_cmd_sbom = GEN     $(sbom_targets)
+      cmd_sbom = printf "%s\n" "$(KBUILD_IMAGE)" >"$(tmp-target)"; \
+                 $(if $(CONFIG_MODULES),sed 's/\.o$$/.ko/' $(objtree)/modules.order >> "$(tmp-target)";) \
+                 $(PYTHON3) $(srctree)/scripts/sbom/sbom.py \
+                     --src-tree $(abspath $(srctree)) \
+                     --obj-tree $(abspath $(objtree)) \
+                     --roots-file "$(tmp-target)" \
+                     --output-directory $(abspath $(objtree)) \
+                     --generate-spdx \
+                     --package-license "GPL-2.0 WITH Linux-syscall-note" \
+                     --package-version "$(KERNELVERSION)" \
+                     --write-output-on-error;
+PHONY += sbom
+sbom: $(notdir $(KBUILD_IMAGE)) include/generated/autoconf.h $(if $(CONFIG_MODULES),modules modules.order)
+	$(call cmd,sbom)
+
 # Clang Tooling
 # ---------------------------------------------------------------------------
 
 quiet_cmd_gen_compile_commands = GEN     $@
       cmd_gen_compile_commands = $(PYTHON3) $< -a $(AR) -o $@ $(filter-out $<, $(real-prereqs))
 
-$(extmod_prefix)compile_commands.json: scripts/clang-tools/gen_compile_commands.py \
+compile_commands.json: $(srctree)/scripts/clang-tools/gen_compile_commands.py \
 	$(if $(KBUILD_EXTMOD),, vmlinux.a $(KBUILD_VMLINUX_LIBS)) \
-	$(if $(CONFIG_MODULES), $(MODORDER)) FORCE
+	$(if $(CONFIG_MODULES), modules.order) FORCE
 	$(call if_changed,gen_compile_commands)
 
-targets += $(extmod_prefix)compile_commands.json
+targets += compile_commands.json
 
 PHONY += clang-tidy clang-analyzer
 
@@ -1978,7 +2326,7 @@ ifdef CONFIG_CC_IS_CLANG
 quiet_cmd_clang_tools = CHECK   $<
       cmd_clang_tools = $(PYTHON3) $(srctree)/scripts/clang-tools/run-clang-tools.py $@ $<
 
-clang-tidy clang-analyzer: $(extmod_prefix)compile_commands.json
+clang-tidy clang-analyzer: compile_commands.json
 	$(call cmd,clang_tools)
 else
 clang-tidy clang-analyzer:
@@ -1989,7 +2337,7 @@ endif
 # Scripts to check various things for consistency
 # ---------------------------------------------------------------------------
 
-PHONY += includecheck versioncheck coccicheck export_report
+PHONY += includecheck versioncheck coccicheck kconfig-sym-check
 
 includecheck:
 	find $(srctree)/* $(RCS_FIND_IGNORE) \
@@ -2004,8 +2352,8 @@ versioncheck:
 coccicheck:
 	$(Q)$(BASH) $(srctree)/scripts/$@
 
-export_report:
-	$(PERL) $(srctree)/scripts/export_report.pl
+kconfig-sym-check:
+	$(Q)$(PERL) $(srctree)/scripts/kconfig/kconfig-sym-check.pl $(srctree) $(KCONFIG_SYM_CHECK_EXCLUDES)
 
 PHONY += checkstack kernelrelease kernelversion image_name
 
@@ -2018,9 +2366,10 @@ CHECKSTACK_ARCH := $(SUBARCH)
 else
 CHECKSTACK_ARCH := $(ARCH)
 endif
+MINSTACKSIZE	?= 100
 checkstack:
 	$(OBJDUMP) -d vmlinux $$(find . -name '*.ko') | \
-	$(PERL) $(srctree)/scripts/checkstack.pl $(CHECKSTACK_ARCH)
+	$(PERL) $(srctree)/scripts/checkstack.pl $(CHECKSTACK_ARCH) $(MINSTACKSIZE)
 
 kernelrelease:
 	@$(filechk_kernel.release)

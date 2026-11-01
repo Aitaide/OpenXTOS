@@ -374,11 +374,6 @@ static inline u16 pipe_full_bits(u16 hw_status_bits)
 	return (hw_status_bits >> 10) & 0x3;
 };
 
-static inline unsigned int dma_chain_flag_bits(u16 prepost_bits)
-{
-	return (prepost_bits >> 6) & 0x3;
-}
-
 static inline unsigned int adc_upper_read_ptr_code(u16 prepost_bits)
 {
 	return (prepost_bits >> 12) & 0x3;
@@ -3877,11 +3872,10 @@ static int setup_subdevices(struct comedi_device *dev)
 	s = &dev->subdevices[4];
 	if (board->has_8255) {
 		if (board->layout == LAYOUT_4020) {
-			ret = subdev_8255_init(dev, s, dio_callback_4020,
-					       I8255_4020_REG);
+			ret = subdev_8255_cb_init(dev, s, dio_callback_4020,
+						  I8255_4020_REG);
 		} else {
-			ret = subdev_8255_mm_init(dev, s, NULL,
-						  DIO_8255_OFFSET);
+			ret = subdev_8255_mm_init(dev, s, DIO_8255_OFFSET);
 		}
 		if (ret)
 			return ret;
@@ -4080,28 +4074,28 @@ static int cb_pcidas64_pci_probe(struct pci_dev *dev,
 }
 
 static const struct pci_device_id cb_pcidas64_pci_table[] = {
-	{ PCI_VDEVICE(CB, 0x001d), BOARD_PCIDAS6402_16 },
-	{ PCI_VDEVICE(CB, 0x001e), BOARD_PCIDAS6402_12 },
-	{ PCI_VDEVICE(CB, 0x0035), BOARD_PCIDAS64_M1_16 },
-	{ PCI_VDEVICE(CB, 0x0036), BOARD_PCIDAS64_M2_16 },
-	{ PCI_VDEVICE(CB, 0x0037), BOARD_PCIDAS64_M3_16 },
-	{ PCI_VDEVICE(CB, 0x0052), BOARD_PCIDAS4020_12 },
-	{ PCI_VDEVICE(CB, 0x005d), BOARD_PCIDAS6023 },
-	{ PCI_VDEVICE(CB, 0x005e), BOARD_PCIDAS6025 },
-	{ PCI_VDEVICE(CB, 0x005f), BOARD_PCIDAS6030 },
-	{ PCI_VDEVICE(CB, 0x0060), BOARD_PCIDAS6031 },
-	{ PCI_VDEVICE(CB, 0x0061), BOARD_PCIDAS6032 },
-	{ PCI_VDEVICE(CB, 0x0062), BOARD_PCIDAS6033 },
-	{ PCI_VDEVICE(CB, 0x0063), BOARD_PCIDAS6034 },
-	{ PCI_VDEVICE(CB, 0x0064), BOARD_PCIDAS6035 },
-	{ PCI_VDEVICE(CB, 0x0065), BOARD_PCIDAS6040 },
-	{ PCI_VDEVICE(CB, 0x0066), BOARD_PCIDAS6052 },
-	{ PCI_VDEVICE(CB, 0x0067), BOARD_PCIDAS6070 },
-	{ PCI_VDEVICE(CB, 0x0068), BOARD_PCIDAS6071 },
-	{ PCI_VDEVICE(CB, 0x006f), BOARD_PCIDAS6036 },
-	{ PCI_VDEVICE(CB, 0x0078), BOARD_PCIDAS6013 },
-	{ PCI_VDEVICE(CB, 0x0079), BOARD_PCIDAS6014 },
-	{ 0 }
+	{ PCI_VDEVICE(CB, 0x001d), .driver_data = BOARD_PCIDAS6402_16 },
+	{ PCI_VDEVICE(CB, 0x001e), .driver_data = BOARD_PCIDAS6402_12 },
+	{ PCI_VDEVICE(CB, 0x0035), .driver_data = BOARD_PCIDAS64_M1_16 },
+	{ PCI_VDEVICE(CB, 0x0036), .driver_data = BOARD_PCIDAS64_M2_16 },
+	{ PCI_VDEVICE(CB, 0x0037), .driver_data = BOARD_PCIDAS64_M3_16 },
+	{ PCI_VDEVICE(CB, 0x0052), .driver_data = BOARD_PCIDAS4020_12 },
+	{ PCI_VDEVICE(CB, 0x005d), .driver_data = BOARD_PCIDAS6023 },
+	{ PCI_VDEVICE(CB, 0x005e), .driver_data = BOARD_PCIDAS6025 },
+	{ PCI_VDEVICE(CB, 0x005f), .driver_data = BOARD_PCIDAS6030 },
+	{ PCI_VDEVICE(CB, 0x0060), .driver_data = BOARD_PCIDAS6031 },
+	{ PCI_VDEVICE(CB, 0x0061), .driver_data = BOARD_PCIDAS6032 },
+	{ PCI_VDEVICE(CB, 0x0062), .driver_data = BOARD_PCIDAS6033 },
+	{ PCI_VDEVICE(CB, 0x0063), .driver_data = BOARD_PCIDAS6034 },
+	{ PCI_VDEVICE(CB, 0x0064), .driver_data = BOARD_PCIDAS6035 },
+	{ PCI_VDEVICE(CB, 0x0065), .driver_data = BOARD_PCIDAS6040 },
+	{ PCI_VDEVICE(CB, 0x0066), .driver_data = BOARD_PCIDAS6052 },
+	{ PCI_VDEVICE(CB, 0x0067), .driver_data = BOARD_PCIDAS6070 },
+	{ PCI_VDEVICE(CB, 0x0068), .driver_data = BOARD_PCIDAS6071 },
+	{ PCI_VDEVICE(CB, 0x006f), .driver_data = BOARD_PCIDAS6036 },
+	{ PCI_VDEVICE(CB, 0x0078), .driver_data = BOARD_PCIDAS6013 },
+	{ PCI_VDEVICE(CB, 0x0079), .driver_data = BOARD_PCIDAS6014 },
+	{ }
 };
 MODULE_DEVICE_TABLE(pci, cb_pcidas64_pci_table);
 

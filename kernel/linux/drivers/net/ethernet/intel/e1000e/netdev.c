@@ -25,6 +25,7 @@
 #include <linux/pm_runtime.h>
 #include <linux/prefetch.h>
 #include <linux/suspend.h>
+#include <linux/dmi.h>
 
 #include "e1000.h"
 #define CREATE_TRACE_POINTS
@@ -55,6 +56,25 @@ static const struct e1000_info *e1000_info_tbl[] = {
 	[board_pch_tgp]		= &e1000_pch_tgp_info,
 	[board_pch_adp]		= &e1000_pch_adp_info,
 	[board_pch_mtp]		= &e1000_pch_mtp_info,
+	[board_pch_ptp]		= &e1000_pch_ptp_info,
+};
+
+static const struct dmi_system_id disable_k1_list[] = {
+	{
+		.ident = "Dell Pro 16 Plus PB16250",
+		.matches = {
+			DMI_MATCH(DMI_SYS_VENDOR, "Dell Inc."),
+			DMI_MATCH(DMI_PRODUCT_NAME, "Dell Pro 16 Plus PB16250"),
+		},
+	},
+	{
+		.ident = "Lenovo ThinkPad P14s Gen 5",
+		.matches = {
+			DMI_MATCH(DMI_SYS_VENDOR, "LENOVO"),
+			DMI_MATCH(DMI_PRODUCT_VERSION, "ThinkPad P14s Gen 5"),
+		},
+	},
+	{}
 };
 
 struct e1000_reg_info {
@@ -1788,8 +1808,7 @@ static irqreturn_t e1000_intr_msi(int __always_unused irq, void *data)
 		adapter->corr_errors +=
 		    pbeccsts & E1000_PBECCSTS_CORR_ERR_CNT_MASK;
 		adapter->uncorr_errors +=
-		    (pbeccsts & E1000_PBECCSTS_UNCORR_ERR_CNT_MASK) >>
-		    E1000_PBECCSTS_UNCORR_ERR_CNT_SHIFT;
+		    FIELD_GET(E1000_PBECCSTS_UNCORR_ERR_CNT_MASK, pbeccsts);
 
 		/* Do the reset outside of interrupt context */
 		schedule_work(&adapter->reset_task);
@@ -1803,7 +1822,7 @@ static irqreturn_t e1000_intr_msi(int __always_unused irq, void *data)
 		adapter->total_tx_packets = 0;
 		adapter->total_rx_bytes = 0;
 		adapter->total_rx_packets = 0;
-		__napi_schedule(&adapter->napi);
+		__napi_schedule_irqoff(&adapter->napi);
 	}
 
 	return IRQ_HANDLED;
@@ -1868,8 +1887,7 @@ static irqreturn_t e1000_intr(int __always_unused irq, void *data)
 		adapter->corr_errors +=
 		    pbeccsts & E1000_PBECCSTS_CORR_ERR_CNT_MASK;
 		adapter->uncorr_errors +=
-		    (pbeccsts & E1000_PBECCSTS_UNCORR_ERR_CNT_MASK) >>
-		    E1000_PBECCSTS_UNCORR_ERR_CNT_SHIFT;
+		    FIELD_GET(E1000_PBECCSTS_UNCORR_ERR_CNT_MASK, pbeccsts);
 
 		/* Do the reset outside of interrupt context */
 		schedule_work(&adapter->reset_task);
@@ -1883,7 +1901,7 @@ static irqreturn_t e1000_intr(int __always_unused irq, void *data)
 		adapter->total_tx_packets = 0;
 		adapter->total_rx_bytes = 0;
 		adapter->total_rx_packets = 0;
-		__napi_schedule(&adapter->napi);
+		__napi_schedule_irqoff(&adapter->napi);
 	}
 
 	return IRQ_HANDLED;
@@ -1952,7 +1970,7 @@ static irqreturn_t e1000_intr_msix_rx(int __always_unused irq, void *data)
 	if (napi_schedule_prep(&adapter->napi)) {
 		adapter->total_rx_bytes = 0;
 		adapter->total_rx_packets = 0;
-		__napi_schedule(&adapter->napi);
+		__napi_schedule_irqoff(&adapter->napi);
 	}
 	return IRQ_HANDLED;
 }
@@ -2052,10 +2070,8 @@ void e1000e_set_interrupt_capability(struct e1000_adapter *adapter)
 	case E1000E_INT_MODE_MSIX:
 		if (adapter->flags & FLAG_HAS_MSIX) {
 			adapter->num_vectors = 3; /* RxQ0, TxQ0 and other */
-			adapter->msix_entries = kcalloc(adapter->num_vectors,
-							sizeof(struct
-							       msix_entry),
-							GFP_KERNEL);
+			adapter->msix_entries = kzalloc_objs(struct msix_entry,
+							     adapter->num_vectors);
 			if (adapter->msix_entries) {
 				struct e1000_adapter *a = adapter;
 
@@ -2372,9 +2388,8 @@ int e1000e_setup_rx_resources(struct e1000_ring *rx_ring)
 
 	for (i = 0; i < rx_ring->count; i++) {
 		buffer_info = &rx_ring->buffer_info[i];
-		buffer_info->ps_pages = kcalloc(PS_PAGE_BUFFERS,
-						sizeof(struct e1000_ps_page),
-						GFP_KERNEL);
+		buffer_info->ps_pages = kzalloc_objs(struct e1000_ps_page,
+						     PS_PAGE_BUFFERS);
 		if (!buffer_info->ps_pages)
 			goto err_pages;
 	}
@@ -2763,7 +2778,7 @@ static void e1000e_vlan_filter_disable(struct e1000_adapter *adapter)
 		rctl &= ~(E1000_RCTL_VFE | E1000_RCTL_CFIEN);
 		ew32(RCTL, rctl);
 
-		if (adapter->mng_vlan_id != (u16)E1000_MNG_VLAN_NONE) {
+		if (adapter->mng_vlan_id != E1000_MNG_VLAN_NONE) {
 			e1000_vlan_rx_kill_vid(netdev, htons(ETH_P_8021Q),
 					       adapter->mng_vlan_id);
 			adapter->mng_vlan_id = E1000_MNG_VLAN_NONE;
@@ -2830,7 +2845,7 @@ static void e1000_update_mng_vlan(struct e1000_adapter *adapter)
 		adapter->mng_vlan_id = vid;
 	}
 
-	if ((old_vid != (u16)E1000_MNG_VLAN_NONE) && (vid != old_vid))
+	if (old_vid != E1000_MNG_VLAN_NONE && vid != old_vid)
 		e1000_vlan_rx_kill_vid(netdev, htons(ETH_P_8021Q), old_vid);
 }
 
@@ -2930,11 +2945,8 @@ static void e1000_configure_tx(struct e1000_adapter *adapter)
 	tx_ring->head = adapter->hw.hw_addr + E1000_TDH(0);
 	tx_ring->tail = adapter->hw.hw_addr + E1000_TDT(0);
 
-	writel(0, tx_ring->head);
 	if (adapter->flags2 & FLAG2_PCIM2PCI_ARBITER_WA)
 		e1000e_update_tdt_wa(tx_ring, 0);
-	else
-		writel(0, tx_ring->tail);
 
 	/* Set the Tx Interrupt Delay register */
 	ew32(TIDV, adapter->tx_int_delay);
@@ -3255,11 +3267,8 @@ static void e1000_configure_rx(struct e1000_adapter *adapter)
 	rx_ring->head = adapter->hw.hw_addr + E1000_RDH(0);
 	rx_ring->tail = adapter->hw.hw_addr + E1000_RDT(0);
 
-	writel(0, rx_ring->head);
 	if (adapter->flags2 & FLAG2_PCIM2PCI_ARBITER_WA)
 		e1000e_update_rdt_wa(rx_ring, 0);
-	else
-		writel(0, rx_ring->tail);
 
 	/* Enable Receive Checksum Offload for TCP and UDP */
 	rxcsum = er32(RXCSUM);
@@ -3542,9 +3551,6 @@ s32 e1000e_get_base_timinca(struct e1000_adapter *adapter, u32 *timinca)
 	case e1000_pch_cnp:
 	case e1000_pch_tgp:
 	case e1000_pch_adp:
-	case e1000_pch_mtp:
-	case e1000_pch_lnp:
-	case e1000_pch_ptp:
 	case e1000_pch_nvp:
 		if (er32(TSYNCRXCTL) & E1000_TSYNCRXCTL_SYSCFI) {
 			/* Stable 24MHz frequency */
@@ -3559,6 +3565,17 @@ s32 e1000e_get_base_timinca(struct e1000_adapter *adapter, u32 *timinca)
 			shift = INCVALUE_SHIFT_38400KHZ;
 			adapter->cc.shift = shift;
 		}
+		break;
+	case e1000_pch_mtp:
+	case e1000_pch_lnp:
+	case e1000_pch_ptp:
+		/* System firmware can misreport this value, so set it to a
+		 * stable 38400KHz frequency.
+		 */
+		incperiod = INCPERIOD_38400KHZ;
+		incvalue = INCVALUE_38400KHZ;
+		shift = INCVALUE_SHIFT_38400KHZ;
+		adapter->cc.shift = shift;
 		break;
 	case e1000_82574:
 	case e1000_82583:
@@ -3582,6 +3599,7 @@ s32 e1000e_get_base_timinca(struct e1000_adapter *adapter, u32 *timinca)
  * e1000e_config_hwtstamp - configure the hwtstamp registers and enable/disable
  * @adapter: board private structure
  * @config: timestamp configuration
+ * @extack: netlink extended ACK for error report
  *
  * Outgoing time stamping can be enabled and disabled. Play nice and
  * disable it when requested, although it shouldn't cause any overhead
@@ -3595,7 +3613,8 @@ s32 e1000e_get_base_timinca(struct e1000_adapter *adapter, u32 *timinca)
  * exception of "all V2 events regardless of level 2 or 4".
  **/
 static int e1000e_config_hwtstamp(struct e1000_adapter *adapter,
-				  struct hwtstamp_config *config)
+				  struct kernel_hwtstamp_config *config,
+				  struct netlink_ext_ack *extack)
 {
 	struct e1000_hw *hw = &adapter->hw;
 	u32 tsync_tx_ctl = E1000_TSYNCTXCTL_ENABLED;
@@ -3606,8 +3625,10 @@ static int e1000e_config_hwtstamp(struct e1000_adapter *adapter,
 	bool is_l2 = false;
 	u32 regval;
 
-	if (!(adapter->flags & FLAG_HAS_HW_TIMESTAMP))
+	if (!(adapter->flags & FLAG_HAS_HW_TIMESTAMP)) {
+		NL_SET_ERR_MSG(extack, "No HW timestamp support");
 		return -EINVAL;
+	}
 
 	switch (config->tx_type) {
 	case HWTSTAMP_TX_OFF:
@@ -3616,6 +3637,7 @@ static int e1000e_config_hwtstamp(struct e1000_adapter *adapter,
 	case HWTSTAMP_TX_ON:
 		break;
 	default:
+		NL_SET_ERR_MSG(extack, "Unsupported TX HW timestamp type");
 		return -ERANGE;
 	}
 
@@ -3689,6 +3711,7 @@ static int e1000e_config_hwtstamp(struct e1000_adapter *adapter,
 		config->rx_filter = HWTSTAMP_FILTER_ALL;
 		break;
 	default:
+		NL_SET_ERR_MSG(extack, "Unsupported RX HW timestamp filter");
 		return -ERANGE;
 	}
 
@@ -3701,7 +3724,8 @@ static int e1000e_config_hwtstamp(struct e1000_adapter *adapter,
 	ew32(TSYNCTXCTL, regval);
 	if ((er32(TSYNCTXCTL) & E1000_TSYNCTXCTL_ENABLED) !=
 	    (regval & E1000_TSYNCTXCTL_ENABLED)) {
-		e_err("Timesync Tx Control register not set as expected\n");
+		NL_SET_ERR_MSG(extack,
+			       "Timesync Tx Control register not set as expected");
 		return -EAGAIN;
 	}
 
@@ -3714,7 +3738,8 @@ static int e1000e_config_hwtstamp(struct e1000_adapter *adapter,
 				 E1000_TSYNCRXCTL_TYPE_MASK)) !=
 	    (regval & (E1000_TSYNCRXCTL_ENABLED |
 		       E1000_TSYNCRXCTL_TYPE_MASK))) {
-		e_err("Timesync Rx Control register not set as expected\n");
+		NL_SET_ERR_MSG(extack,
+			       "Timesync Rx Control register not set as expected");
 		return -EAGAIN;
 	}
 
@@ -3909,6 +3934,7 @@ static void e1000e_systim_reset(struct e1000_adapter *adapter)
 {
 	struct ptp_clock_info *info = &adapter->ptp_clock_info;
 	struct e1000_hw *hw = &adapter->hw;
+	struct netlink_ext_ack extack = {};
 	unsigned long flags;
 	u32 timinca;
 	s32 ret_val;
@@ -3936,11 +3962,16 @@ static void e1000e_systim_reset(struct e1000_adapter *adapter)
 	/* reset the systim ns time counter */
 	spin_lock_irqsave(&adapter->systim_lock, flags);
 	timecounter_init(&adapter->tc, &adapter->cc,
-			 ktime_to_ns(ktime_get_real()));
+			 ktime_get_real_ns());
 	spin_unlock_irqrestore(&adapter->systim_lock, flags);
 
 	/* restore the previous hwtstamp configuration settings */
-	e1000e_config_hwtstamp(adapter, &adapter->hwtstamp_config);
+	ret_val = e1000e_config_hwtstamp(adapter, &adapter->hwtstamp_config,
+					 &extack);
+	if (ret_val) {
+		if (extack._msg)
+			e_err("%s\n", extack._msg);
+	}
 }
 
 /**
@@ -4295,8 +4326,8 @@ void e1000e_down(struct e1000_adapter *adapter, bool reset)
 
 	napi_synchronize(&adapter->napi);
 
-	del_timer_sync(&adapter->watchdog_timer);
-	del_timer_sync(&adapter->phy_info_timer);
+	timer_delete_sync(&adapter->watchdog_timer);
+	timer_delete_sync(&adapter->phy_info_timer);
 
 	spin_lock(&adapter->stats64_lock);
 	e1000e_update_stats(adapter);
@@ -4422,7 +4453,7 @@ u64 e1000e_read_systim(struct e1000_adapter *adapter,
  * e1000e_cyclecounter_read - read raw cycle counter (used by time counter)
  * @cc: cyclecounter structure
  **/
-static u64 e1000e_cyclecounter_read(const struct cyclecounter *cc)
+static u64 e1000e_cyclecounter_read(struct cyclecounter *cc)
 {
 	struct e1000_adapter *adapter = container_of(cc, struct e1000_adapter,
 						     cc);
@@ -4615,6 +4646,7 @@ int e1000e_open(struct net_device *netdev)
 	struct e1000_hw *hw = &adapter->hw;
 	struct pci_dev *pdev = adapter->pdev;
 	int err;
+	int irq;
 
 	/* disallow open during test */
 	if (test_bit(__E1000_TESTING, &adapter->state))
@@ -4678,7 +4710,15 @@ int e1000e_open(struct net_device *netdev)
 	/* From here on the code is the same as e1000e_up() */
 	clear_bit(__E1000_DOWN, &adapter->state);
 
+	if (adapter->int_mode == E1000E_INT_MODE_MSIX)
+		irq = adapter->msix_entries[0].vector;
+	else
+		irq = adapter->pdev->irq;
+
+	netif_napi_set_irq(&adapter->napi, irq);
 	napi_enable(&adapter->napi);
+	netif_queue_set_napi(netdev, 0, NETDEV_QUEUE_TYPE_RX, &adapter->napi);
+	netif_queue_set_napi(netdev, 0, NETDEV_QUEUE_TYPE_TX, &adapter->napi);
 
 	e1000_irq_enable(adapter);
 
@@ -4737,6 +4777,8 @@ int e1000e_close(struct net_device *netdev)
 		netdev_info(netdev, "NIC Link is Down\n");
 	}
 
+	netif_queue_set_napi(netdev, 0, NETDEV_QUEUE_TYPE_RX, NULL);
+	netif_queue_set_napi(netdev, 0, NETDEV_QUEUE_TYPE_TX, NULL);
 	napi_disable(&adapter->napi);
 
 	e1000e_free_tx_resources(adapter->tx_ring);
@@ -4836,7 +4878,8 @@ static void e1000e_update_phy_task(struct work_struct *work)
  **/
 static void e1000_update_phy_info(struct timer_list *t)
 {
-	struct e1000_adapter *adapter = from_timer(adapter, t, phy_info_timer);
+	struct e1000_adapter *adapter = timer_container_of(adapter, t,
+							   phy_info_timer);
 
 	if (test_bit(__E1000_DOWN, &adapter->state))
 		return;
@@ -5031,8 +5074,7 @@ static void e1000e_update_stats(struct e1000_adapter *adapter)
 		adapter->corr_errors +=
 		    pbeccsts & E1000_PBECCSTS_CORR_ERR_CNT_MASK;
 		adapter->uncorr_errors +=
-		    (pbeccsts & E1000_PBECCSTS_UNCORR_ERR_CNT_MASK) >>
-		    E1000_PBECCSTS_UNCORR_ERR_CNT_SHIFT;
+		    FIELD_GET(E1000_PBECCSTS_UNCORR_ERR_CNT_MASK, pbeccsts);
 	}
 }
 
@@ -5173,7 +5215,8 @@ static void e1000e_check_82574_phy_workaround(struct e1000_adapter *adapter)
  **/
 static void e1000_watchdog(struct timer_list *t)
 {
-	struct e1000_adapter *adapter = from_timer(adapter, t, watchdog_timer);
+	struct e1000_adapter *adapter = timer_container_of(adapter, t,
+							   watchdog_timer);
 
 	/* Do the rest outside of interrupt context */
 	schedule_work(&adapter->watchdog_task);
@@ -5628,8 +5671,6 @@ static int e1000_tx_map(struct e1000_ring *tx_ring, struct sk_buff *skb,
 dma_error:
 	dev_err(&pdev->dev, "Tx DMA map failed\n");
 	buffer_info->dma = 0;
-	if (count)
-		count--;
 
 	while (count--) {
 		if (i == 0)
@@ -6041,7 +6082,7 @@ static int e1000_change_mtu(struct net_device *netdev, int new_mtu)
 	adapter->max_frame_size = max_frame;
 	netdev_dbg(netdev, "changing MTU from %d to %d\n",
 		   netdev->mtu, new_mtu);
-	netdev->mtu = new_mtu;
+	WRITE_ONCE(netdev->mtu, new_mtu);
 
 	pm_runtime_get_sync(netdev->dev.parent);
 
@@ -6077,8 +6118,7 @@ static int e1000_change_mtu(struct net_device *netdev, int new_mtu)
 	return 0;
 }
 
-static int e1000_mii_ioctl(struct net_device *netdev, struct ifreq *ifr,
-			   int cmd)
+static int e1000_ioctl(struct net_device *netdev, struct ifreq *ifr, int cmd)
 {
 	struct e1000_adapter *adapter = netdev_priv(netdev);
 	struct mii_ioctl_data *data = if_mii(ifr);
@@ -6138,7 +6178,8 @@ static int e1000_mii_ioctl(struct net_device *netdev, struct ifreq *ifr,
 /**
  * e1000e_hwtstamp_set - control hardware time stamping
  * @netdev: network interface device structure
- * @ifr: interface request
+ * @config: timestamp configuration
+ * @extack: netlink extended ACK report
  *
  * Outgoing time stamping can be enabled and disabled. Play nice and
  * disable it when requested, although it shouldn't cause any overhead
@@ -6151,20 +6192,18 @@ static int e1000_mii_ioctl(struct net_device *netdev, struct ifreq *ifr,
  * specified. Matching the kind of event packet is not supported, with the
  * exception of "all V2 events regardless of level 2 or 4".
  **/
-static int e1000e_hwtstamp_set(struct net_device *netdev, struct ifreq *ifr)
+static int e1000e_hwtstamp_set(struct net_device *netdev,
+			       struct kernel_hwtstamp_config *config,
+			       struct netlink_ext_ack *extack)
 {
 	struct e1000_adapter *adapter = netdev_priv(netdev);
-	struct hwtstamp_config config;
 	int ret_val;
 
-	if (copy_from_user(&config, ifr->ifr_data, sizeof(config)))
-		return -EFAULT;
-
-	ret_val = e1000e_config_hwtstamp(adapter, &config);
+	ret_val = e1000e_config_hwtstamp(adapter, config, extack);
 	if (ret_val)
 		return ret_val;
 
-	switch (config.rx_filter) {
+	switch (config->rx_filter) {
 	case HWTSTAMP_FILTER_PTP_V2_L4_SYNC:
 	case HWTSTAMP_FILTER_PTP_V2_L2_SYNC:
 	case HWTSTAMP_FILTER_PTP_V2_SYNC:
@@ -6176,38 +6215,23 @@ static int e1000e_hwtstamp_set(struct net_device *netdev, struct ifreq *ifr)
 		 * by hardware so notify the caller the requested packets plus
 		 * some others are time stamped.
 		 */
-		config.rx_filter = HWTSTAMP_FILTER_SOME;
+		config->rx_filter = HWTSTAMP_FILTER_SOME;
 		break;
 	default:
 		break;
 	}
 
-	return copy_to_user(ifr->ifr_data, &config,
-			    sizeof(config)) ? -EFAULT : 0;
+	return 0;
 }
 
-static int e1000e_hwtstamp_get(struct net_device *netdev, struct ifreq *ifr)
+static int e1000e_hwtstamp_get(struct net_device *netdev,
+			       struct kernel_hwtstamp_config *kernel_config)
 {
 	struct e1000_adapter *adapter = netdev_priv(netdev);
 
-	return copy_to_user(ifr->ifr_data, &adapter->hwtstamp_config,
-			    sizeof(adapter->hwtstamp_config)) ? -EFAULT : 0;
-}
+	*kernel_config = adapter->hwtstamp_config;
 
-static int e1000_ioctl(struct net_device *netdev, struct ifreq *ifr, int cmd)
-{
-	switch (cmd) {
-	case SIOCGMIIPHY:
-	case SIOCGMIIREG:
-	case SIOCSMIIREG:
-		return e1000_mii_ioctl(netdev, ifr, cmd);
-	case SIOCSHWTSTAMP:
-		return e1000e_hwtstamp_set(netdev, ifr);
-	case SIOCGHWTSTAMP:
-		return e1000e_hwtstamp_get(netdev, ifr);
-	default:
-		return -EOPNOTSUPP;
-	}
+	return 0;
 }
 
 static int e1000_init_phy_wakeup(struct e1000_adapter *adapter, u32 wufc)
@@ -6249,7 +6273,7 @@ static int e1000_init_phy_wakeup(struct e1000_adapter *adapter, u32 wufc)
 		phy_reg |= BM_RCTL_MPE;
 	phy_reg &= ~(BM_RCTL_MO_MASK);
 	if (mac_reg & E1000_RCTL_MO_3)
-		phy_reg |= (((mac_reg & E1000_RCTL_MO_3) >> E1000_RCTL_MO_SHIFT)
+		phy_reg |= (FIELD_GET(E1000_RCTL_MO_3, mac_reg)
 			    << BM_RCTL_MO_SHIFT);
 	if (mac_reg & E1000_RCTL_BAM)
 		phy_reg |= BM_RCTL_BAM;
@@ -6366,48 +6390,48 @@ static void e1000e_s0ix_entry_flow(struct e1000_adapter *adapter)
 		mac_data |= E1000_EXTCNF_CTRL_GATE_PHY_CFG;
 		ew32(EXTCNF_CTRL, mac_data);
 
-		/* Enable the Dynamic Power Gating in the MAC */
-		mac_data = er32(FEXTNVM7);
-		mac_data |= BIT(22);
-		ew32(FEXTNVM7, mac_data);
-
 		/* Disable disconnected cable conditioning for Power Gating */
 		mac_data = er32(DPGFR);
 		mac_data |= BIT(2);
 		ew32(DPGFR, mac_data);
 
-		/* Don't wake from dynamic Power Gating with clock request */
-		mac_data = er32(FEXTNVM12);
-		mac_data |= BIT(12);
-		ew32(FEXTNVM12, mac_data);
-
-		/* Ungate PGCB clock */
-		mac_data = er32(FEXTNVM9);
-		mac_data &= ~BIT(28);
-		ew32(FEXTNVM9, mac_data);
-
-		/* Enable K1 off to enable mPHY Power Gating */
-		mac_data = er32(FEXTNVM6);
-		mac_data |= BIT(31);
-		ew32(FEXTNVM6, mac_data);
-
-		/* Enable mPHY power gating for any link and speed */
-		mac_data = er32(FEXTNVM8);
-		mac_data |= BIT(9);
-		ew32(FEXTNVM8, mac_data);
-
 		/* Enable the Dynamic Clock Gating in the DMA and MAC */
 		mac_data = er32(CTRL_EXT);
 		mac_data |= E1000_CTRL_EXT_DMA_DYN_CLK_EN;
 		ew32(CTRL_EXT, mac_data);
-
-		/* No MAC DPG gating SLP_S0 in modern standby
-		 * Switch the logic of the lanphypc to use PMC counter
-		 */
-		mac_data = er32(FEXTNVM5);
-		mac_data |= BIT(7);
-		ew32(FEXTNVM5, mac_data);
 	}
+
+	/* Enable the Dynamic Power Gating in the MAC */
+	mac_data = er32(FEXTNVM7);
+	mac_data |= BIT(22);
+	ew32(FEXTNVM7, mac_data);
+
+	/* Don't wake from dynamic Power Gating with clock request */
+	mac_data = er32(FEXTNVM12);
+	mac_data |= BIT(12);
+	ew32(FEXTNVM12, mac_data);
+
+	/* Ungate PGCB clock */
+	mac_data = er32(FEXTNVM9);
+	mac_data &= ~BIT(28);
+	ew32(FEXTNVM9, mac_data);
+
+	/* Enable K1 off to enable mPHY Power Gating */
+	mac_data = er32(FEXTNVM6);
+	mac_data |= BIT(31);
+	ew32(FEXTNVM6, mac_data);
+
+	/* Enable mPHY power gating for any link and speed */
+	mac_data = er32(FEXTNVM8);
+	mac_data |= BIT(9);
+	ew32(FEXTNVM8, mac_data);
+
+	/* No MAC DPG gating SLP_S0 in modern standby
+	 * Switch the logic of the lanphypc to use PMC counter
+	 */
+	mac_data = er32(FEXTNVM5);
+	mac_data |= BIT(7);
+	ew32(FEXTNVM5, mac_data);
 
 	/* Disable the time synchronization clock */
 	mac_data = er32(FEXTNVM7);
@@ -6501,33 +6525,6 @@ static void e1000e_s0ix_exit_flow(struct e1000_adapter *adapter)
 	} else {
 		/* Request driver unconfigure the device from S0ix */
 
-		/* Disable the Dynamic Power Gating in the MAC */
-		mac_data = er32(FEXTNVM7);
-		mac_data &= 0xFFBFFFFF;
-		ew32(FEXTNVM7, mac_data);
-
-		/* Disable mPHY power gating for any link and speed */
-		mac_data = er32(FEXTNVM8);
-		mac_data &= ~BIT(9);
-		ew32(FEXTNVM8, mac_data);
-
-		/* Disable K1 off */
-		mac_data = er32(FEXTNVM6);
-		mac_data &= ~BIT(31);
-		ew32(FEXTNVM6, mac_data);
-
-		/* Disable Ungate PGCB clock */
-		mac_data = er32(FEXTNVM9);
-		mac_data |= BIT(28);
-		ew32(FEXTNVM9, mac_data);
-
-		/* Cancel not waking from dynamic
-		 * Power Gating with clock request
-		 */
-		mac_data = er32(FEXTNVM12);
-		mac_data &= ~BIT(12);
-		ew32(FEXTNVM12, mac_data);
-
 		/* Cancel disable disconnected cable conditioning
 		 * for Power Gating
 		 */
@@ -6539,13 +6536,6 @@ static void e1000e_s0ix_exit_flow(struct e1000_adapter *adapter)
 		mac_data = er32(CTRL_EXT);
 		mac_data &= 0xFFF7FFFF;
 		ew32(CTRL_EXT, mac_data);
-
-		/* Revert the lanphypc logic to use the internal Gbe counter
-		 * and not the PMC counter
-		 */
-		mac_data = er32(FEXTNVM5);
-		mac_data &= 0xFFFFFF7F;
-		ew32(FEXTNVM5, mac_data);
 
 		/* Enable the periodic inband message,
 		 * Request PCIe clock in K1 page770_17[10:9] =01b
@@ -6584,6 +6574,40 @@ static void e1000e_s0ix_exit_flow(struct e1000_adapter *adapter)
 	mac_data &= ~BIT(31);
 	mac_data |= BIT(0);
 	ew32(FEXTNVM7, mac_data);
+
+	/* Disable the Dynamic Power Gating in the MAC */
+	mac_data = er32(FEXTNVM7);
+	mac_data &= 0xFFBFFFFF;
+	ew32(FEXTNVM7, mac_data);
+
+	/* Disable mPHY power gating for any link and speed */
+	mac_data = er32(FEXTNVM8);
+	mac_data &= ~BIT(9);
+	ew32(FEXTNVM8, mac_data);
+
+	/* Disable K1 off */
+	mac_data = er32(FEXTNVM6);
+	mac_data &= ~BIT(31);
+	ew32(FEXTNVM6, mac_data);
+
+	/* Disable Ungate PGCB clock */
+	mac_data = er32(FEXTNVM9);
+	mac_data |= BIT(28);
+	ew32(FEXTNVM9, mac_data);
+
+	/* Cancel not waking from dynamic
+	 * Power Gating with clock request
+	 */
+	mac_data = er32(FEXTNVM12);
+	mac_data &= ~BIT(12);
+	ew32(FEXTNVM12, mac_data);
+
+	/* Revert the lanphypc logic to use the internal Gbe counter
+	 * and not the PMC counter
+	 */
+	mac_data = er32(FEXTNVM5);
+	mac_data &= 0xFFFFFF7F;
+	ew32(FEXTNVM5, mac_data);
 }
 
 static int e1000e_pm_freeze(struct device *dev)
@@ -6674,8 +6698,10 @@ static int __e1000_shutdown(struct pci_dev *pdev, bool runtime)
 		if (adapter->flags2 & FLAG2_HAS_PHY_WAKEUP) {
 			/* enable wakeup by the PHY */
 			retval = e1000_init_phy_wakeup(adapter, wufc);
-			if (retval)
-				return retval;
+			if (retval) {
+				e_err("Failed to enable wakeup\n");
+				goto skip_phy_configurations;
+			}
 		} else {
 			/* enable wakeup by the MAC */
 			ew32(WUFC, wufc);
@@ -6691,14 +6717,16 @@ static int __e1000_shutdown(struct pci_dev *pdev, bool runtime)
 	if (adapter->hw.phy.type == e1000_phy_igp_3) {
 		e1000e_igp3_phy_powerdown_workaround_ich8lan(&adapter->hw);
 	} else if (hw->mac.type >= e1000_pch_lpt) {
-		if (wufc && !(wufc & (E1000_WUFC_EX | E1000_WUFC_MC | E1000_WUFC_BC)))
+		if (wufc && !(wufc & (E1000_WUFC_EX | E1000_WUFC_MC | E1000_WUFC_BC))) {
 			/* ULP does not support wake from unicast, multicast
 			 * or broadcast.
 			 */
 			retval = e1000_enable_ulp_lpt_lp(hw, !runtime);
-
-		if (retval)
-			return retval;
+			if (retval) {
+				e_err("Failed to enable ULP\n");
+				goto skip_phy_configurations;
+			}
+		}
 	}
 
 	/* Ensure that the appropriate bits are set in LPI_CTRL
@@ -6729,6 +6757,7 @@ static int __e1000_shutdown(struct pci_dev *pdev, bool runtime)
 		hw->phy.ops.release(hw);
 	}
 
+skip_phy_configurations:
 	/* Release control of h/w to f/w.  If f/w is AMT enabled, this
 	 * would have already happened in close and is redundant.
 	 */
@@ -6953,13 +6982,13 @@ static int __e1000_resume(struct pci_dev *pdev)
 	return 0;
 }
 
-static __maybe_unused int e1000e_pm_prepare(struct device *dev)
+static int e1000e_pm_prepare(struct device *dev)
 {
 	return pm_runtime_suspended(dev) &&
 		pm_suspend_via_firmware();
 }
 
-static __maybe_unused int e1000e_pm_suspend(struct device *dev)
+static int e1000e_pm_suspend(struct device *dev)
 {
 	struct net_device *netdev = pci_get_drvdata(to_pci_dev(dev));
 	struct e1000_adapter *adapter = netdev_priv(netdev);
@@ -6971,18 +7000,16 @@ static __maybe_unused int e1000e_pm_suspend(struct device *dev)
 	e1000e_pm_freeze(dev);
 
 	rc = __e1000_shutdown(pdev, false);
-	if (rc) {
-		e1000e_pm_thaw(dev);
-	} else {
+	if (!rc) {
 		/* Introduce S0ix implementation */
 		if (adapter->flags2 & FLAG2_ENABLE_S0IX_FLOWS)
 			e1000e_s0ix_entry_flow(adapter);
 	}
 
-	return rc;
+	return 0;
 }
 
-static __maybe_unused int e1000e_pm_resume(struct device *dev)
+static int e1000e_pm_resume(struct device *dev)
 {
 	struct net_device *netdev = pci_get_drvdata(to_pci_dev(dev));
 	struct e1000_adapter *adapter = netdev_priv(netdev);
@@ -7016,7 +7043,7 @@ static __maybe_unused int e1000e_pm_runtime_idle(struct device *dev)
 	return -EBUSY;
 }
 
-static __maybe_unused int e1000e_pm_runtime_resume(struct device *dev)
+static int e1000e_pm_runtime_resume(struct device *dev)
 {
 	struct pci_dev *pdev = to_pci_dev(dev);
 	struct net_device *netdev = pci_get_drvdata(pdev);
@@ -7035,7 +7062,7 @@ static __maybe_unused int e1000e_pm_runtime_resume(struct device *dev)
 	return rc;
 }
 
-static __maybe_unused int e1000e_pm_runtime_suspend(struct device *dev)
+static int e1000e_pm_runtime_suspend(struct device *dev)
 {
 	struct pci_dev *pdev = to_pci_dev(dev);
 	struct net_device *netdev = pci_get_drvdata(pdev);
@@ -7183,7 +7210,6 @@ static pci_ers_result_t e1000_io_slot_reset(struct pci_dev *pdev)
 			"Cannot re-enable PCI device after reset.\n");
 		result = PCI_ERS_RESULT_DISCONNECT;
 	} else {
-		pdev->state_saved = true;
 		pci_restore_state(pdev);
 		pci_set_master(pdev);
 
@@ -7341,9 +7367,11 @@ static const struct net_device_ops e1000e_netdev_ops = {
 #ifdef CONFIG_NET_POLL_CONTROLLER
 	.ndo_poll_controller	= e1000_netpoll,
 #endif
-	.ndo_set_features = e1000_set_features,
-	.ndo_fix_features = e1000_fix_features,
+	.ndo_set_features	= e1000_set_features,
+	.ndo_fix_features	= e1000_fix_features,
 	.ndo_features_check	= passthru_features_check,
+	.ndo_hwtstamp_get	= e1000e_hwtstamp_get,
+	.ndo_hwtstamp_set	= e1000e_hwtstamp_set,
 };
 
 /**
@@ -7661,6 +7689,10 @@ static int e1000_probe(struct pci_dev *pdev, const struct pci_device_id *ent)
 	/* init PTP hardware clock */
 	e1000e_ptp_init(adapter);
 
+	/* disable K1 by default on known problematic systems */
+	if (hw->mac.type >= e1000_pch_mtp && dmi_check_system(disable_k1_list))
+		adapter->flags2 |= FLAG2_DISABLE_K1;
+
 	/* reset the hardware with the new settings */
 	e1000e_reset(adapter);
 
@@ -7694,6 +7726,7 @@ static int e1000_probe(struct pci_dev *pdev, const struct pci_device_id *ent)
 err_register:
 	if (!(adapter->flags & FLAG_HAS_AMT))
 		e1000e_release_hw_control(adapter);
+	e1000e_ptp_remove(adapter);
 err_eeprom:
 	if (hw->phy.ops.check_reset_block && !hw->phy.ops.check_reset_block(hw))
 		e1000_phy_hw_reset(&adapter->hw);
@@ -7736,8 +7769,8 @@ static void e1000_remove(struct pci_dev *pdev)
 	 * from being rescheduled.
 	 */
 	set_bit(__E1000_DOWN, &adapter->state);
-	del_timer_sync(&adapter->watchdog_timer);
-	del_timer_sync(&adapter->phy_info_timer);
+	timer_delete_sync(&adapter->watchdog_timer);
+	timer_delete_sync(&adapter->phy_info_timer);
 
 	cancel_work_sync(&adapter->reset_task);
 	cancel_work_sync(&adapter->watchdog_task);
@@ -7786,144 +7819,374 @@ static const struct pci_error_handlers e1000_err_handler = {
 };
 
 static const struct pci_device_id e1000_pci_tbl[] = {
-	{ PCI_VDEVICE(INTEL, E1000_DEV_ID_82571EB_COPPER), board_82571 },
-	{ PCI_VDEVICE(INTEL, E1000_DEV_ID_82571EB_FIBER), board_82571 },
-	{ PCI_VDEVICE(INTEL, E1000_DEV_ID_82571EB_QUAD_COPPER), board_82571 },
-	{ PCI_VDEVICE(INTEL, E1000_DEV_ID_82571EB_QUAD_COPPER_LP),
-	  board_82571 },
-	{ PCI_VDEVICE(INTEL, E1000_DEV_ID_82571EB_QUAD_FIBER), board_82571 },
-	{ PCI_VDEVICE(INTEL, E1000_DEV_ID_82571EB_SERDES), board_82571 },
-	{ PCI_VDEVICE(INTEL, E1000_DEV_ID_82571EB_SERDES_DUAL), board_82571 },
-	{ PCI_VDEVICE(INTEL, E1000_DEV_ID_82571EB_SERDES_QUAD), board_82571 },
-	{ PCI_VDEVICE(INTEL, E1000_DEV_ID_82571PT_QUAD_COPPER), board_82571 },
+	{
+		PCI_VDEVICE(INTEL, E1000_DEV_ID_82571EB_COPPER),
+		.driver_data = board_82571,
+	}, {
+		PCI_VDEVICE(INTEL, E1000_DEV_ID_82571EB_FIBER),
+		.driver_data = board_82571,
+	}, {
+		PCI_VDEVICE(INTEL, E1000_DEV_ID_82571EB_QUAD_COPPER),
+		.driver_data = board_82571,
+	}, {
+		PCI_VDEVICE(INTEL, E1000_DEV_ID_82571EB_QUAD_COPPER_LP),
+		.driver_data = board_82571,
+	}, {
+		PCI_VDEVICE(INTEL, E1000_DEV_ID_82571EB_QUAD_FIBER),
+		.driver_data = board_82571,
+	}, {
+		PCI_VDEVICE(INTEL, E1000_DEV_ID_82571EB_SERDES),
+		.driver_data = board_82571,
+	}, {
+		PCI_VDEVICE(INTEL, E1000_DEV_ID_82571EB_SERDES_DUAL),
+		.driver_data = board_82571,
+	}, {
+		PCI_VDEVICE(INTEL, E1000_DEV_ID_82571EB_SERDES_QUAD),
+		.driver_data = board_82571,
+	}, {
+		PCI_VDEVICE(INTEL, E1000_DEV_ID_82571PT_QUAD_COPPER),
+		.driver_data = board_82571,
+	},
 
-	{ PCI_VDEVICE(INTEL, E1000_DEV_ID_82572EI), board_82572 },
-	{ PCI_VDEVICE(INTEL, E1000_DEV_ID_82572EI_COPPER), board_82572 },
-	{ PCI_VDEVICE(INTEL, E1000_DEV_ID_82572EI_FIBER), board_82572 },
-	{ PCI_VDEVICE(INTEL, E1000_DEV_ID_82572EI_SERDES), board_82572 },
+	{
+		PCI_VDEVICE(INTEL, E1000_DEV_ID_82572EI),
+		.driver_data = board_82572,
+	}, {
+		PCI_VDEVICE(INTEL, E1000_DEV_ID_82572EI_COPPER),
+		.driver_data = board_82572,
+	}, {
+		PCI_VDEVICE(INTEL, E1000_DEV_ID_82572EI_FIBER),
+		.driver_data = board_82572,
+	}, {
+		PCI_VDEVICE(INTEL, E1000_DEV_ID_82572EI_SERDES),
+		.driver_data = board_82572,
+	},
 
-	{ PCI_VDEVICE(INTEL, E1000_DEV_ID_82573E), board_82573 },
-	{ PCI_VDEVICE(INTEL, E1000_DEV_ID_82573E_IAMT), board_82573 },
-	{ PCI_VDEVICE(INTEL, E1000_DEV_ID_82573L), board_82573 },
+	{
+		PCI_VDEVICE(INTEL, E1000_DEV_ID_82573E),
+		.driver_data = board_82573,
+	}, {
+		PCI_VDEVICE(INTEL, E1000_DEV_ID_82573E_IAMT),
+		.driver_data = board_82573,
+	}, {
+		PCI_VDEVICE(INTEL, E1000_DEV_ID_82573L),
+		.driver_data = board_82573,
+	},
 
-	{ PCI_VDEVICE(INTEL, E1000_DEV_ID_82574L), board_82574 },
-	{ PCI_VDEVICE(INTEL, E1000_DEV_ID_82574LA), board_82574 },
-	{ PCI_VDEVICE(INTEL, E1000_DEV_ID_82583V), board_82583 },
+	{
+		PCI_VDEVICE(INTEL, E1000_DEV_ID_82574L),
+		.driver_data = board_82574,
+	}, {
+		PCI_VDEVICE(INTEL, E1000_DEV_ID_82574LA),
+		.driver_data = board_82574,
+	}, {
+		PCI_VDEVICE(INTEL, E1000_DEV_ID_82583V),
+		.driver_data = board_82583,
+	},
 
-	{ PCI_VDEVICE(INTEL, E1000_DEV_ID_80003ES2LAN_COPPER_DPT),
-	  board_80003es2lan },
-	{ PCI_VDEVICE(INTEL, E1000_DEV_ID_80003ES2LAN_COPPER_SPT),
-	  board_80003es2lan },
-	{ PCI_VDEVICE(INTEL, E1000_DEV_ID_80003ES2LAN_SERDES_DPT),
-	  board_80003es2lan },
-	{ PCI_VDEVICE(INTEL, E1000_DEV_ID_80003ES2LAN_SERDES_SPT),
-	  board_80003es2lan },
+	{
+		PCI_VDEVICE(INTEL, E1000_DEV_ID_80003ES2LAN_COPPER_DPT),
+		.driver_data = board_80003es2lan,
+	}, {
+		PCI_VDEVICE(INTEL, E1000_DEV_ID_80003ES2LAN_COPPER_SPT),
+		.driver_data = board_80003es2lan,
+	}, {
+		PCI_VDEVICE(INTEL, E1000_DEV_ID_80003ES2LAN_SERDES_DPT),
+		.driver_data = board_80003es2lan,
+	}, {
+		PCI_VDEVICE(INTEL, E1000_DEV_ID_80003ES2LAN_SERDES_SPT),
+		.driver_data = board_80003es2lan,
+	},
 
-	{ PCI_VDEVICE(INTEL, E1000_DEV_ID_ICH8_IFE), board_ich8lan },
-	{ PCI_VDEVICE(INTEL, E1000_DEV_ID_ICH8_IFE_G), board_ich8lan },
-	{ PCI_VDEVICE(INTEL, E1000_DEV_ID_ICH8_IFE_GT), board_ich8lan },
-	{ PCI_VDEVICE(INTEL, E1000_DEV_ID_ICH8_IGP_AMT), board_ich8lan },
-	{ PCI_VDEVICE(INTEL, E1000_DEV_ID_ICH8_IGP_C), board_ich8lan },
-	{ PCI_VDEVICE(INTEL, E1000_DEV_ID_ICH8_IGP_M), board_ich8lan },
-	{ PCI_VDEVICE(INTEL, E1000_DEV_ID_ICH8_IGP_M_AMT), board_ich8lan },
-	{ PCI_VDEVICE(INTEL, E1000_DEV_ID_ICH8_82567V_3), board_ich8lan },
+	{
+		PCI_VDEVICE(INTEL, E1000_DEV_ID_ICH8_IFE),
+		.driver_data = board_ich8lan,
+	}, {
+		PCI_VDEVICE(INTEL, E1000_DEV_ID_ICH8_IFE_G),
+		.driver_data = board_ich8lan,
+	}, {
+		PCI_VDEVICE(INTEL, E1000_DEV_ID_ICH8_IFE_GT),
+		.driver_data = board_ich8lan,
+	}, {
+		PCI_VDEVICE(INTEL, E1000_DEV_ID_ICH8_IGP_AMT),
+		.driver_data = board_ich8lan,
+	}, {
+		PCI_VDEVICE(INTEL, E1000_DEV_ID_ICH8_IGP_C),
+		.driver_data = board_ich8lan,
+	}, {
+		PCI_VDEVICE(INTEL, E1000_DEV_ID_ICH8_IGP_M),
+		.driver_data = board_ich8lan,
+	}, {
+		PCI_VDEVICE(INTEL, E1000_DEV_ID_ICH8_IGP_M_AMT),
+		.driver_data = board_ich8lan,
+	}, {
+		PCI_VDEVICE(INTEL, E1000_DEV_ID_ICH8_82567V_3),
+		.driver_data = board_ich8lan,
+	},
 
-	{ PCI_VDEVICE(INTEL, E1000_DEV_ID_ICH9_IFE), board_ich9lan },
-	{ PCI_VDEVICE(INTEL, E1000_DEV_ID_ICH9_IFE_G), board_ich9lan },
-	{ PCI_VDEVICE(INTEL, E1000_DEV_ID_ICH9_IFE_GT), board_ich9lan },
-	{ PCI_VDEVICE(INTEL, E1000_DEV_ID_ICH9_IGP_AMT), board_ich9lan },
-	{ PCI_VDEVICE(INTEL, E1000_DEV_ID_ICH9_IGP_C), board_ich9lan },
-	{ PCI_VDEVICE(INTEL, E1000_DEV_ID_ICH9_BM), board_ich9lan },
-	{ PCI_VDEVICE(INTEL, E1000_DEV_ID_ICH9_IGP_M), board_ich9lan },
-	{ PCI_VDEVICE(INTEL, E1000_DEV_ID_ICH9_IGP_M_AMT), board_ich9lan },
-	{ PCI_VDEVICE(INTEL, E1000_DEV_ID_ICH9_IGP_M_V), board_ich9lan },
+	{
+		PCI_VDEVICE(INTEL, E1000_DEV_ID_ICH9_IFE),
+		.driver_data = board_ich9lan,
+	}, {
+		PCI_VDEVICE(INTEL, E1000_DEV_ID_ICH9_IFE_G),
+		.driver_data = board_ich9lan,
+	}, {
+		PCI_VDEVICE(INTEL, E1000_DEV_ID_ICH9_IFE_GT),
+		.driver_data = board_ich9lan,
+	}, {
+		PCI_VDEVICE(INTEL, E1000_DEV_ID_ICH9_IGP_AMT),
+		.driver_data = board_ich9lan,
+	}, {
+		PCI_VDEVICE(INTEL, E1000_DEV_ID_ICH9_IGP_C),
+		.driver_data = board_ich9lan,
+	}, {
+		PCI_VDEVICE(INTEL, E1000_DEV_ID_ICH9_BM),
+		.driver_data = board_ich9lan,
+	}, {
+		PCI_VDEVICE(INTEL, E1000_DEV_ID_ICH9_IGP_M),
+		.driver_data = board_ich9lan,
+	}, {
+		PCI_VDEVICE(INTEL, E1000_DEV_ID_ICH9_IGP_M_AMT),
+		.driver_data = board_ich9lan,
+	}, {
+		PCI_VDEVICE(INTEL, E1000_DEV_ID_ICH9_IGP_M_V),
+		.driver_data = board_ich9lan
+	},
 
-	{ PCI_VDEVICE(INTEL, E1000_DEV_ID_ICH10_R_BM_LM), board_ich9lan },
-	{ PCI_VDEVICE(INTEL, E1000_DEV_ID_ICH10_R_BM_LF), board_ich9lan },
-	{ PCI_VDEVICE(INTEL, E1000_DEV_ID_ICH10_R_BM_V), board_ich9lan },
+	{
+		PCI_VDEVICE(INTEL, E1000_DEV_ID_ICH10_R_BM_LM),
+		.driver_data = board_ich9lan,
+	}, {
+		PCI_VDEVICE(INTEL, E1000_DEV_ID_ICH10_R_BM_LF),
+		.driver_data = board_ich9lan,
+	}, {
+		PCI_VDEVICE(INTEL, E1000_DEV_ID_ICH10_R_BM_V),
+		.driver_data = board_ich9lan,
+	},
 
-	{ PCI_VDEVICE(INTEL, E1000_DEV_ID_ICH10_D_BM_LM), board_ich10lan },
-	{ PCI_VDEVICE(INTEL, E1000_DEV_ID_ICH10_D_BM_LF), board_ich10lan },
-	{ PCI_VDEVICE(INTEL, E1000_DEV_ID_ICH10_D_BM_V), board_ich10lan },
+	{
+		PCI_VDEVICE(INTEL, E1000_DEV_ID_ICH10_D_BM_LM),
+		.driver_data = board_ich10lan,
+	}, {
+		PCI_VDEVICE(INTEL, E1000_DEV_ID_ICH10_D_BM_LF),
+		.driver_data = board_ich10lan,
+	}, {
+		PCI_VDEVICE(INTEL, E1000_DEV_ID_ICH10_D_BM_V),
+		.driver_data = board_ich10lan,
+	},
 
-	{ PCI_VDEVICE(INTEL, E1000_DEV_ID_PCH_M_HV_LM), board_pchlan },
-	{ PCI_VDEVICE(INTEL, E1000_DEV_ID_PCH_M_HV_LC), board_pchlan },
-	{ PCI_VDEVICE(INTEL, E1000_DEV_ID_PCH_D_HV_DM), board_pchlan },
-	{ PCI_VDEVICE(INTEL, E1000_DEV_ID_PCH_D_HV_DC), board_pchlan },
+	{
+		PCI_VDEVICE(INTEL, E1000_DEV_ID_PCH_M_HV_LM),
+		.driver_data = board_pchlan,
+	}, {
+		PCI_VDEVICE(INTEL, E1000_DEV_ID_PCH_M_HV_LC),
+		.driver_data = board_pchlan,
+	}, {
+		PCI_VDEVICE(INTEL, E1000_DEV_ID_PCH_D_HV_DM),
+		.driver_data = board_pchlan,
+	}, {
+		PCI_VDEVICE(INTEL, E1000_DEV_ID_PCH_D_HV_DC),
+		.driver_data = board_pchlan
+	},
 
-	{ PCI_VDEVICE(INTEL, E1000_DEV_ID_PCH2_LV_LM), board_pch2lan },
-	{ PCI_VDEVICE(INTEL, E1000_DEV_ID_PCH2_LV_V), board_pch2lan },
+	{
+		PCI_VDEVICE(INTEL, E1000_DEV_ID_PCH2_LV_LM),
+		.driver_data = board_pch2lan,
+	}, {
+		PCI_VDEVICE(INTEL, E1000_DEV_ID_PCH2_LV_V),
+		.driver_data = board_pch2lan
+	},
 
-	{ PCI_VDEVICE(INTEL, E1000_DEV_ID_PCH_LPT_I217_LM), board_pch_lpt },
-	{ PCI_VDEVICE(INTEL, E1000_DEV_ID_PCH_LPT_I217_V), board_pch_lpt },
-	{ PCI_VDEVICE(INTEL, E1000_DEV_ID_PCH_LPTLP_I218_LM), board_pch_lpt },
-	{ PCI_VDEVICE(INTEL, E1000_DEV_ID_PCH_LPTLP_I218_V), board_pch_lpt },
-	{ PCI_VDEVICE(INTEL, E1000_DEV_ID_PCH_I218_LM2), board_pch_lpt },
-	{ PCI_VDEVICE(INTEL, E1000_DEV_ID_PCH_I218_V2), board_pch_lpt },
-	{ PCI_VDEVICE(INTEL, E1000_DEV_ID_PCH_I218_LM3), board_pch_lpt },
-	{ PCI_VDEVICE(INTEL, E1000_DEV_ID_PCH_I218_V3), board_pch_lpt },
-	{ PCI_VDEVICE(INTEL, E1000_DEV_ID_PCH_SPT_I219_LM), board_pch_spt },
-	{ PCI_VDEVICE(INTEL, E1000_DEV_ID_PCH_SPT_I219_V), board_pch_spt },
-	{ PCI_VDEVICE(INTEL, E1000_DEV_ID_PCH_SPT_I219_LM2), board_pch_spt },
-	{ PCI_VDEVICE(INTEL, E1000_DEV_ID_PCH_SPT_I219_V2), board_pch_spt },
-	{ PCI_VDEVICE(INTEL, E1000_DEV_ID_PCH_LBG_I219_LM3), board_pch_spt },
-	{ PCI_VDEVICE(INTEL, E1000_DEV_ID_PCH_SPT_I219_LM4), board_pch_spt },
-	{ PCI_VDEVICE(INTEL, E1000_DEV_ID_PCH_SPT_I219_V4), board_pch_spt },
-	{ PCI_VDEVICE(INTEL, E1000_DEV_ID_PCH_SPT_I219_LM5), board_pch_spt },
-	{ PCI_VDEVICE(INTEL, E1000_DEV_ID_PCH_SPT_I219_V5), board_pch_spt },
-	{ PCI_VDEVICE(INTEL, E1000_DEV_ID_PCH_CNP_I219_LM6), board_pch_cnp },
-	{ PCI_VDEVICE(INTEL, E1000_DEV_ID_PCH_CNP_I219_V6), board_pch_cnp },
-	{ PCI_VDEVICE(INTEL, E1000_DEV_ID_PCH_CNP_I219_LM7), board_pch_cnp },
-	{ PCI_VDEVICE(INTEL, E1000_DEV_ID_PCH_CNP_I219_V7), board_pch_cnp },
-	{ PCI_VDEVICE(INTEL, E1000_DEV_ID_PCH_ICP_I219_LM8), board_pch_cnp },
-	{ PCI_VDEVICE(INTEL, E1000_DEV_ID_PCH_ICP_I219_V8), board_pch_cnp },
-	{ PCI_VDEVICE(INTEL, E1000_DEV_ID_PCH_ICP_I219_LM9), board_pch_cnp },
-	{ PCI_VDEVICE(INTEL, E1000_DEV_ID_PCH_ICP_I219_V9), board_pch_cnp },
-	{ PCI_VDEVICE(INTEL, E1000_DEV_ID_PCH_CMP_I219_LM10), board_pch_cnp },
-	{ PCI_VDEVICE(INTEL, E1000_DEV_ID_PCH_CMP_I219_V10), board_pch_cnp },
-	{ PCI_VDEVICE(INTEL, E1000_DEV_ID_PCH_CMP_I219_LM11), board_pch_cnp },
-	{ PCI_VDEVICE(INTEL, E1000_DEV_ID_PCH_CMP_I219_V11), board_pch_cnp },
-	{ PCI_VDEVICE(INTEL, E1000_DEV_ID_PCH_CMP_I219_LM12), board_pch_spt },
-	{ PCI_VDEVICE(INTEL, E1000_DEV_ID_PCH_CMP_I219_V12), board_pch_spt },
-	{ PCI_VDEVICE(INTEL, E1000_DEV_ID_PCH_TGP_I219_LM13), board_pch_tgp },
-	{ PCI_VDEVICE(INTEL, E1000_DEV_ID_PCH_TGP_I219_V13), board_pch_tgp },
-	{ PCI_VDEVICE(INTEL, E1000_DEV_ID_PCH_TGP_I219_LM14), board_pch_tgp },
-	{ PCI_VDEVICE(INTEL, E1000_DEV_ID_PCH_TGP_I219_V14), board_pch_tgp },
-	{ PCI_VDEVICE(INTEL, E1000_DEV_ID_PCH_TGP_I219_LM15), board_pch_tgp },
-	{ PCI_VDEVICE(INTEL, E1000_DEV_ID_PCH_TGP_I219_V15), board_pch_tgp },
-	{ PCI_VDEVICE(INTEL, E1000_DEV_ID_PCH_RPL_I219_LM23), board_pch_adp },
-	{ PCI_VDEVICE(INTEL, E1000_DEV_ID_PCH_RPL_I219_V23), board_pch_adp },
-	{ PCI_VDEVICE(INTEL, E1000_DEV_ID_PCH_ADP_I219_LM16), board_pch_adp },
-	{ PCI_VDEVICE(INTEL, E1000_DEV_ID_PCH_ADP_I219_V16), board_pch_adp },
-	{ PCI_VDEVICE(INTEL, E1000_DEV_ID_PCH_ADP_I219_LM17), board_pch_adp },
-	{ PCI_VDEVICE(INTEL, E1000_DEV_ID_PCH_ADP_I219_V17), board_pch_adp },
-	{ PCI_VDEVICE(INTEL, E1000_DEV_ID_PCH_RPL_I219_LM22), board_pch_adp },
-	{ PCI_VDEVICE(INTEL, E1000_DEV_ID_PCH_RPL_I219_V22), board_pch_adp },
-	{ PCI_VDEVICE(INTEL, E1000_DEV_ID_PCH_MTP_I219_LM18), board_pch_mtp },
-	{ PCI_VDEVICE(INTEL, E1000_DEV_ID_PCH_MTP_I219_V18), board_pch_mtp },
-	{ PCI_VDEVICE(INTEL, E1000_DEV_ID_PCH_MTP_I219_LM19), board_pch_mtp },
-	{ PCI_VDEVICE(INTEL, E1000_DEV_ID_PCH_MTP_I219_V19), board_pch_mtp },
-	{ PCI_VDEVICE(INTEL, E1000_DEV_ID_PCH_LNP_I219_LM20), board_pch_mtp },
-	{ PCI_VDEVICE(INTEL, E1000_DEV_ID_PCH_LNP_I219_V20), board_pch_mtp },
-	{ PCI_VDEVICE(INTEL, E1000_DEV_ID_PCH_LNP_I219_LM21), board_pch_mtp },
-	{ PCI_VDEVICE(INTEL, E1000_DEV_ID_PCH_LNP_I219_V21), board_pch_mtp },
-	{ PCI_VDEVICE(INTEL, E1000_DEV_ID_PCH_ARL_I219_LM24), board_pch_mtp },
-	{ PCI_VDEVICE(INTEL, E1000_DEV_ID_PCH_ARL_I219_V24), board_pch_mtp },
-	{ PCI_VDEVICE(INTEL, E1000_DEV_ID_PCH_PTP_I219_LM25), board_pch_mtp },
-	{ PCI_VDEVICE(INTEL, E1000_DEV_ID_PCH_PTP_I219_V25), board_pch_mtp },
-	{ PCI_VDEVICE(INTEL, E1000_DEV_ID_PCH_PTP_I219_LM26), board_pch_mtp },
-	{ PCI_VDEVICE(INTEL, E1000_DEV_ID_PCH_PTP_I219_V26), board_pch_mtp },
-	{ PCI_VDEVICE(INTEL, E1000_DEV_ID_PCH_PTP_I219_LM27), board_pch_mtp },
-	{ PCI_VDEVICE(INTEL, E1000_DEV_ID_PCH_PTP_I219_V27), board_pch_mtp },
-	{ PCI_VDEVICE(INTEL, E1000_DEV_ID_PCH_NVL_I219_LM29), board_pch_mtp },
-	{ PCI_VDEVICE(INTEL, E1000_DEV_ID_PCH_NVL_I219_V29), board_pch_mtp },
+	{
+		PCI_VDEVICE(INTEL, E1000_DEV_ID_PCH_LPT_I217_LM),
+		.driver_data = board_pch_lpt,
+	}, {
+		PCI_VDEVICE(INTEL, E1000_DEV_ID_PCH_LPT_I217_V),
+		.driver_data = board_pch_lpt,
+	}, {
+		PCI_VDEVICE(INTEL, E1000_DEV_ID_PCH_LPTLP_I218_LM),
+		.driver_data = board_pch_lpt,
+	}, {
+		PCI_VDEVICE(INTEL, E1000_DEV_ID_PCH_LPTLP_I218_V),
+		.driver_data = board_pch_lpt,
+	}, {
+		PCI_VDEVICE(INTEL, E1000_DEV_ID_PCH_I218_LM2),
+		.driver_data = board_pch_lpt,
+	}, {
+		PCI_VDEVICE(INTEL, E1000_DEV_ID_PCH_I218_V2),
+		.driver_data = board_pch_lpt,
+	}, {
+		PCI_VDEVICE(INTEL, E1000_DEV_ID_PCH_I218_LM3),
+		.driver_data = board_pch_lpt,
+	}, {
+		PCI_VDEVICE(INTEL, E1000_DEV_ID_PCH_I218_V3),
+		.driver_data = board_pch_lpt,
+	}, {
+		PCI_VDEVICE(INTEL, E1000_DEV_ID_PCH_SPT_I219_LM),
+		.driver_data = board_pch_spt,
+	}, {
+		PCI_VDEVICE(INTEL, E1000_DEV_ID_PCH_SPT_I219_V),
+		.driver_data = board_pch_spt,
+	}, {
+		PCI_VDEVICE(INTEL, E1000_DEV_ID_PCH_SPT_I219_LM2),
+		.driver_data = board_pch_spt,
+	}, {
+		PCI_VDEVICE(INTEL, E1000_DEV_ID_PCH_SPT_I219_V2),
+		.driver_data = board_pch_spt,
+	}, {
+		PCI_VDEVICE(INTEL, E1000_DEV_ID_PCH_LBG_I219_LM3),
+		.driver_data = board_pch_spt,
+	}, {
+		PCI_VDEVICE(INTEL, E1000_DEV_ID_PCH_SPT_I219_LM4),
+		.driver_data = board_pch_spt,
+	}, {
+		PCI_VDEVICE(INTEL, E1000_DEV_ID_PCH_SPT_I219_V4),
+		.driver_data = board_pch_spt,
+	}, {
+		PCI_VDEVICE(INTEL, E1000_DEV_ID_PCH_SPT_I219_LM5),
+		.driver_data = board_pch_spt,
+	}, {
+		PCI_VDEVICE(INTEL, E1000_DEV_ID_PCH_SPT_I219_V5),
+		.driver_data = board_pch_spt,
+	}, {
+		PCI_VDEVICE(INTEL, E1000_DEV_ID_PCH_CNP_I219_LM6),
+		.driver_data = board_pch_cnp,
+	}, {
+		PCI_VDEVICE(INTEL, E1000_DEV_ID_PCH_CNP_I219_V6),
+		.driver_data = board_pch_cnp,
+	}, {
+		PCI_VDEVICE(INTEL, E1000_DEV_ID_PCH_CNP_I219_LM7),
+		.driver_data = board_pch_cnp,
+	}, {
+		PCI_VDEVICE(INTEL, E1000_DEV_ID_PCH_CNP_I219_V7),
+		.driver_data = board_pch_cnp,
+	}, {
+		PCI_VDEVICE(INTEL, E1000_DEV_ID_PCH_ICP_I219_LM8),
+		.driver_data = board_pch_cnp,
+	}, {
+		PCI_VDEVICE(INTEL, E1000_DEV_ID_PCH_ICP_I219_V8),
+		.driver_data = board_pch_cnp,
+	}, {
+		PCI_VDEVICE(INTEL, E1000_DEV_ID_PCH_ICP_I219_LM9),
+		.driver_data = board_pch_cnp,
+	}, {
+		PCI_VDEVICE(INTEL, E1000_DEV_ID_PCH_ICP_I219_V9),
+		.driver_data = board_pch_cnp,
+	}, {
+		PCI_VDEVICE(INTEL, E1000_DEV_ID_PCH_CMP_I219_LM10),
+		.driver_data = board_pch_cnp,
+	}, {
+		PCI_VDEVICE(INTEL, E1000_DEV_ID_PCH_CMP_I219_V10),
+		.driver_data = board_pch_cnp,
+	}, {
+		PCI_VDEVICE(INTEL, E1000_DEV_ID_PCH_CMP_I219_LM11),
+		.driver_data = board_pch_cnp,
+	}, {
+		PCI_VDEVICE(INTEL, E1000_DEV_ID_PCH_CMP_I219_V11),
+		.driver_data = board_pch_cnp,
+	}, {
+		PCI_VDEVICE(INTEL, E1000_DEV_ID_PCH_CMP_I219_LM12),
+		.driver_data = board_pch_spt,
+	}, {
+		PCI_VDEVICE(INTEL, E1000_DEV_ID_PCH_CMP_I219_V12),
+		.driver_data = board_pch_spt,
+	}, {
+		PCI_VDEVICE(INTEL, E1000_DEV_ID_PCH_TGP_I219_LM13),
+		.driver_data = board_pch_tgp,
+	}, {
+		PCI_VDEVICE(INTEL, E1000_DEV_ID_PCH_TGP_I219_V13),
+		.driver_data = board_pch_tgp,
+	}, {
+		PCI_VDEVICE(INTEL, E1000_DEV_ID_PCH_TGP_I219_LM14),
+		.driver_data = board_pch_tgp,
+	}, {
+		PCI_VDEVICE(INTEL, E1000_DEV_ID_PCH_TGP_I219_V14),
+		.driver_data = board_pch_tgp,
+	}, {
+		PCI_VDEVICE(INTEL, E1000_DEV_ID_PCH_TGP_I219_LM15),
+		.driver_data = board_pch_tgp,
+	}, {
+		PCI_VDEVICE(INTEL, E1000_DEV_ID_PCH_TGP_I219_V15),
+		.driver_data = board_pch_tgp,
+	}, {
+		PCI_VDEVICE(INTEL, E1000_DEV_ID_PCH_RPL_I219_LM23),
+		.driver_data = board_pch_adp,
+	}, {
+		PCI_VDEVICE(INTEL, E1000_DEV_ID_PCH_RPL_I219_V23),
+		.driver_data = board_pch_adp,
+	}, {
+		PCI_VDEVICE(INTEL, E1000_DEV_ID_PCH_ADP_I219_LM16),
+		.driver_data = board_pch_adp,
+	}, {
+		PCI_VDEVICE(INTEL, E1000_DEV_ID_PCH_ADP_I219_V16),
+		.driver_data = board_pch_adp,
+	}, {
+		PCI_VDEVICE(INTEL, E1000_DEV_ID_PCH_ADP_I219_LM17),
+		.driver_data = board_pch_adp,
+	}, {
+		PCI_VDEVICE(INTEL, E1000_DEV_ID_PCH_ADP_I219_V17),
+		.driver_data = board_pch_adp,
+	}, {
+		PCI_VDEVICE(INTEL, E1000_DEV_ID_PCH_RPL_I219_LM22),
+		.driver_data = board_pch_adp,
+	}, {
+		PCI_VDEVICE(INTEL, E1000_DEV_ID_PCH_RPL_I219_V22),
+		.driver_data = board_pch_adp,
+	}, {
+		PCI_VDEVICE(INTEL, E1000_DEV_ID_PCH_ADP_I219_LM19),
+		.driver_data = board_pch_adp,
+	}, {
+		PCI_VDEVICE(INTEL, E1000_DEV_ID_PCH_ADP_I219_V19),
+		.driver_data = board_pch_adp,
+	}, {
+		PCI_VDEVICE(INTEL, E1000_DEV_ID_PCH_MTP_I219_LM18),
+		.driver_data = board_pch_mtp,
+	}, {
+		PCI_VDEVICE(INTEL, E1000_DEV_ID_PCH_MTP_I219_V18),
+		.driver_data = board_pch_mtp,
+	}, {
+		PCI_VDEVICE(INTEL, E1000_DEV_ID_PCH_LNP_I219_LM20),
+		.driver_data = board_pch_mtp,
+	}, {
+		PCI_VDEVICE(INTEL, E1000_DEV_ID_PCH_LNP_I219_V20),
+		.driver_data = board_pch_mtp,
+	}, {
+		PCI_VDEVICE(INTEL, E1000_DEV_ID_PCH_LNP_I219_LM21),
+		.driver_data = board_pch_mtp,
+	}, {
+		PCI_VDEVICE(INTEL, E1000_DEV_ID_PCH_LNP_I219_V21),
+		.driver_data = board_pch_mtp,
+	}, {
+		PCI_VDEVICE(INTEL, E1000_DEV_ID_PCH_ARL_I219_LM24),
+		.driver_data = board_pch_mtp,
+	}, {
+		PCI_VDEVICE(INTEL, E1000_DEV_ID_PCH_ARL_I219_V24),
+		.driver_data = board_pch_mtp,
+	}, {
+		PCI_VDEVICE(INTEL, E1000_DEV_ID_PCH_PTP_I219_LM25),
+		.driver_data = board_pch_ptp,
+	}, {
+		PCI_VDEVICE(INTEL, E1000_DEV_ID_PCH_PTP_I219_V25),
+		.driver_data = board_pch_ptp,
+	}, {
+		PCI_VDEVICE(INTEL, E1000_DEV_ID_PCH_PTP_I219_LM27),
+		.driver_data = board_pch_ptp,
+	}, {
+		PCI_VDEVICE(INTEL, E1000_DEV_ID_PCH_PTP_I219_V27),
+		.driver_data = board_pch_ptp,
+	}, {
+		PCI_VDEVICE(INTEL, E1000_DEV_ID_PCH_NVL_I219_LM29),
+		.driver_data = board_pch_ptp,
+	}, {
+		PCI_VDEVICE(INTEL, E1000_DEV_ID_PCH_NVL_I219_V29),
+		.driver_data = board_pch_ptp
+	},
 
-	{ 0, 0, 0, 0, 0, 0, 0 }	/* terminate list */
+	{ }	/* terminate list */
 };
 MODULE_DEVICE_TABLE(pci, e1000_pci_tbl);
 
-static const struct dev_pm_ops e1000_pm_ops = {
-#ifdef CONFIG_PM_SLEEP
+static const struct dev_pm_ops e1000e_pm_ops = {
 	.prepare	= e1000e_pm_prepare,
 	.suspend	= e1000e_pm_suspend,
 	.resume		= e1000e_pm_resume,
@@ -7931,9 +8194,8 @@ static const struct dev_pm_ops e1000_pm_ops = {
 	.thaw		= e1000e_pm_thaw,
 	.poweroff	= e1000e_pm_suspend,
 	.restore	= e1000e_pm_resume,
-#endif
-	SET_RUNTIME_PM_OPS(e1000e_pm_runtime_suspend, e1000e_pm_runtime_resume,
-			   e1000e_pm_runtime_idle)
+	RUNTIME_PM_OPS(e1000e_pm_runtime_suspend, e1000e_pm_runtime_resume,
+		       e1000e_pm_runtime_idle)
 };
 
 /* PCI Device API Driver */
@@ -7942,9 +8204,7 @@ static struct pci_driver e1000_driver = {
 	.id_table = e1000_pci_tbl,
 	.probe    = e1000_probe,
 	.remove   = e1000_remove,
-	.driver   = {
-		.pm = &e1000_pm_ops,
-	},
+	.driver.pm = pm_ptr(&e1000e_pm_ops),
 	.shutdown = e1000_shutdown,
 	.err_handler = &e1000_err_handler
 };
@@ -7976,7 +8236,6 @@ static void __exit e1000_exit_module(void)
 }
 module_exit(e1000_exit_module);
 
-MODULE_AUTHOR("Intel Corporation, <linux.nics@intel.com>");
 MODULE_DESCRIPTION("Intel(R) PRO/1000 Network Driver");
 MODULE_LICENSE("GPL v2");
 

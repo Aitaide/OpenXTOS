@@ -365,11 +365,6 @@ unsigned sizeof_namespace_label(struct nvdimm_drvdata *ndd);
 	for (res = (ndd)->dpa.child, next = res ? res->sibling : NULL; \
 			res; res = next, next = next ? next->sibling : NULL)
 
-struct nd_percpu_lane {
-	int count;
-	spinlock_t lock;
-};
-
 enum nd_label_flags {
 	ND_LABEL_REAP,
 };
@@ -400,6 +395,10 @@ struct nd_mapping {
 	struct nvdimm_drvdata *ndd;
 };
 
+struct nd_lane {
+	struct mutex lock; /* serialize lane access */
+} ____cacheline_aligned_in_smp;
+
 struct nd_region {
 	struct device dev;
 	struct ida ns_ida;
@@ -420,9 +419,9 @@ struct nd_region {
 	struct kernfs_node *bb_state;
 	struct badblocks bb;
 	struct nd_interleave_set *nd_set;
-	struct nd_percpu_lane __percpu *lane;
+	struct nd_lane *lane;
 	int (*flush)(struct nd_region *nd_region, struct bio *bio);
-	struct nd_mapping mapping[];
+	struct nd_mapping mapping[] __counted_by(ndr_mappings);
 };
 
 static inline bool nsl_validate_nlabel(struct nd_region *nd_region,
@@ -489,7 +488,6 @@ enum nd_async_mode {
 	ND_ASYNC,
 };
 
-int nd_integrity_init(struct gendisk *disk, unsigned long meta_size);
 void wait_nvdimm_bus_probe_idle(struct device *dev);
 void nd_device_register(struct device *dev);
 void nd_device_unregister(struct device *dev, enum nd_async_mode mode);
@@ -601,6 +599,13 @@ struct nd_dax *to_nd_dax(struct device *dev);
 int nd_dax_probe(struct device *dev, struct nd_namespace_common *ndns);
 bool is_nd_dax(const struct device *dev);
 struct device *nd_dax_create(struct nd_region *nd_region);
+static inline struct device *nd_dax_devinit(struct nd_dax *nd_dax,
+					    struct nd_namespace_common *ndns)
+{
+	if (!nd_dax)
+		return NULL;
+	return nd_pfn_devinit(&nd_dax->nd_pfn, ndns);
+}
 #else
 static inline int nd_dax_probe(struct device *dev,
 		struct nd_namespace_common *ndns)
@@ -626,6 +631,12 @@ u64 nd_region_interleave_set_cookie(struct nd_region *nd_region,
 u64 nd_region_interleave_set_altcookie(struct nd_region *nd_region);
 void nvdimm_bus_lock(struct device *dev);
 void nvdimm_bus_unlock(struct device *dev);
+DEFINE_CLASS(nvdimm_bus, struct device *,
+	     if (_T) nvdimm_bus_unlock(_T),
+	     ({ if (_T) nvdimm_bus_lock(_T); _T; }),
+	     struct device *_T);
+DEFINE_CLASS_IS_GUARD(nvdimm_bus);
+
 bool is_nvdimm_bus_locked(struct device *dev);
 void nvdimm_check_and_set_ro(struct gendisk *disk);
 void nvdimm_drvdata_release(struct kref *kref);
@@ -667,7 +678,7 @@ static inline bool is_bad_pmem(struct badblocks *bb, sector_t sector,
 {
 	if (bb->count) {
 		sector_t first_bad;
-		int num_bad;
+		sector_t num_bad;
 
 		return !!badblocks_check(bb, sector, len / 512, &first_bad,
 				&num_bad);

@@ -8,6 +8,7 @@
 
 #include <linux/acpi.h>
 #include <linux/module.h>
+#include <linux/platform_data/x86/intel_scu_ipc.h>
 #include <linux/platform_device.h>
 #include <linux/property.h>
 #include <linux/usb/pd.h>
@@ -17,8 +18,6 @@
 #include <linux/usb/typec_tbt.h>
 #include <linux/debugfs.h>
 #include <linux/usb.h>
-
-#include <asm/intel_scu_ipc.h>
 
 #define PMC_USBC_CMD		0xa7
 
@@ -152,13 +151,14 @@ struct pmc_usb {
 	u8 num_ports;
 	struct device *dev;
 	struct intel_scu_ipc_dev *ipc;
-	struct pmc_usb_port *port;
 	struct acpi_device *iom_adev;
 	void __iomem *iom_base;
 	u32 iom_port_status_offset;
 	u8 iom_port_status_size;
 
 	struct dentry *dentry;
+
+	struct pmc_usb_port port[] __counted_by(num_ports);
 };
 
 static struct dentry *pmc_mux_debugfs_root;
@@ -189,6 +189,12 @@ static int hsl_orientation(struct pmc_usb_port *port)
 		return port->hsl_orientation - 1;
 
 	return port->orientation - 1;
+}
+
+static bool is_pmc_mux_tbt(struct acpi_device *adev)
+{
+	return acpi_dev_hid_uid_match(adev, "INTC1072", NULL) ||
+	       acpi_dev_hid_uid_match(adev, "INTC1079", NULL);
 }
 
 static int pmc_usb_send_command(struct intel_scu_ipc_dev *ipc, u8 *msg, u32 len)
@@ -292,6 +298,24 @@ pmc_usb_mux_dp(struct pmc_usb_port *port, struct typec_mux_state *state)
 
 	req.mode_data |= (state->mode - TYPEC_STATE_MODAL) <<
 			 PMC_USB_ALTMODE_DP_MODE_SHIFT;
+
+	if (!is_pmc_mux_tbt(port->pmc->iom_adev)) {
+		u8 cable_speed = (data->conf & DP_CONF_SIGNALLING_MASK) >>
+				  DP_CONF_SIGNALLING_SHIFT;
+
+		u8 cable_type = (data->conf & DP_CONF_CABLE_TYPE_MASK) >>
+				 DP_CONF_CABLE_TYPE_SHIFT;
+
+		req.mode_data |= PMC_USB_ALTMODE_CABLE_SPD(cable_speed);
+
+		if (cable_type == DP_CONF_CABLE_TYPE_OPTICAL)
+			req.mode_data |= PMC_USB_ALTMODE_CABLE_TYPE;
+		else if (cable_type == DP_CONF_CABLE_TYPE_RE_TIMER)
+			req.mode_data |= PMC_USB_ALTMODE_ACTIVE_CABLE |
+					 PMC_USB_ALTMODE_RETIMER_CABLE;
+		else if (cable_type == DP_CONF_CABLE_TYPE_RE_DRIVER)
+			req.mode_data |= PMC_USB_ALTMODE_ACTIVE_CABLE;
+	}
 
 	ret = pmc_usb_command(port, (void *)&req, sizeof(req));
 	if (ret)
@@ -599,6 +623,7 @@ static int pmc_usb_register_port(struct pmc_usb *pmc, int index,
 	desc.driver_data = port;
 	desc.name = fwnode_get_name(fwnode);
 	desc.set = pmc_usb_set_role;
+	desc.allow_userspace_control = true;
 
 	port->usb_sw = usb_role_switch_register(pmc->dev, &desc);
 	if (IS_ERR(port->usb_sw)) {
@@ -694,7 +719,7 @@ DEFINE_SHOW_ATTRIBUTE(port_iom_status);
 static void pmc_mux_port_debugfs_init(struct pmc_usb_port *port)
 {
 	struct dentry *debugfs_dir;
-	char name[6];
+	char name[8];
 
 	snprintf(name, sizeof(name), "port%d", port->usb3_port - 1);
 
@@ -707,30 +732,28 @@ static int pmc_usb_probe(struct platform_device *pdev)
 {
 	struct fwnode_handle *fwnode = NULL;
 	struct pmc_usb *pmc;
+	u8 num_ports = 0;
 	int i = 0;
 	int ret;
 
-	pmc = devm_kzalloc(&pdev->dev, sizeof(*pmc), GFP_KERNEL);
-	if (!pmc)
-		return -ENOMEM;
-
 	device_for_each_child_node(&pdev->dev, fwnode)
-		pmc->num_ports++;
+		num_ports++;
 
 	/* The IOM microcontroller has a limitation of max 4 ports. */
-	if (pmc->num_ports > 4) {
+	if (num_ports > 4) {
 		dev_err(&pdev->dev, "driver limited to 4 ports\n");
 		return -ERANGE;
 	}
 
-	pmc->port = devm_kcalloc(&pdev->dev, pmc->num_ports,
-				 sizeof(struct pmc_usb_port), GFP_KERNEL);
-	if (!pmc->port)
+	pmc = devm_kzalloc(&pdev->dev, struct_size(pmc, port, num_ports), GFP_KERNEL);
+	if (!pmc)
 		return -ENOMEM;
+
+	pmc->num_ports = num_ports;
 
 	pmc->ipc = devm_intel_scu_ipc_dev_get(&pdev->dev);
 	if (!pmc->ipc)
-		return -ENODEV;
+		return -EPROBE_DEFER;
 
 	pmc->dev = &pdev->dev;
 
@@ -804,7 +827,7 @@ static struct platform_driver pmc_usb_driver = {
 		.acpi_match_table = ACPI_PTR(pmc_usb_acpi_ids),
 	},
 	.probe = pmc_usb_probe,
-	.remove_new = pmc_usb_remove,
+	.remove = pmc_usb_remove,
 };
 
 static int __init pmc_usb_init(void)

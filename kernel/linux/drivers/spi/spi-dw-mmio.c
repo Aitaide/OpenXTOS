@@ -31,6 +31,8 @@ struct dw_spi_mmio {
 	struct clk     *pclk;
 	void           *priv;
 	struct reset_control *rstc;
+	void (*platform_suspend)(struct dw_spi_mmio *dwsmmio);
+	int (*platform_resume)(struct dw_spi_mmio *dwsmmio);
 };
 
 #define MSCC_CPU_SYSTEM_CTRL_GENERAL_CTRL	0x24
@@ -47,6 +49,8 @@ struct dw_spi_mmio {
 
 #define SPARX5_FORCE_ENA			0xa4
 #define SPARX5_FORCE_VAL			0xa8
+
+#define JHB100_ADDRMODE_CS			0x00
 
 struct dw_spi_mscc {
 	struct regmap       *syscon;
@@ -104,10 +108,8 @@ static int dw_spi_mscc_init(struct platform_device *pdev,
 		return -ENOMEM;
 
 	dwsmscc->spi_mst = devm_platform_ioremap_resource(pdev, 1);
-	if (IS_ERR(dwsmscc->spi_mst)) {
-		dev_err(&pdev->dev, "SPI_MST region map failed\n");
+	if (IS_ERR(dwsmscc->spi_mst))
 		return PTR_ERR(dwsmscc->spi_mst);
-	}
 
 	dwsmscc->syscon = syscon_regmap_lookup_by_compatible(cpu_syscon);
 	if (IS_ERR(dwsmscc->syscon))
@@ -228,8 +230,8 @@ static int dw_spi_hssi_init(struct platform_device *pdev,
 	return 0;
 }
 
-static int dw_spi_intel_init(struct platform_device *pdev,
-			     struct dw_spi_mmio *dwsmmio)
+static int dw_spi_hssi_no_dma_init(struct platform_device *pdev,
+				   struct dw_spi_mmio *dwsmmio)
 {
 	dwsmmio->dws.ip = DW_HSSI_ID;
 
@@ -312,6 +314,58 @@ static int dw_spi_elba_init(struct platform_device *pdev,
 	return 0;
 }
 
+static int dw_spi_jhb100_set_addr_nbyte(struct spi_device *spi, u8 nbyte)
+{
+	struct dw_spi *dws = spi_controller_get_devdata(spi->controller);
+	struct dw_spi_mmio *dwsmmio = container_of(dws, struct dw_spi_mmio, dws);
+	struct regmap *syscon = dwsmmio->priv;
+
+	if (nbyte == 3) {
+		regmap_update_bits(syscon, JHB100_ADDRMODE_CS,
+				   BIT(spi_get_chipselect(spi, 0)),
+				   0);
+	} else if (nbyte == 4) {
+		regmap_update_bits(syscon, JHB100_ADDRMODE_CS,
+				   BIT(spi_get_chipselect(spi, 0)),
+				   BIT(spi_get_chipselect(spi, 0)));
+	} else {
+		dev_err(&spi->dev, "Unsupported address nbyte %d\n", nbyte);
+		return -EINVAL;
+	}
+
+	return 0;
+}
+
+static int dw_spi_jhb100_resume(struct dw_spi_mmio *dwsmmio)
+{
+	dw_spi_jhb100_mask_intr(&dwsmmio->dws, 0xff);
+
+	return 0;
+}
+
+static int dw_spi_jhb100_init(struct platform_device *pdev,
+			      struct dw_spi_mmio *dwsmmio)
+{
+	struct regmap *syscon;
+
+	syscon = syscon_regmap_lookup_by_phandle(dev_of_node(&pdev->dev),
+						 "starfive,sfc-filter-syscon");
+	if (IS_ERR(syscon))
+		return dev_err_probe(&pdev->dev, PTR_ERR(syscon),
+				     "syscon regmap lookup failed\n");
+
+	dwsmmio->priv = syscon;
+	dwsmmio->platform_resume = dw_spi_jhb100_resume;
+
+	dwsmmio->dws.set_addr_nbyte = dw_spi_jhb100_set_addr_nbyte;
+	dwsmmio->dws.ip = DW_HSSI_ID;
+	dwsmmio->dws.quirk_flags = DW_SPI_QUIRK_JHB100;
+
+	dw_spi_jhb100_mask_intr(&dwsmmio->dws, 0xff);
+
+	return 0;
+}
+
 static int dw_spi_mmio_probe(struct platform_device *pdev)
 {
 	int (*init_func)(struct platform_device *pdev,
@@ -320,7 +374,6 @@ static int dw_spi_mmio_probe(struct platform_device *pdev)
 	struct resource *mem;
 	struct dw_spi *dws;
 	int ret;
-	int num_cs;
 
 	dwsmmio = devm_kzalloc(&pdev->dev, sizeof(struct dw_spi_mmio),
 			GFP_KERNEL);
@@ -340,30 +393,23 @@ static int dw_spi_mmio_probe(struct platform_device *pdev)
 	if (dws->irq < 0)
 		return dws->irq; /* -ENXIO */
 
-	dwsmmio->clk = devm_clk_get(&pdev->dev, NULL);
+	dwsmmio->clk = devm_clk_get_enabled(&pdev->dev, NULL);
 	if (IS_ERR(dwsmmio->clk))
 		return PTR_ERR(dwsmmio->clk);
-	ret = clk_prepare_enable(dwsmmio->clk);
-	if (ret)
-		return ret;
 
 	/* Optional clock needed to access the registers */
-	dwsmmio->pclk = devm_clk_get_optional(&pdev->dev, "pclk");
-	if (IS_ERR(dwsmmio->pclk)) {
-		ret = PTR_ERR(dwsmmio->pclk);
-		goto out_clk;
-	}
-	ret = clk_prepare_enable(dwsmmio->pclk);
-	if (ret)
-		goto out_clk;
+	dwsmmio->pclk = devm_clk_get_optional_enabled(&pdev->dev, "pclk");
+	if (IS_ERR(dwsmmio->pclk))
+		return PTR_ERR(dwsmmio->pclk);
 
 	/* find an optional reset controller */
 	dwsmmio->rstc = devm_reset_control_get_optional_exclusive(&pdev->dev, "spi");
-	if (IS_ERR(dwsmmio->rstc)) {
-		ret = PTR_ERR(dwsmmio->rstc);
-		goto out_clk;
-	}
-	reset_control_deassert(dwsmmio->rstc);
+	if (IS_ERR(dwsmmio->rstc))
+		return PTR_ERR(dwsmmio->rstc);
+
+	ret = reset_control_deassert(dwsmmio->rstc);
+	if (ret)
+		return dev_err_probe(&pdev->dev, ret, "Failed to deassert resets\n");
 
 	dws->bus_num = pdev->id;
 
@@ -373,22 +419,19 @@ static int dw_spi_mmio_probe(struct platform_device *pdev)
 				     &dws->reg_io_width))
 		dws->reg_io_width = 4;
 
-	num_cs = 4;
-
-	device_property_read_u32(&pdev->dev, "num-cs", &num_cs);
-
-	dws->num_cs = num_cs;
+	/* Rely on the auto-detection if no property specified */
+	device_property_read_u32(&pdev->dev, "num-cs", &dws->num_cs);
 
 	init_func = device_get_match_data(&pdev->dev);
 	if (init_func) {
 		ret = init_func(pdev, dwsmmio);
 		if (ret)
-			goto out;
+			goto out_reset;
 	}
 
 	pm_runtime_enable(&pdev->dev);
 
-	ret = dw_spi_add_host(&pdev->dev, dws);
+	ret = dw_spi_add_controller(&pdev->dev, dws);
 	if (ret)
 		goto out;
 
@@ -397,22 +440,65 @@ static int dw_spi_mmio_probe(struct platform_device *pdev)
 
 out:
 	pm_runtime_disable(&pdev->dev);
-	clk_disable_unprepare(dwsmmio->pclk);
-out_clk:
-	clk_disable_unprepare(dwsmmio->clk);
+out_reset:
 	reset_control_assert(dwsmmio->rstc);
 
 	return ret;
 }
 
+static int dw_spi_mmio_suspend(struct device *dev)
+{
+	struct dw_spi_mmio *dwsmmio = dev_get_drvdata(dev);
+	int ret;
+
+	ret = dw_spi_suspend_controller(&dwsmmio->dws);
+	if (ret)
+		return ret;
+
+	if (dwsmmio->platform_suspend)
+		dwsmmio->platform_suspend(dwsmmio);
+
+	reset_control_assert(dwsmmio->rstc);
+
+	clk_disable_unprepare(dwsmmio->pclk);
+	clk_disable_unprepare(dwsmmio->clk);
+
+	return 0;
+}
+
+static int dw_spi_mmio_resume(struct device *dev)
+{
+	struct dw_spi_mmio *dwsmmio = dev_get_drvdata(dev);
+	int ret;
+
+	clk_prepare_enable(dwsmmio->clk);
+	clk_prepare_enable(dwsmmio->pclk);
+
+	reset_control_deassert(dwsmmio->rstc);
+
+	if (dwsmmio->platform_resume) {
+		ret = dwsmmio->platform_resume(dwsmmio);
+		if (ret) {
+			reset_control_assert(dwsmmio->rstc);
+
+			clk_disable_unprepare(dwsmmio->pclk);
+			clk_disable_unprepare(dwsmmio->clk);
+			return ret;
+		}
+	}
+
+	return dw_spi_resume_controller(&dwsmmio->dws);
+}
+
+static DEFINE_SIMPLE_DEV_PM_OPS(dw_spi_mmio_pm_ops,
+				dw_spi_mmio_suspend, dw_spi_mmio_resume);
+
 static void dw_spi_mmio_remove(struct platform_device *pdev)
 {
 	struct dw_spi_mmio *dwsmmio = platform_get_drvdata(pdev);
 
-	dw_spi_remove_host(&dwsmmio->dws);
+	dw_spi_remove_controller(&dwsmmio->dws);
 	pm_runtime_disable(&pdev->dev);
-	clk_disable_unprepare(dwsmmio->pclk);
-	clk_disable_unprepare(dwsmmio->clk);
 	reset_control_assert(dwsmmio->rstc);
 }
 
@@ -423,8 +509,8 @@ static const struct of_device_id dw_spi_mmio_of_match[] = {
 	{ .compatible = "amazon,alpine-dw-apb-ssi", .data = dw_spi_alpine_init},
 	{ .compatible = "renesas,rzn1-spi", .data = dw_spi_pssi_init},
 	{ .compatible = "snps,dwc-ssi-1.01a", .data = dw_spi_hssi_init},
-	{ .compatible = "intel,keembay-ssi", .data = dw_spi_intel_init},
-	{ .compatible = "intel,thunderbay-ssi", .data = dw_spi_intel_init},
+	{ .compatible = "snps,dwc-ssi-2.00a", .data = dw_spi_hssi_init},
+	{ .compatible = "intel,keembay-ssi", .data = dw_spi_hssi_no_dma_init},
 	{
 		.compatible = "intel,mountevans-imc-ssi",
 		.data = dw_spi_mountevans_imc_init,
@@ -432,6 +518,7 @@ static const struct of_device_id dw_spi_mmio_of_match[] = {
 	{ .compatible = "microchip,sparx5-spi", dw_spi_mscc_sparx5_init},
 	{ .compatible = "canaan,k210-spi", dw_spi_canaan_k210_init},
 	{ .compatible = "amd,pensando-elba-spi", .data = dw_spi_elba_init},
+	{ .compatible = "starfive,jhb100-sfc", .data = dw_spi_jhb100_init},
 	{ /* end of table */}
 };
 MODULE_DEVICE_TABLE(of, dw_spi_mmio_of_match);
@@ -439,6 +526,7 @@ MODULE_DEVICE_TABLE(of, dw_spi_mmio_of_match);
 #ifdef CONFIG_ACPI
 static const struct acpi_device_id dw_spi_mmio_acpi_match[] = {
 	{"HISI0173", (kernel_ulong_t)dw_spi_pssi_init},
+	{"LECA0002", (kernel_ulong_t)dw_spi_hssi_no_dma_init},
 	{},
 };
 MODULE_DEVICE_TABLE(acpi, dw_spi_mmio_acpi_match);
@@ -446,11 +534,12 @@ MODULE_DEVICE_TABLE(acpi, dw_spi_mmio_acpi_match);
 
 static struct platform_driver dw_spi_mmio_driver = {
 	.probe		= dw_spi_mmio_probe,
-	.remove_new	= dw_spi_mmio_remove,
+	.remove		= dw_spi_mmio_remove,
 	.driver		= {
 		.name	= DRIVER_NAME,
 		.of_match_table = dw_spi_mmio_of_match,
 		.acpi_match_table = ACPI_PTR(dw_spi_mmio_acpi_match),
+		.pm	= pm_sleep_ptr(&dw_spi_mmio_pm_ops),
 	},
 };
 module_platform_driver(dw_spi_mmio_driver);
@@ -458,4 +547,4 @@ module_platform_driver(dw_spi_mmio_driver);
 MODULE_AUTHOR("Jean-Hugues Deschenes <jean-hugues.deschenes@octasic.com>");
 MODULE_DESCRIPTION("Memory-mapped I/O interface driver for DW SPI Core");
 MODULE_LICENSE("GPL v2");
-MODULE_IMPORT_NS(SPI_DW_CORE);
+MODULE_IMPORT_NS("SPI_DW_CORE");

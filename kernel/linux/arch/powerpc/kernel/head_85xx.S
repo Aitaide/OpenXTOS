@@ -294,9 +294,10 @@ set_ivor:
 /* Macros to hide the PTE size differences
  *
  * FIND_PTE -- walks the page tables given EA & pgdir pointer
- *   r10 -- EA of fault
+ *   r10 -- free
  *   r11 -- PGDIR pointer
  *   r12 -- free
+ *   r13 -- EA of fault
  *   label 2: is the bailout case
  *
  * if we find the pte (fall through):
@@ -304,39 +305,29 @@ set_ivor:
  *   r12 is pointer to the pte
  *   r10 is the pshift from the PGD, if we're a hugepage
  */
-#ifdef CONFIG_PTE_64BIT
 #ifdef CONFIG_HUGETLB_PAGE
 #define FIND_PTE	\
-	rlwinm	r12, r10, 13, 19, 29;	/* Compute pgdir/pmd offset */	\
-	lwzx	r11, r12, r11;		/* Get pgd/pmd entry */		\
+	rlwinm	r12, r13, 14, 18, 28;	/* Compute pgdir/pmd offset */	\
+	add	r12, r11, r12;						\
+	lwz	r11, 4(r12);		/* Get pgd/pmd entry */		\
+	rlwinm.	r10, r11, 32 - _PAGE_PSIZE_SHIFT, 0x1e; /* get tsize*/	\
+	bne	1000f;			/* Huge page (leaf entry) */	\
 	rlwinm.	r12, r11, 0, 0, 20;	/* Extract pt base address */	\
-	blt	1000f;			/* Normal non-huge page */	\
 	beq	2f;			/* Bail if no table */		\
-	oris	r11, r11, PD_HUGE@h;	/* Put back address bit */	\
-	andi.	r10, r11, HUGEPD_SHIFT_MASK@l; /* extract size field */	\
-	xor	r12, r10, r11;		/* drop size bits from pointer */ \
-	b	1001f;							\
-1000:	rlwimi	r12, r10, 23, 20, 28;	/* Compute pte address */	\
+	rlwimi	r12, r13, 23, 20, 28;	/* Compute pte address */	\
 	li	r10, 0;			/* clear r10 */			\
-1001:	lwz	r11, 4(r12);		/* Get pte entry */
+	lwz	r11, 4(r12);		/* Get pte entry */		\
+1000:
 #else
 #define FIND_PTE	\
-	rlwinm	r12, r10, 13, 19, 29;	/* Compute pgdir/pmd offset */	\
-	lwzx	r11, r12, r11;		/* Get pgd/pmd entry */		\
+	rlwinm	r12, r13, 14, 18, 28;	/* Compute pgdir/pmd offset */	\
+	add	r12, r11, r12;						\
+	lwz	r11, 4(r12);		/* Get pgd/pmd entry */		\
 	rlwinm.	r12, r11, 0, 0, 20;	/* Extract pt base address */	\
 	beq	2f;			/* Bail if no table */		\
-	rlwimi	r12, r10, 23, 20, 28;	/* Compute pte address */	\
+	rlwimi	r12, r13, 23, 20, 28;	/* Compute pte address */	\
 	lwz	r11, 4(r12);		/* Get pte entry */
 #endif /* HUGEPAGE */
-#else /* !PTE_64BIT */
-#define FIND_PTE	\
-	rlwimi	r11, r10, 12, 20, 29;	/* Create L1 (pgdir/pmd) address */	\
-	lwz	r11, 0(r11);		/* Get L1 entry */			\
-	rlwinm.	r12, r11, 0, 0, 19;	/* Extract L2 (pte) base address */	\
-	beq	2f;			/* Bail if no table */			\
-	rlwimi	r12, r10, 22, 20, 29;	/* Compute PTE address */		\
-	lwz	r11, 0(r12);		/* Get Linux PTE */
-#endif
 
 /*
  * Interrupt vector entry code
@@ -441,13 +432,13 @@ START_BTB_FLUSH_SECTION
 	BTB_FLUSH(r10)
 1:
 END_BTB_FLUSH_SECTION
-	mfspr	r10, SPRN_DEAR		/* Get faulting address */
+	mfspr	r13, SPRN_DEAR		/* Get faulting address */
 
 	/* If we are faulting a kernel address, we have to use the
 	 * kernel page tables.
 	 */
 	lis	r11, PAGE_OFFSET@h
-	cmplw	5, r10, r11
+	cmplw	5, r13, r11
 	blt	5, 3f
 	lis	r11, swapper_pg_dir@h
 	ori	r11, r11, swapper_pg_dir@l
@@ -470,38 +461,17 @@ END_BTB_FLUSH_SECTION
 #endif
 
 4:
-	/* Mask of required permission bits. Note that while we
-	 * do copy ESR:ST to _PAGE_RW position as trying to write
-	 * to an RO page is pretty common, we don't do it with
-	 * _PAGE_DIRTY. We could do it, but it's a fairly rare
-	 * event so I'd rather take the overhead when it happens
-	 * rather than adding an instruction here. We should measure
-	 * whether the whole thing is worth it in the first place
-	 * as we could avoid loading SPRN_ESR completely in the first
-	 * place...
-	 *
-	 * TODO: Is it worth doing that mfspr & rlwimi in the first
-	 *       place or can we save a couple of instructions here ?
-	 */
-	mfspr	r12,SPRN_ESR
-#ifdef CONFIG_PTE_64BIT
-	li	r13,_PAGE_PRESENT
-	oris	r13,r13,_PAGE_ACCESSED@h
-#else
-	li	r13,_PAGE_PRESENT|_PAGE_ACCESSED
-#endif
-	rlwimi	r13,r12,11,29,29
-
 	FIND_PTE
+
+	li	r13,_PAGE_PRESENT|_PAGE_BAP_SR
+	oris	r13,r13,_PAGE_ACCESSED@h
 	andc.	r13,r13,r11		/* Check permission */
 
-#ifdef CONFIG_PTE_64BIT
 #ifdef CONFIG_SMP
 	subf	r13,r11,r12		/* create false data dep */
 	lwzx	r13,r11,r13		/* Get upper pte bits */
 #else
 	lwz	r13,0(r12)		/* Get upper pte bits */
-#endif
 #endif
 
 	bne	2f			/* Bail if permission/valid mismatch */
@@ -549,13 +519,13 @@ START_BTB_FLUSH_SECTION
 1:
 END_BTB_FLUSH_SECTION
 
-	mfspr	r10, SPRN_SRR0		/* Get faulting address */
+	mfspr	r13, SPRN_SRR0		/* Get faulting address */
 
 	/* If we are faulting a kernel address, we have to use the
 	 * kernel page tables.
 	 */
 	lis	r11, PAGE_OFFSET@h
-	cmplw	5, r10, r11
+	cmplw	5, r13, r11
 	blt	5, 3f
 	lis	r11, swapper_pg_dir@h
 	ori	r11, r11, swapper_pg_dir@l
@@ -564,13 +534,10 @@ END_BTB_FLUSH_SECTION
 	rlwinm	r12,r12,0,16,1
 	mtspr	SPRN_MAS1,r12
 
+	FIND_PTE
 	/* Make up the required permissions for kernel code */
-#ifdef CONFIG_PTE_64BIT
 	li	r13,_PAGE_PRESENT | _PAGE_BAP_SX
 	oris	r13,r13,_PAGE_ACCESSED@h
-#else
-	li	r13,_PAGE_PRESENT | _PAGE_ACCESSED | _PAGE_EXEC
-#endif
 	b	4f
 
 	/* Get the PGD for the current thread */
@@ -584,25 +551,19 @@ END_BTB_FLUSH_SECTION
 	beq	2f			/* KUAP fault */
 #endif
 
+	FIND_PTE
 	/* Make up the required permissions for user code */
-#ifdef CONFIG_PTE_64BIT
 	li	r13,_PAGE_PRESENT | _PAGE_BAP_UX
 	oris	r13,r13,_PAGE_ACCESSED@h
-#else
-	li	r13,_PAGE_PRESENT | _PAGE_ACCESSED | _PAGE_EXEC
-#endif
 
 4:
-	FIND_PTE
 	andc.	r13,r13,r11		/* Check permission */
 
-#ifdef CONFIG_PTE_64BIT
 #ifdef CONFIG_SMP
 	subf	r13,r11,r12		/* create false data dep */
 	lwzx	r13,r11,r13		/* Get upper pte bits */
 #else
 	lwz	r13,0(r12)		/* Get upper pte bits */
-#endif
 #endif
 
 	bne	2f			/* Bail if permission mismatch */
@@ -696,7 +657,7 @@ interrupt_end:
  *	r10 - tsize encoding (if HUGETLB_PAGE) or available to use
  *	r11 - TLB (info from Linux PTE)
  *	r12 - available to use
- *	r13 - upper bits of PTE (if PTE_64BIT) or available to use
+ *	r13 - upper bits of PTE
  *	CR5 - results of addr >= PAGE_OFFSET
  *	MAS0, MAS1 - loaded with proper value when we get here
  *	MAS2, MAS3 - will need additional info from Linux PTE
@@ -746,17 +707,12 @@ finish_tlb_load:
 	lwz	r15, 0(r14)
 100:	stw	r15, 0(r17)
 
-	/*
-	 * Calc MAS1_TSIZE from r10 (which has pshift encoded)
-	 * tlb_enc = (pshift - 10).
-	 */
-	subi	r15, r10, 10
 	mfspr	r16, SPRN_MAS1
-	rlwimi	r16, r15, 7, 20, 24
+	rlwimi	r16, r10, MAS1_TSIZE_SHIFT, MAS1_TSIZE_MASK
 	mtspr	SPRN_MAS1, r16
 
 	/* copy the pshift for use later */
-	mr	r14, r10
+	addi	r14, r10, _PAGE_PSIZE_SHIFT_OFFSET
 
 	/* fall through */
 
@@ -769,7 +725,6 @@ finish_tlb_load:
 	 * here we (properly should) assume have the appropriate value.
 	 */
 finish_tlb_load_cont:
-#ifdef CONFIG_PTE_64BIT
 	rlwinm	r12, r11, 32-2, 26, 31	/* Move in perm bits */
 	andi.	r10, r11, _PAGE_DIRTY
 	bne	1f
@@ -782,26 +737,9 @@ BEGIN_MMU_FTR_SECTION
 	srwi	r10, r13, 12		/* grab RPN[12:31] */
 	mtspr	SPRN_MAS7, r10
 END_MMU_FTR_SECTION_IFSET(MMU_FTR_BIG_PHYS)
-#else
-	li	r10, (_PAGE_EXEC | _PAGE_PRESENT)
-	mr	r13, r11
-	rlwimi	r10, r11, 31, 29, 29	/* extract _PAGE_DIRTY into SW */
-	and	r12, r11, r10
-	andi.	r10, r11, _PAGE_USER	/* Test for _PAGE_USER */
-	slwi	r10, r12, 1
-	or	r10, r10, r12
-	rlwinm	r10, r10, 0, ~_PAGE_EXEC	/* Clear SX on user pages */
-	iseleq	r12, r12, r10
-	rlwimi	r13, r12, 0, 20, 31	/* Get RPN from PTE, merge w/ perms */
-	mtspr	SPRN_MAS3, r13
-#endif
 
 	mfspr	r12, SPRN_MAS2
-#ifdef CONFIG_PTE_64BIT
 	rlwimi	r12, r11, 32-19, 27, 31	/* extract WIMGE from pte */
-#else
-	rlwimi	r12, r11, 26, 27, 31	/* extract WIMGE from pte */
-#endif
 #ifdef CONFIG_HUGETLB_PAGE
 	beq	6, 3f			/* don't mask if page isn't huge */
 	li	r13, 1

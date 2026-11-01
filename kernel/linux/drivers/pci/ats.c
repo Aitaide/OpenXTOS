@@ -9,6 +9,7 @@
  * Copyright (C) 2011 Advanced Micro Devices,
  */
 
+#include <linux/bitfield.h>
 #include <linux/export.h>
 #include <linux/pci-ats.h>
 #include <linux/pci.h>
@@ -39,12 +40,52 @@ void pci_ats_init(struct pci_dev *dev)
  */
 bool pci_ats_supported(struct pci_dev *dev)
 {
-	if (!dev->ats_cap)
+	if (!dev->ats_cap || dev->untrusted)
 		return false;
 
-	return (dev->untrusted == 0);
+	if (dev->is_virtfn)
+		return pci_ats_supported(pci_physfn(dev));
+
+	return true;
 }
 EXPORT_SYMBOL_GPL(pci_ats_supported);
+
+/**
+ * pci_prepare_ats - Setup the PS for ATS
+ * @dev: the PCI device
+ * @ps: the IOMMU page shift
+ *
+ * This must be done by the IOMMU driver on the PF before any VFs are created to
+ * ensure that the VF can have ATS enabled.
+ *
+ * Returns 0 on success, or negative on failure.
+ */
+int pci_prepare_ats(struct pci_dev *dev, int ps)
+{
+	u16 ctrl;
+
+	if (!pci_ats_supported(dev))
+		return -EINVAL;
+
+	if (WARN_ON(dev->ats_enabled))
+		return -EBUSY;
+
+	if (ps < PCI_ATS_MIN_STU)
+		return -EINVAL;
+
+	if (dev->is_virtfn) {
+		if (pci_physfn(dev)->ats_stu != ps)
+			return -EINVAL;
+
+		return 0;
+	}
+
+	dev->ats_stu = ps;
+	ctrl = PCI_ATS_CTRL_STU(dev->ats_stu - PCI_ATS_MIN_STU);
+	pci_write_config_word(dev, dev->ats_cap + PCI_ATS_CTRL, ctrl);
+	return 0;
+}
+EXPORT_SYMBOL_GPL(pci_prepare_ats);
 
 /**
  * pci_enable_ats - enable the ATS capability
@@ -170,6 +211,53 @@ int pci_ats_page_aligned(struct pci_dev *pdev)
 
 	return 0;
 }
+
+/*
+ * CXL r4.0, sec 3.2.5.13 Memory Type on CXL.cache notes: to source requests on
+ * CXL.cache, devices need to get the Host Physical Address (HPA) from the Host
+ * by means of an ATS request on CXL.io.
+ *
+ * In other words, CXL.cache devices cannot access host physical memory without
+ * ATS.
+ *
+ * Check Cache_Capable instead of Cache_Enable because CXL.cache may be enabled
+ * after the caller uses this to make its ATS decision.
+ */
+static bool pci_cxl_ats_required(struct pci_dev *pdev)
+{
+	int offset;
+	u16 cap;
+
+	offset = pci_find_dvsec_capability(pdev, PCI_VENDOR_ID_CXL,
+					   PCI_DVSEC_CXL_DEVICE);
+	if (!offset)
+		return false;
+
+	if (pci_read_config_word(pdev, offset + PCI_DVSEC_CXL_CAP, &cap))
+		return false;
+
+	return cap & PCI_DVSEC_CXL_CACHE_CAPABLE;
+}
+
+/**
+ * pci_ats_required - Whether the PCI device requires ATS
+ * @pdev: the PCI device
+ *
+ * Returns true, if the PCI device requires ATS for basic functional operation.
+ */
+bool pci_ats_required(struct pci_dev *pdev)
+{
+	if (!pci_ats_supported(pdev))
+		return false;
+
+	/* A VF inherits its PF's requirement for ATS function */
+	if (pdev->is_virtfn)
+		pdev = pci_physfn(pdev);
+
+	return pci_cxl_ats_required(pdev) ||
+	       pci_dev_specific_ats_required(pdev);
+}
+EXPORT_SYMBOL_GPL(pci_ats_required);
 
 #ifdef CONFIG_PCI_PRI
 void pci_pri_init(struct pci_dev *pdev)
@@ -376,7 +464,7 @@ int pci_enable_pasid(struct pci_dev *pdev, int features)
 	if (WARN_ON(pdev->pasid_enabled))
 		return -EBUSY;
 
-	if (!pdev->eetlp_prefix_path && !pdev->pasid_no_tlp)
+	if (!pdev->eetlp_prefix_max && !pdev->pasid_no_tlp)
 		return -EINVAL;
 
 	if (!pasid)
@@ -454,8 +542,8 @@ void pci_restore_pasid_state(struct pci_dev *pdev)
  * pci_pasid_features - Check which PASID features are supported
  * @pdev: PCI device structure
  *
- * Returns a negative value when no PASI capability is present.
- * Otherwise is returns a bitmask with supported features. Current
+ * Return a negative value when no PASID capability is present.
+ * Otherwise return a bitmask with supported features. Current
  * features reported are:
  * PCI_PASID_CAP_EXEC - Execute permission supported
  * PCI_PASID_CAP_PRIV - Privileged mode supported
@@ -480,8 +568,6 @@ int pci_pasid_features(struct pci_dev *pdev)
 }
 EXPORT_SYMBOL_GPL(pci_pasid_features);
 
-#define PASID_NUMBER_SHIFT	8
-#define PASID_NUMBER_MASK	(0x1f << PASID_NUMBER_SHIFT)
 /**
  * pci_max_pasids - Get maximum number of PASIDs supported by device
  * @pdev: PCI device structure
@@ -503,9 +589,40 @@ int pci_max_pasids(struct pci_dev *pdev)
 
 	pci_read_config_word(pdev, pasid + PCI_PASID_CAP, &supported);
 
-	supported = (supported & PASID_NUMBER_MASK) >> PASID_NUMBER_SHIFT;
-
-	return (1 << supported);
+	return (1 << FIELD_GET(PCI_PASID_CAP_WIDTH, supported));
 }
 EXPORT_SYMBOL_GPL(pci_max_pasids);
+
+/**
+ * pci_pasid_status - Check the PASID status
+ * @pdev: PCI device structure
+ *
+ * Returns a negative value when no PASID capability is present.
+ * Otherwise the value of the control register is returned.
+ * Status reported are:
+ *
+ * PCI_PASID_CTRL_ENABLE - PASID enabled
+ * PCI_PASID_CTRL_EXEC - Execute permission enabled
+ * PCI_PASID_CTRL_PRIV - Privileged mode enabled
+ */
+int pci_pasid_status(struct pci_dev *pdev)
+{
+	int pasid;
+	u16 ctrl;
+
+	if (pdev->is_virtfn)
+		pdev = pci_physfn(pdev);
+
+	pasid = pdev->pasid_cap;
+	if (!pasid)
+		return -EINVAL;
+
+	pci_read_config_word(pdev, pasid + PCI_PASID_CTRL, &ctrl);
+
+	ctrl &= PCI_PASID_CTRL_ENABLE | PCI_PASID_CTRL_EXEC |
+		PCI_PASID_CTRL_PRIV;
+
+	return ctrl;
+}
+EXPORT_SYMBOL_GPL(pci_pasid_status);
 #endif /* CONFIG_PCI_PASID */

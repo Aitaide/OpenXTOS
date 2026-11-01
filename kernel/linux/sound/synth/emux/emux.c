@@ -26,7 +26,7 @@ int snd_emux_new(struct snd_emux **remu)
 	struct snd_emux *emu;
 
 	*remu = NULL;
-	emu = kzalloc(sizeof(*emu), GFP_KERNEL);
+	emu = kzalloc_obj(*emu);
 	if (emu == NULL)
 		return -ENOMEM;
 
@@ -85,19 +85,16 @@ int snd_emux_register(struct snd_emux *emu, struct snd_card *card, int index, ch
 		return -EINVAL;
 
 	emu->card = card;
-	emu->name = kstrdup(name, GFP_KERNEL);
-	emu->voices = kcalloc(emu->max_voices, sizeof(struct snd_emux_voice),
-			      GFP_KERNEL);
+	emu->name = kstrdup_const(name, GFP_KERNEL);
+	emu->voices = kzalloc_objs(struct snd_emux_voice, emu->max_voices);
 	if (emu->name == NULL || emu->voices == NULL)
 		return -ENOMEM;
 
 	/* create soundfont list */
 	memset(&sf_cb, 0, sizeof(sf_cb));
 	sf_cb.private_data = emu;
-	if (emu->ops.sample_new)
-		sf_cb.sample_new = sf_sample_new;
-	if (emu->ops.sample_free)
-		sf_cb.sample_free = sf_sample_free;
+	sf_cb.sample_new = sf_sample_new;
+	sf_cb.sample_free = sf_sample_free;
 	if (emu->ops.sample_reset)
 		sf_cb.sample_reset = sf_sample_reset;
 	emu->sflist = snd_sf_new(&sf_cb, emu->memhdr);
@@ -140,7 +137,7 @@ int snd_emux_free(struct snd_emux *emu)
 	snd_emux_delete_hwdep(emu);
 	snd_sf_free(emu->sflist);
 	kfree(emu->voices);
-	kfree(emu->name);
+	kfree_const(emu->name);
 	kfree(emu);
 	return 0;
 }

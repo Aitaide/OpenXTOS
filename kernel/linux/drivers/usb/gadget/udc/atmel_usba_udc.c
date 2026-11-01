@@ -40,7 +40,7 @@ static int queue_dbg_open(struct inode *inode, struct file *file)
 	struct usba_request *req, *req_copy;
 	struct list_head *queue_data;
 
-	queue_data = kmalloc(sizeof(*queue_data), GFP_KERNEL);
+	queue_data = kmalloc_obj(*queue_data);
 	if (!queue_data)
 		return -ENOMEM;
 	INIT_LIST_HEAD(queue_data);
@@ -94,7 +94,7 @@ static ssize_t queue_dbg_read(struct file *file, char __user *buf,
 
 	inode_lock(file_inode(file));
 	list_for_each_entry_safe(req, tmp_req, queue, queue) {
-		len = snprintf(tmpbuf, sizeof(tmpbuf),
+		len = scnprintf(tmpbuf, sizeof(tmpbuf),
 				"%8p %08x %c%c%c %5d %c%c%c\n",
 				req->req.buf, req->req.length,
 				req->req.no_interrupt ? 'i' : 'I',
@@ -104,7 +104,6 @@ static ssize_t queue_dbg_read(struct file *file, char __user *buf,
 				req->submitted ? 'F' : 'f',
 				req->using_dma ? 'D' : 'd',
 				req->last_transaction ? 'L' : 'l');
-		len = min(len, sizeof(tmpbuf));
 		if (len > nbytes)
 			break;
 
@@ -188,7 +187,6 @@ static int regs_dbg_release(struct inode *inode, struct file *file)
 static const struct file_operations queue_dbg_fops = {
 	.owner		= THIS_MODULE,
 	.open		= queue_dbg_open,
-	.llseek		= no_llseek,
 	.read		= queue_dbg_read,
 	.release	= queue_dbg_release,
 };
@@ -704,7 +702,7 @@ usba_ep_alloc_request(struct usb_ep *_ep, gfp_t gfp_flags)
 
 	DBG(DBG_GADGET, "ep_alloc_request: %p, 0x%x\n", _ep, gfp_flags);
 
-	req = kzalloc(sizeof(*req), gfp_flags);
+	req = kzalloc_obj(*req, gfp_flags);
 	if (!req)
 		return NULL;
 
@@ -2446,7 +2444,7 @@ static SIMPLE_DEV_PM_OPS(usba_udc_pm_ops, usba_udc_suspend, usba_udc_resume);
 
 static struct platform_driver udc_driver = {
 	.probe		= usba_udc_probe,
-	.remove_new	= usba_udc_remove,
+	.remove		= usba_udc_remove,
 	.driver		= {
 		.name		= "atmel_usba_udc",
 		.pm		= &usba_udc_pm_ops,

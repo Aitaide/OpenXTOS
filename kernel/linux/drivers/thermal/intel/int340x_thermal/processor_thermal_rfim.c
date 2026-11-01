@@ -7,9 +7,10 @@
 #include <linux/kernel.h>
 #include <linux/module.h>
 #include <linux/pci.h>
+#include <linux/sysfs.h>
 #include "processor_thermal_device.h"
 
-MODULE_IMPORT_NS(INT340X_THERMAL);
+MODULE_IMPORT_NS("INT340X_THERMAL");
 
 struct mmio_reg {
 	int read_only;
@@ -17,6 +18,12 @@ struct mmio_reg {
 	int bits;
 	u16 mask;
 	u16 shift;
+};
+
+struct mapping_table {
+	const char *attr_name;
+	const u32 value;
+	const char *mapped_str;
 };
 
 /* These will represent sysfs attribute names */
@@ -62,6 +69,89 @@ static const struct mmio_reg dlvr_mmio_regs[] = {
 	{ 1, 0x15A10, 1, 0x1, 16}, /* dlvr_pll_busy */
 };
 
+static const struct mmio_reg lnl_dlvr_mmio_regs[] = {
+	{ 0, 0x5A08, 5, 0x1F, 0}, /* dlvr_spread_spectrum_pct */
+	{ 0, 0x5A08, 1, 0x1, 5}, /* dlvr_control_mode */
+	{ 0, 0x5A08, 1, 0x1, 6}, /* dlvr_control_lock */
+	{ 0, 0x5A08, 1, 0x1, 7}, /* dlvr_rfim_enable */
+	{ 0, 0x5A08, 2, 0x3, 8}, /* dlvr_freq_select */
+	{ 1, 0x5A10, 2, 0x3, 30}, /* dlvr_hardware_rev */
+	{ 1, 0x5A10, 2, 0x3, 0}, /* dlvr_freq_mhz */
+	{ 1, 0x5A10, 1, 0x1, 23}, /* dlvr_pll_busy */
+};
+
+static const struct mapping_table lnl_dlvr_mapping[] = {
+	{"dlvr_freq_select", 0, "2227.2"},
+	{"dlvr_freq_select", 1, "2140"},
+	{"dlvr_freq_mhz", 0, "2227.2"},
+	{"dlvr_freq_mhz", 1, "2140"},
+	{NULL, 0, NULL},
+};
+
+static const struct mmio_reg nvl_dlvr_mmio_regs[] = {
+	{ 0, 0x19208, 5, 0x1F, 0}, /* dlvr_spread_spectrum_pct */
+	{ 0, 0x19208, 1, 0x1, 5}, /* dlvr_control_mode */
+	{ 0, 0x19208, 1, 0x1, 6}, /* dlvr_control_lock */
+	{ 0, 0x19208, 1, 0x1, 7}, /* dlvr_rfim_enable */
+	{ 0, 0x19208, 12, 0xFFF, 8}, /* dlvr_freq_select */
+	{ 1, 0x19210, 2, 0x3, 30}, /* dlvr_hardware_rev */
+	{ 1, 0x19210, 16, 0xFFFF, 0}, /* dlvr_freq_mhz */
+	{ 1, 0x19210, 1, 0x1, 16}, /* dlvr_pll_busy */
+};
+
+static int match_mapping_table(const struct mapping_table *table, const char *attr_name,
+			       bool match_int_value, const u32 value, const char *value_str,
+			       char **result_str, u32 *result_int)
+{
+	bool attr_matched = false;
+	int i = 0;
+
+	if (!table)
+		return -EOPNOTSUPP;
+
+	while (table[i].attr_name) {
+		if (strncmp(table[i].attr_name, attr_name, strlen(attr_name)))
+			goto match_next;
+
+		attr_matched = true;
+
+		if (match_int_value) {
+			if (table[i].value != value)
+				goto match_next;
+
+			*result_str = (char *)table[i].mapped_str;
+			return 0;
+		}
+
+		if (strncmp(table[i].mapped_str, value_str, strlen(table[i].mapped_str)))
+			goto match_next;
+
+		*result_int = table[i].value;
+
+		return 0;
+match_next:
+		i++;
+	}
+
+	/* If attribute name is matched, then the user space value is invalid */
+	if (attr_matched)
+		return -EINVAL;
+
+	return -EOPNOTSUPP;
+}
+
+static int get_mapped_string(const struct mapping_table *table, const char *attr_name,
+			     u32 value, char **result)
+{
+	return match_mapping_table(table, attr_name, true, value, NULL, result, NULL);
+}
+
+static int get_mapped_value(const struct mapping_table *table, const char *attr_name,
+			    const char *value, unsigned int *result)
+{
+	return match_mapping_table(table, attr_name, false, 0, value, NULL, result);
+}
+
 /* These will represent sysfs attribute names */
 static const char * const dvfs_strings[] = {
 	"rfi_restriction_run_busy",
@@ -88,17 +178,22 @@ static const struct mmio_reg adl_dvfs_mmio_regs[] = {
 	{ 0, 0x5A40, 1, 0x1, 0}, /* rfi_disable */
 };
 
+static const struct mapping_table *dlvr_mapping;
+static const struct mmio_reg *dlvr_mmio_regs_table;
+
 #define RFIM_SHOW(suffix, table)\
 static ssize_t suffix##_show(struct device *dev,\
 			      struct device_attribute *attr,\
 			      char *buf)\
 {\
+	const struct mmio_reg *mmio_regs = dlvr_mmio_regs_table;\
+	const struct mapping_table *mapping = dlvr_mapping;\
 	struct proc_thermal_device *proc_priv;\
 	struct pci_dev *pdev = to_pci_dev(dev);\
-	const struct mmio_reg *mmio_regs;\
 	const char **match_strs;\
+	int ret, err;\
 	u32 reg_val;\
-	int ret;\
+	char *str;\
 \
 	proc_priv = pci_get_drvdata(pdev);\
 	if (table == 1) {\
@@ -106,7 +201,6 @@ static ssize_t suffix##_show(struct device *dev,\
 		mmio_regs = adl_dvfs_mmio_regs;\
 	} else if (table == 2) { \
 		match_strs = (const char **)dlvr_strings;\
-		mmio_regs = dlvr_mmio_regs;\
 	} else {\
 		match_strs = (const char **)fivr_strings;\
 		mmio_regs = tgl_fivr_mmio_regs;\
@@ -116,7 +210,12 @@ static ssize_t suffix##_show(struct device *dev,\
 		return ret;\
 	reg_val = readl((void __iomem *) (proc_priv->mmio_base + mmio_regs[ret].offset));\
 	ret = (reg_val >> mmio_regs[ret].shift) & mmio_regs[ret].mask;\
-	return sprintf(buf, "%u\n", ret);\
+	err = get_mapped_string(mapping, attr->attr.name, ret, &str);\
+	if (!err)\
+		return sysfs_emit(buf, "%s\n", str);\
+	if (err == -EOPNOTSUPP)\
+		return sysfs_emit(buf, "%u\n", ret);\
+	return err;\
 }
 
 #define RFIM_STORE(suffix, table)\
@@ -124,11 +223,12 @@ static ssize_t suffix##_store(struct device *dev,\
 			       struct device_attribute *attr,\
 			       const char *buf, size_t count)\
 {\
+	const struct mmio_reg *mmio_regs = dlvr_mmio_regs_table;\
+	const struct mapping_table *mapping = dlvr_mapping;\
 	struct proc_thermal_device *proc_priv;\
 	struct pci_dev *pdev = to_pci_dev(dev);\
 	unsigned int input;\
 	const char **match_strs;\
-	const struct mmio_reg *mmio_regs;\
 	int ret, err;\
 	u32 reg_val;\
 	u32 mask;\
@@ -139,7 +239,6 @@ static ssize_t suffix##_store(struct device *dev,\
 		mmio_regs = adl_dvfs_mmio_regs;\
 	} else if (table == 2) { \
 		match_strs = (const char **)dlvr_strings;\
-		mmio_regs = dlvr_mmio_regs;\
 	} else {\
 		match_strs = (const char **)fivr_strings;\
 		mmio_regs = tgl_fivr_mmio_regs;\
@@ -150,9 +249,14 @@ static ssize_t suffix##_store(struct device *dev,\
 		return ret;\
 	if (mmio_regs[ret].read_only)\
 		return -EPERM;\
-	err = kstrtouint(buf, 10, &input);\
-	if (err)\
+	err = get_mapped_value(mapping, attr->attr.name, buf, &input);\
+	if (err == -EINVAL)\
 		return err;\
+	if (err == -EOPNOTSUPP) {\
+		err = kstrtouint(buf, 10, &input);\
+		if (err)\
+			return err;\
+	} \
 	mask = GENMASK(mmio_regs[ret].shift + mmio_regs[ret].bits - 1, mmio_regs[ret].shift);\
 	reg_val = readl((void __iomem *) (proc_priv->mmio_base + mmio_regs[ret].offset));\
 	reg_val &= ~mask;\
@@ -295,22 +399,36 @@ static ssize_t rfi_restriction_show(struct device *dev,
 	if (ret)
 		return ret;
 
-	return sprintf(buf, "%llu\n", resp);
+	return sysfs_emit(buf, "%llu\n", resp);
 }
+
+ /* ddr_data_rate */
+static const struct mmio_reg nvl_ddr_data_rate_reg = { 1, 0xE0, 10, 0x3FF, 2};
+
+static const struct mmio_reg *ddr_data_rate_reg;
 
 static ssize_t ddr_data_rate_show(struct device *dev,
 				  struct device_attribute *attr,
 				  char *buf)
 {
-	u16 id = 0x0107;
 	u64 resp;
-	int ret;
 
-	ret = processor_thermal_send_mbox_read_cmd(to_pci_dev(dev), id, &resp);
-	if (ret)
-		return ret;
+	if (ddr_data_rate_reg) {
+		u16 reg_val;
 
-	return sprintf(buf, "%llu\n", resp);
+		pci_read_config_word(to_pci_dev(dev), ddr_data_rate_reg->offset, &reg_val);
+		resp = (reg_val >> ddr_data_rate_reg->shift) & ddr_data_rate_reg->mask;
+		resp = (resp * 3333) / 100;
+	} else {
+		const u16 id = 0x0107;
+		int ret;
+
+		ret = processor_thermal_send_mbox_read_cmd(to_pci_dev(dev), id, &resp);
+		if (ret)
+			return ret;
+	}
+
+	return sysfs_emit(buf, "%llu\n", resp);
 }
 
 static DEVICE_ATTR_RW(rfi_restriction);
@@ -347,19 +465,37 @@ int proc_thermal_rfim_add(struct pci_dev *pdev, struct proc_thermal_device *proc
 	}
 
 	if (proc_priv->mmio_feature_mask & PROC_THERMAL_FEATURE_DLVR) {
+		switch (pdev->device) {
+		case PCI_DEVICE_ID_INTEL_LNLM_THERMAL:
+		case PCI_DEVICE_ID_INTEL_PTL_THERMAL:
+		case PCI_DEVICE_ID_INTEL_WCL_THERMAL:
+			dlvr_mmio_regs_table = lnl_dlvr_mmio_regs;
+			dlvr_mapping = lnl_dlvr_mapping;
+			break;
+		case PCI_DEVICE_ID_INTEL_NVL_H_THERMAL:
+		case PCI_DEVICE_ID_INTEL_NVL_S_THERMAL:
+			dlvr_mmio_regs_table = nvl_dlvr_mmio_regs;
+			ddr_data_rate_reg = &nvl_ddr_data_rate_reg;
+			break;
+		default:
+			dlvr_mmio_regs_table = dlvr_mmio_regs;
+			break;
+		}
 		ret = sysfs_create_group(&pdev->dev.kobj, &dlvr_attribute_group);
-		if (ret)
+		if (ret) {
+			if (proc_priv->mmio_feature_mask & PROC_THERMAL_FEATURE_FIVR)
+				sysfs_remove_group(&pdev->dev.kobj, &fivr_attribute_group);
 			return ret;
+		}
 	}
 
 	if (proc_priv->mmio_feature_mask & PROC_THERMAL_FEATURE_DVFS) {
 		ret = sysfs_create_group(&pdev->dev.kobj, &dvfs_attribute_group);
-		if (ret && proc_priv->mmio_feature_mask & PROC_THERMAL_FEATURE_FIVR) {
-			sysfs_remove_group(&pdev->dev.kobj, &fivr_attribute_group);
-			return ret;
-		}
-		if (ret && proc_priv->mmio_feature_mask & PROC_THERMAL_FEATURE_DLVR) {
-			sysfs_remove_group(&pdev->dev.kobj, &dlvr_attribute_group);
+		if (ret) {
+			if (proc_priv->mmio_feature_mask & PROC_THERMAL_FEATURE_DLVR)
+				sysfs_remove_group(&pdev->dev.kobj, &dlvr_attribute_group);
+			if (proc_priv->mmio_feature_mask & PROC_THERMAL_FEATURE_FIVR)
+				sysfs_remove_group(&pdev->dev.kobj, &fivr_attribute_group);
 			return ret;
 		}
 	}
@@ -384,3 +520,4 @@ void proc_thermal_rfim_remove(struct pci_dev *pdev)
 EXPORT_SYMBOL_GPL(proc_thermal_rfim_remove);
 
 MODULE_LICENSE("GPL v2");
+MODULE_DESCRIPTION("Processor Thermal RFIM Interface");

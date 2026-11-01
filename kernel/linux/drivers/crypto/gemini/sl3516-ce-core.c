@@ -414,10 +414,8 @@ static int sl3516_ce_probe(struct platform_device *pdev)
 		return irq;
 
 	err = devm_request_irq(&pdev->dev, irq, ce_irq_handler, 0, "crypto", ce);
-	if (err) {
-		dev_err(ce->dev, "Cannot request Crypto Engine IRQ (err=%d)\n", err);
+	if (err)
 		return err;
-	}
 
 	ce->reset = devm_reset_control_get(&pdev->dev, NULL);
 	if (IS_ERR(ce->reset))
@@ -505,7 +503,7 @@ error_pm:
 	return err;
 }
 
-static int sl3516_ce_remove(struct platform_device *pdev)
+static void sl3516_ce_remove(struct platform_device *pdev)
 {
 	struct sl3516_ce_dev *ce = platform_get_drvdata(pdev);
 
@@ -518,8 +516,6 @@ static int sl3516_ce_remove(struct platform_device *pdev)
 #ifdef CONFIG_CRYPTO_DEV_SL3516_DEBUG
 	debugfs_remove_recursive(ce->dbgfs_dir);
 #endif
-
-	return 0;
 }
 
 static const struct of_device_id sl3516_ce_crypto_of_match_table[] = {

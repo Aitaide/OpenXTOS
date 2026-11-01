@@ -84,7 +84,7 @@ enum dma_transfer_direction {
 	DMA_TRANS_NONE,
 };
 
-/**
+/*
  * Interleaved Transfer Request
  * ----------------------------
  * A chunk is collection of contiguous bytes to be transferred.
@@ -161,6 +161,16 @@ struct dma_interleaved_template {
 };
 
 /**
+ * struct dma_vec - DMA vector
+ * @addr: Bus address of the start of the vector
+ * @len: Length in bytes of the DMA vector
+ */
+struct dma_vec {
+	dma_addr_t addr;
+	size_t len;
+};
+
+/**
  * enum dma_ctrl_flags - DMA flags to augment operation preparation,
  *  control completion, and communicate status.
  * @DMA_PREP_INTERRUPT - trigger an interrupt (callback) upon completion of
@@ -213,7 +223,7 @@ enum sum_check_bits {
 };
 
 /**
- * enum pq_check_flags - result of async_{xor,pq}_zero_sum operations
+ * enum sum_check_flags - result of async_{xor,pq}_zero_sum operations
  * @SUM_CHECK_P_RESULT - 1 if xor zero sum error, 0 otherwise
  * @SUM_CHECK_Q_RESULT - 1 if reed-solomon zero sum error, 0 otherwise
  */
@@ -276,7 +286,7 @@ typedef struct { DECLARE_BITMAP(bits, DMA_TX_TYPE_END); } dma_cap_mask_t;
  *	pointer to the engine's metadata area
  *   4. Read out the metadata from the pointer
  *
- * Note: the two mode is not compatible and clients must use one mode for a
+ * Warning: the two modes are not compatible and clients must use one mode for a
  * descriptor.
  */
 enum dma_desc_metadata_mode {
@@ -312,6 +322,8 @@ struct dma_router {
  * @slave: ptr to the device using this channel
  * @cookie: last cookie value returned to client
  * @completed_cookie: last completed cookie for this channel
+ * @lock: protect between config and prepare transfer when driver have not
+ *	  implemented callback device_prep_config_sg().
  * @chan_id: channel ID for sysfs
  * @dev: class device for sysfs
  * @name: backlink name for sysfs
@@ -330,6 +342,12 @@ struct dma_chan {
 	struct device *slave;
 	dma_cookie_t cookie;
 	dma_cookie_t completed_cookie;
+
+	/*
+	 * protect between config and prepare transfer because *_prep() may be
+	 * called from complete callback, which is in GFP_NOSLEEP context.
+	 */
+	spinlock_t lock;
 
 	/* sysfs */
 	int chan_id;
@@ -517,8 +535,6 @@ static inline const char *dma_chan_name(struct dma_chan *chan)
 	return dev_name(&chan->dev->device);
 }
 
-void dma_chan_cleanup(struct kref *kref);
-
 /**
  * typedef dma_filter_fn - callback filter for dma_request_channel
  * @chan: channel to be reviewed
@@ -586,9 +602,13 @@ struct dma_descriptor_metadata_ops {
  * @phys: physical address of the descriptor
  * @chan: target channel for this operation
  * @tx_submit: accept the descriptor, assign ordered cookie and mark the
- * descriptor pending. To be pushed on .issue_pending() call
+ *	descriptor pending. To be pushed on .issue_pending() call
+ * @desc_free: driver's callback function to free a resusable descriptor
+ *	after completion
  * @callback: routine to call after this operation is complete
+ * @callback_result: error result from a DMA transaction
  * @callback_param: general parameter to pass to the callback routine
+ * @unmap: hook for generic DMA unmap data
  * @desc_metadata_mode: core managed metadata mode to protect mixed use of
  *	DESC_METADATA_CLIENT or DESC_METADATA_ENGINE. Otherwise
  *	DESC_METADATA_NONE
@@ -611,7 +631,7 @@ struct dma_async_tx_descriptor {
 	void *callback_param;
 	struct dmaengine_unmap_data *unmap;
 	enum dma_desc_metadata_mode desc_metadata_mode;
-	struct dma_descriptor_metadata_ops *metadata_ops;
+	const struct dma_descriptor_metadata_ops *metadata_ops;
 #ifdef CONFIG_ASYNC_TX_ENABLE_CHANNEL_SWITCH
 	struct dma_async_tx_descriptor *next;
 	struct dma_async_tx_descriptor *parent;
@@ -819,12 +839,15 @@ struct dma_filter {
  * @device_prep_dma_memset: prepares a memset operation
  * @device_prep_dma_memset_sg: prepares a memset operation over a scatter list
  * @device_prep_dma_interrupt: prepares an end of chain interrupt operation
+ * @device_prep_peripheral_dma_vec: prepares a scatter-gather DMA transfer,
+ *	where the address and size of each segment is located in one entry of
+ *	the dma_vec array.
  * @device_prep_slave_sg: prepares a slave dma operation
+ * @device_prep_config_sg: prepares a slave DMA operation with dma_slave_config
  * @device_prep_dma_cyclic: prepare a cyclic dma operation suitable for audio.
  *	The function takes a buffer of size buf_len. The callback function will
  *	be called after period_len bytes have been transferred.
  * @device_prep_interleaved_dma: Transfer expression in a generic way.
- * @device_prep_dma_imm_data: DMA's 8 byte immediate data to the dst address
  * @device_caps: May be used to override the generic DMA slave capabilities
  *	with per-channel specific ones
  * @device_config: Pushes a new configuration to a channel, return 0 or an error
@@ -912,19 +935,24 @@ struct dma_device {
 	struct dma_async_tx_descriptor *(*device_prep_dma_interrupt)(
 		struct dma_chan *chan, unsigned long flags);
 
+	struct dma_async_tx_descriptor *(*device_prep_peripheral_dma_vec)(
+		struct dma_chan *chan, const struct dma_vec *vecs,
+		size_t nents, enum dma_transfer_direction direction,
+		unsigned long flags);
 	struct dma_async_tx_descriptor *(*device_prep_slave_sg)(
 		struct dma_chan *chan, struct scatterlist *sgl,
 		unsigned int sg_len, enum dma_transfer_direction direction,
 		unsigned long flags, void *context);
+	struct dma_async_tx_descriptor *(*device_prep_config_sg)(
+		struct dma_chan *chan, struct scatterlist *sgl,
+		unsigned int sg_len, enum dma_transfer_direction direction,
+		unsigned long flags, struct dma_slave_config *config);
 	struct dma_async_tx_descriptor *(*device_prep_dma_cyclic)(
 		struct dma_chan *chan, dma_addr_t buf_addr, size_t buf_len,
 		size_t period_len, enum dma_transfer_direction direction,
 		unsigned long flags);
 	struct dma_async_tx_descriptor *(*device_prep_interleaved_dma)(
 		struct dma_chan *chan, struct dma_interleaved_template *xt,
-		unsigned long flags);
-	struct dma_async_tx_descriptor *(*device_prep_dma_imm_data)(
-		struct dma_chan *chan, dma_addr_t dst, u64 data,
 		unsigned long flags);
 
 	void (*device_caps)(struct dma_chan *chan, struct dma_slave_caps *caps);
@@ -955,34 +983,175 @@ static inline int dmaengine_slave_config(struct dma_chan *chan,
 
 static inline bool is_slave_direction(enum dma_transfer_direction direction)
 {
-	return (direction == DMA_MEM_TO_DEV) || (direction == DMA_DEV_TO_MEM);
+	return (direction == DMA_MEM_TO_DEV) || (direction == DMA_DEV_TO_MEM) ||
+	       (direction == DMA_DEV_TO_DEV);
 }
 
-static inline struct dma_async_tx_descriptor *dmaengine_prep_slave_single(
-	struct dma_chan *chan, dma_addr_t buf, size_t len,
-	enum dma_transfer_direction dir, unsigned long flags)
+static inline struct dma_async_tx_descriptor *
+dmaengine_prep_config_single(struct dma_chan *chan, dma_addr_t buf, size_t len,
+			     enum dma_transfer_direction dir,
+			     unsigned long flags,
+			     struct dma_slave_config *config)
 {
 	struct scatterlist sg;
+
+	if (!chan || !chan->device)
+		return NULL;
+
 	sg_init_table(&sg, 1);
 	sg_dma_address(&sg) = buf;
 	sg_dma_len(&sg) = len;
 
-	if (!chan || !chan->device || !chan->device->device_prep_slave_sg)
+	if (chan->device->device_prep_config_sg)
+		return chan->device->device_prep_config_sg(chan, &sg, 1, dir,
+							   flags, config);
+
+	if (config)
+		if (dmaengine_slave_config(chan, config))
+			return NULL;
+
+	if (!chan->device->device_prep_slave_sg)
 		return NULL;
 
 	return chan->device->device_prep_slave_sg(chan, &sg, 1,
 						  dir, flags, NULL);
 }
 
-static inline struct dma_async_tx_descriptor *dmaengine_prep_slave_sg(
-	struct dma_chan *chan, struct scatterlist *sgl,	unsigned int sg_len,
+static inline struct dma_async_tx_descriptor *
+dmaengine_prep_slave_single(struct dma_chan *chan, dma_addr_t buf, size_t len,
+			    enum dma_transfer_direction dir,
+			    unsigned long flags)
+{
+	return dmaengine_prep_config_single(chan, buf, len, dir, flags, NULL);
+}
+
+/**
+ * dmaengine_prep_peripheral_dma_vec() - Prepare a DMA scatter-gather descriptor
+ * @chan: The channel to be used for this descriptor
+ * @vecs: The array of DMA vectors that should be transferred
+ * @nents: The number of DMA vectors in the array
+ * @dir: Specifies the direction of the data transfer
+ * @flags: DMA engine flags - DMA_PREP_REPEAT can be used to mark a cyclic
+ *         DMA transfer
+ */
+static inline struct dma_async_tx_descriptor *dmaengine_prep_peripheral_dma_vec(
+	struct dma_chan *chan, const struct dma_vec *vecs, size_t nents,
 	enum dma_transfer_direction dir, unsigned long flags)
 {
-	if (!chan || !chan->device || !chan->device->device_prep_slave_sg)
+	if (!chan || !chan->device || !chan->device->device_prep_peripheral_dma_vec)
+		return NULL;
+
+	return chan->device->device_prep_peripheral_dma_vec(chan, vecs, nents,
+							    dir, flags);
+}
+
+static inline struct dma_async_tx_descriptor *
+dmaengine_prep_config_sg(struct dma_chan *chan, struct scatterlist *sgl,
+			 unsigned int sg_len, enum dma_transfer_direction dir,
+			 unsigned long flags, struct dma_slave_config *config)
+{
+	if (!chan || !chan->device)
+		return NULL;
+
+	if (chan->device->device_prep_config_sg)
+		return chan->device->device_prep_config_sg(chan, sgl, sg_len,
+				dir, flags, config);
+
+	if (config)
+		if (dmaengine_slave_config(chan, config))
+			return NULL;
+
+	if (!chan->device->device_prep_slave_sg)
 		return NULL;
 
 	return chan->device->device_prep_slave_sg(chan, sgl, sg_len,
 						  dir, flags, NULL);
+}
+
+static inline struct dma_async_tx_descriptor *
+dmaengine_prep_slave_sg(struct dma_chan *chan, struct scatterlist *sgl,
+			unsigned int sg_len, enum dma_transfer_direction dir,
+			unsigned long flags)
+{
+	return dmaengine_prep_config_sg(chan, sgl, sg_len, dir, flags, NULL);
+}
+
+/**
+ * dmaengine_prep_config_sg_safe - prepare a scatter-gather DMA transfer
+ *                                 with atomic slave configuration update
+ * @chan: DMA channel
+ * @sgl: scatterlist for the transfer
+ * @sg_len: number of entries in @sgl
+ * @dir: DMA transfer direction
+ * @flags: transfer preparation flags
+ * @config: DMA slave configuration for this transfer
+ *
+ * Prepare a DMA scatter-gather transfer together with a corresponding slave
+ * configuration update in a re-entrant and race-safe manner.
+ *
+ * DMA engine drivers may implement the optional
+ * device_prep_config_sg() callback to perform both the slave configuration
+ * and descriptor preparation atomically. In this case, the operation is
+ * fully handled by the DMA engine driver.
+ *
+ * If the DMA engine driver does not implement device_prep_config_sg(), falls
+ * back to calling dmaengine_slave_config() followed by dmaengine_prep_slave_sg().
+ * The fallback path is protected by a per-channel spinlock to ensure that
+ * concurrent callers cannot interleave configuration and descriptor preparation
+ * on the same DMA channel.
+ *
+ * Return: Pointer to a prepared DMA async transaction descriptor on success,
+ * or %NULL if the transfer could not be prepared.
+ */
+static inline struct dma_async_tx_descriptor *
+dmaengine_prep_config_sg_safe(struct dma_chan *chan, struct scatterlist *sgl,
+			      unsigned int sg_len,
+			      enum dma_transfer_direction dir,
+			      unsigned long flags,
+			      struct dma_slave_config *config)
+{
+	struct dma_async_tx_descriptor *tx;
+	unsigned long spinlock_flags;
+
+	if (!chan || !chan->device)
+		return NULL;
+
+	if (!chan->device->device_prep_config_sg)
+		spin_lock_irqsave(&chan->lock, spinlock_flags);
+
+	tx = dmaengine_prep_config_sg(chan, sgl, sg_len, dir, flags, config);
+
+	if (!chan->device->device_prep_config_sg)
+		spin_unlock_irqrestore(&chan->lock, spinlock_flags);
+
+	return tx;
+}
+
+/**
+ * dmaengine_prep_config_single_safe - prepare a single-buffer DMA transfer
+ *                                     with atomic slave configuration update
+ * @chan: DMA channel
+ * @buf: DMA buffer address
+ * @len: length of the transfer in bytes
+ * @dir: DMA transfer direction
+ * @flags: transfer preparation flags
+ * @config: DMA slave configuration for this transfer
+ *
+ * Detail see dmaengine_prep_config_sg_safe().
+ */
+static inline struct dma_async_tx_descriptor *
+dmaengine_prep_config_single_safe(struct dma_chan *chan, dma_addr_t buf,
+				  size_t len, enum dma_transfer_direction dir,
+				  unsigned long flags,
+				  struct dma_slave_config *config)
+{
+	struct scatterlist sg;
+
+	sg_init_table(&sg, 1);
+	sg_dma_address(&sg) = buf;
+	sg_dma_len(&sg) = len;
+
+	return dmaengine_prep_config_sg_safe(chan, &sg, 1, dir, flags, config);
 }
 
 #ifdef CONFIG_RAPIDIO_DMA_ENGINE
@@ -1489,6 +1658,7 @@ struct dma_chan *__dma_request_channel(const dma_cap_mask_t *mask,
 
 struct dma_chan *dma_request_chan(struct device *dev, const char *name);
 struct dma_chan *dma_request_chan_by_mask(const dma_cap_mask_t *mask);
+struct dma_chan *devm_dma_request_chan(struct device *dev, const char *name);
 
 void dma_release_channel(struct dma_chan *chan);
 int dma_get_slave_caps(struct dma_chan *chan, struct dma_slave_caps *caps);
@@ -1525,6 +1695,12 @@ static inline struct dma_chan *dma_request_chan_by_mask(
 {
 	return ERR_PTR(-ENODEV);
 }
+
+static inline struct dma_chan *devm_dma_request_chan(struct device *dev, const char *name)
+{
+	return ERR_PTR(-ENODEV);
+}
+
 static inline void dma_release_channel(struct dma_chan *chan)
 {
 }
@@ -1576,7 +1752,8 @@ int dma_async_device_register(struct dma_device *device);
 int dmaenginem_async_device_register(struct dma_device *device);
 void dma_async_device_unregister(struct dma_device *device);
 int dma_async_device_channel_register(struct dma_device *device,
-				      struct dma_chan *chan);
+				      struct dma_chan *chan,
+				      const char *name);
 void dma_async_device_channel_unregister(struct dma_device *device,
 					 struct dma_chan *chan);
 void dma_run_dependencies(struct dma_async_tx_descriptor *tx);
@@ -1599,14 +1776,14 @@ static inline struct dma_chan
 {
 	struct dma_chan *chan;
 
-	chan = dma_request_slave_channel(dev, name);
-	if (chan)
+	chan = dma_request_chan(dev, name);
+	if (!IS_ERR(chan))
 		return chan;
 
 	if (!fn || !fn_param)
 		return NULL;
 
-	return __dma_request_channel(&mask, fn, fn_param, NULL);
+	return dma_request_channel(mask, fn, fn_param);
 }
 
 static inline char *

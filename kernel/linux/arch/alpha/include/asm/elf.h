@@ -53,6 +53,7 @@
 
 #define EF_ALPHA_32BIT		1	/* All addresses are below 2GB */
 
+#define CORE_DUMP_USE_REGSET	1
 /*
  * ELF register definitions..
  */
@@ -74,7 +75,7 @@ typedef elf_fpreg_t elf_fpregset_t[ELF_NFPREG];
 /*
  * This is used to ensure we don't load something for the wrong architecture.
  */
-#define elf_check_arch(x) ((x)->e_machine == EM_ALPHA)
+#define elf_check_arch(x) (((x)->e_machine == EM_ALPHA) && !((x)->e_flags & EF_ALPHA_32BIT))
 
 /*
  * These are used to set parameters in the core dumps.
@@ -133,15 +134,9 @@ extern int dump_elf_task(elf_greg_t *dest, struct task_struct *task);
 #define ELF_PLATFORM				\
 ({						\
 	enum implver_enum i_ = implver();	\
-	( i_ == IMPLVER_EV4 ? "ev4"		\
-	: i_ == IMPLVER_EV5			\
-	  ? (amask(AMASK_BWX) ? "ev5" : "ev56")	\
+	( i_ == IMPLVER_EV5 ? "ev56"			\
 	: amask (AMASK_CIX) ? "ev6" : "ev67");	\
 })
-
-#define SET_PERSONALITY(EX)					\
-	set_personality(((EX).e_flags & EF_ALPHA_32BIT)		\
-	   ? PER_LINUX_32BIT : PER_LINUX)
 
 extern int alpha_l1i_cacheshape;
 extern int alpha_l1d_cacheshape;

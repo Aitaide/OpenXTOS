@@ -387,7 +387,7 @@ static const struct cpcap_battery_config cpcap_battery_bw8x_data = {
  * Safe values for any lipo battery likely to fit into a mapphone
  * battery bay.
  */
-static const struct cpcap_battery_config cpcap_battery_unkown_data = {
+static const struct cpcap_battery_config cpcap_battery_unknown_data = {
 	.cd_factor = 0x3cc,
 	.info.technology = POWER_SUPPLY_TECHNOLOGY_LION,
 	.info.voltage_max_design = 4200000,
@@ -404,6 +404,30 @@ static int cpcap_battery_match_nvmem(struct device *dev, const void *data)
 		return 0;
 }
 
+static void cpcap_battery_update_battery_data(struct cpcap_battery_ddata *ddata)
+{
+	struct power_supply_battery_info *info;
+
+	if (power_supply_get_battery_info(ddata->psy, &info) < 0)
+		return;
+
+	if (info->technology > 0)
+		ddata->config.info.technology = info->technology;
+
+	if (info->voltage_max_design_uv > 0)
+		ddata->config.info.voltage_max_design = info->voltage_max_design_uv;
+
+	if (info->voltage_min_design_uv > 0)
+		ddata->config.info.voltage_min_design = info->voltage_min_design_uv;
+
+	if (info->charge_full_design_uah > 0)
+		ddata->config.info.charge_full_design = info->charge_full_design_uah;
+
+	if (info->constant_charge_voltage_max_uv > 0)
+		ddata->config.bat.constant_charge_voltage_max_uv =
+			info->constant_charge_voltage_max_uv;
+}
+
 static void cpcap_battery_detect_battery_type(struct cpcap_battery_ddata *ddata)
 {
 	struct nvmem_device *nvmem;
@@ -415,10 +439,13 @@ static void cpcap_battery_detect_battery_type(struct cpcap_battery_ddata *ddata)
 	if (IS_ERR_OR_NULL(nvmem)) {
 		ddata->check_nvmem = true;
 		dev_info_once(ddata->dev, "Can not find battery nvmem device. Assuming generic lipo battery\n");
-	} else if (nvmem_device_read(nvmem, 2, 1, &battery_id) < 0) {
-		battery_id = 0;
-		ddata->check_nvmem = true;
-		dev_warn(ddata->dev, "Can not read battery nvmem device. Assuming generic lipo battery\n");
+	} else {
+		if (nvmem_device_read(nvmem, 2, 1, &battery_id) < 0) {
+			battery_id = 0;
+			ddata->check_nvmem = true;
+			dev_warn(ddata->dev, "Can not read battery nvmem device. Assuming generic lipo battery\n");
+		}
+		nvmem_device_put(nvmem);
 	}
 
 	switch (battery_id) {
@@ -429,8 +456,11 @@ static void cpcap_battery_detect_battery_type(struct cpcap_battery_ddata *ddata)
 		ddata->config = cpcap_battery_bw8x_data;
 		break;
 	default:
-		ddata->config = cpcap_battery_unkown_data;
+		ddata->config = cpcap_battery_unknown_data;
 	}
+
+	if (ddata->psy)
+		cpcap_battery_update_battery_data(ddata);
 }
 
 /**
@@ -927,12 +957,8 @@ static int cpcap_battery_init_irq(struct platform_device *pdev,
 					  cpcap_battery_irq_thread,
 					  IRQF_SHARED | IRQF_ONESHOT,
 					  name, ddata);
-	if (error) {
-		dev_err(ddata->dev, "could not get irq %s: %i\n",
-			name, error);
-
+	if (error)
 		return error;
-	}
 
 	d = devm_kzalloc(ddata->dev, sizeof(*d), GFP_KERNEL);
 	if (!d)
@@ -1122,15 +1148,11 @@ static int cpcap_battery_probe(struct platform_device *pdev)
 
 	platform_set_drvdata(pdev, ddata);
 
-	error = cpcap_battery_init_interrupts(pdev, ddata);
-	if (error)
-		return error;
-
 	error = cpcap_battery_init_iio(ddata);
 	if (error)
 		return error;
 
-	psy_cfg.of_node = pdev->dev.of_node;
+	psy_cfg.fwnode = dev_fwnode(&pdev->dev);
 	psy_cfg.drv_data = ddata;
 
 	ddata->psy = devm_power_supply_register(ddata->dev,
@@ -1142,6 +1164,10 @@ static int cpcap_battery_probe(struct platform_device *pdev)
 		return error;
 	}
 
+	error = cpcap_battery_init_interrupts(pdev, ddata);
+	if (error)
+		return error;
+
 	atomic_set(&ddata->active, 1);
 
 	error = cpcap_battery_calibrate(ddata);
@@ -1151,7 +1177,7 @@ static int cpcap_battery_probe(struct platform_device *pdev)
 	return 0;
 }
 
-static int cpcap_battery_remove(struct platform_device *pdev)
+static void cpcap_battery_remove(struct platform_device *pdev)
 {
 	struct cpcap_battery_ddata *ddata = platform_get_drvdata(pdev);
 	int error;
@@ -1161,8 +1187,6 @@ static int cpcap_battery_remove(struct platform_device *pdev)
 				   0xffff, 0);
 	if (error)
 		dev_err(&pdev->dev, "could not disable: %i\n", error);
-
-	return 0;
 }
 
 static struct platform_driver cpcap_battery_driver = {
@@ -1171,10 +1195,11 @@ static struct platform_driver cpcap_battery_driver = {
 		.of_match_table = of_match_ptr(cpcap_battery_id_table),
 	},
 	.probe	= cpcap_battery_probe,
-	.remove = cpcap_battery_remove,
+	.remove	= cpcap_battery_remove,
 };
 module_platform_driver(cpcap_battery_driver);
 
 MODULE_LICENSE("GPL v2");
 MODULE_AUTHOR("Tony Lindgren <tony@atomide.com>");
 MODULE_DESCRIPTION("CPCAP PMIC Battery Driver");
+MODULE_IMPORT_NS("IIO_CONSUMER");

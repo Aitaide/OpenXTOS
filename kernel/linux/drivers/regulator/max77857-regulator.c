@@ -67,7 +67,7 @@ static bool max77857_volatile_reg(struct device *dev, unsigned int reg)
 	}
 }
 
-static struct regmap_config max77857_regmap_config = {
+static const struct regmap_config max77857_regmap_config = {
 	.reg_bits = 8,
 	.val_bits = 8,
 	.cache_type = REGCACHE_MAPLE,
@@ -427,11 +427,11 @@ static int max77857_probe(struct i2c_client *client)
 	return 0;
 }
 
-const struct i2c_device_id max77857_id[] = {
-	{ "max77831", ID_MAX77831 },
-	{ "max77857", ID_MAX77857 },
-	{ "max77859", ID_MAX77859 },
-	{ "max77859a", ID_MAX77859A },
+static const struct i2c_device_id max77857_id[] = {
+	{ .name = "max77831", .driver_data = ID_MAX77831 },
+	{ .name = "max77857", .driver_data = ID_MAX77857 },
+	{ .name = "max77859", .driver_data = ID_MAX77859 },
+	{ .name = "max77859a", .driver_data = ID_MAX77859A },
 	{ }
 };
 MODULE_DEVICE_TABLE(i2c, max77857_id);

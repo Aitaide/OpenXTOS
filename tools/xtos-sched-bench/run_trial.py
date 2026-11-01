@@ -105,7 +105,7 @@ def validate_args(args, allowed_cpus):
     if warmup_jobs >= jobs:
         raise ValueError(f'warmup_jobs must be less than actual job count {jobs}')
     if getattr(args, 'require_preempt_rt', False) and _kernel_realtime() != '1':
-        raise ValueError('--require-preempt-rt requested but /sys/kernel/realtime is not 1')
+        raise ValueError('--require-preempt-rt requested but PREEMPT_RT is not confirmed')
     return runtime_ns, priority
 
 
@@ -122,11 +122,19 @@ def schedule_command(args, binary, runtime_ns, priority):
 
 
 def _kernel_realtime():
-    path = Path('/sys/kernel/realtime')
-    try:
-        return path.read_text(encoding='utf-8').strip()
-    except OSError:
+    # Share the collector's bounded, root-contained evidence rules. In
+    # particular, an unreadable or malformed legacy node cannot be bypassed.
+    spec = importlib.util.spec_from_file_location(
+        'xtos_sched_preflight_rt', Path(__file__).with_name('preflight.py'))
+    if spec is None or spec.loader is None:
         return None
+    preflight = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(preflight)
+    try:
+        fact = preflight.Collector(Path('/'))._collect_realtime()
+    except (OSError, ValueError):
+        return None
+    return fact['value'] if fact['status'] == 'available' else None
 
 
 def _detect_virtualization():
@@ -537,7 +545,7 @@ def main():
     parser.add_argument('--deadline-unpinned', action='store_true',
                         help='pass CPU -1 to SCHED_DEADLINE and retain inherited affinity')
     parser.add_argument('--require-preempt-rt', action='store_true',
-                        help='fail unless /sys/kernel/realtime reports 1')
+                        help='require confirmed PREEMPT_RT from sysfs or current proc evidence')
     parser.add_argument('--binary', type=Path)
     args = parser.parse_args()
     try:

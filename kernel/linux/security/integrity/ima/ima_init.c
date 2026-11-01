@@ -22,6 +22,7 @@
 
 /* name for boot aggregate entry */
 const char boot_aggregate_name[] = "boot_aggregate";
+const char boot_aggregate_late_name[] = "boot_aggregate_late";
 struct tpm_chip *ima_tpm_chip;
 
 /* Add the boot aggregate to the IMA measurement list and extend
@@ -44,18 +45,26 @@ static int __init ima_add_boot_aggregate(void)
 	static const char op[] = "add_boot_aggregate";
 	const char *audit_cause = "ENOMEM";
 	struct ima_template_entry *entry;
-	struct integrity_iint_cache tmp_iint, *iint = &tmp_iint;
-	struct ima_event_data event_data = { .iint = iint,
-					     .filename = boot_aggregate_name };
+	struct ima_iint_cache tmp_iint, *iint = &tmp_iint;
+	struct ima_event_data event_data = { .iint = iint };
 	struct ima_max_digest_data hash;
+	struct ima_digest_data *hash_hdr = container_of(&hash.hdr,
+						struct ima_digest_data, hdr);
+	const char *filename;
 	int result = -ENOMEM;
 	int violation = 0;
 
 	memset(iint, 0, sizeof(*iint));
 	memset(&hash, 0, sizeof(hash));
-	iint->ima_hash = &hash.hdr;
+	iint->ima_hash = hash_hdr;
 	iint->ima_hash->algo = ima_hash_algo;
 	iint->ima_hash->length = hash_digest_size[ima_hash_algo];
+
+	if (IS_ENABLED(CONFIG_IMA_INIT_LATE_SYNC))
+		filename = boot_aggregate_late_name;
+	else
+		filename = boot_aggregate_name;
+	event_data.filename = filename;
 
 	/*
 	 * With TPM 2.0 hash agility, TPM chips could support multiple TPM
@@ -70,7 +79,7 @@ static int __init ima_add_boot_aggregate(void)
 	 * is not found.
 	 */
 	if (ima_tpm_chip) {
-		result = ima_calc_boot_aggregate(&hash.hdr);
+		result = ima_calc_boot_aggregate(hash_hdr);
 		if (result < 0) {
 			audit_cause = "hashing_error";
 			goto err_out;
@@ -84,7 +93,7 @@ static int __init ima_add_boot_aggregate(void)
 	}
 
 	result = ima_store_template(entry, violation, NULL,
-				    boot_aggregate_name,
+				    filename,
 				    CONFIG_IMA_MEASURE_PCR_IDX);
 	if (result < 0) {
 		ima_free_template_entry(entry);
@@ -93,7 +102,7 @@ static int __init ima_add_boot_aggregate(void)
 	}
 	return 0;
 err_out:
-	integrity_audit_msg(AUDIT_INTEGRITY_PCR, NULL, boot_aggregate_name, op,
+	integrity_audit_msg(AUDIT_INTEGRITY_PCR, NULL, filename, op,
 			    audit_cause, result, 0);
 	return result;
 }
@@ -138,6 +147,11 @@ int __init ima_init(void)
 	rc = ima_init_digests();
 	if (rc != 0)
 		return rc;
+
+	rc = ima_init_htable();
+	if (rc != 0)
+		return rc;
+
 	rc = ima_add_boot_aggregate();	/* boot aggregate must be first entry */
 	if (rc != 0)
 		return rc;
@@ -149,6 +163,8 @@ int __init ima_init(void)
 		return rc;
 
 	ima_init_key_queue();
+
+	ima_init_reboot_notifier();
 
 	ima_measure_critical_data("kernel_info", "kernel_version",
 				  UTS_RELEASE, strlen(UTS_RELEASE), false,

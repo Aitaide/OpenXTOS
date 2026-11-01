@@ -23,9 +23,6 @@
  *
  */
 
-#include <linux/slab.h>
-
-#include "reg_helper.h"
 #include "core_types.h"
 #include "clk_mgr_internal.h"
 #include "rv1_clk_mgr.h"
@@ -91,7 +88,7 @@ static void ramp_up_dispclk_with_dpp(
 		struct dc_clocks *new_clocks,
 		bool safe_to_lower)
 {
-	int i;
+	uint32_t i;
 	int dispclk_to_dpp_threshold = rv1_determine_dppclk_threshold(clk_mgr, new_clocks);
 	bool request_dpp_div = new_clocks->dispclk_khz > new_clocks->dppclk_khz;
 

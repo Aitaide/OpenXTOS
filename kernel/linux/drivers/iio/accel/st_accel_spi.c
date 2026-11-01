@@ -9,7 +9,6 @@
 
 #include <linux/kernel.h>
 #include <linux/module.h>
-#include <linux/mod_devicetable.h>
 #include <linux/spi/spi.h>
 #include <linux/iio/iio.h>
 
@@ -65,6 +64,10 @@ static const struct of_device_id st_accel_of_match[] = {
 		.data = LIS2DH12_ACCEL_DEV_NAME,
 	},
 	{
+		.compatible = "st,lis2ds12",
+		.data = LIS2DS12_ACCEL_DEV_NAME,
+	},
+	{
 		.compatible = "st,lis3l02dq",
 		.data = LIS3L02DQ_ACCEL_DEV_NAME,
 	},
@@ -104,7 +107,7 @@ static const struct of_device_id st_accel_of_match[] = {
 		.compatible = "st,iis328dq",
 		.data = IIS328DQ_ACCEL_DEV_NAME,
 	},
-	{}
+	{ }
 };
 MODULE_DEVICE_TABLE(of, st_accel_of_match);
 
@@ -143,26 +146,27 @@ static int st_accel_spi_probe(struct spi_device *spi)
 }
 
 static const struct spi_device_id st_accel_id_table[] = {
-	{ LIS3DH_ACCEL_DEV_NAME },
-	{ LSM330D_ACCEL_DEV_NAME },
-	{ LSM330DL_ACCEL_DEV_NAME },
-	{ LSM330DLC_ACCEL_DEV_NAME },
-	{ LIS331DLH_ACCEL_DEV_NAME },
-	{ LSM330_ACCEL_DEV_NAME },
-	{ LSM303AGR_ACCEL_DEV_NAME },
-	{ LIS2DH12_ACCEL_DEV_NAME },
-	{ LIS3L02DQ_ACCEL_DEV_NAME },
-	{ LNG2DM_ACCEL_DEV_NAME },
-	{ H3LIS331DL_ACCEL_DEV_NAME },
-	{ LIS331DL_ACCEL_DEV_NAME },
-	{ LIS3LV02DL_ACCEL_DEV_NAME },
-	{ LIS2DW12_ACCEL_DEV_NAME },
-	{ LIS3DHH_ACCEL_DEV_NAME },
-	{ LIS3DE_ACCEL_DEV_NAME },
-	{ LIS302DL_ACCEL_DEV_NAME },
-	{ LSM303C_ACCEL_DEV_NAME },
-	{ IIS328DQ_ACCEL_DEV_NAME },
-	{},
+	{ .name = LIS3DH_ACCEL_DEV_NAME },
+	{ .name = LSM330D_ACCEL_DEV_NAME },
+	{ .name = LSM330DL_ACCEL_DEV_NAME },
+	{ .name = LSM330DLC_ACCEL_DEV_NAME },
+	{ .name = LIS331DLH_ACCEL_DEV_NAME },
+	{ .name = LSM330_ACCEL_DEV_NAME },
+	{ .name = LSM303AGR_ACCEL_DEV_NAME },
+	{ .name = LIS2DH12_ACCEL_DEV_NAME },
+	{ .name = LIS2DS12_ACCEL_DEV_NAME },
+	{ .name = LIS3L02DQ_ACCEL_DEV_NAME },
+	{ .name = LNG2DM_ACCEL_DEV_NAME },
+	{ .name = H3LIS331DL_ACCEL_DEV_NAME },
+	{ .name = LIS331DL_ACCEL_DEV_NAME },
+	{ .name = LIS3LV02DL_ACCEL_DEV_NAME },
+	{ .name = LIS2DW12_ACCEL_DEV_NAME },
+	{ .name = LIS3DHH_ACCEL_DEV_NAME },
+	{ .name = LIS3DE_ACCEL_DEV_NAME },
+	{ .name = LIS302DL_ACCEL_DEV_NAME },
+	{ .name = LSM303C_ACCEL_DEV_NAME },
+	{ .name = IIS328DQ_ACCEL_DEV_NAME },
+	{ }
 };
 MODULE_DEVICE_TABLE(spi, st_accel_id_table);
 
@@ -179,4 +183,4 @@ module_spi_driver(st_accel_driver);
 MODULE_AUTHOR("Denis Ciocca <denis.ciocca@st.com>");
 MODULE_DESCRIPTION("STMicroelectronics accelerometers spi driver");
 MODULE_LICENSE("GPL v2");
-MODULE_IMPORT_NS(IIO_ST_SENSORS);
+MODULE_IMPORT_NS("IIO_ST_SENSORS");

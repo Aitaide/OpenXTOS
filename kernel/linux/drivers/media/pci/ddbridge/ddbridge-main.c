@@ -238,7 +238,7 @@ fail:
 	ddb_unmap(dev);
 	pci_set_drvdata(pdev, NULL);
 	pci_disable_device(pdev);
-	return -1;
+	return stat;
 }
 
 /****************************************************************************/
@@ -269,7 +269,7 @@ static const struct pci_device_id ddb_id_table[] = {
 	DDB_DEVICE_ANY(0x0323),
 	DDB_DEVICE_ANY(0x0328),
 	DDB_DEVICE_ANY(0x0329),
-	{0}
+	{ }
 };
 
 MODULE_DEVICE_TABLE(pci, ddb_id_table);

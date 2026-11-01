@@ -2,7 +2,19 @@
 #include <vmlinux.h>
 #include <bpf/bpf_tracing.h>
 #include <bpf/bpf_helpers.h>
-#include "../bpf_testmod/bpf_testmod_kfunc.h"
+#include "../test_kmods/bpf_testmod_kfunc.h"
+
+struct map_uninit_value {
+	struct prog_test_ref_kfunc __kptr_untrusted *unref_ptr;
+	__u32 data;
+} __attribute__((packed));
+
+struct {
+	__uint(type, BPF_MAP_TYPE_PERCPU_ARRAY);
+	__type(key, int);
+	__type(value, struct map_uninit_value);
+	__uint(max_entries, 1);
+} pcpu_array SEC(".maps");
 
 struct map_value {
 	struct prog_test_ref_kfunc __kptr_untrusted *unref_ptr;
@@ -110,10 +122,14 @@ DEFINE_MAP_OF_MAP(BPF_MAP_TYPE_ARRAY_OF_MAPS, array_map, array_of_array_maps);
 DEFINE_MAP_OF_MAP(BPF_MAP_TYPE_ARRAY_OF_MAPS, hash_map, array_of_hash_maps);
 DEFINE_MAP_OF_MAP(BPF_MAP_TYPE_ARRAY_OF_MAPS, hash_malloc_map, array_of_hash_malloc_maps);
 DEFINE_MAP_OF_MAP(BPF_MAP_TYPE_ARRAY_OF_MAPS, lru_hash_map, array_of_lru_hash_maps);
+DEFINE_MAP_OF_MAP(BPF_MAP_TYPE_ARRAY_OF_MAPS, pcpu_array_map, array_of_pcpu_array_maps);
+DEFINE_MAP_OF_MAP(BPF_MAP_TYPE_ARRAY_OF_MAPS, pcpu_hash_map, array_of_pcpu_hash_maps);
 DEFINE_MAP_OF_MAP(BPF_MAP_TYPE_HASH_OF_MAPS, array_map, hash_of_array_maps);
 DEFINE_MAP_OF_MAP(BPF_MAP_TYPE_HASH_OF_MAPS, hash_map, hash_of_hash_maps);
 DEFINE_MAP_OF_MAP(BPF_MAP_TYPE_HASH_OF_MAPS, hash_malloc_map, hash_of_hash_malloc_maps);
 DEFINE_MAP_OF_MAP(BPF_MAP_TYPE_HASH_OF_MAPS, lru_hash_map, hash_of_lru_hash_maps);
+DEFINE_MAP_OF_MAP(BPF_MAP_TYPE_HASH_OF_MAPS, pcpu_array_map, hash_of_pcpu_array_maps);
+DEFINE_MAP_OF_MAP(BPF_MAP_TYPE_HASH_OF_MAPS, pcpu_hash_map, hash_of_pcpu_hash_maps);
 
 #define WRITE_ONCE(x, val) ((*(volatile typeof(x) *) &(x)) = (val))
 
@@ -204,6 +220,8 @@ int test_map_kptr(struct __sk_buff *ctx)
 	TEST(hash_map);
 	TEST(hash_malloc_map);
 	TEST(lru_hash_map);
+	TEST(pcpu_array_map);
+	TEST(pcpu_hash_map);
 
 #undef TEST
 	return 0;
@@ -281,10 +299,14 @@ int test_map_in_map_kptr(struct __sk_buff *ctx)
 	TEST(array_of_hash_maps);
 	TEST(array_of_hash_malloc_maps);
 	TEST(array_of_lru_hash_maps);
+	TEST(array_of_pcpu_array_maps);
+	TEST(array_of_pcpu_hash_maps);
 	TEST(hash_of_array_maps);
 	TEST(hash_of_hash_maps);
 	TEST(hash_of_hash_malloc_maps);
 	TEST(hash_of_lru_hash_maps);
+	TEST(hash_of_pcpu_array_maps);
+	TEST(hash_of_pcpu_hash_maps);
 
 #undef TEST
 	return 0;
@@ -476,6 +498,107 @@ int test_map_kptr_ref3(struct __sk_buff *ctx)
 	ref--;
 	return 0;
 }
+
+int num_of_refs;
+
+static __always_inline int read_ref_count(void)
+{
+	struct prog_test_ref_kfunc *p;
+	unsigned long arg = 0;
+
+	p = bpf_kfunc_call_test_acquire(&arg);
+	if (!p)
+		return 1;
+
+	num_of_refs = p->cnt.refs.counter;
+	bpf_kfunc_call_test_release(p);
+	return 0;
+}
+
+SEC("syscall")
+int count_ref(void *ctx)
+{
+	return read_ref_count();
+}
+
+static __always_inline int stash_ref_ptr(struct map_value *v)
+{
+	struct prog_test_ref_kfunc *p, *old;
+	unsigned long arg = 0;
+
+	p = bpf_kfunc_call_test_acquire(&arg);
+	if (!p)
+		return 1;
+
+	old = bpf_kptr_xchg(&v->ref_ptr, p);
+	if (old) {
+		bpf_kfunc_call_test_release(old);
+		old = bpf_kptr_xchg(&v->ref_ptr, NULL);
+		if (old)
+			bpf_kfunc_call_test_release(old);
+		return 2;
+	}
+	return 0;
+}
+
+static __always_inline int check_refs(int expected)
+{
+	int ret;
+
+	ret = read_ref_count();
+	if (ret)
+		return ret;
+	return num_of_refs == expected ? 0 : 3;
+}
+
+SEC("syscall")
+int test_array_map_update_kptr(void *ctx)
+{
+	struct map_value init = {}, *v;
+	int key = 0, ret;
+
+	v = bpf_map_lookup_elem(&array_map, &key);
+	if (!v)
+		return 1;
+	ret = stash_ref_ptr(v);
+	if (ret)
+		return ret;
+	ret = check_refs(3);
+	if (ret)
+		return ret;
+	ret = bpf_map_update_elem(&array_map, &key, &init, BPF_EXIST);
+	if (ret)
+		return 4;
+	return check_refs(3);
+}
+
+#define DEFINE_HASH_UPDATE_KPTR_TEST(name, map)			\
+SEC("syscall")							\
+int name(void *ctx)						\
+{								\
+	struct map_value init = {}, *v;				\
+	int key = 0, ret;					\
+								\
+	ret = bpf_map_update_elem(&map, &key, &init, BPF_NOEXIST); \
+	if (ret)						\
+		return 1;					\
+	v = bpf_map_lookup_elem(&map, &key);			\
+	if (!v)							\
+		return 2;					\
+	ret = stash_ref_ptr(v);					\
+	if (ret)						\
+		return ret;					\
+	ret = check_refs(3);					\
+	if (ret)						\
+		return ret;					\
+	ret = bpf_map_update_elem(&map, &key, &init, BPF_EXIST); \
+	if (ret)						\
+		return 4;					\
+	return check_refs(3);					\
+}
+
+DEFINE_HASH_UPDATE_KPTR_TEST(test_hash_map_update_kptr, hash_map)
+DEFINE_HASH_UPDATE_KPTR_TEST(test_hash_malloc_map_update_kptr, hash_malloc_map)
 
 SEC("syscall")
 int test_ls_map_kptr_ref1(void *ctx)

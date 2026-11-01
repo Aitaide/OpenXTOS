@@ -81,7 +81,7 @@ struct serial_state {
 	int			quot;
 	int			IER; 	/* Interrupt Enable Register */
 	int			MCR; 	/* Modem control register */
-	int			x_char;	/* xon/xoff character */
+	u8			x_char;	/* xon/xoff character */
 };
 
 static struct tty_driver *serial_driver;
@@ -178,9 +178,9 @@ static void receive_chars(struct serial_state *info)
 {
         int status;
 	int serdatr;
-	unsigned char ch, flag;
+	u8 ch, flag;
 	struct	async_icount *icount;
-	int oe = 0;
+	bool overrun = false;
 
 	icount = &info->icount;
 
@@ -230,7 +230,7 @@ static void receive_chars(struct serial_state *info)
 	   * should be ignored.
 	   */
 	  if (status & info->ignore_status_mask)
-	    goto out;
+		  return;
 
 	  status &= info->read_status_mask;
 
@@ -251,15 +251,13 @@ static void receive_chars(struct serial_state *info)
 	     * reported immediately, and doesn't
 	     * affect the current character
 	     */
-	     oe = 1;
+	     overrun = true;
 	  }
 	}
 	tty_insert_flip_char(&info->tport, ch, flag);
-	if (oe == 1)
+	if (overrun)
 		tty_insert_flip_char(&info->tport, 0, TTY_OVERRUN);
 	tty_flip_buffer_push(&info->tport);
-out:
-	return;
 }
 
 static void transmit_chars(struct serial_state *info)
@@ -440,28 +438,28 @@ static irqreturn_t ser_tx_int(int irq, void *dev_id)
  * ---------------------------------------------------------------
  */
 
-static int startup(struct tty_struct *tty, struct serial_state *info)
+static int rs_startup(struct tty_struct *tty, struct serial_state *info)
 {
 	struct tty_port *port = &info->tport;
 	unsigned long flags;
 	int	retval=0;
-	unsigned long page;
+	void *buffer;
 
-	page = get_zeroed_page(GFP_KERNEL);
-	if (!page)
+	buffer = kzalloc(PAGE_SIZE, GFP_KERNEL);
+	if (!buffer)
 		return -ENOMEM;
 
 	local_irq_save(flags);
 
 	if (tty_port_initialized(port)) {
-		free_page(page);
+		kfree(buffer);
 		goto errout;
 	}
 
 	if (info->xmit.buf)
-		free_page(page);
+		kfree(buffer);
 	else
-		info->xmit.buf = (unsigned char *) page;
+		info->xmit.buf = buffer;
 
 #ifdef SERIAL_DEBUG_OPEN
 	printk("starting up ttys%d ...", info->line);
@@ -515,7 +513,7 @@ errout:
  * This routine will shutdown a serial port; interrupts are disabled, and
  * DTR is dropped if the hangup on close termio flag is on.
  */
-static void shutdown(struct tty_struct *tty, struct serial_state *info)
+static void rs_shutdown(struct tty_struct *tty, struct serial_state *info)
 {
 	unsigned long	flags;
 
@@ -539,7 +537,7 @@ static void shutdown(struct tty_struct *tty, struct serial_state *info)
 	 */
 	free_irq(IRQ_AMIGA_VERTB, info);
 
-	free_page((unsigned long)info->xmit.buf);
+	kfree(info->xmit.buf);
 	info->xmit.buf = NULL;
 
 	info->IER = 0;
@@ -813,7 +811,7 @@ static void rs_flush_buffer(struct tty_struct *tty)
  * This function is used to send a high-priority XON/XOFF character to
  * the device
  */
-static void rs_send_xchar(struct tty_struct *tty, char ch)
+static void rs_send_xchar(struct tty_struct *tty, u8 ch)
 {
 	struct serial_state *info = tty->driver_data;
         unsigned long flags;
@@ -977,7 +975,7 @@ check_and_exit:
 			change_speed(tty, state, NULL);
 		}
 	} else
-		retval = startup(tty, state);
+		retval = rs_startup(tty, state);
 	tty_unlock(tty);
 	return retval;
 }
@@ -1140,16 +1138,15 @@ static int rs_ioctl(struct tty_struct *tty,
 				local_irq_save(flags);
 				cnow = info->icount; /* atomic copy */
 				local_irq_restore(flags);
-				if (cnow.rng == cprev.rng && cnow.dsr == cprev.dsr && 
-				    cnow.dcd == cprev.dcd && cnow.cts == cprev.cts) {
-					ret = -EIO; /* no change => error */
-					break;
-				}
 				if ( ((arg & TIOCM_RNG) && (cnow.rng != cprev.rng)) ||
 				     ((arg & TIOCM_DSR) && (cnow.dsr != cprev.dsr)) ||
 				     ((arg & TIOCM_CD)  && (cnow.dcd != cprev.dcd)) ||
 				     ((arg & TIOCM_CTS) && (cnow.cts != cprev.cts)) ) {
 					ret = 0;
+					break;
+				}
+				if (tty_io_error(tty)) {
+					ret = -EIO;
 					break;
 				}
 				schedule();
@@ -1253,9 +1250,9 @@ static void rs_close(struct tty_struct *tty, struct file * filp)
 		 */
 		rs_wait_until_sent(tty, state->timeout);
 	}
-	shutdown(tty, state);
+	rs_shutdown(tty, state);
 	rs_flush_buffer(tty);
-		
+
 	tty_ldisc_flush(tty);
 	port->tty = NULL;
 
@@ -1327,7 +1324,7 @@ static void rs_hangup(struct tty_struct *tty)
 	struct serial_state *info = tty->driver_data;
 
 	rs_flush_buffer(tty);
-	shutdown(tty, info);
+	rs_shutdown(tty, info);
 	info->tport.count = 0;
 	tty_port_set_active(&info->tport, false);
 	info->tport.tty = NULL;
@@ -1351,7 +1348,7 @@ static int rs_open(struct tty_struct *tty, struct file * filp)
 	port->tty = tty;
 	tty->driver_data = info;
 
-	retval = startup(tty, info);
+	retval = rs_startup(tty, info);
 	if (retval) {
 		return retval;
 	}
@@ -1568,7 +1565,7 @@ fail_tty_driver_kref_put:
 	return error;
 }
 
-static int __exit amiga_serial_remove(struct platform_device *pdev)
+static void __exit amiga_serial_remove(struct platform_device *pdev)
 {
 	struct serial_state *state = platform_get_drvdata(pdev);
 
@@ -1578,11 +1575,15 @@ static int __exit amiga_serial_remove(struct platform_device *pdev)
 
 	free_irq(IRQ_AMIGA_TBE, state);
 	free_irq(IRQ_AMIGA_RBF, state);
-
-	return 0;
 }
 
-static struct platform_driver amiga_serial_driver = {
+/*
+ * amiga_serial_remove() lives in .exit.text. For drivers registered via
+ * module_platform_driver_probe() this is ok because they cannot get unbound at
+ * runtime. So mark the driver struct with __refdata to prevent modpost
+ * triggering a section mismatch warning.
+ */
+static struct platform_driver amiga_serial_driver __refdata = {
 	.remove = __exit_p(amiga_serial_remove),
 	.driver   = {
 		.name	= "amiga-serial",
@@ -1658,5 +1659,6 @@ console_initcall(amiserial_console_init);
 
 #endif /* CONFIG_SERIAL_CONSOLE && !MODULE */
 
+MODULE_DESCRIPTION("Serial driver for the amiga builtin port");
 MODULE_LICENSE("GPL");
 MODULE_ALIAS("platform:amiga-serial");

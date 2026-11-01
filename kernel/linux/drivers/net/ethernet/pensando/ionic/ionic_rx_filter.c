@@ -312,8 +312,8 @@ static int ionic_lif_filter_add(struct ionic_lif *lif,
 	int err = 0;
 
 	ctx.cmd.rx_filter_add = *ac;
-	ctx.cmd.rx_filter_add.opcode = IONIC_CMD_RX_FILTER_ADD,
-	ctx.cmd.rx_filter_add.lif_index = cpu_to_le16(lif->index),
+	ctx.cmd.rx_filter_add.opcode = IONIC_CMD_RX_FILTER_ADD;
+	ctx.cmd.rx_filter_add.lif_index = cpu_to_le16(lif->index);
 
 	spin_lock_bh(&lif->rx_filters.lock);
 	f = ionic_rx_filter_find(lif, &ctx.cmd.rx_filter_add);
@@ -558,17 +558,14 @@ struct sync_item {
 void ionic_rx_filter_sync(struct ionic_lif *lif)
 {
 	struct device *dev = lif->ionic->dev;
-	struct list_head sync_add_list;
-	struct list_head sync_del_list;
 	struct sync_item *sync_item;
 	struct ionic_rx_filter *f;
+	LIST_HEAD(sync_add_list);
+	LIST_HEAD(sync_del_list);
 	struct hlist_head *head;
 	struct hlist_node *tmp;
 	struct sync_item *spos;
 	unsigned int i;
-
-	INIT_LIST_HEAD(&sync_add_list);
-	INIT_LIST_HEAD(&sync_del_list);
 
 	clear_bit(IONIC_LIF_F_FILTER_SYNC_NEEDED, lif->state);
 

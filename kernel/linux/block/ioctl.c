@@ -11,17 +11,21 @@
 #include <linux/blktrace_api.h>
 #include <linux/pr.h>
 #include <linux/uaccess.h>
+#include <linux/pagemap.h>
+#include <linux/io_uring/cmd.h>
+#include <linux/blk-integrity.h>
+#include <trace/events/block.h>
+#include <uapi/linux/blkdev.h>
 #include "blk.h"
+#include "blk-crypto-internal.h"
 
 static int blkpg_do_ioctl(struct block_device *bdev,
 			  struct blkpg_partition __user *upart, int op)
 {
 	struct gendisk *disk = bdev->bd_disk;
 	struct blkpg_partition p;
-	long long start, length;
+	sector_t start, length, capacity, end;
 
-	if (disk->flags & GENHD_FL_NO_PART)
-		return -EINVAL;
 	if (!capable(CAP_SYS_ADMIN))
 		return -EACCES;
 	if (copy_from_user(&p, upart, sizeof(struct blkpg_partition)))
@@ -35,14 +39,24 @@ static int blkpg_do_ioctl(struct block_device *bdev,
 	if (op == BLKPG_DEL_PARTITION)
 		return bdev_del_partition(disk, p.pno);
 
+	if (p.start < 0 || p.length <= 0 || LLONG_MAX - p.length < p.start)
+		return -EINVAL;
+	/* Check that the partition is aligned to the block size */
+	if (!IS_ALIGNED(p.start | p.length, bdev_logical_block_size(bdev)))
+		return -EINVAL;
+
 	start = p.start >> SECTOR_SHIFT;
 	length = p.length >> SECTOR_SHIFT;
+	capacity = get_capacity(disk);
+
+	if (check_add_overflow(start, length, &end))
+		return -EINVAL;
+
+	if (start >= capacity || end > capacity)
+		return -EINVAL;
 
 	switch (op) {
 	case BLKPG_ADD_PARTITION:
-		/* check if partition is aligned to blocksize */
-		if (p.start & (bdev_logical_block_size(bdev) - 1))
-			return -EINVAL;
 		return bdev_add_partition(disk, p.pno, start, length);
 	case BLKPG_RESIZE_PARTITION:
 		return bdev_resize_partition(disk, p.pno, start, length);
@@ -84,48 +98,86 @@ static int compat_blkpg_ioctl(struct block_device *bdev,
 }
 #endif
 
+/*
+ * Check that [start, start + len) is a valid range from the block device's
+ * perspective, including verifying that it can be correctly translated into
+ * logical block addresses.
+ */
+static int blk_validate_byte_range(struct block_device *bdev,
+				   uint64_t start, uint64_t len)
+{
+	unsigned int bs_mask = bdev_logical_block_size(bdev) - 1;
+	uint64_t end;
+
+	if ((start | len) & bs_mask)
+		return -EINVAL;
+	if (!len)
+		return -EINVAL;
+	if (check_add_overflow(start, len, &end) || end > bdev_nr_bytes(bdev))
+		return -EINVAL;
+
+	return 0;
+}
+
 static int blk_ioctl_discard(struct block_device *bdev, blk_mode_t mode,
 		unsigned long arg)
 {
-	uint64_t range[2];
-	uint64_t start, len;
-	struct inode *inode = bdev->bd_inode;
+	uint64_t range[2], start, len;
+	struct bio *prev = NULL, *bio;
+	sector_t sector, nr_sects;
+	struct blk_plug plug;
 	int err;
 
-	if (!(mode & BLK_OPEN_WRITE))
-		return -EBADF;
+	if (copy_from_user(range, (void __user *)arg, sizeof(range)))
+		return -EFAULT;
+	start = range[0];
+	len = range[1];
 
 	if (!bdev_max_discard_sectors(bdev))
 		return -EOPNOTSUPP;
 
-	if (copy_from_user(range, (void __user *)arg, sizeof(range)))
-		return -EFAULT;
+	if (!(mode & BLK_OPEN_WRITE))
+		return -EBADF;
+	if (bdev_read_only(bdev))
+		return -EPERM;
+	err = blk_validate_byte_range(bdev, start, len);
+	if (err)
+		return err;
 
-	start = range[0];
-	len = range[1];
-
-	if (start & 511)
-		return -EINVAL;
-	if (len & 511)
-		return -EINVAL;
-
-	if (start + len > bdev_nr_bytes(bdev))
-		return -EINVAL;
-
-	filemap_invalidate_lock(inode->i_mapping);
+	inode_lock(bdev->bd_mapping->host);
+	filemap_invalidate_lock(bdev->bd_mapping);
 	err = truncate_bdev_range(bdev, mode, start, start + len - 1);
 	if (err)
 		goto fail;
-	err = blkdev_issue_discard(bdev, start >> 9, len >> 9, GFP_KERNEL);
+
+	sector = start >> SECTOR_SHIFT;
+	nr_sects = len >> SECTOR_SHIFT;
+
+	blk_start_plug(&plug);
+	while (!fatal_signal_pending(current)) {
+		bio = blk_alloc_discard_bio(bdev, &sector, &nr_sects,
+				GFP_KERNEL);
+		if (!bio)
+			break;
+		prev = bio_chain_and_submit(prev, bio);
+	}
+	if (prev) {
+		err = bio_submit_or_kill(prev, BLKDEV_ZERO_KILLABLE);
+		if (err == -EOPNOTSUPP)
+			err = 0;
+		bio_put(prev);
+	}
+	blk_finish_plug(&plug);
 fail:
-	filemap_invalidate_unlock(inode->i_mapping);
+	filemap_invalidate_unlock(bdev->bd_mapping);
+	inode_unlock(bdev->bd_mapping->host);
 	return err;
 }
 
 static int blk_ioctl_secure_erase(struct block_device *bdev, blk_mode_t mode,
 		void __user *argp)
 {
-	uint64_t start, len;
+	uint64_t start, len, end;
 	uint64_t range[2];
 	int err;
 
@@ -140,15 +192,18 @@ static int blk_ioctl_secure_erase(struct block_device *bdev, blk_mode_t mode,
 	len = range[1];
 	if ((start & 511) || (len & 511))
 		return -EINVAL;
-	if (start + len > bdev_nr_bytes(bdev))
+	if (check_add_overflow(start, len, &end) ||
+	    end > bdev_nr_bytes(bdev))
 		return -EINVAL;
 
-	filemap_invalidate_lock(bdev->bd_inode->i_mapping);
-	err = truncate_bdev_range(bdev, mode, start, start + len - 1);
+	inode_lock(bdev->bd_mapping->host);
+	filemap_invalidate_lock(bdev->bd_mapping);
+	err = truncate_bdev_range(bdev, mode, start, end - 1);
 	if (!err)
 		err = blkdev_issue_secure_erase(bdev, start >> 9, len >> 9,
 						GFP_KERNEL);
-	filemap_invalidate_unlock(bdev->bd_inode->i_mapping);
+	filemap_invalidate_unlock(bdev->bd_mapping);
+	inode_unlock(bdev->bd_mapping->host);
 	return err;
 }
 
@@ -158,7 +213,6 @@ static int blk_ioctl_zeroout(struct block_device *bdev, blk_mode_t mode,
 {
 	uint64_t range[2];
 	uint64_t start, end, len;
-	struct inode *inode = bdev->bd_inode;
 	int err;
 
 	if (!(mode & BLK_OPEN_WRITE))
@@ -181,16 +235,18 @@ static int blk_ioctl_zeroout(struct block_device *bdev, blk_mode_t mode,
 		return -EINVAL;
 
 	/* Invalidate the page cache, including dirty pages */
-	filemap_invalidate_lock(inode->i_mapping);
+	inode_lock(bdev->bd_mapping->host);
+	filemap_invalidate_lock(bdev->bd_mapping);
 	err = truncate_bdev_range(bdev, mode, start, end);
 	if (err)
 		goto fail;
 
 	err = blkdev_issue_zeroout(bdev, start >> 9, len >> 9, GFP_KERNEL,
-				   BLKDEV_ZERO_NOUNMAP);
+				   BLKDEV_ZERO_NOUNMAP | BLKDEV_ZERO_KILLABLE);
 
 fail:
-	filemap_invalidate_unlock(inode->i_mapping);
+	filemap_invalidate_unlock(bdev->bd_mapping);
+	inode_unlock(bdev->bd_mapping->host);
 	return err;
 }
 
@@ -256,7 +312,13 @@ int blkdev_compat_ptr_ioctl(struct block_device *bdev, blk_mode_t mode,
 EXPORT_SYMBOL(blkdev_compat_ptr_ioctl);
 #endif
 
-static bool blkdev_pr_allowed(struct block_device *bdev, blk_mode_t mode)
+enum pr_direction {
+	PR_IN,  /* read from device */
+	PR_OUT, /* write to device */
+};
+
+static bool blkdev_pr_allowed(struct block_device *bdev, blk_mode_t mode,
+		enum pr_direction dir)
 {
 	/* no sense to make reservations for partitions */
 	if (bdev_is_partition(bdev))
@@ -264,11 +326,17 @@ static bool blkdev_pr_allowed(struct block_device *bdev, blk_mode_t mode)
 
 	if (capable(CAP_SYS_ADMIN))
 		return true;
+
 	/*
-	 * Only allow unprivileged reservations if the file descriptor is open
-	 * for writing.
+	 * Only allow unprivileged reservation _out_ commands if the file
+	 * descriptor is open for writing. Allow reservation _in_ commands if
+	 * the file descriptor is open for reading since they do not modify the
+	 * device.
 	 */
-	return mode & BLK_OPEN_WRITE;
+	if (dir == PR_IN)
+		return mode & BLK_OPEN_READ;
+	else
+		return mode & BLK_OPEN_WRITE;
 }
 
 static int blkdev_pr_register(struct block_device *bdev, blk_mode_t mode,
@@ -277,7 +345,7 @@ static int blkdev_pr_register(struct block_device *bdev, blk_mode_t mode,
 	const struct pr_ops *ops = bdev->bd_disk->fops->pr_ops;
 	struct pr_registration reg;
 
-	if (!blkdev_pr_allowed(bdev, mode))
+	if (!blkdev_pr_allowed(bdev, mode, PR_OUT))
 		return -EPERM;
 	if (!ops || !ops->pr_register)
 		return -EOPNOTSUPP;
@@ -295,7 +363,7 @@ static int blkdev_pr_reserve(struct block_device *bdev, blk_mode_t mode,
 	const struct pr_ops *ops = bdev->bd_disk->fops->pr_ops;
 	struct pr_reservation rsv;
 
-	if (!blkdev_pr_allowed(bdev, mode))
+	if (!blkdev_pr_allowed(bdev, mode, PR_OUT))
 		return -EPERM;
 	if (!ops || !ops->pr_reserve)
 		return -EOPNOTSUPP;
@@ -313,7 +381,7 @@ static int blkdev_pr_release(struct block_device *bdev, blk_mode_t mode,
 	const struct pr_ops *ops = bdev->bd_disk->fops->pr_ops;
 	struct pr_reservation rsv;
 
-	if (!blkdev_pr_allowed(bdev, mode))
+	if (!blkdev_pr_allowed(bdev, mode, PR_OUT))
 		return -EPERM;
 	if (!ops || !ops->pr_release)
 		return -EOPNOTSUPP;
@@ -331,7 +399,7 @@ static int blkdev_pr_preempt(struct block_device *bdev, blk_mode_t mode,
 	const struct pr_ops *ops = bdev->bd_disk->fops->pr_ops;
 	struct pr_preempt p;
 
-	if (!blkdev_pr_allowed(bdev, mode))
+	if (!blkdev_pr_allowed(bdev, mode, PR_OUT))
 		return -EPERM;
 	if (!ops || !ops->pr_preempt)
 		return -EOPNOTSUPP;
@@ -349,7 +417,7 @@ static int blkdev_pr_clear(struct block_device *bdev, blk_mode_t mode,
 	const struct pr_ops *ops = bdev->bd_disk->fops->pr_ops;
 	struct pr_clear c;
 
-	if (!blkdev_pr_allowed(bdev, mode))
+	if (!blkdev_pr_allowed(bdev, mode, PR_OUT))
 		return -EPERM;
 	if (!ops || !ops->pr_clear)
 		return -EOPNOTSUPP;
@@ -361,6 +429,87 @@ static int blkdev_pr_clear(struct block_device *bdev, blk_mode_t mode,
 	return ops->pr_clear(bdev, c.key);
 }
 
+static int blkdev_pr_read_keys(struct block_device *bdev, blk_mode_t mode,
+		struct pr_read_keys __user *arg)
+{
+	const struct pr_ops *ops = bdev->bd_disk->fops->pr_ops;
+	struct pr_keys *keys_info;
+	struct pr_read_keys read_keys;
+	u64 __user *keys_ptr;
+	size_t keys_info_len;
+	size_t keys_copy_len;
+	int ret;
+
+	if (!blkdev_pr_allowed(bdev, mode, PR_IN))
+		return -EPERM;
+	if (!ops || !ops->pr_read_keys)
+		return -EOPNOTSUPP;
+
+	if (copy_from_user(&read_keys, arg, sizeof(read_keys)))
+		return -EFAULT;
+
+	if (read_keys.num_keys > PR_KEYS_MAX)
+		return -EINVAL;
+
+	keys_info_len = struct_size(keys_info, keys, read_keys.num_keys);
+
+	keys_info = kvzalloc(keys_info_len, GFP_KERNEL);
+	if (!keys_info)
+		return -ENOMEM;
+
+	keys_info->num_keys = read_keys.num_keys;
+
+	ret = ops->pr_read_keys(bdev, keys_info);
+	if (ret)
+		goto out;
+
+	/* Copy out individual keys */
+	keys_ptr = u64_to_user_ptr(read_keys.keys_ptr);
+	keys_copy_len = min(read_keys.num_keys, keys_info->num_keys) *
+		        sizeof(keys_info->keys[0]);
+
+	if (copy_to_user(keys_ptr, keys_info->keys, keys_copy_len)) {
+		ret = -EFAULT;
+		goto out;
+	}
+
+	/* Copy out the arg struct */
+	read_keys.generation = keys_info->generation;
+	read_keys.num_keys = keys_info->num_keys;
+
+	if (copy_to_user(arg, &read_keys, sizeof(read_keys)))
+		ret = -EFAULT;
+out:
+	kvfree(keys_info);
+	return ret;
+}
+
+static int blkdev_pr_read_reservation(struct block_device *bdev,
+		blk_mode_t mode, struct pr_read_reservation __user *arg)
+{
+	const struct pr_ops *ops = bdev->bd_disk->fops->pr_ops;
+	struct pr_held_reservation rsv = {};
+	struct pr_read_reservation out = {};
+	int ret;
+
+	if (!blkdev_pr_allowed(bdev, mode, PR_IN))
+		return -EPERM;
+	if (!ops || !ops->pr_read_reservation)
+		return -EOPNOTSUPP;
+
+	ret = ops->pr_read_reservation(bdev, &rsv);
+	if (ret)
+		return ret;
+
+	out.key = rsv.key;
+	out.generation = rsv.generation;
+	out.type = rsv.type;
+
+	if (copy_to_user(arg, &out, sizeof(out)))
+		return -EFAULT;
+	return 0;
+}
+
 static int blkdev_flushbuf(struct block_device *bdev, unsigned cmd,
 		unsigned long arg)
 {
@@ -370,9 +519,10 @@ static int blkdev_flushbuf(struct block_device *bdev, unsigned cmd,
 	mutex_lock(&bdev->bd_holder_lock);
 	if (bdev->bd_holder_ops && bdev->bd_holder_ops->sync)
 		bdev->bd_holder_ops->sync(bdev);
-	else
+	else {
+		mutex_unlock(&bdev->bd_holder_lock);
 		sync_blockdev(bdev);
-	mutex_unlock(&bdev->bd_holder_lock);
+	}
 
 	invalidate_bdev(bdev);
 	return 0;
@@ -393,7 +543,10 @@ static int blkdev_roset(struct block_device *bdev, unsigned cmd,
 		if (ret)
 			return ret;
 	}
-	bdev->bd_read_only = n;
+	if (n)
+		bdev_set_flag(bdev, BD_READ_ONLY);
+	else
+		bdev_clear_flag(bdev, BD_READ_ONLY);
 	return 0;
 }
 
@@ -415,7 +568,7 @@ static int blkdev_getgeo(struct block_device *bdev,
 	 */
 	memset(&geo, 0, sizeof(geo));
 	geo.start = get_start_sect(bdev);
-	ret = disk->fops->getgeo(bdev, &geo);
+	ret = disk->fops->getgeo(disk, &geo);
 	if (ret)
 		return ret;
 	if (copy_to_user(argp, &geo, sizeof(geo)))
@@ -449,7 +602,7 @@ static int compat_hdio_getgeo(struct block_device *bdev,
 	 * want to override it.
 	 */
 	geo.start = get_start_sect(bdev);
-	ret = disk->fops->getgeo(bdev, &geo);
+	ret = disk->fops->getgeo(disk, &geo);
 	if (ret)
 		return ret;
 
@@ -463,9 +616,13 @@ static int compat_hdio_getgeo(struct block_device *bdev,
 #endif
 
 /* set the logical block size */
-static int blkdev_bszset(struct block_device *bdev, blk_mode_t mode,
+static int blkdev_bszset(struct file *file, blk_mode_t mode,
 		int __user *argp)
 {
+	// this one might be file_inode(file)->i_rdev - a rare valid
+	// use of file_inode() for those.
+	dev_t dev = I_BDEV(file->f_mapping->host)->bd_dev;
+	struct file *excl_file;
 	int ret, n;
 
 	if (!capable(CAP_SYS_ADMIN))
@@ -476,13 +633,13 @@ static int blkdev_bszset(struct block_device *bdev, blk_mode_t mode,
 		return -EFAULT;
 
 	if (mode & BLK_OPEN_EXCL)
-		return set_blocksize(bdev, n);
+		return set_blocksize(file, n);
 
-	if (IS_ERR(blkdev_get_by_dev(bdev->bd_dev, mode, &bdev, NULL)))
+	excl_file = bdev_file_open_by_dev(dev, mode, &dev, NULL);
+	if (IS_ERR(excl_file))
 		return -EBUSY;
-	ret = set_blocksize(bdev, n);
-	blkdev_put(bdev, &bdev);
-
+	ret = set_blocksize(excl_file, n);
+	fput(excl_file);
 	return ret;
 }
 
@@ -511,6 +668,7 @@ static int blkdev_common_ioctl(struct block_device *bdev, blk_mode_t mode,
 	case BLKGETDISKSEQ:
 		return put_u64(argp, bdev->bd_disk->diskseq);
 	case BLKREPORTZONE:
+	case BLKREPORTZONEV2:
 		return blkdev_report_zones_ioctl(bdev, cmd, arg);
 	case BLKRESETZONE:
 	case BLKOPENZONE:
@@ -540,7 +698,7 @@ static int blkdev_common_ioctl(struct block_device *bdev, blk_mode_t mode,
 				    queue_max_sectors(bdev_get_queue(bdev)));
 		return put_ushort(argp, max_sectors);
 	case BLKROTATIONAL:
-		return put_ushort(argp, !bdev_nonrot(bdev));
+		return put_ushort(argp, bdev_rot(bdev));
 	case BLKRASET:
 	case BLKFRASET:
 		if(!capable(CAP_SYS_ADMIN))
@@ -552,11 +710,16 @@ static int blkdev_common_ioctl(struct block_device *bdev, blk_mode_t mode,
 			return -EACCES;
 		if (bdev_is_partition(bdev))
 			return -EINVAL;
-		return disk_scan_partitions(bdev->bd_disk, mode);
+		return disk_scan_partitions(bdev->bd_disk,
+				mode | BLK_OPEN_STRICT_SCAN);
 	case BLKTRACESTART:
 	case BLKTRACESTOP:
 	case BLKTRACETEARDOWN:
 		return blk_trace_ioctl(bdev, cmd, argp);
+	case BLKCRYPTOIMPORTKEY:
+	case BLKCRYPTOGENERATEKEY:
+	case BLKCRYPTOPREPAREKEY:
+		return blk_crypto_ioctl(bdev, cmd, argp);
 	case IOC_PR_REGISTER:
 		return blkdev_pr_register(bdev, mode, argp);
 	case IOC_PR_RESERVE:
@@ -569,8 +732,12 @@ static int blkdev_common_ioctl(struct block_device *bdev, blk_mode_t mode,
 		return blkdev_pr_preempt(bdev, mode, argp, true);
 	case IOC_PR_CLEAR:
 		return blkdev_pr_clear(bdev, mode, argp);
+	case IOC_PR_READ_KEYS:
+		return blkdev_pr_read_keys(bdev, mode, argp);
+	case IOC_PR_READ_RESERVATION:
+		return blkdev_pr_read_reservation(bdev, mode, argp);
 	default:
-		return -ENOIOCTLCMD;
+		return blk_get_meta_cap(bdev, cmd, argp);
 	}
 }
 
@@ -610,12 +777,13 @@ long blkdev_ioctl(struct file *file, unsigned cmd, unsigned long arg)
 	case BLKBSZGET: /* get block device soft block size (cf. BLKSSZGET) */
 		return put_int(argp, block_size(bdev));
 	case BLKBSZSET:
-		return blkdev_bszset(bdev, mode, argp);
+		return blkdev_bszset(file, mode, argp);
 	case BLKGETSIZE64:
 		return put_u64(argp, bdev_nr_bytes(bdev));
 
 	/* Incompatible alignment on i386 */
 	case BLKTRACESETUP:
+	case BLKTRACESETUP2:
 		return blk_trace_ioctl(bdev, cmd, argp);
 	default:
 		break;
@@ -670,7 +838,7 @@ long compat_blkdev_ioctl(struct file *file, unsigned cmd, unsigned long arg)
 	case BLKBSZGET_32: /* get the logical block size (cf. BLKSSZGET) */
 		return put_int(argp, bdev_logical_block_size(bdev));
 	case BLKBSZSET_32:
-		return blkdev_bszset(bdev, mode, argp);
+		return blkdev_bszset(file, mode, argp);
 	case BLKGETSIZE64_32:
 		return put_u64(argp, bdev_nr_bytes(bdev));
 
@@ -688,3 +856,153 @@ long compat_blkdev_ioctl(struct file *file, unsigned cmd, unsigned long arg)
 	return ret;
 }
 #endif
+
+struct blk_iou_cmd {
+	u64 start;
+	u64 len;
+	int res;
+	bool nowait;
+};
+
+static void blk_cmd_complete(struct io_tw_req tw_req, io_tw_token_t tw)
+{
+	struct io_uring_cmd *cmd = io_uring_cmd_from_tw(tw_req);
+	struct blk_iou_cmd *bic = io_uring_cmd_to_pdu(cmd, struct blk_iou_cmd);
+
+	if (bic->res == -EAGAIN && bic->nowait)
+		io_uring_cmd_issue_blocking(cmd);
+	else
+		io_uring_cmd_done(cmd, bic->res,
+				  IO_URING_CMD_TASK_WORK_ISSUE_FLAGS);
+}
+
+static void bio_cmd_bio_end_io(struct bio *bio)
+{
+	struct io_uring_cmd *cmd = bio->bi_private;
+	struct blk_iou_cmd *bic = io_uring_cmd_to_pdu(cmd, struct blk_iou_cmd);
+
+	if (unlikely(bio->bi_status) && !bic->res)
+		bic->res = blk_status_to_errno(bio->bi_status);
+
+	io_uring_cmd_do_in_task_lazy(cmd, blk_cmd_complete);
+	bio_put(bio);
+}
+
+static int blkdev_cmd_discard(struct io_uring_cmd *cmd)
+{
+	struct blk_iou_cmd *bic = io_uring_cmd_to_pdu(cmd, struct blk_iou_cmd);
+	struct block_device *bdev = I_BDEV(cmd->file->f_mapping->host);
+	gfp_t gfp = bic->nowait ? GFP_NOWAIT : GFP_KERNEL;
+	sector_t sector = bic->start >> SECTOR_SHIFT;
+	sector_t nr_sects = bic->len >> SECTOR_SHIFT;
+	struct bio *prev = NULL, *bio;
+	int err;
+
+	if (!bdev_max_discard_sectors(bdev))
+		return -EOPNOTSUPP;
+	if (!(file_to_blk_mode(cmd->file) & BLK_OPEN_WRITE))
+		return -EBADF;
+	if (bdev_read_only(bdev))
+		return -EPERM;
+	err = blk_validate_byte_range(bdev, bic->start, bic->len);
+	if (err)
+		return err;
+
+	err = filemap_invalidate_pages(bdev->bd_mapping, bic->start,
+				       bic->start + bic->len - 1, bic->nowait);
+	if (err)
+		return err;
+
+	while (true) {
+		bio = blk_alloc_discard_bio(bdev, &sector, &nr_sects, gfp);
+		if (!bio)
+			break;
+		if (bic->nowait) {
+			/*
+			 * Don't allow multi-bio non-blocking submissions as
+			 * subsequent bios may fail but we won't get a direct
+			 * indication of that. Normally, the caller should
+			 * retry from a blocking context.
+			 */
+			if (unlikely(nr_sects)) {
+				bio_put(bio);
+				return -EAGAIN;
+			}
+			bio->bi_opf |= REQ_NOWAIT;
+		}
+
+		prev = bio_chain_and_submit(prev, bio);
+	}
+	if (unlikely(!prev))
+		return -EAGAIN;
+	if (unlikely(nr_sects))
+		bic->res = -EAGAIN;
+
+	prev->bi_private = cmd;
+	prev->bi_end_io = bio_cmd_bio_end_io;
+	submit_bio(prev);
+	return -EIOCBQUEUED;
+}
+
+static int blkdev_cmd_zone_reset_all(struct io_uring_cmd *cmd)
+{
+	struct blk_iou_cmd *bic = io_uring_cmd_to_pdu(cmd, struct blk_iou_cmd);
+	struct block_device *bdev = I_BDEV(cmd->file->f_mapping->host);
+	struct bio *bio;
+	int err;
+
+	if (!(file_to_blk_mode(cmd->file) & BLK_OPEN_WRITE))
+		return -EBADF;
+	if (bdev_read_only(bdev))
+		return -EPERM;
+	if (!bdev_is_zoned(bdev))
+		return -EOPNOTSUPP;
+	if (bic->start || bic->len)
+		return -EINVAL;
+
+	err = filemap_invalidate_pages(bdev->bd_mapping, 0,
+				bdev_nr_bytes(bdev) - 1, bic->nowait);
+	if (err)
+		return err;
+
+	bio = bio_alloc(bdev, 0, REQ_OP_ZONE_RESET_ALL,
+			bic->nowait ? GFP_NOWAIT : GFP_KERNEL);
+	if (!bio)
+		return -EAGAIN;
+	if (bic->nowait)
+		bio->bi_opf |= REQ_NOWAIT;
+	trace_blkdev_zone_mgmt(bio, 0);
+	bio->bi_private = cmd;
+	bio->bi_end_io = bio_cmd_bio_end_io;
+	submit_bio(bio);
+	return -EIOCBQUEUED;
+}
+
+int blkdev_uring_cmd(struct io_uring_cmd *cmd, unsigned int issue_flags)
+{
+	struct blk_iou_cmd *bic = io_uring_cmd_to_pdu(cmd, struct blk_iou_cmd);
+	u32 cmd_op = cmd->cmd_op;
+
+	/* Read what we need from the SQE on the first issue */
+	if (!(cmd->flags & IORING_URING_CMD_REISSUE)) {
+		const struct io_uring_sqe *sqe = cmd->sqe;
+
+		if (unlikely(sqe->ioprio || sqe->__pad1 || sqe->len ||
+			     sqe->rw_flags || sqe->file_index))
+			return -EINVAL;
+
+		bic->start = READ_ONCE(sqe->addr);
+		bic->len = READ_ONCE(sqe->addr3);
+	}
+
+	bic->res = 0;
+	bic->nowait = issue_flags & IO_URING_F_NONBLOCK;
+
+	switch (cmd_op) {
+	case BLOCK_URING_CMD_DISCARD:
+		return blkdev_cmd_discard(cmd);
+	case BLOCK_URING_CMD_ZONE_RESET_ALL:
+		return blkdev_cmd_zone_reset_all(cmd);
+	}
+	return -EINVAL;
+}

@@ -189,7 +189,7 @@ static int mall_change(struct net *net, struct sk_buff *in_skb,
 			return -EINVAL;
 	}
 
-	new = kzalloc(sizeof(*new), GFP_KERNEL);
+	new = kzalloc_obj(*new, GFP_KERNEL_ACCOUNT);
 	if (!new)
 		return -ENOBUFS;
 
@@ -201,7 +201,7 @@ static int mall_change(struct net *net, struct sk_buff *in_skb,
 		handle = 1;
 	new->handle = handle;
 	new->flags = userflags;
-	new->pf = alloc_percpu(struct tc_matchall_pcnt);
+	new->pf = alloc_percpu_gfp(struct tc_matchall_pcnt, GFP_KERNEL_ACCOUNT);
 	if (!new->pf) {
 		err = -ENOMEM;
 		goto err_alloc_percpu;
@@ -227,6 +227,8 @@ static int mall_change(struct net *net, struct sk_buff *in_skb,
 
 	if (!tc_in_hw(new->flags))
 		new->flags |= TCA_CLS_FLAGS_NOT_IN_HW;
+
+	tcf_proto_update_usesw(tp, new->flags);
 
 	*arg = head;
 	rcu_assign_pointer(tp->root, new);
@@ -398,6 +400,7 @@ static struct tcf_proto_ops cls_mall_ops __read_mostly = {
 	.bind_class	= mall_bind_class,
 	.owner		= THIS_MODULE,
 };
+MODULE_ALIAS_NET_CLS("matchall");
 
 static int __init cls_mall_init(void)
 {

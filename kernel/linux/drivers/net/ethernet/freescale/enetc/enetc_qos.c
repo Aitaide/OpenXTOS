@@ -336,7 +336,7 @@ int enetc_setup_tc_cbs(struct net_device *ndev, void *type_data)
 	 *
 	 * (enetClockFrequency / portTransmitRate) * 100
 	 */
-	hi_credit_reg = (u32)div_u64((ENETC_CLK * 100ULL) * hi_credit_bit,
+	hi_credit_reg = (u32)div_u64((priv->sysclk_freq * 100ULL) * hi_credit_bit,
 				     port_transmit_rate * 1000000ULL);
 
 	enetc_port_wr(hw, ENETC_PTCCBSR1(tc), hi_credit_reg);
@@ -443,7 +443,7 @@ struct enetc_psfp_gate {
 	u32 num_entries;
 	refcount_t refcount;
 	struct hlist_node node;
-	struct action_gate_entry entries[];
+	struct action_gate_entry entries[] __counted_by(num_entries);
 };
 
 /* Only enable the green color frame now
@@ -1135,7 +1135,6 @@ static int enetc_psfp_parse_clsflower(struct enetc_ndev_priv *priv,
 	struct flow_action_entry *entry;
 	struct action_gate_entry *e;
 	u8 sfi_overwrite = 0;
-	int entries_size;
 	int i, err;
 
 	if (f->common.chain_index >= priv->psfp_cap.max_streamid) {
@@ -1153,7 +1152,7 @@ static int enetc_psfp_parse_clsflower(struct enetc_ndev_priv *priv,
 	if (!entryg)
 		return -EINVAL;
 
-	filter = kzalloc(sizeof(*filter), GFP_KERNEL);
+	filter = kzalloc_obj(*filter);
 	if (!filter)
 		return -ENOMEM;
 
@@ -1242,8 +1241,7 @@ static int enetc_psfp_parse_clsflower(struct enetc_ndev_priv *priv,
 		goto free_filter;
 	}
 
-	entries_size = struct_size(sgi, entries, entryg->gate.num_entries);
-	sgi = kzalloc(entries_size, GFP_KERNEL);
+	sgi = kzalloc_flex(*sgi, entries, entryg->gate.num_entries);
 	if (!sgi) {
 		err = -ENOMEM;
 		goto free_filter;
@@ -1266,7 +1264,7 @@ static int enetc_psfp_parse_clsflower(struct enetc_ndev_priv *priv,
 
 	filter->sgi_index = sgi->index;
 
-	sfi = kzalloc(sizeof(*sfi), GFP_KERNEL);
+	sfi = kzalloc_obj(*sfi);
 	if (!sfi) {
 		err = -ENOMEM;
 		goto free_gate;
@@ -1283,7 +1281,7 @@ static int enetc_psfp_parse_clsflower(struct enetc_ndev_priv *priv,
 			goto free_sfi;
 
 		if (entryp->police.burst) {
-			fmi = kzalloc(sizeof(*fmi), GFP_KERNEL);
+			fmi = kzalloc_obj(*fmi);
 			if (!fmi) {
 				err = -ENOMEM;
 				goto free_sfi;

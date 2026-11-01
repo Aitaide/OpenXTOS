@@ -14,6 +14,7 @@
 #include <linux/spinlock.h>
 #include <linux/debugfs.h>
 #include <linux/export.h>
+#include <linux/string_choices.h>
 
 #include "../cluster/heartbeat.h"
 #include "../cluster/nodemanager.h"
@@ -90,12 +91,12 @@ void __dlm_print_one_lock_resource(struct dlm_lock_resource *res)
 	       buf, res->owner, res->state);
 	printk("  last used: %lu, refcnt: %u, on purge list: %s\n",
 	       res->last_used, kref_read(&res->refs),
-	       list_empty(&res->purge) ? "no" : "yes");
+	       str_no_yes(list_empty(&res->purge)));
 	printk("  on dirty list: %s, on reco list: %s, "
 	       "migrating pending: %s\n",
-	       list_empty(&res->dirty) ? "no" : "yes",
-	       list_empty(&res->recovering) ? "no" : "yes",
-	       res->migration_pending ? "yes" : "no");
+	       str_no_yes(list_empty(&res->dirty)),
+	       str_no_yes(list_empty(&res->recovering)),
+	       str_yes_no(res->migration_pending));
 	printk("  inflight locks: %d, asts reserved: %d\n",
 	       res->inflight_locks, atomic_read(&res->asts_reserved));
 	dlm_print_lockres_refmap(res);
@@ -163,59 +164,6 @@ static const char *dlm_errnames[] = {
 	[DLM_MIGRATING] =		"DLM_MIGRATING",
 	[DLM_MAXSTATS] =		"DLM_MAXSTATS",
 };
-
-static const char *dlm_errmsgs[] = {
-	[DLM_NORMAL] = 			"request in progress",
-	[DLM_GRANTED] = 		"request granted",
-	[DLM_DENIED] = 			"request denied",
-	[DLM_DENIED_NOLOCKS] = 		"request denied, out of system resources",
-	[DLM_WORKING] = 		"async request in progress",
-	[DLM_BLOCKED] = 		"lock request blocked",
-	[DLM_BLOCKED_ORPHAN] = 		"lock request blocked by a orphan lock",
-	[DLM_DENIED_GRACE_PERIOD] = 	"topological change in progress",
-	[DLM_SYSERR] = 			"system error",
-	[DLM_NOSUPPORT] = 		"unsupported",
-	[DLM_CANCELGRANT] = 		"can't cancel convert: already granted",
-	[DLM_IVLOCKID] = 		"bad lockid",
-	[DLM_SYNC] = 			"synchronous request granted",
-	[DLM_BADTYPE] = 		"bad resource type",
-	[DLM_BADRESOURCE] = 		"bad resource handle",
-	[DLM_MAXHANDLES] = 		"no more resource handles",
-	[DLM_NOCLINFO] = 		"can't contact cluster manager",
-	[DLM_NOLOCKMGR] = 		"can't contact lock manager",
-	[DLM_NOPURGED] = 		"can't contact purge daemon",
-	[DLM_BADARGS] = 		"bad api args",
-	[DLM_VOID] = 			"no status",
-	[DLM_NOTQUEUED] = 		"NOQUEUE was specified and request failed",
-	[DLM_IVBUFLEN] = 		"invalid resource name length",
-	[DLM_CVTUNGRANT] = 		"attempted to convert ungranted lock",
-	[DLM_BADPARAM] = 		"invalid lock mode specified",
-	[DLM_VALNOTVALID] = 		"value block has been invalidated",
-	[DLM_REJECTED] = 		"request rejected, unrecognized client",
-	[DLM_ABORT] = 			"blocked lock request cancelled",
-	[DLM_CANCEL] = 			"conversion request cancelled",
-	[DLM_IVRESHANDLE] = 		"invalid resource handle",
-	[DLM_DEADLOCK] = 		"deadlock recovery refused this request",
-	[DLM_DENIED_NOASTS] = 		"failed to allocate AST",
-	[DLM_FORWARD] = 		"request must wait for primary's response",
-	[DLM_TIMEOUT] = 		"timeout value for lock has expired",
-	[DLM_IVGROUPID] = 		"invalid group specification",
-	[DLM_VERS_CONFLICT] = 		"version conflicts prevent request handling",
-	[DLM_BAD_DEVICE_PATH] = 	"Locks device does not exist or path wrong",
-	[DLM_NO_DEVICE_PERMISSION] = 	"Client has insufficient perms for device",
-	[DLM_NO_CONTROL_DEVICE] = 	"Cannot set options on opened device ",
-	[DLM_RECOVERING] = 		"lock resource being recovered",
-	[DLM_MIGRATING] = 		"lock resource being migrated",
-	[DLM_MAXSTATS] = 		"invalid error number",
-};
-
-const char *dlm_errmsg(enum dlm_status err)
-{
-	if (err >= DLM_MAXSTATS || err < 0)
-		return dlm_errmsgs[DLM_MAXSTATS];
-	return dlm_errmsgs[err];
-}
-EXPORT_SYMBOL_GPL(dlm_errmsg);
 
 const char *dlm_errname(enum dlm_status err)
 {
@@ -312,10 +260,10 @@ void dlm_print_one_mle(struct dlm_master_list_entry *mle)
 {
 	char *buf;
 
-	buf = (char *) get_zeroed_page(GFP_ATOMIC);
+	buf = kzalloc(PAGE_SIZE, GFP_ATOMIC);
 	if (buf) {
 		dump_mle(mle, buf, PAGE_SIZE - 1);
-		free_page((unsigned long)buf);
+		kfree(buf);
 	}
 }
 
@@ -332,7 +280,7 @@ static struct dentry *dlm_debugfs_root;
 /* begin - utils funcs */
 static int debug_release(struct inode *inode, struct file *file)
 {
-	free_page((unsigned long)file->private_data);
+	kfree(file->private_data);
 	return 0;
 }
 
@@ -379,17 +327,15 @@ static int debug_purgelist_open(struct inode *inode, struct file *file)
 	struct dlm_ctxt *dlm = inode->i_private;
 	char *buf = NULL;
 
-	buf = (char *) get_zeroed_page(GFP_NOFS);
+	buf = kzalloc(PAGE_SIZE, GFP_NOFS);
 	if (!buf)
-		goto bail;
+		return -ENOMEM;
 
 	i_size_write(inode, debug_purgelist_print(dlm, buf, PAGE_SIZE - 1));
 
 	file->private_data = buf;
 
 	return 0;
-bail:
-	return -ENOMEM;
 }
 
 static const struct file_operations debug_purgelist_fops = {
@@ -436,17 +382,15 @@ static int debug_mle_open(struct inode *inode, struct file *file)
 	struct dlm_ctxt *dlm = inode->i_private;
 	char *buf = NULL;
 
-	buf = (char *) get_zeroed_page(GFP_NOFS);
+	buf = kzalloc(PAGE_SIZE, GFP_NOFS);
 	if (!buf)
-		goto bail;
+		return -ENOMEM;
 
 	i_size_write(inode, debug_mle_print(dlm, buf, PAGE_SIZE - 1));
 
 	file->private_data = buf;
 
 	return 0;
-bail:
-	return -ENOMEM;
 }
 
 static const struct file_operations debug_mle_fops = {
@@ -612,6 +556,7 @@ static int debug_lockres_open(struct inode *inode, struct file *file)
 	struct dlm_ctxt *dlm = inode->i_private;
 	struct debug_lockres *dl;
 	void *buf;
+	int status = -ENOMEM;
 
 	buf = kmalloc(PAGE_SIZE, GFP_KERNEL);
 	if (!buf)
@@ -624,16 +569,23 @@ static int debug_lockres_open(struct inode *inode, struct file *file)
 	dl->dl_len = PAGE_SIZE;
 	dl->dl_buf = buf;
 
-	dlm_grab(dlm);
-	dl->dl_ctxt = dlm;
+	/* ->release uses dl_ctxt after open, so it needs a real pin. */
+	dl->dl_ctxt = dlm_grab(dlm);
+	if (!dl->dl_ctxt) {
+		status = -ENOENT;
+		goto bailseq;
+	}
 
 	return 0;
 
+bailseq:
+	seq_release_private(inode, file);
 bailfree:
 	kfree(buf);
 bail:
-	mlog_errno(-ENOMEM);
-	return -ENOMEM;
+	if (status != -ENOENT)
+		mlog_errno(status);
+	return status;
 }
 
 static int debug_lockres_release(struct inode *inode, struct file *file)
@@ -784,8 +736,11 @@ static int debug_state_print(struct dlm_ctxt *dlm, char *buf, int len)
 				 buf + out, len - out);
 	out += scnprintf(buf + out, len - out, "\n");
 
+	spin_unlock(&dlm->spinlock);
+
 	/* Recovery Node State: */
 	out += scnprintf(buf + out, len - out, "Recovery Node State:\n");
+	spin_lock(&dlm_reco_state_lock);
 	list_for_each_entry(node, &dlm->reco.node_data, list) {
 		switch (node->state) {
 		case DLM_RECO_NODE_DATA_INIT:
@@ -817,7 +772,7 @@ static int debug_state_print(struct dlm_ctxt *dlm, char *buf, int len)
 				node->node_num, state);
 	}
 
-	spin_unlock(&dlm->spinlock);
+	spin_unlock(&dlm_reco_state_lock);
 
 	return out;
 }
@@ -827,17 +782,15 @@ static int debug_state_open(struct inode *inode, struct file *file)
 	struct dlm_ctxt *dlm = inode->i_private;
 	char *buf = NULL;
 
-	buf = (char *) get_zeroed_page(GFP_NOFS);
+	buf = kzalloc(PAGE_SIZE, GFP_NOFS);
 	if (!buf)
-		goto bail;
+		return -ENOMEM;
 
 	i_size_write(inode, debug_state_print(dlm, buf, PAGE_SIZE - 1));
 
 	file->private_data = buf;
 
 	return 0;
-bail:
-	return -ENOMEM;
 }
 
 static const struct file_operations debug_state_fops = {

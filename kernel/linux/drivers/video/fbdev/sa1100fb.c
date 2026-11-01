@@ -562,6 +562,8 @@ static int sa1100fb_mmap(struct fb_info *info,
 		container_of(info, struct sa1100fb_info, fb);
 	unsigned long off = vma->vm_pgoff << PAGE_SHIFT;
 
+	vma->vm_page_prot = pgprot_decrypted(vma->vm_page_prot);
+
 	if (off < info->fix.smem_len) {
 		vma->vm_pgoff += 1; /* skip over the palette */
 		return dma_mmap_wc(fbi->dev, vma, fbi->map_cpu, fbi->map_dma,
@@ -575,14 +577,13 @@ static int sa1100fb_mmap(struct fb_info *info,
 
 static const struct fb_ops sa1100fb_ops = {
 	.owner		= THIS_MODULE,
+	__FB_DEFAULT_IOMEM_OPS_RDWR,
 	.fb_check_var	= sa1100fb_check_var,
 	.fb_set_par	= sa1100fb_set_par,
 //	.fb_set_cmap	= sa1100fb_set_cmap,
 	.fb_setcolreg	= sa1100fb_setcolreg,
-	.fb_fillrect	= cfb_fillrect,
-	.fb_copyarea	= cfb_copyarea,
-	.fb_imageblit	= cfb_imageblit,
 	.fb_blank	= sa1100fb_blank,
+	__FB_DEFAULT_IOMEM_OPS_DRAW,
 	.fb_mmap	= sa1100fb_mmap,
 };
 
@@ -1166,10 +1167,8 @@ static int sa1100fb_probe(struct platform_device *pdev)
 
 	ret = devm_request_irq(&pdev->dev, irq, sa1100fb_handle_irq, 0,
 			       "LCD", fbi);
-	if (ret) {
-		dev_err(&pdev->dev, "request_irq failed: %d\n", ret);
+	if (ret)
 		return ret;
-	}
 
 	fbi->shannon_lcden = gpiod_get_optional(&pdev->dev, "shannon-lcden",
 						GPIOD_OUT_LOW);

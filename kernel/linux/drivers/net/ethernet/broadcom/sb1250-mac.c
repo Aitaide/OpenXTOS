@@ -622,9 +622,8 @@ static void sbdma_initctx(struct sbmacdma *d, struct sbmac_softc *s, int chan,
 
 	d->sbdma_maxdescr = maxdescr;
 
-	d->sbdma_dscrtable_unaligned = kcalloc(d->sbdma_maxdescr + 1,
-					       sizeof(*d->sbdma_dscrtable),
-					       GFP_KERNEL);
+	d->sbdma_dscrtable_unaligned = kzalloc_objs(*d->sbdma_dscrtable,
+						    d->sbdma_maxdescr + 1);
 
 	/*
 	 * The descriptor table must be aligned to at least 16 bytes or the
@@ -642,8 +641,7 @@ static void sbdma_initctx(struct sbmacdma *d, struct sbmac_softc *s, int chan,
 	 * And context table
 	 */
 
-	d->sbdma_ctxtable = kcalloc(d->sbdma_maxdescr,
-				    sizeof(*d->sbdma_ctxtable), GFP_KERNEL);
+	d->sbdma_ctxtable = kzalloc_objs(*d->sbdma_ctxtable, d->sbdma_maxdescr);
 
 #ifdef CONFIG_SBMAC_COALESCE
 	/*
@@ -2593,7 +2591,7 @@ out_out:
 	return err;
 }
 
-static int sbmac_remove(struct platform_device *pldev)
+static void sbmac_remove(struct platform_device *pldev)
 {
 	struct net_device *dev = platform_get_drvdata(pldev);
 	struct sbmac_softc *sc = netdev_priv(dev);
@@ -2604,8 +2602,6 @@ static int sbmac_remove(struct platform_device *pldev)
 	mdiobus_free(sc->mii_bus);
 	iounmap(sc->sbm_base);
 	free_netdev(dev);
-
-	return 0;
 }
 
 static struct platform_driver sbmac_driver = {

@@ -19,7 +19,8 @@
 #include <linux/interrupt.h>
 #include <linux/wait.h>
 #include <linux/i2c.h>
-#include <linux/of_device.h>
+#include <linux/of.h>
+#include <linux/property.h>
 #include "tpm.h"
 
 /* I2C interface offsets */
@@ -181,8 +182,10 @@ static int i2c_nuvoton_wait_for_stat(struct tpm_chip *chip, u8 mask, u8 value,
 						      timeout);
 		if (rc > 0)
 			return 0;
-		/* At this point we know that the SINT pin is asserted, so we
-		 * do not need to do i2c_nuvoton_check_status */
+
+		disable_irq(priv->irq);
+		if (rc < 0)
+			return rc;
 	} else {
 		unsigned long ten_msec, stop;
 		bool status_valid;
@@ -349,7 +352,8 @@ static int i2c_nuvoton_recv(struct tpm_chip *chip, u8 *buf, size_t count)
  * tpm.c can skip polling for the data to be available as the interrupt is
  * waited for here
  */
-static int i2c_nuvoton_send(struct tpm_chip *chip, u8 *buf, size_t len)
+static int i2c_nuvoton_send(struct tpm_chip *chip, u8 *buf, size_t bufsiz,
+			    size_t len)
 {
 	struct priv_data *priv = dev_get_drvdata(&chip->dev);
 	struct device *dev = chip->dev.parent;
@@ -524,7 +528,6 @@ static int get_vid(struct i2c_client *client, u32 *res)
 
 static int i2c_nuvoton_probe(struct i2c_client *client)
 {
-	const struct i2c_device_id *id = i2c_client_get_device_id(client);
 	int rc;
 	struct tpm_chip *chip;
 	struct device *dev = &client->dev;
@@ -546,15 +549,8 @@ static int i2c_nuvoton_probe(struct i2c_client *client)
 	if (!priv)
 		return -ENOMEM;
 
-	if (dev->of_node) {
-		const struct of_device_id *of_id;
-
-		of_id = of_match_device(dev->driver->of_match_table, dev);
-		if (of_id && of_id->data == OF_IS_TPM2)
-			chip->flags |= TPM_CHIP_FLAG_TPM2;
-	} else
-		if (id->driver_data == I2C_IS_TPM2)
-			chip->flags |= TPM_CHIP_FLAG_TPM2;
+	if (i2c_get_match_data(client))
+		chip->flags |= TPM_CHIP_FLAG_TPM2;
 
 	init_waitqueue_head(&priv->read_queue);
 
@@ -580,8 +576,6 @@ static int i2c_nuvoton_probe(struct i2c_client *client)
 				      dev_name(&chip->dev),
 				      chip);
 		if (rc) {
-			dev_err(dev, "%s() Unable to request irq: %d for use\n",
-				__func__, priv->irq);
 			priv->irq = 0;
 		} else {
 			chip->flags |= TPM_CHIP_FLAG_IRQ;
@@ -661,6 +655,6 @@ static struct i2c_driver i2c_nuvoton_driver = {
 
 module_i2c_driver(i2c_nuvoton_driver);
 
-MODULE_AUTHOR("Dan Morav (dan.morav@nuvoton.com)");
+MODULE_AUTHOR("Dan Morav <dan.morav@nuvoton.com>");
 MODULE_DESCRIPTION("Nuvoton TPM I2C Driver");
 MODULE_LICENSE("GPL");

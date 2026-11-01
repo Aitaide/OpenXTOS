@@ -13,8 +13,8 @@
 #include <net/dsa.h>
 #include <net/dst_metadata.h>
 
-#include "slave.h"
 #include "tag.h"
+#include "user.h"
 
 static LIST_HEAD(dsa_tag_drivers_list);
 static DEFINE_MUTEX(dsa_tag_drivers_lock);
@@ -27,7 +27,7 @@ static DEFINE_MUTEX(dsa_tag_drivers_lock);
  * switch, the DSA driver owning the interface to which the packet is
  * delivered is never notified unless we do so here.
  */
-static bool dsa_skb_defer_rx_timestamp(struct dsa_slave_priv *p,
+static bool dsa_skb_defer_rx_timestamp(struct dsa_user_priv *p,
 				       struct sk_buff *skb)
 {
 	struct dsa_switch *ds = p->dp->ds;
@@ -57,7 +57,7 @@ static int dsa_switch_rcv(struct sk_buff *skb, struct net_device *dev,
 	struct metadata_dst *md_dst = skb_metadata_dst(skb);
 	struct dsa_port *cpu_dp = dev->dsa_ptr;
 	struct sk_buff *nskb = NULL;
-	struct dsa_slave_priv *p;
+	struct dsa_user_priv *p;
 
 	if (unlikely(!cpu_dp)) {
 		kfree_skb(skb);
@@ -75,26 +75,27 @@ static int dsa_switch_rcv(struct sk_buff *skb, struct net_device *dev,
 		if (!skb_has_extensions(skb))
 			skb->slow_gro = 0;
 
-		skb->dev = dsa_master_find_slave(dev, 0, port);
+		skb->dev = dsa_conduit_find_user(dev, 0, port);
 		if (likely(skb->dev)) {
 			dsa_default_offload_fwd_mark(skb);
 			nskb = skb;
+		} else {
+			/* Just drop the skb if we can't find the user */
+			kfree_skb(skb);
 		}
 	} else {
 		nskb = cpu_dp->rcv(skb, dev);
 	}
 
-	if (!nskb) {
-		kfree_skb(skb);
+	if (!nskb)
 		return 0;
-	}
 
 	skb = nskb;
 	skb_push(skb, ETH_HLEN);
 	skb->pkt_type = PACKET_HOST;
 	skb->protocol = eth_type_trans(skb, skb->dev);
 
-	if (unlikely(!dsa_slave_dev_check(skb->dev))) {
+	if (unlikely(!dsa_user_dev_check(skb->dev))) {
 		/* Packet is to be injected directly on an upper
 		 * device, e.g. a team/bond, so skip all DSA-port
 		 * specific actions.
@@ -105,12 +106,12 @@ static int dsa_switch_rcv(struct sk_buff *skb, struct net_device *dev,
 
 	p = netdev_priv(skb->dev);
 
-	if (unlikely(cpu_dp->ds->untag_bridge_pvid)) {
-		nskb = dsa_untag_bridge_pvid(skb);
-		if (!nskb) {
-			kfree_skb(skb);
+	if (unlikely(cpu_dp->ds->untag_bridge_pvid ||
+		     cpu_dp->ds->untag_vlan_aware_bridge_pvid)) {
+		/* dsa_software_vlan_untag() drops skb on failure */
+		nskb = dsa_software_vlan_untag(skb);
+		if (!nskb)
 			return 0;
-		}
 		skb = nskb;
 	}
 

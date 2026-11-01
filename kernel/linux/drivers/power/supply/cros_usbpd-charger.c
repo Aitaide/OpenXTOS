@@ -72,17 +72,6 @@ static enum power_supply_property cros_usbpd_dedicated_charger_props[] = {
 	POWER_SUPPLY_PROP_VOLTAGE_NOW,
 };
 
-static enum power_supply_usb_type cros_usbpd_charger_usb_types[] = {
-	POWER_SUPPLY_USB_TYPE_UNKNOWN,
-	POWER_SUPPLY_USB_TYPE_SDP,
-	POWER_SUPPLY_USB_TYPE_DCP,
-	POWER_SUPPLY_USB_TYPE_CDP,
-	POWER_SUPPLY_USB_TYPE_C,
-	POWER_SUPPLY_USB_TYPE_PD,
-	POWER_SUPPLY_USB_TYPE_PD_DRP,
-	POWER_SUPPLY_USB_TYPE_APPLE_BRICK_ID
-};
-
 /* Input voltage/current limit in mV/mA. Default to none. */
 static u16 input_voltage_limit = EC_POWER_LIMIT_NONE;
 static u16 input_current_limit = EC_POWER_LIMIT_NONE;
@@ -104,7 +93,7 @@ static int cros_usbpd_charger_ec_command(struct charger_data *charger,
 	struct cros_ec_command *msg;
 	int ret;
 
-	msg = kzalloc(struct_size(msg, data, max(outsize, insize)), GFP_KERNEL);
+	msg = kzalloc_flex(*msg, data, max(outsize, insize));
 	if (!msg)
 		return -ENOMEM;
 
@@ -135,6 +124,11 @@ static int cros_usbpd_charger_get_num_ports(struct charger_data *charger)
 	if (ret < 0)
 		return ret;
 
+	if (resp.port_count > EC_USB_PD_MAX_PORTS) {
+		dev_warn(charger->dev, "Charge port count out of bounds\n");
+		return EC_USB_PD_MAX_PORTS;
+	}
+
 	return resp.port_count;
 }
 
@@ -147,6 +141,11 @@ static int cros_usbpd_charger_get_usbpd_num_ports(struct charger_data *charger)
 					    NULL, 0, &resp, sizeof(resp));
 	if (ret < 0)
 		return ret;
+
+	if (resp.num_ports > EC_USB_PD_MAX_PORTS) {
+		dev_warn(charger->dev, "USB PD port count out of bounds\n");
+		return EC_USB_PD_MAX_PORTS;
+	}
 
 	return resp.num_ports;
 }
@@ -599,10 +598,13 @@ static int cros_usbpd_charger_probe(struct platform_device *pd)
 
 	/*
 	 * Sanity checks on the number of ports:
-	 *  there should be at most 1 dedicated port
+	 *  there should be at most 1 dedicated port, and the count must
+	 *  not exceed the maximum number of supported ports
+	 *  (EC_USB_PD_MAX_PORTS).
 	 */
 	if (charger->num_charger_ports < charger->num_usbpd_ports ||
-	    charger->num_charger_ports > (charger->num_usbpd_ports + 1)) {
+	    charger->num_charger_ports > (charger->num_usbpd_ports + 1) ||
+	    charger->num_charger_ports > EC_USB_PD_MAX_PORTS) {
 		dev_err(dev, "Unexpected number of charge port count\n");
 		ret = -EPROTO;
 		goto fail_nowarn;
@@ -628,6 +630,7 @@ static int cros_usbpd_charger_probe(struct platform_device *pd)
 		psy_desc->external_power_changed =
 					cros_usbpd_charger_power_changed;
 		psy_cfg.drv_data = port;
+		psy_cfg.no_wakeup_source = true;
 
 		if (cros_usbpd_charger_port_is_dedicated(port)) {
 			sprintf(port->name, CHARGER_DEDICATED_DIR_NAME);
@@ -642,15 +645,19 @@ static int cros_usbpd_charger_probe(struct platform_device *pd)
 			psy_desc->properties = cros_usbpd_charger_props;
 			psy_desc->num_properties =
 				ARRAY_SIZE(cros_usbpd_charger_props);
-			psy_desc->usb_types = cros_usbpd_charger_usb_types;
-			psy_desc->num_usb_types =
-				ARRAY_SIZE(cros_usbpd_charger_usb_types);
+			psy_desc->usb_types = BIT(POWER_SUPPLY_USB_TYPE_UNKNOWN) |
+					      BIT(POWER_SUPPLY_USB_TYPE_SDP)     |
+					      BIT(POWER_SUPPLY_USB_TYPE_DCP)     |
+					      BIT(POWER_SUPPLY_USB_TYPE_CDP)     |
+					      BIT(POWER_SUPPLY_USB_TYPE_C)       |
+					      BIT(POWER_SUPPLY_USB_TYPE_PD)      |
+					      BIT(POWER_SUPPLY_USB_TYPE_PD_DRP)  |
+					      BIT(POWER_SUPPLY_USB_TYPE_APPLE_BRICK_ID);
 		}
 
 		psy_desc->name = port->name;
 
-		psy = devm_power_supply_register_no_ws(dev, psy_desc,
-						       &psy_cfg);
+		psy = devm_power_supply_register(dev, psy_desc, &psy_cfg);
 		if (IS_ERR(psy)) {
 			dev_err(dev, "Failed to register power supply\n");
 			continue;
@@ -711,16 +718,22 @@ static int cros_usbpd_charger_resume(struct device *dev)
 static SIMPLE_DEV_PM_OPS(cros_usbpd_charger_pm_ops, NULL,
 			 cros_usbpd_charger_resume);
 
+static const struct platform_device_id cros_usbpd_charger_id[] = {
+	{ .name = DRV_NAME },
+	{ }
+};
+MODULE_DEVICE_TABLE(platform, cros_usbpd_charger_id);
+
 static struct platform_driver cros_usbpd_charger_driver = {
 	.driver = {
 		.name = DRV_NAME,
 		.pm = &cros_usbpd_charger_pm_ops,
 	},
-	.probe = cros_usbpd_charger_probe
+	.probe = cros_usbpd_charger_probe,
+	.id_table = cros_usbpd_charger_id,
 };
 
 module_platform_driver(cros_usbpd_charger_driver);
 
 MODULE_LICENSE("GPL");
 MODULE_DESCRIPTION("ChromeOS EC USBPD charger");
-MODULE_ALIAS("platform:" DRV_NAME);

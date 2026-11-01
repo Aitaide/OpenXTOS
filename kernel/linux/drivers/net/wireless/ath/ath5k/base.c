@@ -59,7 +59,7 @@
 #include <net/cfg80211.h>
 #include <net/ieee80211_radiotap.h>
 
-#include <asm/unaligned.h>
+#include <linux/unaligned.h>
 
 #include <net/mac80211.h>
 #include "base.h"
@@ -230,13 +230,13 @@ ath5k_chip_name(enum ath5k_srev_type type, u_int16_t val)
 }
 static unsigned int ath5k_ioread32(void *hw_priv, u32 reg_offset)
 {
-	struct ath5k_hw *ah = (struct ath5k_hw *) hw_priv;
+	struct ath5k_hw *ah = hw_priv;
 	return ath5k_hw_reg_read(ah, reg_offset);
 }
 
 static void ath5k_iowrite32(void *hw_priv, u32 val, u32 reg_offset)
 {
-	struct ath5k_hw *ah = (struct ath5k_hw *) hw_priv;
+	struct ath5k_hw *ah = hw_priv;
 	ath5k_hw_reg_write(ah, val, reg_offset);
 }
 
@@ -919,8 +919,8 @@ ath5k_desc_alloc(struct ath5k_hw *ah)
 	ATH5K_DBG(ah, ATH5K_DEBUG_ANY, "DMA map: %p (%zu) -> %llx\n",
 		ds, ah->desc_len, (unsigned long long)ah->desc_daddr);
 
-	bf = kcalloc(1 + ATH_TXBUF + ATH_RXBUF + ATH_BCBUF,
-			sizeof(struct ath5k_buf), GFP_KERNEL);
+	bf = kzalloc_objs(struct ath5k_buf,
+			  1 + ATH_TXBUF + ATH_RXBUF + ATH_BCBUF);
 	if (bf == NULL) {
 		ATH5K_ERR(ah, "can't allocate bufptr\n");
 		ret = -ENOMEM;
@@ -1738,7 +1738,8 @@ ath5k_tx_frame_completed(struct ath5k_hw *ah, struct sk_buff *skb,
 	}
 
 	info->status.rates[ts->ts_final_idx].count = ts->ts_final_retry;
-	info->status.rates[ts->ts_final_idx + 1].idx = -1;
+	if (ts->ts_final_idx + 1 < IEEE80211_TX_MAX_RATES)
+		info->status.rates[ts->ts_final_idx + 1].idx = -1;
 
 	if (unlikely(ts->ts_status)) {
 		ah->stats.ack_fail++;
@@ -1770,7 +1771,7 @@ ath5k_tx_frame_completed(struct ath5k_hw *ah, struct sk_buff *skb,
 		ah->stats.antenna_tx[0]++; /* invalid */
 
 	trace_ath5k_tx_complete(ah, skb, txq, ts);
-	ieee80211_tx_status(ah->hw, skb);
+	ieee80211_tx_status_skb(ah->hw, skb);
 }
 
 static void
@@ -2599,8 +2600,6 @@ ath5k_init_ah(struct ath5k_hw *ah, const struct ath_bus_ops *bus_ops)
 	/* SW support for IBSS_RSN is provided by mac80211 */
 	hw->wiphy->flags |= WIPHY_FLAG_IBSS_RSN;
 
-	hw->wiphy->flags |= WIPHY_FLAG_SUPPORTS_5_10_MHZ;
-
 	/* both antennas can be configured as RX or TX */
 	hw->wiphy->available_antennas_tx = 0x3;
 	hw->wiphy->available_antennas_rx = 0x3;
@@ -2847,7 +2846,7 @@ static void ath5k_stop_tasklets(struct ath5k_hw *ah)
  * if another thread does a system call and the thread doing the
  * stop is preempted).
  */
-void ath5k_stop(struct ieee80211_hw *hw)
+void ath5k_stop(struct ieee80211_hw *hw, bool suspend)
 {
 	struct ath5k_hw *ah = hw->priv;
 	int ret;

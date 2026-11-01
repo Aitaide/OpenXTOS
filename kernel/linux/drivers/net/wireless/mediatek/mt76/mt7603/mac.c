@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: ISC
+// SPDX-License-Identifier: BSD-3-Clause-Clear
 
 #include <linux/etherdevice.h>
 #include <linux/timekeeping.h>
@@ -235,16 +235,17 @@ void mt7603_wtbl_set_smps(struct mt7603_dev *dev, struct mt7603_sta *sta,
 	sta->smps = enabled;
 }
 
-void mt7603_wtbl_set_ps(struct mt7603_dev *dev, struct mt7603_sta *sta,
-			bool enabled)
+static void
+__mt7603_wtbl_set_ps(struct mt7603_dev *dev, struct mt7603_sta *sta,
+		     bool enabled, bool filter)
 {
 	int idx = sta->wcid.idx;
 	u32 addr;
 
-	spin_lock_bh(&dev->ps_lock);
+	lockdep_assert_held(&dev->ps_lock);
 
 	if (sta->ps == enabled)
-		goto out;
+		return;
 
 	mt76_wr(dev, MT_PSE_RTA,
 		FIELD_PREP(MT_PSE_RTA_TAG_ID, idx) |
@@ -255,7 +256,7 @@ void mt7603_wtbl_set_ps(struct mt7603_dev *dev, struct mt7603_sta *sta,
 
 	mt76_poll(dev, MT_PSE_RTA, MT_PSE_RTA_BUSY, 0, 5000);
 
-	if (enabled)
+	if (enabled && filter)
 		mt7603_filter_tx(dev, sta->vif->idx, idx, false);
 
 	addr = mt7603_wtbl1_addr(idx);
@@ -264,8 +265,34 @@ void mt7603_wtbl_set_ps(struct mt7603_dev *dev, struct mt7603_sta *sta,
 		 enabled * MT_WTBL1_W3_POWER_SAVE);
 	mt76_clear(dev, MT_WTBL1_OR, MT_WTBL1_OR_PSM_WRITE);
 	sta->ps = enabled;
+}
 
-out:
+void mt7603_wtbl_set_ps(struct mt7603_dev *dev, struct mt7603_sta *sta,
+			bool enabled)
+{
+	spin_lock_bh(&dev->ps_lock);
+	__mt7603_wtbl_set_ps(dev, sta, enabled, enabled);
+	spin_unlock_bh(&dev->ps_lock);
+}
+
+void mt7603_wtbl_sta_ps(struct mt7603_dev *dev, struct mt7603_sta *sta, bool ps)
+{
+	spin_lock_bh(&dev->ps_lock);
+	sta->ps_sleeping = ps;
+	__mt7603_wtbl_set_ps(dev, sta, ps, ps);
+	spin_unlock_bh(&dev->ps_lock);
+}
+
+void mt7603_wtbl_restore_ps(struct mt7603_dev *dev, struct mt7603_sta *sta)
+{
+	spin_lock_bh(&dev->ps_lock);
+	/*
+	 * Frames that are already queued for the station belong to the service
+	 * period that has just been served, so unlike on a sleep transition
+	 * they must not be pulled back into the PS queue.
+	 */
+	if (sta->ps_sleeping)
+		__mt7603_wtbl_set_ps(dev, sta, true, false);
 	spin_unlock_bh(&dev->ps_lock);
 }
 
@@ -487,10 +514,7 @@ mt7603_rx_get_wcid(struct mt7603_dev *dev, u8 idx, bool unicast)
 	struct mt7603_sta *sta;
 	struct mt76_wcid *wcid;
 
-	if (idx >= MT7603_WTBL_SIZE)
-		return NULL;
-
-	wcid = rcu_dereference(dev->mt76.wcid[idx]);
+	wcid = mt76_wcid_ptr(dev, idx);
 	if (unicast || !wcid)
 		return wcid;
 
@@ -1266,23 +1290,15 @@ void mt7603_mac_add_txs(struct mt7603_dev *dev, void *data)
 	if (pid == MT_PACKET_ID_NO_ACK)
 		return;
 
-	if (wcidx >= MT7603_WTBL_SIZE)
-		return;
-
 	rcu_read_lock();
 
-	wcid = rcu_dereference(dev->mt76.wcid[wcidx]);
+	wcid = mt76_wcid_ptr(dev, wcidx);
 	if (!wcid)
 		goto out;
 
 	msta = container_of(wcid, struct mt7603_sta, wcid);
 	sta = wcid_to_sta(wcid);
-
-	if (list_empty(&msta->wcid.poll_list)) {
-		spin_lock_bh(&dev->mt76.sta_poll_lock);
-		list_add_tail(&msta->wcid.poll_list, &dev->mt76.sta_poll_list);
-		spin_unlock_bh(&dev->mt76.sta_poll_lock);
-	}
+	mt76_wcid_add_poll(&dev->mt76, &msta->wcid);
 
 	if (mt7603_mac_add_txs_skb(dev, msta, pid, txs_data))
 		goto out;
@@ -1393,6 +1409,7 @@ void mt7603_pse_client_reset(struct mt7603_dev *dev)
 		   MT_CLIENT_RESET_TX_R_E_2_S);
 
 	/* Start PSE client TX abort */
+	mt76_set(dev, MT_WPDMA_GLO_CFG, MT_WPDMA_GLO_CFG_FORCE_TX_EOF);
 	mt76_set(dev, addr, MT_CLIENT_RESET_TX_R_E_1);
 	mt76_poll_msec(dev, addr, MT_CLIENT_RESET_TX_R_E_1_S,
 		       MT_CLIENT_RESET_TX_R_E_1_S, 500);
@@ -1441,15 +1458,6 @@ static void mt7603_mac_watchdog_reset(struct mt7603_dev *dev)
 
 	mt7603_beacon_set_timer(dev, -1, 0);
 
-	if (dev->reset_cause[RESET_CAUSE_RESET_FAILED] ||
-	    dev->cur_reset_cause == RESET_CAUSE_RX_PSE_BUSY ||
-	    dev->cur_reset_cause == RESET_CAUSE_BEACON_STUCK ||
-	    dev->cur_reset_cause == RESET_CAUSE_TX_HANG)
-		mt7603_pse_reset(dev);
-
-	if (dev->reset_cause[RESET_CAUSE_RESET_FAILED])
-		goto skip_dma_reset;
-
 	mt7603_mac_stop(dev);
 
 	mt76_clear(dev, MT_WPDMA_GLO_CFG,
@@ -1459,28 +1467,32 @@ static void mt7603_mac_watchdog_reset(struct mt7603_dev *dev)
 
 	mt7603_irq_disable(dev, mask);
 
-	mt76_set(dev, MT_WPDMA_GLO_CFG, MT_WPDMA_GLO_CFG_FORCE_TX_EOF);
-
 	mt7603_pse_client_reset(dev);
 
 	mt76_queue_tx_cleanup(dev, dev->mt76.q_mcu[MT_MCUQ_WM], true);
 	for (i = 0; i < __MT_TXQ_MAX; i++)
 		mt76_queue_tx_cleanup(dev, dev->mphy.q_tx[i], true);
 
+	mt7603_dma_sched_reset(dev);
+
+	mt76_tx_status_check(&dev->mt76, true);
+
 	mt76_for_each_q_rx(&dev->mt76, i) {
 		mt76_queue_rx_reset(dev, i);
 	}
 
-	mt76_tx_status_check(&dev->mt76, true);
+	if (dev->reset_cause[RESET_CAUSE_RESET_FAILED] ||
+	    dev->cur_reset_cause == RESET_CAUSE_RX_PSE_BUSY)
+		mt7603_pse_reset(dev);
 
-	mt7603_dma_sched_reset(dev);
+	if (!dev->reset_cause[RESET_CAUSE_RESET_FAILED]) {
+		mt7603_mac_dma_start(dev);
 
-	mt7603_mac_dma_start(dev);
+		mt7603_irq_enable(dev, mask);
 
-	mt7603_irq_enable(dev, mask);
+		clear_bit(MT76_RESET, &dev->mphy.state);
+	}
 
-skip_dma_reset:
-	clear_bit(MT76_RESET, &dev->mphy.state);
 	mutex_unlock(&dev->mt76.mutex);
 
 	mt76_worker_enable(&dev->mt76.tx_worker);
@@ -1488,14 +1500,13 @@ skip_dma_reset:
 	tasklet_enable(&dev->mt76.pre_tbtt_tasklet);
 	mt7603_beacon_set_timer(dev, -1, beacon_int);
 
-	local_bh_disable();
 	napi_enable(&dev->mt76.tx_napi);
-	napi_schedule(&dev->mt76.tx_napi);
-
 	napi_enable(&dev->mt76.napi[0]);
-	napi_schedule(&dev->mt76.napi[0]);
-
 	napi_enable(&dev->mt76.napi[1]);
+
+	local_bh_disable();
+	napi_schedule(&dev->mt76.tx_napi);
+	napi_schedule(&dev->mt76.napi[0]);
 	napi_schedule(&dev->mt76.napi[1]);
 	local_bh_enable();
 
@@ -1570,20 +1581,29 @@ static bool mt7603_rx_pse_busy(struct mt7603_dev *dev)
 {
 	u32 addr, val;
 
-	if (mt76_rr(dev, MT_MCU_DEBUG_RESET) & MT_MCU_DEBUG_RESET_QUEUES)
-		return true;
-
 	if (mt7603_rx_fifo_busy(dev))
-		return false;
+		goto out;
 
 	addr = mt7603_reg_map(dev, MT_CLIENT_BASE_PHYS_ADDR + MT_CLIENT_STATUS);
 	mt76_wr(dev, addr, 3);
 	val = mt76_rr(dev, addr) >> 16;
 
-	if (is_mt7628(dev) && (val & 0x4001) == 0x4001)
-		return true;
+	if (!(val & BIT(0)))
+		return false;
 
-	return (val & 0x8001) == 0x8001 || (val & 0xe001) == 0xe001;
+	if (is_mt7628(dev))
+		val &= 0xa000;
+	else
+		val &= 0x8000;
+	if (!val)
+		return false;
+
+out:
+	if (mt76_rr(dev, MT_INT_SOURCE_CSR) &
+	    (MT_INT_RX_DONE(0) | MT_INT_RX_DONE(1)))
+		return false;
+
+	return true;
 }
 
 static bool
@@ -1788,7 +1808,7 @@ mt7603_false_cca_check(struct mt7603_dev *dev)
 
 	mt7603_cca_stats_reset(dev);
 
-	min_signal = mt76_get_min_avg_rssi(&dev->mt76, false);
+	min_signal = mt76_get_min_avg_rssi(&dev->mt76, 0);
 	if (!min_signal) {
 		dev->sensitivity = 0;
 		dev->last_cca_adj = jiffies;
@@ -1823,6 +1843,39 @@ out:
 	mt7603_adjust_sensitivity(dev);
 }
 
+/*
+ * Releasing buffered frames turns off the PSE redirect for a station, since
+ * the released frames would otherwise be looped back into the driver PS queue
+ * again. mac80211 never tells us when the service period is over, so hardware
+ * buffering has to be re-armed here for every station that is still known to
+ * be asleep. Waiting for the PSD queue to drain makes sure that the released
+ * frames have already passed the redirect stage.
+ */
+static void
+mt7603_mac_ps_check(struct mt7603_dev *dev)
+{
+	int i;
+
+	if (dev->mphy.q_tx[MT_TXQ_PSD]->queued)
+		return;
+
+	rcu_read_lock();
+	for (i = 0; i < MT7603_WTBL_STA; i++) {
+		struct mt76_wcid *wcid = mt76_wcid_ptr(dev, i);
+		struct mt7603_sta *msta;
+
+		if (!wcid || !wcid->sta)
+			continue;
+
+		msta = container_of(wcid, struct mt7603_sta, wcid);
+		if (msta->ps || !msta->ps_sleeping)
+			continue;
+
+		mt7603_wtbl_restore_ps(dev, msta);
+	}
+	rcu_read_unlock();
+}
+
 void mt7603_mac_work(struct work_struct *work)
 {
 	struct mt7603_dev *dev = container_of(work, struct mt7603_dev,
@@ -1837,6 +1890,7 @@ void mt7603_mac_work(struct work_struct *work)
 	dev->mphy.mac_work_count++;
 	mt76_update_survey(&dev->mphy);
 	mt7603_edcca_check(dev);
+	mt7603_mac_ps_check(dev);
 
 	for (i = 0, idx = 0; i < 2; i++) {
 		u32 val = mt76_rr(dev, MT_TX_AGG_CNT(i));

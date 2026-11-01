@@ -34,7 +34,6 @@
 
 struct max30208_data {
 	struct i2c_client *client;
-	struct iio_dev *indio_dev;
 	struct mutex lock; /* Lock to prevent concurrent reads of temperature readings */
 };
 
@@ -219,7 +218,7 @@ static int max30208_probe(struct i2c_client *i2c)
 }
 
 static const struct i2c_device_id max30208_id_table[] = {
-	{ "max30208" },
+	{ .name = "max30208" },
 	{ }
 };
 MODULE_DEVICE_TABLE(i2c, max30208_id_table);

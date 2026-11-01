@@ -738,8 +738,8 @@ static int db2k_auto_attach(struct comedi_device *dev, unsigned long context)
 		return result;
 
 	s = &dev->subdevices[2];
-	return subdev_8255_init(dev, s, db2k_8255_cb,
-				DB2K_REG_DIO_P2_EXP_IO_8_BIT);
+	return subdev_8255_cb_init(dev, s, db2k_8255_cb,
+				   DB2K_REG_DIO_P2_EXP_IO_8_BIT);
 }
 
 static void db2k_detach(struct comedi_device *dev)
@@ -764,11 +764,11 @@ static int db2k_pci_probe(struct pci_dev *dev, const struct pci_device_id *id)
 }
 
 static const struct pci_device_id db2k_pci_table[] = {
-	{ PCI_DEVICE_SUB(PCI_VENDOR_ID_IOTECH, 0x0409, PCI_VENDOR_ID_IOTECH,
-			 0x0002), .driver_data = BOARD_DAQBOARD2000, },
-	{ PCI_DEVICE_SUB(PCI_VENDOR_ID_IOTECH, 0x0409, PCI_VENDOR_ID_IOTECH,
-			 0x0004), .driver_data = BOARD_DAQBOARD2001, },
-	{ 0 }
+	{ PCI_VDEVICE_SUB(IOTECH, 0x0409, PCI_VENDOR_ID_IOTECH, 0x0002),
+	  .driver_data = BOARD_DAQBOARD2000 },
+	{ PCI_VDEVICE_SUB(IOTECH, 0x0409, PCI_VENDOR_ID_IOTECH, 0x0004),
+	  .driver_data = BOARD_DAQBOARD2001 },
+	{ }
 };
 MODULE_DEVICE_TABLE(pci, db2k_pci_table);
 

@@ -13,55 +13,6 @@
 
 #include "8250_dwlib.h"
 
-/* Offsets for the DesignWare specific registers */
-#define DW_UART_TCR	0xac /* Transceiver Control Register (RS485) */
-#define DW_UART_DE_EN	0xb0 /* Driver Output Enable Register */
-#define DW_UART_RE_EN	0xb4 /* Receiver Output Enable Register */
-#define DW_UART_DLF	0xc0 /* Divisor Latch Fraction Register */
-#define DW_UART_RAR	0xc4 /* Receive Address Register */
-#define DW_UART_TAR	0xc8 /* Transmit Address Register */
-#define DW_UART_LCR_EXT	0xcc /* Line Extended Control Register */
-#define DW_UART_CPR	0xf4 /* Component Parameter Register */
-#define DW_UART_UCV	0xf8 /* UART Component Version */
-
-/* Receive / Transmit Address Register bits */
-#define DW_UART_ADDR_MASK		GENMASK(7, 0)
-
-/* Line Status Register bits */
-#define DW_UART_LSR_ADDR_RCVD		BIT(8)
-
-/* Transceiver Control Register bits */
-#define DW_UART_TCR_RS485_EN		BIT(0)
-#define DW_UART_TCR_RE_POL		BIT(1)
-#define DW_UART_TCR_DE_POL		BIT(2)
-#define DW_UART_TCR_XFER_MODE		GENMASK(4, 3)
-#define DW_UART_TCR_XFER_MODE_DE_DURING_RE	FIELD_PREP(DW_UART_TCR_XFER_MODE, 0)
-#define DW_UART_TCR_XFER_MODE_SW_DE_OR_RE	FIELD_PREP(DW_UART_TCR_XFER_MODE, 1)
-#define DW_UART_TCR_XFER_MODE_DE_OR_RE		FIELD_PREP(DW_UART_TCR_XFER_MODE, 2)
-
-/* Line Extended Control Register bits */
-#define DW_UART_LCR_EXT_DLS_E		BIT(0)
-#define DW_UART_LCR_EXT_ADDR_MATCH	BIT(1)
-#define DW_UART_LCR_EXT_SEND_ADDR	BIT(2)
-#define DW_UART_LCR_EXT_TRANSMIT_MODE	BIT(3)
-
-/* Component Parameter Register bits */
-#define DW_UART_CPR_ABP_DATA_WIDTH	GENMASK(1, 0)
-#define DW_UART_CPR_AFCE_MODE		BIT(4)
-#define DW_UART_CPR_THRE_MODE		BIT(5)
-#define DW_UART_CPR_SIR_MODE		BIT(6)
-#define DW_UART_CPR_SIR_LP_MODE		BIT(7)
-#define DW_UART_CPR_ADDITIONAL_FEATURES	BIT(8)
-#define DW_UART_CPR_FIFO_ACCESS		BIT(9)
-#define DW_UART_CPR_FIFO_STAT		BIT(10)
-#define DW_UART_CPR_SHADOW		BIT(11)
-#define DW_UART_CPR_ENCODED_PARMS	BIT(12)
-#define DW_UART_CPR_DMA_EXTRA		BIT(13)
-#define DW_UART_CPR_FIFO_MODE		GENMASK(23, 16)
-
-/* Helper for FIFO size calculation */
-#define DW_UART_CPR_FIFO_SIZE(a)	(FIELD_GET(DW_UART_CPR_FIFO_MODE, (a)) * 16)
-
 /*
  * divisor = div(I) + div(F)
  * "I" means integer, "F" means fractional
@@ -89,7 +40,7 @@ static void dw8250_set_divisor(struct uart_port *p, unsigned int baud,
 			       unsigned int quot, unsigned int quot_frac)
 {
 	dw8250_writel_ext(p, DW_UART_DLF, quot_frac);
-	serial8250_do_set_divisor(p, baud, quot, quot_frac);
+	serial8250_do_set_divisor(p, baud, quot);
 }
 
 void dw8250_do_set_termios(struct uart_port *p, struct ktermios *termios,
@@ -242,7 +193,6 @@ static const struct serial_rs485 dw8250_rs485_supported = {
 void dw8250_setup_port(struct uart_port *p)
 {
 	struct dw8250_port_data *pd = p->private_data;
-	struct dw8250_data *data = to_dw8250_data(pd);
 	struct uart_8250_port *up = up_to_u8250p(p);
 	u32 reg, old_dlf;
 
@@ -259,17 +209,6 @@ void dw8250_setup_port(struct uart_port *p)
 	}
 	up->capabilities |= UART_CAP_NOTEMT;
 
-	/*
-	 * If the Component Version Register returns zero, we know that
-	 * ADDITIONAL_FEATURES are not enabled. No need to go any further.
-	 */
-	reg = dw8250_readl_ext(p, DW_UART_UCV);
-	if (!reg)
-		return;
-
-	dev_dbg(p->dev, "Designware UART version %c.%c%c\n",
-		(reg >> 24) & 0xff, (reg >> 16) & 0xff, (reg >> 8) & 0xff);
-
 	/* Preserve value written by firmware or bootloader  */
 	old_dlf = dw8250_readl_ext(p, DW_UART_DLF);
 	dw8250_writel_ext(p, DW_UART_DLF, ~0U);
@@ -282,9 +221,14 @@ void dw8250_setup_port(struct uart_port *p)
 		p->set_divisor = dw8250_set_divisor;
 	}
 
+	reg = dw8250_readl_ext(p, DW_UART_UCV);
+	if (reg)
+		dev_dbg(p->dev, "Designware UART version %c.%c%c\n",
+			(reg >> 24) & 0xff, (reg >> 16) & 0xff, (reg >> 8) & 0xff);
+
 	reg = dw8250_readl_ext(p, DW_UART_CPR);
 	if (!reg) {
-		reg = data->pdata->cpr_val;
+		reg = pd->cpr_value;
 		dev_dbg(p->dev, "CPR is not available, using 0x%08x instead\n", reg);
 	}
 	if (!reg)

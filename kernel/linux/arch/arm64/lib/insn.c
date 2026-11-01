@@ -5,6 +5,7 @@
  *
  * Copyright (C) 2014-2016 Zi Shen Lim <zlim.lnx@gmail.com>
  */
+#include <linux/bitfield.h>
 #include <linux/bitops.h>
 #include <linux/bug.h>
 #include <linux/printk.h>
@@ -337,6 +338,8 @@ u32 aarch64_insn_gen_cond_branch_imm(unsigned long pc, unsigned long addr,
 	long offset;
 
 	offset = label_imm_common(pc, addr, SZ_1M);
+	if (offset >= SZ_1M)
+		return AARCH64_BREAK_FAULT;
 
 	insn = aarch64_insn_get_bcond_value();
 
@@ -540,6 +543,35 @@ u32 aarch64_insn_gen_load_store_pair(enum aarch64_insn_register reg1,
 					     offset >> shift);
 }
 
+u32 aarch64_insn_gen_load_acq_store_rel(enum aarch64_insn_register reg,
+					enum aarch64_insn_register base,
+					enum aarch64_insn_size_type size,
+					enum aarch64_insn_ldst_type type)
+{
+	u32 insn;
+
+	switch (type) {
+	case AARCH64_INSN_LDST_LOAD_ACQ:
+		insn = aarch64_insn_get_load_acq_value();
+		break;
+	case AARCH64_INSN_LDST_STORE_REL:
+		insn = aarch64_insn_get_store_rel_value();
+		break;
+	default:
+		pr_err("%s: unknown load-acquire/store-release encoding %d\n",
+		       __func__, type);
+		return AARCH64_BREAK_FAULT;
+	}
+
+	insn = aarch64_insn_encode_ldst_size(size, insn);
+
+	insn = aarch64_insn_encode_register(AARCH64_INSN_REGTYPE_RT, insn,
+					    reg);
+
+	return aarch64_insn_encode_register(AARCH64_INSN_REGTYPE_RN, insn,
+					    base);
+}
+
 u32 aarch64_insn_gen_load_store_ex(enum aarch64_insn_register reg,
 				   enum aarch64_insn_register base,
 				   enum aarch64_insn_register state,
@@ -581,7 +613,6 @@ u32 aarch64_insn_gen_load_store_ex(enum aarch64_insn_register reg,
 					    state);
 }
 
-#ifdef CONFIG_ARM64_LSE_ATOMICS
 static u32 aarch64_insn_encode_ldst_order(enum aarch64_insn_mem_order_type type,
 					  u32 insn)
 {
@@ -725,7 +756,6 @@ u32 aarch64_insn_gen_cas(enum aarch64_insn_register result,
 	return aarch64_insn_encode_register(AARCH64_INSN_REGTYPE_RS, insn,
 					    value);
 }
-#endif
 
 u32 aarch64_insn_gen_add_sub_imm(enum aarch64_insn_register dst,
 				 enum aarch64_insn_register src,
@@ -954,6 +984,66 @@ u32 aarch64_insn_gen_add_sub_shifted_reg(enum aarch64_insn_register dst,
 	insn = aarch64_insn_encode_register(AARCH64_INSN_REGTYPE_RM, insn, reg);
 
 	return aarch64_insn_encode_immediate(AARCH64_INSN_IMM_6, insn, shift);
+}
+
+/*
+ * Unlike the shifted-register form, register 31 is not XZR everywhere here:
+ * it encodes SP for @src, and for @dst too unless @type sets the flags. Only
+ * @reg keeps the XZR meaning.
+ */
+u32 aarch64_insn_gen_add_sub_extended_reg(enum aarch64_insn_register dst,
+					  enum aarch64_insn_register src,
+					  enum aarch64_insn_register reg,
+					  enum aarch64_insn_extend_type extend,
+					  int shift,
+					  enum aarch64_insn_variant variant,
+					  enum aarch64_insn_adsb_type type)
+{
+	u32 insn;
+
+	switch (type) {
+	case AARCH64_INSN_ADSB_ADD:
+		insn = aarch64_insn_get_add_ext_value();
+		break;
+	case AARCH64_INSN_ADSB_SUB:
+		insn = aarch64_insn_get_sub_ext_value();
+		break;
+	case AARCH64_INSN_ADSB_ADD_SETFLAGS:
+		insn = aarch64_insn_get_adds_ext_value();
+		break;
+	case AARCH64_INSN_ADSB_SUB_SETFLAGS:
+		insn = aarch64_insn_get_subs_ext_value();
+		break;
+	default:
+		pr_err("%s: unknown add/sub encoding %d\n", __func__, type);
+		return AARCH64_BREAK_FAULT;
+	}
+
+	switch (variant) {
+	case AARCH64_INSN_VARIANT_32BIT:
+		break;
+	case AARCH64_INSN_VARIANT_64BIT:
+		insn |= AARCH64_INSN_SF_BIT;
+		break;
+	default:
+		pr_err("%s: unknown variant encoding %d\n", __func__, variant);
+		return AARCH64_BREAK_FAULT;
+	}
+
+	if (shift < 0 || shift > 4) {
+		pr_err("%s: invalid shift encoding %d\n", __func__, shift);
+		return AARCH64_BREAK_FAULT;
+	}
+
+	insn = aarch64_insn_encode_register(AARCH64_INSN_REGTYPE_RD, insn, dst);
+
+	insn = aarch64_insn_encode_register(AARCH64_INSN_REGTYPE_RN, insn, src);
+
+	insn = aarch64_insn_encode_register(AARCH64_INSN_REGTYPE_RM, insn, reg);
+
+	/* option in bits [15:13] and imm3 in [12:10] together fill IMM_6 */
+	return aarch64_insn_encode_immediate(AARCH64_INSN_IMM_6, insn,
+					     (extend << 3) | shift);
 }
 
 u32 aarch64_insn_gen_data1(enum aarch64_insn_register dst,
@@ -1471,47 +1561,71 @@ u32 aarch64_insn_gen_extr(enum aarch64_insn_variant variant,
 	return aarch64_insn_encode_register(AARCH64_INSN_REGTYPE_RM, insn, Rm);
 }
 
+static u32 __get_barrier_crm_val(enum aarch64_insn_mb_type type)
+{
+	switch (type) {
+	case AARCH64_INSN_MB_SY:
+		return 0xf;
+	case AARCH64_INSN_MB_ST:
+		return 0xe;
+	case AARCH64_INSN_MB_LD:
+		return 0xd;
+	case AARCH64_INSN_MB_ISH:
+		return 0xb;
+	case AARCH64_INSN_MB_ISHST:
+		return 0xa;
+	case AARCH64_INSN_MB_ISHLD:
+		return 0x9;
+	case AARCH64_INSN_MB_NSH:
+		return 0x7;
+	case AARCH64_INSN_MB_NSHST:
+		return 0x6;
+	case AARCH64_INSN_MB_NSHLD:
+		return 0x5;
+	default:
+		pr_err("%s: unknown barrier type %d\n", __func__, type);
+		return AARCH64_BREAK_FAULT;
+	}
+}
+
 u32 aarch64_insn_gen_dmb(enum aarch64_insn_mb_type type)
 {
 	u32 opt;
 	u32 insn;
 
-	switch (type) {
-	case AARCH64_INSN_MB_SY:
-		opt = 0xf;
-		break;
-	case AARCH64_INSN_MB_ST:
-		opt = 0xe;
-		break;
-	case AARCH64_INSN_MB_LD:
-		opt = 0xd;
-		break;
-	case AARCH64_INSN_MB_ISH:
-		opt = 0xb;
-		break;
-	case AARCH64_INSN_MB_ISHST:
-		opt = 0xa;
-		break;
-	case AARCH64_INSN_MB_ISHLD:
-		opt = 0x9;
-		break;
-	case AARCH64_INSN_MB_NSH:
-		opt = 0x7;
-		break;
-	case AARCH64_INSN_MB_NSHST:
-		opt = 0x6;
-		break;
-	case AARCH64_INSN_MB_NSHLD:
-		opt = 0x5;
-		break;
-	default:
-		pr_err("%s: unknown dmb type %d\n", __func__, type);
+	opt = __get_barrier_crm_val(type);
+	if (opt == AARCH64_BREAK_FAULT)
 		return AARCH64_BREAK_FAULT;
-	}
 
 	insn = aarch64_insn_get_dmb_value();
 	insn &= ~GENMASK(11, 8);
 	insn |= (opt << 8);
 
 	return insn;
+}
+
+u32 aarch64_insn_gen_dsb(enum aarch64_insn_mb_type type)
+{
+	u32 opt, insn;
+
+	opt = __get_barrier_crm_val(type);
+	if (opt == AARCH64_BREAK_FAULT)
+		return AARCH64_BREAK_FAULT;
+
+	insn = aarch64_insn_get_dsb_base_value();
+	insn &= ~GENMASK(11, 8);
+	insn |= (opt << 8);
+
+	return insn;
+}
+
+u32 aarch64_insn_gen_mrs(enum aarch64_insn_register result,
+			 enum aarch64_insn_system_register sysreg)
+{
+	u32 insn = aarch64_insn_get_mrs_value();
+
+	insn &= ~GENMASK(19, 0);
+	insn |= sysreg << 5;
+	return aarch64_insn_encode_register(AARCH64_INSN_REGTYPE_RT,
+					    insn, result);
 }

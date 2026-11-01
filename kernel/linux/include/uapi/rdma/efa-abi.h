@@ -1,12 +1,13 @@
 /* SPDX-License-Identifier: ((GPL-2.0 WITH Linux-syscall-note) OR BSD-2-Clause) */
 /*
- * Copyright 2018-2023 Amazon.com, Inc. or its affiliates. All rights reserved.
+ * Copyright 2018-2026 Amazon.com, Inc. or its affiliates. All rights reserved.
  */
 
 #ifndef EFA_ABI_USER_H
 #define EFA_ABI_USER_H
 
 #include <linux/types.h>
+#include <rdma/ib_user_ioctl_cmds.h>
 
 /*
  * Increment this value if any changes that break userspace ABI
@@ -21,12 +22,12 @@
  */
 
 enum {
-	EFA_ALLOC_UCONTEXT_CMD_COMP_TX_BATCH  = 1 << 0,
-	EFA_ALLOC_UCONTEXT_CMD_COMP_MIN_SQ_WR = 1 << 1,
+	EFA_ALLOC_UCONTEXT_CMD_SUPP_CAPS_TX_BATCH  = 1 << 0,
+	EFA_ALLOC_UCONTEXT_CMD_SUPP_CAPS_MIN_SQ_WR = 1 << 1,
 };
 
 struct efa_ibv_alloc_ucontext_cmd {
-	__u32 comp_mask;
+	__u32 supported_caps;
 	__u8 reserved_20[4];
 };
 
@@ -43,7 +44,8 @@ struct efa_ibv_alloc_ucontext_resp {
 	__u32 max_llq_size; /* bytes */
 	__u16 max_tx_batch; /* units of 64 bytes */
 	__u16 min_sq_wr;
-	__u8 reserved_a0[4];
+	__u16 inline_buf_size_ex;
+	__u8 reserved_b0[2];
 };
 
 struct efa_ibv_alloc_pd_resp {
@@ -54,7 +56,8 @@ struct efa_ibv_alloc_pd_resp {
 
 enum {
 	EFA_CREATE_CQ_WITH_COMPLETION_CHANNEL = 1 << 0,
-	EFA_CREATE_CQ_WITH_SGID               = 1 << 1,
+	EFA_CREATE_CQ_WITH_SGID = 1 << 1,
+	EFA_CREATE_CQ_WITH_SQ_COMP_64_BIT_REQ_ID = 1 << 2,
 };
 
 struct efa_ibv_create_cq {
@@ -84,11 +87,19 @@ enum {
 	EFA_QP_DRIVER_TYPE_SRD = 0,
 };
 
+enum {
+	EFA_CREATE_QP_WITH_UNSOLICITED_WRITE_RECV = 1 << 0,
+	EFA_CREATE_QP_WITH_SQ_64_BIT_REQ_ID = 1 << 1,
+};
+
 struct efa_ibv_create_qp {
 	__u32 comp_mask;
 	__u32 rq_ring_size; /* bytes */
 	__u32 sq_ring_size; /* bytes */
 	__u32 driver_qp_type;
+	__u16 flags;
+	__u8 sl;
+	__u8 reserved_98[5];
 };
 
 struct efa_ibv_create_qp_resp {
@@ -122,6 +133,10 @@ enum {
 	EFA_QUERY_DEVICE_CAPS_CQ_WITH_SGID     = 1 << 3,
 	EFA_QUERY_DEVICE_CAPS_DATA_POLLING_128 = 1 << 4,
 	EFA_QUERY_DEVICE_CAPS_RDMA_WRITE = 1 << 5,
+	EFA_QUERY_DEVICE_CAPS_UNSOLICITED_WRITE_RECV = 1 << 6,
+	EFA_QUERY_DEVICE_CAPS_CQ_WITH_EXT_MEM = 1 << 7,
+	EFA_QUERY_DEVICE_CAPS_COMP_CNTR = 1 << 8,
+	EFA_QUERY_DEVICE_CAPS_SQ_64_BIT_REQ_ID = 1 << 9,
 };
 
 struct efa_ibv_ex_query_device_resp {
@@ -132,6 +147,29 @@ struct efa_ibv_ex_query_device_resp {
 	__u16 max_rq_sge;
 	__u32 max_rdma_size;
 	__u32 device_caps;
+};
+
+enum {
+	EFA_QUERY_MR_VALIDITY_RECV_IC_ID = 1 << 0,
+	EFA_QUERY_MR_VALIDITY_RDMA_READ_IC_ID = 1 << 1,
+	EFA_QUERY_MR_VALIDITY_RDMA_RECV_IC_ID = 1 << 2,
+};
+
+enum efa_query_mr_attrs {
+	EFA_IB_ATTR_QUERY_MR_HANDLE = (1U << UVERBS_ID_NS_SHIFT),
+	EFA_IB_ATTR_QUERY_MR_RESP_IC_ID_VALIDITY,
+	EFA_IB_ATTR_QUERY_MR_RESP_RECV_IC_ID,
+	EFA_IB_ATTR_QUERY_MR_RESP_RDMA_READ_IC_ID,
+	EFA_IB_ATTR_QUERY_MR_RESP_RDMA_RECV_IC_ID,
+};
+
+enum efa_mr_methods {
+	EFA_IB_METHOD_MR_QUERY = (1U << UVERBS_ID_NS_SHIFT),
+};
+
+enum efa_comp_cntr_create_attrs {
+	EFA_IB_ATTR_CREATE_COMP_CNTR_COMP_BUFFER = (1U << UVERBS_ID_NS_SHIFT),
+	EFA_IB_ATTR_CREATE_COMP_CNTR_ERR_BUFFER,
 };
 
 #endif /* EFA_ABI_USER_H */

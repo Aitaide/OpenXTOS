@@ -25,9 +25,11 @@ static DEFINE_IDA(cxl_memdev_ida);
 static void cxl_memdev_release(struct device *dev)
 {
 	struct cxl_memdev *cxlmd = to_cxl_memdev(dev);
+	struct device *parent = dev->parent;
 
 	ida_free(&cxl_memdev_ida, cxlmd->id);
 	kfree(cxlmd);
+	put_device(parent);
 }
 
 static char *cxl_memdev_devnode(const struct device *dev, umode_t *mode, kuid_t *uid,
@@ -58,7 +60,7 @@ static ssize_t payload_max_show(struct device *dev,
 
 	if (!mds)
 		return sysfs_emit(buf, "\n");
-	return sysfs_emit(buf, "%zu\n", mds->payload_size);
+	return sysfs_emit(buf, "%zu\n", cxlds->cxl_mbox.payload_size);
 }
 static DEVICE_ATTR_RO(payload_max);
 
@@ -75,12 +77,20 @@ static ssize_t label_storage_size_show(struct device *dev,
 }
 static DEVICE_ATTR_RO(label_storage_size);
 
+static resource_size_t cxl_ram_size(struct cxl_dev_state *cxlds)
+{
+	/* Static RAM is only expected at partition 0. */
+	if (cxlds->part[0].mode != CXL_PARTMODE_RAM)
+		return 0;
+	return resource_size(&cxlds->part[0].res);
+}
+
 static ssize_t ram_size_show(struct device *dev, struct device_attribute *attr,
 			     char *buf)
 {
 	struct cxl_memdev *cxlmd = to_cxl_memdev(dev);
 	struct cxl_dev_state *cxlds = cxlmd->cxlds;
-	unsigned long long len = resource_size(&cxlds->ram_res);
+	unsigned long long len = cxl_ram_size(cxlds);
 
 	return sysfs_emit(buf, "%#llx\n", len);
 }
@@ -93,7 +103,7 @@ static ssize_t pmem_size_show(struct device *dev, struct device_attribute *attr,
 {
 	struct cxl_memdev *cxlmd = to_cxl_memdev(dev);
 	struct cxl_dev_state *cxlds = cxlmd->cxlds;
-	unsigned long long len = resource_size(&cxlds->pmem_res);
+	unsigned long long len = cxl_pmem_size(cxlds);
 
 	return sysfs_emit(buf, "%#llx\n", len);
 }
@@ -114,7 +124,7 @@ static DEVICE_ATTR_RO(serial);
 static ssize_t numa_node_show(struct device *dev, struct device_attribute *attr,
 			      char *buf)
 {
-	return sprintf(buf, "%d\n", dev_to_node(dev));
+	return sysfs_emit(buf, "%d\n", dev_to_node(dev));
 }
 static DEVICE_ATTR_RO(numa_node);
 
@@ -124,14 +134,18 @@ static ssize_t security_state_show(struct device *dev,
 {
 	struct cxl_memdev *cxlmd = to_cxl_memdev(dev);
 	struct cxl_dev_state *cxlds = cxlmd->cxlds;
+	struct cxl_mailbox *cxl_mbox = &cxlds->cxl_mbox;
 	struct cxl_memdev_state *mds = to_cxl_memdev_state(cxlds);
-	u64 reg = readq(cxlds->regs.mbox + CXLDEV_MBOX_BG_CMD_STATUS_OFFSET);
-	u32 pct = FIELD_GET(CXLDEV_MBOX_BG_CMD_COMMAND_PCT_MASK, reg);
-	u16 cmd = FIELD_GET(CXLDEV_MBOX_BG_CMD_COMMAND_OPCODE_MASK, reg);
 	unsigned long state = mds->security.state;
+	int rc = 0;
 
-	if (cmd == CXL_MBOX_OP_SANITIZE && pct != 100)
-		return sysfs_emit(buf, "sanitize\n");
+	/* sync with latest submission state */
+	mutex_lock(&cxl_mbox->mbox_mutex);
+	if (mds->security.sanitize_active)
+		rc = sysfs_emit(buf, "sanitize\n");
+	mutex_unlock(&cxl_mbox->mbox_mutex);
+	if (rc)
+		return rc;
 
 	if (!(state & CXL_PMEM_SEC_STATE_USER_PASS_SET))
 		return sysfs_emit(buf, "disabled\n");
@@ -141,8 +155,8 @@ static ssize_t security_state_show(struct device *dev,
 		return sysfs_emit(buf, "frozen\n");
 	if (state & CXL_PMEM_SEC_STATE_LOCKED)
 		return sysfs_emit(buf, "locked\n");
-	else
-		return sysfs_emit(buf, "unlocked\n");
+
+	return sysfs_emit(buf, "unlocked\n");
 }
 static struct device_attribute dev_attr_security_state =
 	__ATTR(state, 0444, security_state_show, NULL);
@@ -152,24 +166,17 @@ static ssize_t security_sanitize_store(struct device *dev,
 				       const char *buf, size_t len)
 {
 	struct cxl_memdev *cxlmd = to_cxl_memdev(dev);
-	struct cxl_memdev_state *mds = to_cxl_memdev_state(cxlmd->cxlds);
-	struct cxl_port *port = cxlmd->endpoint;
 	bool sanitize;
 	ssize_t rc;
 
 	if (kstrtobool(buf, &sanitize) || !sanitize)
 		return -EINVAL;
 
-	if (!port || !is_cxl_endpoint(port))
-		return -EINVAL;
+	rc = cxl_mem_sanitize(cxlmd, CXL_MBOX_OP_SANITIZE);
+	if (rc)
+		return rc;
 
-	/* ensure no regions are mapped to this memdev */
-	if (port->commit_end != -1)
-		return -EBUSY;
-
-	rc = cxl_mem_sanitize(mds, CXL_MBOX_OP_SANITIZE);
-
-	return rc ? rc : len;
+	return len;
 }
 static struct device_attribute dev_attr_security_sanitize =
 	__ATTR(sanitize, 0200, NULL, security_sanitize_store);
@@ -179,27 +186,31 @@ static ssize_t security_erase_store(struct device *dev,
 				    const char *buf, size_t len)
 {
 	struct cxl_memdev *cxlmd = to_cxl_memdev(dev);
-	struct cxl_memdev_state *mds = to_cxl_memdev_state(cxlmd->cxlds);
-	struct cxl_port *port = cxlmd->endpoint;
 	ssize_t rc;
 	bool erase;
 
 	if (kstrtobool(buf, &erase) || !erase)
 		return -EINVAL;
 
-	if (!port || !is_cxl_endpoint(port))
-		return -EINVAL;
+	rc = cxl_mem_sanitize(cxlmd, CXL_MBOX_OP_SECURE_ERASE);
+	if (rc)
+		return rc;
 
-	/* ensure no regions are mapped to this memdev */
-	if (port->commit_end != -1)
-		return -EBUSY;
-
-	rc = cxl_mem_sanitize(mds, CXL_MBOX_OP_SECURE_ERASE);
-
-	return rc ? rc : len;
+	return len;
 }
 static struct device_attribute dev_attr_security_erase =
 	__ATTR(erase, 0200, NULL, security_erase_store);
+
+bool cxl_memdev_has_poison_cmd(struct cxl_memdev *cxlmd,
+			       enum poison_cmd_enabled_bits cmd)
+{
+	struct cxl_memdev_state *mds = to_cxl_memdev_state(cxlmd->cxlds);
+
+	if (!mds)
+		return 0;
+
+	return test_bit(cmd, mds->poison.enabled_cmds);
+}
 
 static int cxl_get_poison_by_memdev(struct cxl_memdev *cxlmd)
 {
@@ -208,22 +219,17 @@ static int cxl_get_poison_by_memdev(struct cxl_memdev *cxlmd)
 	int rc = 0;
 
 	/* CXL 3.0 Spec 8.2.9.8.4.1 Separate pmem and ram poison requests */
-	if (resource_size(&cxlds->pmem_res)) {
-		offset = cxlds->pmem_res.start;
-		length = resource_size(&cxlds->pmem_res);
-		rc = cxl_mem_get_poison(cxlmd, offset, length, NULL);
-		if (rc)
-			return rc;
-	}
-	if (resource_size(&cxlds->ram_res)) {
-		offset = cxlds->ram_res.start;
-		length = resource_size(&cxlds->ram_res);
+	for (int i = 0; i < cxlds->nr_partitions; i++) {
+		const struct resource *res = &cxlds->part[i].res;
+
+		offset = res->start;
+		length = resource_size(res);
 		rc = cxl_mem_get_poison(cxlmd, offset, length, NULL);
 		/*
 		 * Invalid Physical Address is not an error for
 		 * volatile addresses. Device support is optional.
 		 */
-		if (rc == -EFAULT)
+		if (rc == -EFAULT && cxlds->part[i].mode == CXL_PARTMODE_RAM)
 			rc = 0;
 	}
 	return rc;
@@ -238,66 +244,25 @@ int cxl_trigger_poison_list(struct cxl_memdev *cxlmd)
 	if (!port || !is_cxl_endpoint(port))
 		return -EINVAL;
 
-	rc = down_read_interruptible(&cxl_dpa_rwsem);
-	if (rc)
+	ACQUIRE(rwsem_read_intr, region_rwsem)(&cxl_rwsem.region);
+	if ((rc = ACQUIRE_ERR(rwsem_read_intr, &region_rwsem)))
 		return rc;
 
-	if (port->commit_end == -1) {
+	ACQUIRE(rwsem_read_intr, dpa_rwsem)(&cxl_rwsem.dpa);
+	if ((rc = ACQUIRE_ERR(rwsem_read_intr, &dpa_rwsem)))
+		return rc;
+
+	if (cxl_num_decoders_committed(port) == 0) {
 		/* No regions mapped to this memdev */
 		rc = cxl_get_poison_by_memdev(cxlmd);
 	} else {
 		/* Regions mapped, collect poison by endpoint */
 		rc =  cxl_get_poison_by_endpoint(port);
 	}
-	up_read(&cxl_dpa_rwsem);
 
 	return rc;
 }
-EXPORT_SYMBOL_NS_GPL(cxl_trigger_poison_list, CXL);
-
-struct cxl_dpa_to_region_context {
-	struct cxl_region *cxlr;
-	u64 dpa;
-};
-
-static int __cxl_dpa_to_region(struct device *dev, void *arg)
-{
-	struct cxl_dpa_to_region_context *ctx = arg;
-	struct cxl_endpoint_decoder *cxled;
-	u64 dpa = ctx->dpa;
-
-	if (!is_endpoint_decoder(dev))
-		return 0;
-
-	cxled = to_cxl_endpoint_decoder(dev);
-	if (!cxled->dpa_res || !resource_size(cxled->dpa_res))
-		return 0;
-
-	if (dpa > cxled->dpa_res->end || dpa < cxled->dpa_res->start)
-		return 0;
-
-	dev_dbg(dev, "dpa:0x%llx mapped in region:%s\n", dpa,
-		dev_name(&cxled->cxld.region->dev));
-
-	ctx->cxlr = cxled->cxld.region;
-
-	return 1;
-}
-
-static struct cxl_region *cxl_dpa_to_region(struct cxl_memdev *cxlmd, u64 dpa)
-{
-	struct cxl_dpa_to_region_context ctx;
-	struct cxl_port *port;
-
-	ctx = (struct cxl_dpa_to_region_context) {
-		.dpa = dpa,
-	};
-	port = cxlmd->endpoint;
-	if (port && is_cxl_endpoint(port) && port->commit_end != -1)
-		device_for_each_child(&port->dev, &ctx, __cxl_dpa_to_region);
-
-	return ctx.cxlr;
-}
+EXPORT_SYMBOL_NS_GPL(cxl_trigger_poison_list, "CXL");
 
 static int cxl_validate_poison_dpa(struct cxl_memdev *cxlmd, u64 dpa)
 {
@@ -310,7 +275,7 @@ static int cxl_validate_poison_dpa(struct cxl_memdev *cxlmd, u64 dpa)
 		dev_dbg(cxlds->dev, "device has no dpa resource\n");
 		return -EINVAL;
 	}
-	if (dpa < cxlds->dpa_res.start || dpa > cxlds->dpa_res.end) {
+	if (!cxl_resource_contains_addr(&cxlds->dpa_res, dpa)) {
 		dev_dbg(cxlds->dev, "dpa:0x%llx not in resource:%pR\n",
 			dpa, &cxlds->dpa_res);
 		return -EINVAL;
@@ -323,9 +288,9 @@ static int cxl_validate_poison_dpa(struct cxl_memdev *cxlmd, u64 dpa)
 	return 0;
 }
 
-int cxl_inject_poison(struct cxl_memdev *cxlmd, u64 dpa)
+int cxl_inject_poison_locked(struct cxl_memdev *cxlmd, u64 dpa)
 {
-	struct cxl_memdev_state *mds = to_cxl_memdev_state(cxlmd->cxlds);
+	struct cxl_mailbox *cxl_mbox = &cxlmd->cxlds->cxl_mbox;
 	struct cxl_mbox_inject_poison inject;
 	struct cxl_poison_record record;
 	struct cxl_mbox_cmd mbox_cmd;
@@ -335,13 +300,12 @@ int cxl_inject_poison(struct cxl_memdev *cxlmd, u64 dpa)
 	if (!IS_ENABLED(CONFIG_DEBUG_FS))
 		return 0;
 
-	rc = down_read_interruptible(&cxl_dpa_rwsem);
-	if (rc)
-		return rc;
+	lockdep_assert_held(&cxl_rwsem.dpa);
+	lockdep_assert_held(&cxl_rwsem.region);
 
 	rc = cxl_validate_poison_dpa(cxlmd, dpa);
 	if (rc)
-		goto out;
+		return rc;
 
 	inject.address = cpu_to_le64(dpa);
 	mbox_cmd = (struct cxl_mbox_cmd) {
@@ -349,13 +313,13 @@ int cxl_inject_poison(struct cxl_memdev *cxlmd, u64 dpa)
 		.size_in = sizeof(inject),
 		.payload_in = &inject,
 	};
-	rc = cxl_internal_send_cmd(mds, &mbox_cmd);
+	rc = cxl_internal_send_cmd(cxl_mbox, &mbox_cmd);
 	if (rc)
-		goto out;
+		return rc;
 
 	cxlr = cxl_dpa_to_region(cxlmd, dpa);
 	if (cxlr)
-		dev_warn_once(mds->cxlds.dev,
+		dev_warn_once(cxl_mbox->host,
 			      "poison inject dpa:%#llx region: %s\n", dpa,
 			      dev_name(&cxlr->dev));
 
@@ -364,16 +328,29 @@ int cxl_inject_poison(struct cxl_memdev *cxlmd, u64 dpa)
 		.length = cpu_to_le32(1),
 	};
 	trace_cxl_poison(cxlmd, cxlr, &record, 0, 0, CXL_POISON_TRACE_INJECT);
-out:
-	up_read(&cxl_dpa_rwsem);
 
-	return rc;
+	return 0;
 }
-EXPORT_SYMBOL_NS_GPL(cxl_inject_poison, CXL);
 
-int cxl_clear_poison(struct cxl_memdev *cxlmd, u64 dpa)
+int cxl_inject_poison(struct cxl_memdev *cxlmd, u64 dpa)
 {
-	struct cxl_memdev_state *mds = to_cxl_memdev_state(cxlmd->cxlds);
+	int rc;
+
+	ACQUIRE(rwsem_read_intr, region_rwsem)(&cxl_rwsem.region);
+	if ((rc = ACQUIRE_ERR(rwsem_read_intr, &region_rwsem)))
+		return rc;
+
+	ACQUIRE(rwsem_read_intr, dpa_rwsem)(&cxl_rwsem.dpa);
+	if ((rc = ACQUIRE_ERR(rwsem_read_intr, &dpa_rwsem)))
+		return rc;
+
+	return cxl_inject_poison_locked(cxlmd, dpa);
+}
+EXPORT_SYMBOL_NS_GPL(cxl_inject_poison, "CXL");
+
+int cxl_clear_poison_locked(struct cxl_memdev *cxlmd, u64 dpa)
+{
+	struct cxl_mailbox *cxl_mbox = &cxlmd->cxlds->cxl_mbox;
 	struct cxl_mbox_clear_poison clear;
 	struct cxl_poison_record record;
 	struct cxl_mbox_cmd mbox_cmd;
@@ -383,13 +360,12 @@ int cxl_clear_poison(struct cxl_memdev *cxlmd, u64 dpa)
 	if (!IS_ENABLED(CONFIG_DEBUG_FS))
 		return 0;
 
-	rc = down_read_interruptible(&cxl_dpa_rwsem);
-	if (rc)
-		return rc;
+	lockdep_assert_held(&cxl_rwsem.dpa);
+	lockdep_assert_held(&cxl_rwsem.region);
 
 	rc = cxl_validate_poison_dpa(cxlmd, dpa);
 	if (rc)
-		goto out;
+		return rc;
 
 	/*
 	 * In CXL 3.0 Spec 8.2.9.8.4.3, the Clear Poison mailbox command
@@ -406,13 +382,13 @@ int cxl_clear_poison(struct cxl_memdev *cxlmd, u64 dpa)
 		.payload_in = &clear,
 	};
 
-	rc = cxl_internal_send_cmd(mds, &mbox_cmd);
+	rc = cxl_internal_send_cmd(cxl_mbox, &mbox_cmd);
 	if (rc)
-		goto out;
+		return rc;
 
 	cxlr = cxl_dpa_to_region(cxlmd, dpa);
 	if (cxlr)
-		dev_warn_once(mds->cxlds.dev,
+		dev_warn_once(cxl_mbox->host,
 			      "poison clear dpa:%#llx region: %s\n", dpa,
 			      dev_name(&cxlr->dev));
 
@@ -421,12 +397,25 @@ int cxl_clear_poison(struct cxl_memdev *cxlmd, u64 dpa)
 		.length = cpu_to_le32(1),
 	};
 	trace_cxl_poison(cxlmd, cxlr, &record, 0, 0, CXL_POISON_TRACE_CLEAR);
-out:
-	up_read(&cxl_dpa_rwsem);
 
-	return rc;
+	return 0;
 }
-EXPORT_SYMBOL_NS_GPL(cxl_clear_poison, CXL);
+
+int cxl_clear_poison(struct cxl_memdev *cxlmd, u64 dpa)
+{
+	int rc;
+
+	ACQUIRE(rwsem_read_intr, region_rwsem)(&cxl_rwsem.region);
+	if ((rc = ACQUIRE_ERR(rwsem_read_intr, &region_rwsem)))
+		return rc;
+
+	ACQUIRE(rwsem_read_intr, dpa_rwsem)(&cxl_rwsem.dpa);
+	if ((rc = ACQUIRE_ERR(rwsem_read_intr, &dpa_rwsem)))
+		return rc;
+
+	return cxl_clear_poison_locked(cxlmd, dpa);
+}
+EXPORT_SYMBOL_NS_GPL(cxl_clear_poison, "CXL");
 
 static struct attribute *cxl_memdev_attributes[] = {
 	&dev_attr_serial.attr,
@@ -437,13 +426,54 @@ static struct attribute *cxl_memdev_attributes[] = {
 	NULL,
 };
 
+static struct cxl_dpa_perf *to_pmem_perf(struct cxl_dev_state *cxlds)
+{
+	for (int i = 0; i < cxlds->nr_partitions; i++)
+		if (cxlds->part[i].mode == CXL_PARTMODE_PMEM)
+			return &cxlds->part[i].perf;
+	return NULL;
+}
+
+static ssize_t pmem_qos_class_show(struct device *dev,
+				   struct device_attribute *attr, char *buf)
+{
+	struct cxl_memdev *cxlmd = to_cxl_memdev(dev);
+	struct cxl_dev_state *cxlds = cxlmd->cxlds;
+
+	return sysfs_emit(buf, "%d\n", to_pmem_perf(cxlds)->qos_class);
+}
+
+static struct device_attribute dev_attr_pmem_qos_class =
+	__ATTR(qos_class, 0444, pmem_qos_class_show, NULL);
+
 static struct attribute *cxl_memdev_pmem_attributes[] = {
 	&dev_attr_pmem_size.attr,
+	&dev_attr_pmem_qos_class.attr,
 	NULL,
 };
 
+static struct cxl_dpa_perf *to_ram_perf(struct cxl_dev_state *cxlds)
+{
+	if (cxlds->part[0].mode != CXL_PARTMODE_RAM)
+		return NULL;
+	return &cxlds->part[0].perf;
+}
+
+static ssize_t ram_qos_class_show(struct device *dev,
+				  struct device_attribute *attr, char *buf)
+{
+	struct cxl_memdev *cxlmd = to_cxl_memdev(dev);
+	struct cxl_dev_state *cxlds = cxlmd->cxlds;
+
+	return sysfs_emit(buf, "%d\n", to_ram_perf(cxlds)->qos_class);
+}
+
+static struct device_attribute dev_attr_ram_qos_class =
+	__ATTR(qos_class, 0444, ram_qos_class_show, NULL);
+
 static struct attribute *cxl_memdev_ram_attributes[] = {
 	&dev_attr_ram_size.attr,
+	&dev_attr_ram_qos_class.attr,
 	NULL,
 };
 
@@ -467,14 +497,42 @@ static struct attribute_group cxl_memdev_attribute_group = {
 	.is_visible = cxl_memdev_visible,
 };
 
+static umode_t cxl_ram_visible(struct kobject *kobj, struct attribute *a, int n)
+{
+	struct device *dev = kobj_to_dev(kobj);
+	struct cxl_memdev *cxlmd = to_cxl_memdev(dev);
+	struct cxl_dpa_perf *perf = to_ram_perf(cxlmd->cxlds);
+
+	if (a == &dev_attr_ram_qos_class.attr &&
+	    (!perf || perf->qos_class == CXL_QOS_CLASS_INVALID))
+		return 0;
+
+	return a->mode;
+}
+
 static struct attribute_group cxl_memdev_ram_attribute_group = {
 	.name = "ram",
 	.attrs = cxl_memdev_ram_attributes,
+	.is_visible = cxl_ram_visible,
 };
+
+static umode_t cxl_pmem_visible(struct kobject *kobj, struct attribute *a, int n)
+{
+	struct device *dev = kobj_to_dev(kobj);
+	struct cxl_memdev *cxlmd = to_cxl_memdev(dev);
+	struct cxl_dpa_perf *perf = to_pmem_perf(cxlmd->cxlds);
+
+	if (a == &dev_attr_pmem_qos_class.attr &&
+	    (!perf || perf->qos_class == CXL_QOS_CLASS_INVALID))
+		return 0;
+
+	return a->mode;
+}
 
 static struct attribute_group cxl_memdev_pmem_attribute_group = {
 	.name = "pmem",
 	.attrs = cxl_memdev_pmem_attributes,
+	.is_visible = cxl_pmem_visible,
 };
 
 static umode_t cxl_memdev_security_visible(struct kobject *kobj,
@@ -509,18 +567,99 @@ static const struct attribute_group *cxl_memdev_attribute_groups[] = {
 	NULL,
 };
 
-static const struct device_type cxl_memdev_type = {
+void cxl_memdev_update_perf(struct cxl_memdev *cxlmd)
+{
+	sysfs_update_group(&cxlmd->dev.kobj, &cxl_memdev_ram_attribute_group);
+	sysfs_update_group(&cxlmd->dev.kobj, &cxl_memdev_pmem_attribute_group);
+}
+EXPORT_SYMBOL_NS_GPL(cxl_memdev_update_perf, "CXL");
+
+static const struct device_type cxl_class_memdev_type = {
 	.name = "cxl_memdev",
 	.release = cxl_memdev_release,
 	.devnode = cxl_memdev_devnode,
 	.groups = cxl_memdev_attribute_groups,
 };
 
+static const struct device_type cxl_memdev_type = {
+	.name = "cxl_memdev",
+	.release = cxl_memdev_release,
+	.devnode = cxl_memdev_devnode,
+};
+
 bool is_cxl_memdev(const struct device *dev)
 {
-	return dev->type == &cxl_memdev_type;
+	return (dev->type == &cxl_class_memdev_type ||
+		dev->type == &cxl_memdev_type);
 }
-EXPORT_SYMBOL_NS_GPL(is_cxl_memdev, CXL);
+EXPORT_SYMBOL_NS_GPL(is_cxl_memdev, "CXL");
+
+static void add_part(struct cxl_dpa_info *info, u64 start, u64 size, enum cxl_partition_mode mode)
+{
+	int i = info->nr_partitions;
+
+	if (size == 0)
+		return;
+
+	info->part[i].range = (struct range) {
+		.start = start,
+		.end = start + size - 1,
+	};
+	info->part[i].mode = mode;
+	info->nr_partitions++;
+}
+
+int cxl_mem_dpa_fetch(struct cxl_memdev_state *mds, struct cxl_dpa_info *info)
+{
+	struct cxl_dev_state *cxlds = &mds->cxlds;
+	struct device *dev = cxlds->dev;
+	int rc;
+
+	if (!cxlds->media_ready) {
+		info->size = 0;
+		return 0;
+	}
+
+	info->size = mds->total_bytes;
+
+	if (mds->partition_align_bytes == 0) {
+		add_part(info, 0, mds->volatile_only_bytes, CXL_PARTMODE_RAM);
+		add_part(info, mds->volatile_only_bytes,
+			 mds->persistent_only_bytes, CXL_PARTMODE_PMEM);
+		return 0;
+	}
+
+	rc = cxl_mem_get_partition_info(mds);
+	if (rc) {
+		dev_err(dev, "Failed to query partition information\n");
+		return rc;
+	}
+
+	add_part(info, 0, mds->active_volatile_bytes, CXL_PARTMODE_RAM);
+	add_part(info, mds->active_volatile_bytes, mds->active_persistent_bytes,
+		 CXL_PARTMODE_PMEM);
+
+	return 0;
+}
+EXPORT_SYMBOL_NS_GPL(cxl_mem_dpa_fetch, "CXL");
+
+
+/**
+ * cxl_set_capacity: initialize dpa by a driver without a mailbox.
+ *
+ * @cxlds: pointer to cxl_dev_state
+ * @capacity: device volatile memory size
+ */
+int cxl_set_capacity(struct cxl_dev_state *cxlds, u64 capacity)
+{
+	struct cxl_dpa_info range_info = {
+		.size = capacity,
+	};
+
+	add_part(&range_info, 0, capacity, CXL_PARTMODE_RAM);
+	return cxl_dpa_setup(cxlds, &range_info);
+}
+EXPORT_SYMBOL_NS_GPL(cxl_set_capacity, "CXL");
 
 /**
  * set_exclusive_cxl_commands() - atomically disable user cxl commands
@@ -534,12 +673,13 @@ EXPORT_SYMBOL_NS_GPL(is_cxl_memdev, CXL);
 void set_exclusive_cxl_commands(struct cxl_memdev_state *mds,
 				unsigned long *cmds)
 {
-	down_write(&cxl_memdev_rwsem);
-	bitmap_or(mds->exclusive_cmds, mds->exclusive_cmds, cmds,
-		  CXL_MEM_COMMAND_ID_MAX);
-	up_write(&cxl_memdev_rwsem);
+	struct cxl_mailbox *cxl_mbox = &mds->cxlds.cxl_mbox;
+
+	guard(rwsem_write)(&cxl_memdev_rwsem);
+	bitmap_or(cxl_mbox->exclusive_cmds, cxl_mbox->exclusive_cmds,
+		  cmds, CXL_MEM_COMMAND_ID_MAX);
 }
-EXPORT_SYMBOL_NS_GPL(set_exclusive_cxl_commands, CXL);
+EXPORT_SYMBOL_NS_GPL(set_exclusive_cxl_commands, "CXL");
 
 /**
  * clear_exclusive_cxl_commands() - atomically enable user cxl commands
@@ -549,30 +689,20 @@ EXPORT_SYMBOL_NS_GPL(set_exclusive_cxl_commands, CXL);
 void clear_exclusive_cxl_commands(struct cxl_memdev_state *mds,
 				  unsigned long *cmds)
 {
-	down_write(&cxl_memdev_rwsem);
-	bitmap_andnot(mds->exclusive_cmds, mds->exclusive_cmds, cmds,
-		      CXL_MEM_COMMAND_ID_MAX);
-	up_write(&cxl_memdev_rwsem);
-}
-EXPORT_SYMBOL_NS_GPL(clear_exclusive_cxl_commands, CXL);
+	struct cxl_mailbox *cxl_mbox = &mds->cxlds.cxl_mbox;
 
-static void cxl_memdev_security_shutdown(struct device *dev)
-{
-	struct cxl_memdev *cxlmd = to_cxl_memdev(dev);
-	struct cxl_memdev_state *mds = to_cxl_memdev_state(cxlmd->cxlds);
-
-	if (mds->security.poll)
-		cancel_delayed_work_sync(&mds->security.poll_dwork);
+	guard(rwsem_write)(&cxl_memdev_rwsem);
+	bitmap_andnot(cxl_mbox->exclusive_cmds, cxl_mbox->exclusive_cmds,
+		      cmds, CXL_MEM_COMMAND_ID_MAX);
 }
+EXPORT_SYMBOL_NS_GPL(clear_exclusive_cxl_commands, "CXL");
 
 static void cxl_memdev_shutdown(struct device *dev)
 {
 	struct cxl_memdev *cxlmd = to_cxl_memdev(dev);
 
-	down_write(&cxl_memdev_rwsem);
-	cxl_memdev_security_shutdown(dev);
+	guard(rwsem_write)(&cxl_memdev_rwsem);
 	cxlmd->cxlds = NULL;
-	up_write(&cxl_memdev_rwsem);
 }
 
 static void cxl_memdev_unregister(void *_cxlmd)
@@ -580,8 +710,8 @@ static void cxl_memdev_unregister(void *_cxlmd)
 	struct cxl_memdev *cxlmd = _cxlmd;
 	struct device *dev = &cxlmd->dev;
 
-	cxl_memdev_shutdown(dev);
 	cdev_device_del(&cxlmd->cdev, dev);
+	cxl_memdev_shutdown(dev);
 	put_device(dev);
 }
 
@@ -590,21 +720,55 @@ static void detach_memdev(struct work_struct *work)
 	struct cxl_memdev *cxlmd;
 
 	cxlmd = container_of(work, typeof(*cxlmd), detach_work);
-	device_release_driver(&cxlmd->dev);
+
+	/*
+	 * When the creator of @cxlmd sets ->attach it indicates CXL operation
+	 * is required. In that case, @cxlmd detach escalates to parent device
+	 * detach.
+	 */
+	if (cxlmd->attach)
+		device_release_driver(cxlmd->dev.parent);
+	else
+		device_release_driver(&cxlmd->dev);
 	put_device(&cxlmd->dev);
 }
 
 static struct lock_class_key cxl_memdev_key;
 
+struct cxl_dev_state *_devm_cxl_dev_state_create(struct device *dev,
+						 enum cxl_devtype type,
+						 u64 serial, u16 dvsec,
+						 size_t size, bool has_mbox)
+{
+	struct cxl_dev_state *cxlds = devm_kzalloc(dev, size, GFP_KERNEL);
+
+	if (!cxlds)
+		return NULL;
+
+	cxlds->dev = dev;
+	cxlds->type = type;
+	cxlds->serial = serial;
+	cxlds->cxl_dvsec = dvsec;
+	cxlds->reg_map.host = dev;
+	cxlds->reg_map.resource = CXL_RESOURCE_NONE;
+
+	if (has_mbox)
+		cxlds->cxl_mbox.host = dev;
+
+	return cxlds;
+}
+EXPORT_SYMBOL_NS_GPL(_devm_cxl_dev_state_create, "CXL");
+
 static struct cxl_memdev *cxl_memdev_alloc(struct cxl_dev_state *cxlds,
-					   const struct file_operations *fops)
+					   const struct file_operations *fops,
+					   const struct cxl_memdev_attach *attach)
 {
 	struct cxl_memdev *cxlmd;
 	struct device *dev;
 	struct cdev *cdev;
 	int rc;
 
-	cxlmd = kzalloc(sizeof(*cxlmd), GFP_KERNEL);
+	cxlmd = kzalloc_obj(*cxlmd);
 	if (!cxlmd)
 		return ERR_PTR(-ENOMEM);
 
@@ -613,14 +777,19 @@ static struct cxl_memdev *cxl_memdev_alloc(struct cxl_dev_state *cxlds,
 		goto err;
 	cxlmd->id = rc;
 	cxlmd->depth = -1;
+	cxlmd->attach = attach;
+	cxlmd->endpoint = ERR_PTR(-ENXIO);
 
 	dev = &cxlmd->dev;
 	device_initialize(dev);
 	lockdep_set_class(&dev->mutex, &cxl_memdev_key);
-	dev->parent = cxlds->dev;
+	dev->parent = get_device(cxlds->dev);
 	dev->bus = &cxl_bus_type;
 	dev->devt = MKDEV(cxl_mem_major, cxlmd->id);
-	dev->type = &cxl_memdev_type;
+	if (cxlds->type == CXL_DEVTYPE_DEVMEM)
+		dev->type = &cxl_memdev_type;
+	else
+		dev->type = &cxl_class_memdev_type;
 	device_set_pm_not_required(dev);
 	INIT_WORK(&cxlmd->detach_work, detach_memdev);
 
@@ -636,11 +805,14 @@ err:
 static long __cxl_memdev_ioctl(struct cxl_memdev *cxlmd, unsigned int cmd,
 			       unsigned long arg)
 {
+	struct cxl_memdev_state *mds = to_cxl_memdev_state(cxlmd->cxlds);
+	struct cxl_mailbox *cxl_mbox = &mds->cxlds.cxl_mbox;
+
 	switch (cmd) {
 	case CXL_MEM_QUERY_COMMANDS:
-		return cxl_query_cmd(cxlmd, (void __user *)arg);
+		return cxl_query_cmd(cxl_mbox, (void __user *)arg);
 	case CXL_MEM_SEND_COMMAND:
-		return cxl_send_cmd(cxlmd, (void __user *)arg);
+		return cxl_send_cmd(cxl_mbox, (void __user *)arg);
 	default:
 		return -ENOTTY;
 	}
@@ -651,15 +823,13 @@ static long cxl_memdev_ioctl(struct file *file, unsigned int cmd,
 {
 	struct cxl_memdev *cxlmd = file->private_data;
 	struct cxl_dev_state *cxlds;
-	int rc = -ENXIO;
 
-	down_read(&cxl_memdev_rwsem);
+	guard(rwsem_read)(&cxl_memdev_rwsem);
 	cxlds = cxlmd->cxlds;
 	if (cxlds && cxlds->type == CXL_DEVTYPE_CLASSMEM)
-		rc = __cxl_memdev_ioctl(cxlmd, cmd, arg);
-	up_read(&cxl_memdev_rwsem);
+		return __cxl_memdev_ioctl(cxlmd, cmd, arg);
 
-	return rc;
+	return -ENXIO;
 }
 
 static int cxl_memdev_open(struct inode *inode, struct file *file)
@@ -695,6 +865,7 @@ static int cxl_memdev_release_file(struct inode *inode, struct file *file)
  */
 static int cxl_mem_get_fw_info(struct cxl_memdev_state *mds)
 {
+	struct cxl_mailbox *cxl_mbox = &mds->cxlds.cxl_mbox;
 	struct cxl_mbox_get_fw_info info;
 	struct cxl_mbox_cmd mbox_cmd;
 	int rc;
@@ -705,7 +876,7 @@ static int cxl_mem_get_fw_info(struct cxl_memdev_state *mds)
 		.payload_out = &info,
 	};
 
-	rc = cxl_internal_send_cmd(mds, &mbox_cmd);
+	rc = cxl_internal_send_cmd(cxl_mbox, &mbox_cmd);
 	if (rc < 0)
 		return rc;
 
@@ -729,6 +900,7 @@ static int cxl_mem_get_fw_info(struct cxl_memdev_state *mds)
  */
 static int cxl_mem_activate_fw(struct cxl_memdev_state *mds, int slot)
 {
+	struct cxl_mailbox *cxl_mbox = &mds->cxlds.cxl_mbox;
 	struct cxl_mbox_activate_fw activate;
 	struct cxl_mbox_cmd mbox_cmd;
 
@@ -745,7 +917,7 @@ static int cxl_mem_activate_fw(struct cxl_memdev_state *mds, int slot)
 	activate.action = CXL_FW_ACTIVATE_OFFLINE;
 	activate.slot = slot;
 
-	return cxl_internal_send_cmd(mds, &mbox_cmd);
+	return cxl_internal_send_cmd(cxl_mbox, &mbox_cmd);
 }
 
 /**
@@ -760,11 +932,12 @@ static int cxl_mem_activate_fw(struct cxl_memdev_state *mds, int slot)
  */
 static int cxl_mem_abort_fw_xfer(struct cxl_memdev_state *mds)
 {
+	struct cxl_mailbox *cxl_mbox = &mds->cxlds.cxl_mbox;
 	struct cxl_mbox_transfer_fw *transfer;
 	struct cxl_mbox_cmd mbox_cmd;
 	int rc;
 
-	transfer = kzalloc(struct_size(transfer, data, 0), GFP_KERNEL);
+	transfer = kzalloc_flex(*transfer, data, 0);
 	if (!transfer)
 		return -ENOMEM;
 
@@ -779,7 +952,7 @@ static int cxl_mem_abort_fw_xfer(struct cxl_memdev_state *mds)
 
 	transfer->action = CXL_FW_TRANSFER_ACTION_ABORT;
 
-	rc = cxl_internal_send_cmd(mds, &mbox_cmd);
+	rc = cxl_internal_send_cmd(cxl_mbox, &mbox_cmd);
 	kfree(transfer);
 	return rc;
 }
@@ -810,12 +983,13 @@ static enum fw_upload_err cxl_fw_prepare(struct fw_upload *fwl, const u8 *data,
 {
 	struct cxl_memdev_state *mds = fwl->dd_handle;
 	struct cxl_mbox_transfer_fw *transfer;
+	struct cxl_mailbox *cxl_mbox = &mds->cxlds.cxl_mbox;
 
 	if (!size)
 		return FW_UPLOAD_ERR_INVALID_SIZE;
 
-	mds->fw.oneshot = struct_size(transfer, data, size) <
-			    mds->payload_size;
+	mds->fw.oneshot = struct_size(transfer, data, size) <=
+			    cxl_mbox->payload_size;
 
 	if (cxl_mem_get_fw_info(mds))
 		return FW_UPLOAD_ERR_HW_ERROR;
@@ -835,6 +1009,7 @@ static enum fw_upload_err cxl_fw_write(struct fw_upload *fwl, const u8 *data,
 {
 	struct cxl_memdev_state *mds = fwl->dd_handle;
 	struct cxl_dev_state *cxlds = &mds->cxlds;
+	struct cxl_mailbox *cxl_mbox = &cxlds->cxl_mbox;
 	struct cxl_memdev *cxlmd = cxlds->cxlmd;
 	struct cxl_mbox_transfer_fw *transfer;
 	struct cxl_mbox_cmd mbox_cmd;
@@ -858,7 +1033,7 @@ static enum fw_upload_err cxl_fw_write(struct fw_upload *fwl, const u8 *data,
 	 * sizeof(*transfer) is 128.  These constraints imply that @cur_size
 	 * will always be 128b aligned.
 	 */
-	cur_size = min_t(size_t, size, mds->payload_size - sizeof(*transfer));
+	cur_size = min_t(size_t, size, cxl_mbox->payload_size - sizeof(*transfer));
 
 	remaining = size - cur_size;
 	size_in = struct_size(transfer, data, cur_size);
@@ -902,7 +1077,7 @@ static enum fw_upload_err cxl_fw_write(struct fw_upload *fwl, const u8 *data,
 		.poll_count = 30,
 	};
 
-	rc = cxl_internal_send_cmd(mds, &mbox_cmd);
+	rc = cxl_internal_send_cmd(cxl_mbox, &mbox_cmd);
 	if (rc < 0) {
 		rc = FW_UPLOAD_ERR_RW_ERROR;
 		goto out_free;
@@ -961,37 +1136,28 @@ static const struct fw_upload_ops cxl_memdev_fw_ops = {
         .cleanup = cxl_fw_cleanup,
 };
 
-static void devm_cxl_remove_fw_upload(void *fwl)
+static void cxl_remove_fw_upload(void *fwl)
 {
 	firmware_upload_unregister(fwl);
 }
 
-int cxl_memdev_setup_fw_upload(struct cxl_memdev_state *mds)
+int devm_cxl_setup_fw_upload(struct device *host, struct cxl_memdev_state *mds)
 {
 	struct cxl_dev_state *cxlds = &mds->cxlds;
+	struct cxl_mailbox *cxl_mbox = &cxlds->cxl_mbox;
 	struct device *dev = &cxlds->cxlmd->dev;
 	struct fw_upload *fwl;
-	int rc;
 
-	if (!test_bit(CXL_MEM_COMMAND_ID_GET_FW_INFO, mds->enabled_cmds))
+	if (!test_bit(CXL_MEM_COMMAND_ID_GET_FW_INFO, cxl_mbox->enabled_cmds))
 		return 0;
 
 	fwl = firmware_upload_register(THIS_MODULE, dev, dev_name(dev),
 				       &cxl_memdev_fw_ops, mds);
 	if (IS_ERR(fwl))
-		return dev_err_probe(dev, PTR_ERR(fwl),
-				     "Failed to register firmware loader\n");
-
-	rc = devm_add_action_or_reset(cxlds->dev, devm_cxl_remove_fw_upload,
-				      fwl);
-	if (rc)
-		dev_err(dev,
-			"Failed to add firmware loader remove action: %d\n",
-			rc);
-
-	return rc;
+		return PTR_ERR(fwl);
+	return devm_add_action_or_reset(host, cxl_remove_fw_upload, fwl);
 }
-EXPORT_SYMBOL_NS_GPL(cxl_memdev_setup_fw_upload, CXL);
+EXPORT_SYMBOL_NS_GPL(devm_cxl_setup_fw_upload, "CXL");
 
 static const struct file_operations cxl_memdev_fops = {
 	.owner = THIS_MODULE,
@@ -1002,82 +1168,134 @@ static const struct file_operations cxl_memdev_fops = {
 	.llseek = noop_llseek,
 };
 
-static void put_sanitize(void *data)
+/*
+ * Activate ioctl operations, no cxl_memdev_rwsem manipulation needed as this is
+ * ordered with cdev_add() publishing the device.
+ */
+static int cxlmd_add(struct cxl_memdev *cxlmd, struct cxl_dev_state *cxlds)
 {
-	struct cxl_memdev_state *mds = data;
-
-	sysfs_put(mds->security.sanitize_node);
-}
-
-static int cxl_memdev_security_init(struct cxl_memdev *cxlmd)
-{
-	struct cxl_dev_state *cxlds = cxlmd->cxlds;
-	struct cxl_memdev_state *mds = to_cxl_memdev_state(cxlds);
-	struct device *dev = &cxlmd->dev;
-	struct kernfs_node *sec;
-
-	sec = sysfs_get_dirent(dev->kobj.sd, "security");
-	if (!sec) {
-		dev_err(dev, "sysfs_get_dirent 'security' failed\n");
-		return -ENODEV;
-	}
-	mds->security.sanitize_node = sysfs_get_dirent(sec, "state");
-	sysfs_put(sec);
-	if (!mds->security.sanitize_node) {
-		dev_err(dev, "sysfs_get_dirent 'state' failed\n");
-		return -ENODEV;
-	}
-
-	return devm_add_action_or_reset(cxlds->dev, put_sanitize, mds);
- }
-
-struct cxl_memdev *devm_cxl_add_memdev(struct cxl_dev_state *cxlds)
-{
-	struct cxl_memdev *cxlmd;
-	struct device *dev;
-	struct cdev *cdev;
 	int rc;
 
-	cxlmd = cxl_memdev_alloc(cxlds, &cxl_memdev_fops);
+	cxlmd->cxlds = cxlds;
+	cxlds->cxlmd = cxlmd;
+
+	rc = cdev_device_add(&cxlmd->cdev, &cxlmd->dev);
+	if (rc) {
+		/*
+		 * The cdev was briefly live, shutdown any ioctl operations that
+		 * saw that state.
+		 */
+		cxl_memdev_shutdown(&cxlmd->dev);
+		return rc;
+	}
+
+	return 0;
+}
+
+DEFINE_FREE(put_cxlmd, struct cxl_memdev *,
+	    if (!IS_ERR_OR_NULL(_T)) put_device(&_T->dev))
+
+static bool cxl_memdev_attach_failed(struct cxl_memdev *cxlmd)
+{
+	/*
+	 * If @attach is provided fail if the driver is not attached upon
+	 * return. Note that failure here could be the result of a race to
+	 * teardown the CXL port topology. I.e. cxl_mem_probe() could have
+	 * succeeded and then cxl_mem unbound before the lock is acquired.
+	 */
+	guard(device)(&cxlmd->dev);
+	return (cxlmd->attach && !cxlmd->dev.driver);
+}
+
+static struct cxl_memdev *cxl_memdev_autoremove(struct cxl_memdev *cxlmd)
+{
+	int rc;
+
+	if (cxl_memdev_attach_failed(cxlmd)) {
+		cxl_memdev_unregister(cxlmd);
+		return ERR_PTR(-ENXIO);
+	}
+
+	rc = devm_add_action_or_reset(cxlmd->cxlds->dev, cxl_memdev_unregister,
+				      cxlmd);
+	if (rc)
+		return ERR_PTR(rc);
+
+	return cxlmd;
+}
+
+/*
+ * Core helper for devm_cxl_add_memdev() that wants to both create a device and
+ * assert to the caller that upon return cxl_mem::probe() has been invoked.
+ */
+struct cxl_memdev *__devm_cxl_add_memdev(struct cxl_dev_state *cxlds,
+					 const struct cxl_memdev_attach *attach)
+{
+	struct device *dev;
+	int rc;
+
+	struct cxl_memdev *cxlmd __free(put_cxlmd) =
+		cxl_memdev_alloc(cxlds, &cxl_memdev_fops, attach);
 	if (IS_ERR(cxlmd))
 		return cxlmd;
 
 	dev = &cxlmd->dev;
 	rc = dev_set_name(dev, "mem%d", cxlmd->id);
 	if (rc)
-		goto err;
+		return ERR_PTR(rc);
 
-	/*
-	 * Activate ioctl operations, no cxl_memdev_rwsem manipulation
-	 * needed as this is ordered with cdev_add() publishing the device.
-	 */
-	cxlmd->cxlds = cxlds;
-	cxlds->cxlmd = cxlmd;
-
-	cdev = &cxlmd->cdev;
-	rc = cdev_device_add(cdev, dev);
-	if (rc)
-		goto err;
-
-	rc = cxl_memdev_security_init(cxlmd);
-	if (rc)
-		goto err;
-
-	rc = devm_add_action_or_reset(cxlds->dev, cxl_memdev_unregister, cxlmd);
+	rc = cxlmd_add(cxlmd, cxlds);
 	if (rc)
 		return ERR_PTR(rc);
-	return cxlmd;
 
-err:
-	/*
-	 * The cdev was briefly live, shutdown any ioctl operations that
-	 * saw that state.
-	 */
-	cxl_memdev_shutdown(dev);
-	put_device(dev);
-	return ERR_PTR(rc);
+	return cxl_memdev_autoremove(no_free_ptr(cxlmd));
 }
-EXPORT_SYMBOL_NS_GPL(devm_cxl_add_memdev, CXL);
+EXPORT_SYMBOL_FOR_MODULES(__devm_cxl_add_memdev, "cxl_mem");
+
+static void sanitize_teardown_notifier(void *data)
+{
+	struct cxl_memdev_state *mds = data;
+	struct cxl_mailbox *cxl_mbox = &mds->cxlds.cxl_mbox;
+	struct kernfs_node *state;
+
+	/*
+	 * Prevent new irq triggered invocations of the workqueue and
+	 * flush inflight invocations.
+	 */
+	mutex_lock(&cxl_mbox->mbox_mutex);
+	state = mds->security.sanitize_node;
+	mds->security.sanitize_node = NULL;
+	mutex_unlock(&cxl_mbox->mbox_mutex);
+
+	cancel_delayed_work_sync(&mds->security.poll_dwork);
+	sysfs_put(state);
+}
+
+int devm_cxl_sanitize_setup_notifier(struct device *host,
+				     struct cxl_memdev *cxlmd)
+{
+	struct cxl_dev_state *cxlds = cxlmd->cxlds;
+	struct cxl_memdev_state *mds = to_cxl_memdev_state(cxlds);
+	struct kernfs_node *sec;
+
+	if (!test_bit(CXL_SEC_ENABLED_SANITIZE, mds->security.enabled_cmds))
+		return 0;
+
+	/*
+	 * Note, the expectation is that @cxlmd would have failed to be
+	 * created if these sysfs_get_dirent calls fail.
+	 */
+	sec = sysfs_get_dirent(cxlmd->dev.kobj.sd, "security");
+	if (!sec)
+		return -ENOENT;
+	mds->security.sanitize_node = sysfs_get_dirent(sec, "state");
+	sysfs_put(sec);
+	if (!mds->security.sanitize_node)
+		return -ENOENT;
+
+	return devm_add_action_or_reset(host, sanitize_teardown_notifier, mds);
+}
+EXPORT_SYMBOL_NS_GPL(devm_cxl_sanitize_setup_notifier, "CXL");
 
 __init int cxl_memdev_init(void)
 {

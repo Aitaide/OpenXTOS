@@ -7,6 +7,7 @@
 
 #include <linux/bcd.h>
 #include <linux/clk.h>
+#include <linux/delay.h>
 #include <linux/i2c.h>
 #include <linux/module.h>
 #include <linux/of.h>
@@ -109,11 +110,11 @@ static const struct isl1208_config config_raa215300_a0 = {
 };
 
 static const struct i2c_device_id isl1208_id[] = {
-	{ "isl1208", .driver_data = (kernel_ulong_t)&config_isl1208 },
-	{ "isl1209", .driver_data = (kernel_ulong_t)&config_isl1209 },
-	{ "isl1218", .driver_data = (kernel_ulong_t)&config_isl1218 },
-	{ "isl1219", .driver_data = (kernel_ulong_t)&config_isl1219 },
-	{ "raa215300_a0", .driver_data = (kernel_ulong_t)&config_raa215300_a0 },
+	{ .name = "isl1208", .driver_data = (kernel_ulong_t)&config_isl1208 },
+	{ .name = "isl1209", .driver_data = (kernel_ulong_t)&config_isl1209 },
+	{ .name = "isl1218", .driver_data = (kernel_ulong_t)&config_isl1218 },
+	{ .name = "isl1219", .driver_data = (kernel_ulong_t)&config_isl1219 },
+	{ .name = "raa215300_a0", .driver_data = (kernel_ulong_t)&config_raa215300_a0 },
 	{ }
 };
 MODULE_DEVICE_TABLE(i2c, isl1208_id);
@@ -628,6 +629,18 @@ isl1208_rtc_interrupt(int irq, void *data)
 	struct isl1208_state *isl1208 = i2c_get_clientdata(client);
 	int handled = 0, sr, err;
 
+	if (!isl1208->config->has_tamper) {
+		/*
+		 * The INT# output is pulled low 250ms after the alarm is
+		 * triggered. After the INT# output is pulled low, it is low for
+		 * at least 250ms, even if the correct action is taken to clear
+		 * it. It is impossible to clear ALM if it is still active. The
+		 * host must wait for the RTC to progress past the alarm time
+		 * plus the 250ms delay before clearing ALM.
+		 */
+		msleep(250);
+	}
+
 	/*
 	 * I2C reads get NAK'ed if we read straight away after an interrupt?
 	 * Using a mdelay/msleep didn't seem to help either, so we work around
@@ -650,6 +663,13 @@ isl1208_rtc_interrupt(int irq, void *data)
 
 		rtc_update_irq(isl1208->rtc, 1, RTC_IRQF | RTC_AF);
 
+		/* Disable the alarm */
+		err = isl1208_rtc_toggle_alarm(client, 0);
+		if (err)
+			return err;
+
+		fsleep(275);
+
 		/* Clear the alarm */
 		sr &= ~ISL1208_REG_SR_ALM;
 		sr = i2c_smbus_write_byte_data(client, ISL1208_REG_SR, sr);
@@ -658,11 +678,6 @@ isl1208_rtc_interrupt(int irq, void *data)
 				__func__);
 		else
 			handled = 1;
-
-		/* Disable the alarm */
-		err = isl1208_rtc_toggle_alarm(client, 0);
-		if (err)
-			return err;
 	}
 
 	if (isl1208->config->has_tamper && (sr & ISL1208_REG_SR_EVT)) {
@@ -775,14 +790,13 @@ static int isl1208_nvmem_read(void *priv, unsigned int off, void *buf,
 {
 	struct isl1208_state *isl1208 = priv;
 	struct i2c_client *client = to_i2c_client(isl1208->rtc->dev.parent);
-	int ret;
 
 	/* nvmem sanitizes offset/count for us, but count==0 is possible */
 	if (!count)
 		return count;
-	ret = isl1208_i2c_read_regs(client, ISL1208_REG_USR1 + off, buf,
+
+	return isl1208_i2c_read_regs(client, ISL1208_REG_USR1 + off, buf,
 				    count);
-	return ret == 0 ? count : ret;
 }
 
 static int isl1208_nvmem_write(void *priv, unsigned int off, void *buf,
@@ -790,15 +804,13 @@ static int isl1208_nvmem_write(void *priv, unsigned int off, void *buf,
 {
 	struct isl1208_state *isl1208 = priv;
 	struct i2c_client *client = to_i2c_client(isl1208->rtc->dev.parent);
-	int ret;
 
 	/* nvmem sanitizes off/count for us, but count==0 is possible */
 	if (!count)
 		return count;
-	ret = isl1208_i2c_set_regs(client, ISL1208_REG_USR1 + off, buf,
-				   count);
 
-	return ret == 0 ? count : ret;
+	return isl1208_i2c_set_regs(client, ISL1208_REG_USR1 + off, buf,
+				   count);
 }
 
 static const struct nvmem_config isl1208_nvmem_config = {
@@ -810,6 +822,11 @@ static const struct nvmem_config isl1208_nvmem_config = {
 	.reg_write = isl1208_nvmem_write,
 };
 
+static void isl1208_disable_irq_wake_action(void *data)
+{
+	disable_irq_wake((unsigned long)data);
+}
+
 static int isl1208_setup_irq(struct i2c_client *client, int irq)
 {
 	int rc = devm_request_threaded_irq(&client->dev, irq, NULL,
@@ -818,8 +835,16 @@ static int isl1208_setup_irq(struct i2c_client *client, int irq)
 					isl1208_driver.driver.name,
 					client);
 	if (!rc) {
-		device_init_wakeup(&client->dev, 1);
-		enable_irq_wake(irq);
+		device_init_wakeup(&client->dev, true);
+		rc = enable_irq_wake(irq);
+		if (rc)
+			return rc;
+
+		rc = devm_add_action_or_reset(&client->dev,
+					      isl1208_disable_irq_wake_action,
+					      (void *)(unsigned long)irq);
+		if (rc)
+			return rc;
 	} else {
 		dev_err(&client->dev,
 			"Unable to request irq %d, no alarm support\n",

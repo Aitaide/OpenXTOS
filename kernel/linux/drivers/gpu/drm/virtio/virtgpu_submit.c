@@ -48,7 +48,7 @@ struct virtio_gpu_submit {
 static int virtio_gpu_do_fence_wait(struct virtio_gpu_submit *submit,
 				    struct dma_fence *in_fence)
 {
-	u32 context = submit->fence_ctx + submit->ring_idx;
+	u64 context = submit->fence_ctx + submit->ring_idx;
 
 	if (dma_fence_match_context(in_fence, context))
 		return 0;
@@ -65,8 +65,10 @@ static int virtio_gpu_dma_fence_wait(struct virtio_gpu_submit *submit,
 
 	dma_fence_unwrap_for_each(f, &itr, fence) {
 		err = virtio_gpu_do_fence_wait(submit, f);
-		if (err)
+		if (err) {
+			dma_fence_put(itr.chain);
 			return err;
+		}
 	}
 
 	return 0;
@@ -99,12 +101,12 @@ virtio_gpu_parse_deps(struct virtio_gpu_submit *submit)
 		return 0;
 
 	/*
-	 * kvalloc at first tries to allocate memory using kmalloc and
-	 * falls back to vmalloc only on failure. It also uses __GFP_NOWARN
+	 * kvmalloc() at first tries to allocate memory using kmalloc() and
+	 * falls back to vmalloc() only on failure. It also uses __GFP_NOWARN
 	 * internally for allocations larger than a page size, preventing
 	 * storm of KMSG warnings.
 	 */
-	syncobjs = kvcalloc(num_in_syncobjs, sizeof(*syncobjs), GFP_KERNEL);
+	syncobjs = kvzalloc_objs(*syncobjs, num_in_syncobjs);
 	if (!syncobjs)
 		return -ENOMEM;
 
@@ -195,7 +197,7 @@ static int virtio_gpu_parse_post_deps(struct virtio_gpu_submit *submit)
 	if (!num_out_syncobjs)
 		return 0;
 
-	post_deps = kvcalloc(num_out_syncobjs, sizeof(*post_deps), GFP_KERNEL);
+	post_deps = kvzalloc_objs(*post_deps, num_out_syncobjs);
 	if (!post_deps)
 		return -ENOMEM;
 
@@ -277,7 +279,7 @@ static int virtio_gpu_fence_event_create(struct drm_device *dev,
 	struct virtio_gpu_fence_event *e = NULL;
 	int ret;
 
-	e = kzalloc(sizeof(*e), GFP_KERNEL);
+	e = kzalloc_obj(*e);
 	if (!e)
 		return -ENOMEM;
 
@@ -387,10 +389,13 @@ static int virtio_gpu_init_submit(struct virtio_gpu_submit *submit,
 	if ((exbuf->flags & VIRTGPU_EXECBUF_FENCE_FD_OUT) ||
 	    exbuf->num_out_syncobjs ||
 	    exbuf->num_bo_handles ||
-	    drm_fence_event)
+	    drm_fence_event) {
 		out_fence = virtio_gpu_fence_alloc(vgdev, fence_ctx, ring_idx);
-	else
+		if (!out_fence)
+			return -ENOMEM;
+	} else {
 		out_fence = NULL;
+	}
 
 	if (drm_fence_event) {
 		err = virtio_gpu_fence_event_create(dev, file, out_fence, ring_idx);
@@ -529,13 +534,17 @@ int virtio_gpu_execbuffer_ioctl(struct drm_device *dev, void *data,
 	virtio_gpu_submit(&submit);
 
 	/*
-	 * Set up usr-out data after submitting the job to optimize
+	 * Set up user-out data after submitting the job to optimize
 	 * the job submission path.
 	 */
 	virtio_gpu_install_out_fence_fd(&submit);
 	virtio_gpu_process_post_deps(&submit);
 	virtio_gpu_complete_submit(&submit);
 cleanup:
+	if (ret && submit.out_fence && submit.out_fence->e) {
+		drm_event_cancel_free(dev, &submit.out_fence->e->base);
+		submit.out_fence->e = NULL;
+	}
 	virtio_gpu_cleanup_submit(&submit);
 
 	return ret;

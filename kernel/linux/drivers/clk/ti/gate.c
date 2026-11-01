@@ -95,7 +95,7 @@ static struct clk *_register_gate(struct device_node *node, const char *name,
 	struct clk_hw_omap *clk_hw;
 	struct clk *clk;
 
-	clk_hw = kzalloc(sizeof(*clk_hw), GFP_KERNEL);
+	clk_hw = kzalloc_obj(*clk_hw);
 	if (!clk_hw)
 		return ERR_PTR(-ENOMEM);
 
@@ -132,7 +132,6 @@ static void __init _of_ti_gate_clk_setup(struct device_node *node,
 	struct clk_omap_reg reg;
 	const char *name;
 	u8 enable_bit = 0;
-	u32 val;
 	u32 flags = 0;
 	u8 clk_gate_flags = 0;
 
@@ -140,8 +139,7 @@ static void __init _of_ti_gate_clk_setup(struct device_node *node,
 		if (ti_clk_get_reg_addr(node, 0, &reg))
 			return;
 
-		if (!of_property_read_u32(node, "ti,bit-shift", &val))
-			enable_bit = val;
+		enable_bit = reg.bit;
 	}
 
 	if (of_clk_get_parent_count(node) != 1) {
@@ -170,18 +168,15 @@ _of_ti_composite_gate_clk_setup(struct device_node *node,
 				const struct clk_hw_omap_ops *hw_ops)
 {
 	struct clk_hw_omap *gate;
-	u32 val = 0;
 
-	gate = kzalloc(sizeof(*gate), GFP_KERNEL);
+	gate = kzalloc_obj(*gate);
 	if (!gate)
 		return;
 
 	if (ti_clk_get_reg_addr(node, 0, &gate->enable_reg))
 		goto cleanup;
 
-	of_property_read_u32(node, "ti,bit-shift", &val);
-
-	gate->enable_bit = val;
+	gate->enable_bit = gate->enable_reg.bit;
 	gate->ops = hw_ops;
 
 	if (!ti_clk_add_component(node, &gate->hw, CLK_COMPONENT_TYPE_GATE))

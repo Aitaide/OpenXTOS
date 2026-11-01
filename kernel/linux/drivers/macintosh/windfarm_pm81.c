@@ -283,8 +283,7 @@ static void wf_smu_create_sys_fans(void)
 	}
 
 	/* Alloc & initialize state */
-	wf_smu_sys_fans = kmalloc(sizeof(struct wf_smu_sys_fans_state),
-				  GFP_KERNEL);
+	wf_smu_sys_fans = kmalloc_obj(struct wf_smu_sys_fans_state);
 	if (wf_smu_sys_fans == NULL) {
 		printk(KERN_WARNING "windfarm: Memory allocation error"
 		       " max fan speed\n");
@@ -419,8 +418,7 @@ static void wf_smu_create_cpu_fans(void)
 		tmax = 0x5e0000; /* 94 degree default */
 
 	/* Alloc & initialize state */
-	wf_smu_cpu_fans = kmalloc(sizeof(struct wf_smu_cpu_fans_state),
-				  GFP_KERNEL);
+	wf_smu_cpu_fans = kmalloc_obj(struct wf_smu_cpu_fans_state);
 	if (wf_smu_cpu_fans == NULL)
 		goto fail;
        	wf_smu_cpu_fans->ticks = 1;
@@ -724,7 +722,7 @@ static int wf_smu_probe(struct platform_device *ddev)
 	return 0;
 }
 
-static int wf_smu_remove(struct platform_device *ddev)
+static void wf_smu_remove(struct platform_device *ddev)
 {
 	wf_unregister_client(&wf_smu_events);
 
@@ -761,13 +759,11 @@ static int wf_smu_remove(struct platform_device *ddev)
 	/* Destroy control loops state structures */
 	kfree(wf_smu_sys_fans);
 	kfree(wf_smu_cpu_fans);
-
-	return 0;
 }
 
 static struct platform_driver wf_smu_driver = {
-        .probe = wf_smu_probe,
-        .remove = wf_smu_remove,
+	.probe = wf_smu_probe,
+	.remove = wf_smu_remove,
 	.driver = {
 		.name = "windfarm",
 	},

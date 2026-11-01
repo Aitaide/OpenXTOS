@@ -401,9 +401,6 @@ struct altera_tse_private {
 	/* MAC address space */
 	struct altera_tse_mac __iomem *mac_dev;
 
-	/* TSE Revision */
-	u32	revision;
-
 	/* mSGDMA Rx Dispatcher address space */
 	void __iomem *rx_dma_csr;
 	void __iomem *rx_dma_desc;
@@ -472,7 +469,7 @@ struct altera_tse_private {
 	/* ethtool msglvl option */
 	u32 msg_enable;
 
-	struct altera_dmaops *dmaops;
+	const struct altera_dmaops *dmaops;
 
 	struct phylink *phylink;
 	struct phylink_config phylink_config;

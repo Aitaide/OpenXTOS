@@ -110,6 +110,8 @@ struct qat_dh_ctx {
 	unsigned int p_size;
 	bool g2;
 	struct qat_crypto_instance *inst;
+	struct crypto_kpp *ftfm;
+	bool fallback;
 } __packed __aligned(64);
 
 struct qat_asym_request {
@@ -253,8 +255,8 @@ static int qat_dh_compute_value(struct kpp_request *req)
 	qat_req->areq.dh = req;
 	msg->pke_hdr.service_type = ICP_QAT_FW_COMN_REQ_CPM_FW_PKE;
 	msg->pke_hdr.comn_req_flags =
-		ICP_QAT_FW_COMN_FLAGS_BUILD(QAT_COMN_PTR_TYPE_FLAT,
-					    QAT_COMN_CD_FLD_TYPE_64BIT_ADR);
+		ICP_QAT_FW_COMN_FLAGS_BUILD(QAT_COMN_CD_FLD_TYPE_64BIT_ADR,
+					    QAT_COMN_PTR_TYPE_FLAT);
 
 	/*
 	 * If no source is provided use g as base
@@ -381,6 +383,36 @@ unmap_src:
 	return ret;
 }
 
+static int qat_dh_generate_public_key(struct kpp_request *req)
+{
+	struct kpp_request *nreq = kpp_request_ctx(req);
+	struct crypto_kpp *tfm = crypto_kpp_reqtfm(req);
+	struct qat_dh_ctx *ctx = kpp_tfm_ctx(tfm);
+
+	if (ctx->fallback) {
+		memcpy(nreq, req, sizeof(*req));
+		kpp_request_set_tfm(nreq, ctx->ftfm);
+		return crypto_kpp_generate_public_key(nreq);
+	}
+
+	return qat_dh_compute_value(req);
+}
+
+static int qat_dh_compute_shared_secret(struct kpp_request *req)
+{
+	struct kpp_request *nreq = kpp_request_ctx(req);
+	struct crypto_kpp *tfm = crypto_kpp_reqtfm(req);
+	struct qat_dh_ctx *ctx = kpp_tfm_ctx(tfm);
+
+	if (ctx->fallback) {
+		memcpy(nreq, req, sizeof(*req));
+		kpp_request_set_tfm(nreq, ctx->ftfm);
+		return crypto_kpp_compute_shared_secret(nreq);
+	}
+
+	return qat_dh_compute_value(req);
+}
+
 static int qat_dh_check_params_length(unsigned int p_len)
 {
 	switch (p_len) {
@@ -397,9 +429,6 @@ static int qat_dh_set_params(struct qat_dh_ctx *ctx, struct dh *params)
 {
 	struct qat_crypto_instance *inst = ctx->inst;
 	struct device *dev = &GET_DEV(inst->accel_dev);
-
-	if (qat_dh_check_params_length(params->p_size << 3))
-		return -EINVAL;
 
 	ctx->p_size = params->p_size;
 	ctx->p = dma_alloc_coherent(dev, ctx->p_size, &ctx->dma_p, GFP_KERNEL);
@@ -454,6 +483,13 @@ static int qat_dh_set_secret(struct crypto_kpp *tfm, const void *buf,
 	if (crypto_dh_decode_key(buf, len, &params) < 0)
 		return -EINVAL;
 
+	if (qat_dh_check_params_length(params.p_size << 3)) {
+		ctx->fallback = true;
+		return crypto_kpp_set_secret(ctx->ftfm, buf, len);
+	}
+
+	ctx->fallback = false;
+
 	/* Free old secret if any */
 	qat_dh_clear_ctx(dev, ctx);
 
@@ -481,6 +517,9 @@ static unsigned int qat_dh_max_size(struct crypto_kpp *tfm)
 {
 	struct qat_dh_ctx *ctx = kpp_tfm_ctx(tfm);
 
+	if (ctx->fallback)
+		return crypto_kpp_maxsize(ctx->ftfm);
+
 	return ctx->p_size;
 }
 
@@ -489,11 +528,22 @@ static int qat_dh_init_tfm(struct crypto_kpp *tfm)
 	struct qat_dh_ctx *ctx = kpp_tfm_ctx(tfm);
 	struct qat_crypto_instance *inst =
 			qat_crypto_get_instance_node(numa_node_id());
+	const char *alg = kpp_alg_name(tfm);
+	unsigned int reqsize;
 
 	if (!inst)
 		return -EINVAL;
 
-	kpp_set_reqsize(tfm, sizeof(struct qat_asym_request) + 64);
+	ctx->ftfm = crypto_alloc_kpp(alg, 0, CRYPTO_ALG_NEED_FALLBACK);
+	if (IS_ERR(ctx->ftfm))
+		return PTR_ERR(ctx->ftfm);
+
+	crypto_kpp_set_flags(ctx->ftfm, crypto_kpp_get_flags(tfm));
+
+	reqsize = max(sizeof(struct qat_asym_request) + 64,
+		      sizeof(struct kpp_request) + crypto_kpp_reqsize(ctx->ftfm));
+
+	kpp_set_reqsize(tfm, reqsize);
 
 	ctx->p_size = 0;
 	ctx->g2 = false;
@@ -505,6 +555,9 @@ static void qat_dh_exit_tfm(struct crypto_kpp *tfm)
 {
 	struct qat_dh_ctx *ctx = kpp_tfm_ctx(tfm);
 	struct device *dev = &GET_DEV(ctx->inst->accel_dev);
+
+	if (ctx->ftfm)
+		crypto_free_kpp(ctx->ftfm);
 
 	qat_dh_clear_ctx(dev, ctx);
 	qat_crypto_put_instance(ctx->inst);
@@ -678,8 +731,8 @@ static int qat_rsa_enc(struct akcipher_request *req)
 	qat_req->areq.rsa = req;
 	msg->pke_hdr.service_type = ICP_QAT_FW_COMN_REQ_CPM_FW_PKE;
 	msg->pke_hdr.comn_req_flags =
-		ICP_QAT_FW_COMN_FLAGS_BUILD(QAT_COMN_PTR_TYPE_FLAT,
-					    QAT_COMN_CD_FLD_TYPE_64BIT_ADR);
+		ICP_QAT_FW_COMN_FLAGS_BUILD(QAT_COMN_CD_FLD_TYPE_64BIT_ADR,
+					    QAT_COMN_PTR_TYPE_FLAT);
 
 	qat_req->in.rsa.enc.e = ctx->dma_e;
 	qat_req->in.rsa.enc.n = ctx->dma_n;
@@ -814,8 +867,8 @@ static int qat_rsa_dec(struct akcipher_request *req)
 	qat_req->areq.rsa = req;
 	msg->pke_hdr.service_type = ICP_QAT_FW_COMN_REQ_CPM_FW_PKE;
 	msg->pke_hdr.comn_req_flags =
-		ICP_QAT_FW_COMN_FLAGS_BUILD(QAT_COMN_PTR_TYPE_FLAT,
-					    QAT_COMN_CD_FLD_TYPE_64BIT_ADR);
+		ICP_QAT_FW_COMN_FLAGS_BUILD(QAT_COMN_CD_FLD_TYPE_64BIT_ADR,
+					    QAT_COMN_PTR_TYPE_FLAT);
 
 	if (ctx->crt_mode) {
 		qat_req->in.rsa.dec_crt.p = ctx->dma_p;
@@ -1032,7 +1085,7 @@ static void qat_rsa_setkey_crt(struct qat_rsa_ctx *ctx, struct rsa_key *rsa_key)
 	ptr = rsa_key->p;
 	len = rsa_key->p_sz;
 	qat_rsa_drop_leading_zeros(&ptr, &len);
-	if (!len)
+	if (!len || len > half_key_sz)
 		goto err;
 	ctx->p = dma_alloc_coherent(dev, half_key_sz, &ctx->dma_p, GFP_KERNEL);
 	if (!ctx->p)
@@ -1043,7 +1096,7 @@ static void qat_rsa_setkey_crt(struct qat_rsa_ctx *ctx, struct rsa_key *rsa_key)
 	ptr = rsa_key->q;
 	len = rsa_key->q_sz;
 	qat_rsa_drop_leading_zeros(&ptr, &len);
-	if (!len)
+	if (!len || len > half_key_sz)
 		goto free_p;
 	ctx->q = dma_alloc_coherent(dev, half_key_sz, &ctx->dma_q, GFP_KERNEL);
 	if (!ctx->q)
@@ -1054,7 +1107,7 @@ static void qat_rsa_setkey_crt(struct qat_rsa_ctx *ctx, struct rsa_key *rsa_key)
 	ptr = rsa_key->dp;
 	len = rsa_key->dp_sz;
 	qat_rsa_drop_leading_zeros(&ptr, &len);
-	if (!len)
+	if (!len || len > half_key_sz)
 		goto free_q;
 	ctx->dp = dma_alloc_coherent(dev, half_key_sz, &ctx->dma_dp,
 				     GFP_KERNEL);
@@ -1066,7 +1119,7 @@ static void qat_rsa_setkey_crt(struct qat_rsa_ctx *ctx, struct rsa_key *rsa_key)
 	ptr = rsa_key->dq;
 	len = rsa_key->dq_sz;
 	qat_rsa_drop_leading_zeros(&ptr, &len);
-	if (!len)
+	if (!len || len > half_key_sz)
 		goto free_dp;
 	ctx->dq = dma_alloc_coherent(dev, half_key_sz, &ctx->dma_dq,
 				     GFP_KERNEL);
@@ -1078,7 +1131,7 @@ static void qat_rsa_setkey_crt(struct qat_rsa_ctx *ctx, struct rsa_key *rsa_key)
 	ptr = rsa_key->qinv;
 	len = rsa_key->qinv_sz;
 	qat_rsa_drop_leading_zeros(&ptr, &len);
-	if (!len)
+	if (!len || len > half_key_sz)
 		goto free_dq;
 	ctx->qinv = dma_alloc_coherent(dev, half_key_sz, &ctx->dma_qinv,
 				       GFP_KERNEL);
@@ -1265,8 +1318,8 @@ static struct akcipher_alg rsa = {
 
 static struct kpp_alg dh = {
 	.set_secret = qat_dh_set_secret,
-	.generate_public_key = qat_dh_compute_value,
-	.compute_shared_secret = qat_dh_compute_value,
+	.generate_public_key = qat_dh_generate_public_key,
+	.compute_shared_secret = qat_dh_compute_shared_secret,
 	.max_size = qat_dh_max_size,
 	.init = qat_dh_init_tfm,
 	.exit = qat_dh_exit_tfm,
@@ -1276,6 +1329,7 @@ static struct kpp_alg dh = {
 		.cra_priority = 1000,
 		.cra_module = THIS_MODULE,
 		.cra_ctxsize = sizeof(struct qat_dh_ctx),
+		.cra_flags = CRYPTO_ALG_NEED_FALLBACK,
 	},
 };
 

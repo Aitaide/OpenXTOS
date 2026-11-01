@@ -16,6 +16,7 @@
 #include <linux/module.h>
 #include <linux/mutex.h>
 #include <linux/of.h>
+#include <linux/pinctrl/consumer.h>
 #include <linux/pinctrl/pinmux.h>
 #include <linux/platform_device.h>
 
@@ -43,12 +44,12 @@ struct rza2_pinctrl_priv {
 	struct device *dev;
 	void __iomem *base;
 
-	struct pinctrl_pin_desc *pins;
 	struct pinctrl_desc desc;
 	struct pinctrl_dev *pctl;
 	struct pinctrl_gpio_range gpio_range;
-	int npins;
+	unsigned int npins;
 	struct mutex mutex; /* serialize adding groups and functions */
+	struct pinctrl_pin_desc pins[] __counted_by(npins);
 };
 
 #define RZA2_PDR(port)		(0x0000 + (port) * 2)	/* Direction 16-bit */
@@ -171,8 +172,7 @@ static int rza2_chip_get(struct gpio_chip *chip, unsigned int offset)
 	return !!(readb(priv->base + RZA2_PIDR(port)) & BIT(pin));
 }
 
-static void rza2_chip_set(struct gpio_chip *chip, unsigned int offset,
-			  int value)
+static int rza2_chip_set(struct gpio_chip *chip, unsigned int offset, int value)
 {
 	struct rza2_pinctrl_priv *priv = gpiochip_get_data(chip);
 	u8 port = RZA2_PIN_ID_TO_PORT(offset);
@@ -187,6 +187,8 @@ static void rza2_chip_set(struct gpio_chip *chip, unsigned int offset,
 		new_value &= ~BIT(pin);
 
 	writeb(new_value, priv->base + RZA2_PODR(port));
+
+	return 0;
 }
 
 static int rza2_chip_direction_output(struct gpio_chip *chip,
@@ -229,6 +231,8 @@ static const char * const rza2_gpio_names[] = {
 static struct gpio_chip chip = {
 	.names = rza2_gpio_names,
 	.base = -1,
+	.request = pinctrl_gpio_request,
+	.free = pinctrl_gpio_free,
 	.get_direction = rza2_chip_get_direction,
 	.direction_input = rza2_chip_direction_input,
 	.direction_output = rza2_chip_direction_output,
@@ -243,6 +247,9 @@ static int rza2_gpio_register(struct rza2_pinctrl_priv *priv)
 	int ret;
 
 	chip.label = devm_kasprintf(priv->dev, GFP_KERNEL, "%pOFn", np);
+	if (!chip.label)
+		return -ENOMEM;
+
 	chip.parent = priv->dev;
 	chip.ngpio = priv->npins;
 
@@ -252,6 +259,8 @@ static int rza2_gpio_register(struct rza2_pinctrl_priv *priv)
 		dev_err(priv->dev, "Unable to parse gpio-ranges\n");
 		return ret;
 	}
+
+	of_node_put(of_args.np);
 
 	if ((of_args.args[0] != 0) ||
 	    (of_args.args[1] != 0) ||
@@ -280,21 +289,15 @@ static int rza2_gpio_register(struct rza2_pinctrl_priv *priv)
 
 static int rza2_pinctrl_register(struct rza2_pinctrl_priv *priv)
 {
-	struct pinctrl_pin_desc *pins;
 	unsigned int i;
 	int ret;
 
-	pins = devm_kcalloc(priv->dev, priv->npins, sizeof(*pins), GFP_KERNEL);
-	if (!pins)
-		return -ENOMEM;
-
-	priv->pins = pins;
-	priv->desc.pins = pins;
+	priv->desc.pins = priv->pins;
 	priv->desc.npins = priv->npins;
 
 	for (i = 0; i < priv->npins; i++) {
-		pins[i].number = i;
-		pins[i].name = rza2_gpio_names[i];
+		priv->pins[i].number = i;
+		priv->pins[i].name = rza2_gpio_names[i];
 	}
 
 	ret = devm_pinctrl_register_and_init(priv->dev, &priv->desc, priv,
@@ -386,7 +389,7 @@ static int rza2_dt_node_to_map(struct pinctrl_dev *pctldev,
 
 	/* Create map where to retrieve function and mux settings from */
 	*num_maps = 0;
-	*map = kzalloc(sizeof(**map), GFP_KERNEL);
+	*map = kzalloc_obj(**map);
 	if (!*map) {
 		ret = -ENOMEM;
 		goto remove_function;
@@ -433,7 +436,7 @@ static int rza2_set_mux(struct pinctrl_dev *pctldev, unsigned int selector,
 			unsigned int group)
 {
 	struct rza2_pinctrl_priv *priv = pinctrl_dev_get_drvdata(pctldev);
-	struct function_desc *func;
+	const struct function_desc *func;
 	unsigned int i, *psel_val;
 	struct group_desc *grp;
 
@@ -447,15 +450,15 @@ static int rza2_set_mux(struct pinctrl_dev *pctldev, unsigned int selector,
 
 	psel_val = func->data;
 
-	for (i = 0; i < grp->num_pins; ++i) {
+	for (i = 0; i < grp->grp.npins; ++i) {
 		dev_dbg(priv->dev, "Setting P%c_%d to PSEL=%d\n",
-			port_names[RZA2_PIN_ID_TO_PORT(grp->pins[i])],
-			RZA2_PIN_ID_TO_PIN(grp->pins[i]),
+			port_names[RZA2_PIN_ID_TO_PORT(grp->grp.pins[i])],
+			RZA2_PIN_ID_TO_PIN(grp->grp.pins[i]),
 			psel_val[i]);
 		rza2_set_pin_function(
 			priv->base,
-			RZA2_PIN_ID_TO_PORT(grp->pins[i]),
-			RZA2_PIN_ID_TO_PIN(grp->pins[i]),
+			RZA2_PIN_ID_TO_PORT(grp->grp.pins[i]),
+			RZA2_PIN_ID_TO_PIN(grp->grp.pins[i]),
 			psel_val[i]);
 	}
 
@@ -473,12 +476,17 @@ static const struct pinmux_ops rza2_pinmux_ops = {
 static int rza2_pinctrl_probe(struct platform_device *pdev)
 {
 	struct rza2_pinctrl_priv *priv;
+	unsigned int npins;
 	int ret;
 
-	priv = devm_kzalloc(&pdev->dev, sizeof(*priv), GFP_KERNEL);
+	npins = (uintptr_t)of_device_get_match_data(&pdev->dev) *
+		      RZA2_PINS_PER_PORT;
+
+	priv = devm_kzalloc(&pdev->dev, struct_size(priv, pins, npins), GFP_KERNEL);
 	if (!priv)
 		return -ENOMEM;
 
+	priv->npins = npins;
 	priv->dev = &pdev->dev;
 
 	priv->base = devm_platform_ioremap_resource(pdev, 0);
@@ -488,9 +496,6 @@ static int rza2_pinctrl_probe(struct platform_device *pdev)
 	mutex_init(&priv->mutex);
 
 	platform_set_drvdata(pdev, priv);
-
-	priv->npins = (int)(uintptr_t)of_device_get_match_data(&pdev->dev) *
-		      RZA2_PINS_PER_PORT;
 
 	priv->desc.name		= DRIVER_NAME;
 	priv->desc.pctlops	= &rza2_pinctrl_ops;

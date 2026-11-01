@@ -27,7 +27,7 @@ DECLARE_EVENT_CLASS(rnbd_srv_link_class,
 
 	TP_fast_assign(
 		__entry->qdepth = srv->queue_depth;
-		__assign_str(sessname, srv->sessname);
+		__assign_str(sessname);
 	),
 
 	TP_printk("sessname: %s qdepth: %d",
@@ -43,24 +43,6 @@ DEFINE_EVENT(rnbd_srv_link_class, name, \
 
 DEFINE_LINK_EVENT(create_sess);
 DEFINE_LINK_EVENT(destroy_sess);
-
-TRACE_DEFINE_ENUM(RNBD_OP_READ);
-TRACE_DEFINE_ENUM(RNBD_OP_WRITE);
-TRACE_DEFINE_ENUM(RNBD_OP_FLUSH);
-TRACE_DEFINE_ENUM(RNBD_OP_DISCARD);
-TRACE_DEFINE_ENUM(RNBD_OP_SECURE_ERASE);
-TRACE_DEFINE_ENUM(RNBD_F_SYNC);
-TRACE_DEFINE_ENUM(RNBD_F_FUA);
-
-#define show_rnbd_rw_flags(x) \
-	__print_flags(x, "|", \
-		{ RNBD_OP_READ,		"READ" }, \
-		{ RNBD_OP_WRITE,	"WRITE" }, \
-		{ RNBD_OP_FLUSH,	"FLUSH" }, \
-		{ RNBD_OP_DISCARD,	"DISCARD" }, \
-		{ RNBD_OP_SECURE_ERASE,	"SECURE_ERASE" }, \
-		{ RNBD_F_SYNC,		"SYNC" }, \
-		{ RNBD_F_FUA,		"FUA" })
 
 TRACE_EVENT(process_rdma,
 	TP_PROTO(struct rnbd_srv_session *srv,
@@ -85,7 +67,7 @@ TRACE_EVENT(process_rdma,
 	),
 
 	TP_fast_assign(
-		__assign_str(sessname, srv->sessname);
+		__assign_str(sessname);
 		__entry->dir = id->dir;
 		__entry->ver = srv->ver;
 		__entry->device_id = le32_to_cpu(msg->device_id);
@@ -97,7 +79,7 @@ TRACE_EVENT(process_rdma,
 		__entry->usrlen = usrlen;
 	),
 
-	TP_printk("I/O req: sess: %s, type: %s, ver: %d, devid: %u, sector: %llu, bsize: %u, flags: %s, ioprio: %d, datalen: %u, usrlen: %zu",
+	TP_printk("I/O req: sess: %s, type: %s, ver: %d, devid: %u, sector: %llu, bsize: %u, flags: %u, ioprio: %d, datalen: %u, usrlen: %zu",
 		   __get_str(sessname),
 		   __print_symbolic(__entry->dir,
 			 { READ,  "READ" },
@@ -106,7 +88,7 @@ TRACE_EVENT(process_rdma,
 		   __entry->device_id,
 		   __entry->sector,
 		   __entry->bi_size,
-		   show_rnbd_rw_flags(__entry->flags),
+		   __entry->flags,
 		   __entry->ioprio,
 		   __entry->datalen,
 		   __entry->usrlen
@@ -130,7 +112,7 @@ TRACE_EVENT(process_msg_sess_info,
 		__entry->proto_ver = srv->ver;
 		__entry->clt_ver = msg->ver;
 		__entry->srv_ver = RNBD_PROTO_VER_MAJOR;
-		__assign_str(sessname, srv->sessname);
+		__assign_str(sessname);
 	),
 
 	TP_printk("Session %s using proto-ver %d (clt-ver: %d, srv-ver: %d)",
@@ -165,8 +147,8 @@ TRACE_EVENT(process_msg_open,
 
 	TP_fast_assign(
 		__entry->access_mode = msg->access_mode;
-		__assign_str(sessname, srv->sessname);
-		__assign_str(dev_name, msg->dev_name);
+		__assign_str(sessname);
+		__assign_str(dev_name);
 	),
 
 	TP_printk("Open message received: session='%s' path='%s' access_mode=%s",
@@ -189,7 +171,7 @@ TRACE_EVENT(process_msg_close,
 
 	TP_fast_assign(
 		__entry->device_id = le32_to_cpu(msg->device_id);
-		__assign_str(sessname, srv->sessname);
+		__assign_str(sessname);
 	),
 
 	TP_printk("Close message received: session='%s' device id='%d'",

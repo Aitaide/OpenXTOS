@@ -136,10 +136,11 @@
  *
  *         To assign a string, use the helper macro __assign_str().
  *
- *         __assign_str(foo, bar);
+ *         __assign_str(foo);
  *
- *         In most cases, the __assign_str() macro will take the same
- *         parameters as the __string() macro had to declare the string.
+ *	   The __string() macro saves off the string that is passed into
+ *         the second parameter, and the __assign_str() will store than
+ *         saved string into the "foo" field.
  *
  *   __vstring: This is similar to __string() but instead of taking a
  *         dynamic length, it takes a variable list va_list 'va' variable.
@@ -163,8 +164,7 @@
  *         __string().
  *
  *   __string_len: This is a helper to a __dynamic_array, but it understands
- *	   that the array has characters in it, and with the combined
- *         use of __assign_str_len(), it will allocate 'len' + 1 bytes
+ *	   that the array has characters in it, it will allocate 'len' + 1 bytes
  *         in the ring buffer and add a '\0' to the string. This is
  *         useful if the string being saved has no terminating '\0' byte.
  *         It requires that the length of the string is known as it acts
@@ -174,9 +174,11 @@
  *
  *         __string_len(foo, bar, len)
  *
- *         To assign this string, use the helper macro __assign_str_len().
+ *         To assign this string, use the helper macro __assign_str().
+ *         The length is saved via the __string_len() and is retrieved in
+ *         __assign_str().
  *
- *         __assign_str_len(foo, bar, len);
+ *         __assign_str(foo);
  *
  *         Then len + 1 is allocated to the ring buffer, and a nul terminating
  *         byte is added. This is similar to:
@@ -245,12 +247,14 @@
  */
 
 /*
- * It is OK to have helper functions in the file, but they need to be protected
- * from being defined more than once. Remember, this file gets included more
- * than once.
+ * It is OK to have helper functions and data structures in the file, but they
+ * need to be protected from being defined more than once. Remember, this file
+ * gets included more than once.
  */
 #ifndef __TRACE_EVENT_SAMPLE_HELPER_FUNCTIONS
 #define __TRACE_EVENT_SAMPLE_HELPER_FUNCTIONS
+#include <linux/timer.h>
+
 static inline int __length_of(const int *list)
 {
 	int i;
@@ -268,6 +272,13 @@ enum {
 	TRACE_SAMPLE_BAR = 4,
 	TRACE_SAMPLE_ZOO = 8,
 };
+
+struct foo_timer_data {
+	const char		*name;
+	struct timer_list	timer;
+	int __percpu		*counter;
+};
+
 #endif
 
 /*
@@ -302,20 +313,23 @@ TRACE_EVENT(foo_bar,
 		__bitmask(	cpus,	num_possible_cpus()	)
 		__cpumask(	cpum				)
 		__vstring(	vstr,	fmt,	va		)
+		__string_len(	lstr,	foo,	bar / 2 < strlen(foo) ? bar / 2 : strlen(foo) )
 	),
 
 	TP_fast_assign(
-		strlcpy(__entry->foo, foo, 10);
+		strscpy(__entry->foo, foo, 10);
 		__entry->bar	= bar;
 		memcpy(__get_dynamic_array(list), lst,
 		       __length_of(lst) * sizeof(int));
-		__assign_str(str, string);
+		__assign_str(str);
+		__assign_str(lstr);
 		__assign_vstr(vstr, fmt, va);
 		__assign_bitmask(cpus, cpumask_bits(mask), num_possible_cpus());
 		__assign_cpumask(cpum, cpumask_bits(mask));
 	),
 
-	TP_printk("foo %s %d %s %s %s %s (%s) (%s) %s", __entry->foo, __entry->bar,
+	TP_printk("foo %s %d %s %s %s %s %s %s (%s) (%s) %s [%d] %*pbl",
+		  __entry->foo, __entry->bar,
 
 /*
  * Notice here the use of some helper functions. This includes:
@@ -359,8 +373,17 @@ TRACE_EVENT(foo_bar,
 		  __print_array(__get_dynamic_array(list),
 				__get_dynamic_array_len(list) / sizeof(int),
 				sizeof(int)),
-		  __get_str(str), __get_bitmask(cpus), __get_cpumask(cpum),
-		  __get_str(vstr))
+
+/*     A shortcut is to use __print_dynamic_array for dynamic arrays */
+
+		  __print_dynamic_array(list, sizeof(int)),
+
+		  __get_str(str), __get_str(lstr),
+		  __get_bitmask(cpus), __get_cpumask(cpum),
+		  __get_str(vstr),
+		  __get_dynamic_array_len(cpus),
+		  __get_dynamic_array_len(cpus),
+		  __get_dynamic_array(cpus))
 );
 
 /*
@@ -414,7 +437,7 @@ TRACE_EVENT_CONDITION(foo_bar_with_cond,
 	),
 
 	TP_fast_assign(
-		__assign_str(foo, foo);
+		__assign_str(foo);
 		__entry->bar	= bar;
 	),
 
@@ -455,7 +478,7 @@ TRACE_EVENT_FN(foo_bar_with_fn,
 	),
 
 	TP_fast_assign(
-		__assign_str(foo, foo);
+		__assign_str(foo);
 		__entry->bar	= bar;
 	),
 
@@ -502,7 +525,7 @@ DECLARE_EVENT_CLASS(foo_template,
 	),
 
 	TP_fast_assign(
-		__assign_str(foo, foo);
+		__assign_str(foo);
 		__entry->bar	= bar;
 	),
 
@@ -570,7 +593,7 @@ TRACE_EVENT(foo_rel_loc,
 	),
 
 	TP_fast_assign(
-		__assign_rel_str(foo, foo);
+		__assign_rel_str(foo);
 		__entry->bar = bar;
 		__assign_rel_bitmask(bitmask, mask,
 			BITS_PER_BYTE * sizeof(unsigned long));
@@ -580,6 +603,25 @@ TRACE_EVENT(foo_rel_loc,
 	TP_printk("foo_rel_loc %s, %d, %s, %s", __get_rel_str(foo), __entry->bar,
 		  __get_rel_bitmask(bitmask),
 		  __get_rel_cpumask(cpumask))
+);
+
+TRACE_EVENT(foo_timer_fn,
+
+	TP_PROTO(struct foo_timer_data *data),
+
+	TP_ARGS(data),
+
+	TP_STRUCT__entry(
+		__string(	name,			data->name	)
+		__field(	int,			count		)
+	),
+
+	TP_fast_assign(
+		__assign_str(name);
+		__entry->count	= *this_cpu_ptr(data->counter);
+	),
+
+	TP_printk("name=%s count=%d", __get_str(name), __entry->count)
 );
 #endif
 

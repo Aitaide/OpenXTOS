@@ -9,7 +9,7 @@
 #include <linux/ratelimit_types.h>
 #include <linux/once_lite.h>
 
-struct uart_port;
+struct console;
 
 extern const char linux_banner[];
 extern const char linux_proc_banner[];
@@ -62,6 +62,10 @@ static inline const char *printk_skip_headers(const char *buffer)
 #define CONSOLE_LOGLEVEL_DEFAULT CONFIG_CONSOLE_LOGLEVEL_DEFAULT
 #define CONSOLE_LOGLEVEL_QUIET	 CONFIG_CONSOLE_LOGLEVEL_QUIET
 
+int match_devname_and_update_preferred_console(const char *match,
+					       const char *name,
+					       const short idx);
+
 extern int console_printk[];
 
 #define console_loglevel (console_printk[0])
@@ -73,8 +77,7 @@ extern void console_verbose(void);
 
 /* strlen("ratelimit") + 1 */
 #define DEVKMSG_STR_MAX_SIZE 10
-extern char devkmsg_log_str[];
-struct ctl_table;
+extern char devkmsg_log_str[DEVKMSG_STR_MAX_SIZE];
 
 extern int suppress_printk;
 
@@ -128,7 +131,7 @@ struct va_format {
 #define no_printk(fmt, ...)				\
 ({							\
 	if (0)						\
-		printk(fmt, ##__VA_ARGS__);		\
+		_printk(fmt, ##__VA_ARGS__);		\
 	0;						\
 })
 
@@ -150,6 +153,8 @@ int vprintk_emit(int facility, int level,
 
 asmlinkage __printf(1, 0)
 int vprintk(const char *fmt, va_list args);
+__printf(1, 0)
+int vprintk_deferred(const char *fmt, va_list args);
 
 asmlinkage __printf(1, 2) __cold
 int _printk(const char *fmt, ...);
@@ -159,10 +164,11 @@ int _printk(const char *fmt, ...);
  */
 __printf(1, 2) __cold int _printk_deferred(const char *fmt, ...);
 
-extern void __printk_safe_enter(void);
-extern void __printk_safe_exit(void);
 extern void __printk_deferred_enter(void);
 extern void __printk_deferred_exit(void);
+
+extern void printk_force_console_enter(void);
+extern void printk_force_console_exit(void);
 
 /*
  * The printk_deferred_enter/exit macros are available only as a hack for
@@ -197,12 +203,20 @@ void show_regs_print_info(const char *log_lvl);
 extern asmlinkage void dump_stack_lvl(const char *log_lvl) __cold;
 extern asmlinkage void dump_stack(void) __cold;
 void printk_trigger_flush(void);
-extern void nbcon_handle_port_lock(struct uart_port *up);
-extern void nbcon_handle_port_unlock(struct uart_port *up);
+void console_try_replay_all(void);
+void printk_legacy_allow_panic_sync(void);
+extern bool nbcon_device_try_acquire(struct console *con);
+extern void nbcon_device_release(struct console *con);
 void nbcon_atomic_flush_unsafe(void);
+bool pr_flush(int timeout_ms, bool reset_on_progress);
 #else
 static inline __printf(1, 0)
 int vprintk(const char *s, va_list args)
+{
+	return 0;
+}
+static inline __printf(1, 0)
+int vprintk_deferred(const char *fmt, va_list args)
 {
 	return 0;
 }
@@ -222,6 +236,14 @@ static inline void printk_deferred_enter(void)
 }
 
 static inline void printk_deferred_exit(void)
+{
+}
+
+static inline void printk_force_console_enter(void)
+{
+}
+
+static inline void printk_force_console_exit(void)
 {
 }
 
@@ -279,17 +301,30 @@ static inline void dump_stack(void)
 static inline void printk_trigger_flush(void)
 {
 }
-
-static inline void nbcon_handle_port_lock(struct uart_port *up)
+static inline void console_try_replay_all(void)
 {
 }
 
-static inline void nbcon_handle_port_unlock(struct uart_port *up)
+static inline void printk_legacy_allow_panic_sync(void)
+{
+}
+
+static inline bool nbcon_device_try_acquire(struct console *con)
+{
+	return false;
+}
+
+static inline void nbcon_device_release(struct console *con)
 {
 }
 
 static inline void nbcon_atomic_flush_unsafe(void)
 {
+}
+
+static inline bool pr_flush(int timeout_ms, bool reset_on_progress)
+{
+	return true;
 }
 
 #endif
@@ -766,8 +801,22 @@ static inline void print_hex_dump_debug(const char *prefix_str, int prefix_type,
 }
 #endif
 
+#if defined(DEBUG)
+#define print_hex_dump_devel(prefix_str, prefix_type, rowsize,		\
+			     groupsize, buf, len, ascii)		\
+	print_hex_dump(KERN_DEBUG, prefix_str, prefix_type, rowsize,	\
+		       groupsize, buf, len, ascii)
+#else
+static inline void print_hex_dump_devel(const char *prefix_str, int prefix_type,
+					int rowsize, int groupsize,
+					const void *buf, size_t len, bool ascii)
+{
+}
+#endif
+
 /**
- * print_hex_dump_bytes - shorthand form of print_hex_dump() with default params
+ * print_hex_dump_bytes - shorthand form of print_hex_dump_debug() with default
+ *                        params
  * @prefix_str: string to prefix each line with;
  *  caller supplies trailing spaces for alignment if desired
  * @prefix_type: controls whether prefix of an offset, address, or none
@@ -775,7 +824,7 @@ static inline void print_hex_dump_debug(const char *prefix_str, int prefix_type,
  * @buf: data blob to dump
  * @len: number of bytes in the @buf
  *
- * Calls print_hex_dump(), with log level of KERN_DEBUG,
+ * Calls print_hex_dump_debug(), with log level of KERN_DEBUG,
  * rowsize of 16, groupsize of 1, and ASCII output included.
  */
 #define print_hex_dump_bytes(prefix_str, prefix_type, buf, len)	\

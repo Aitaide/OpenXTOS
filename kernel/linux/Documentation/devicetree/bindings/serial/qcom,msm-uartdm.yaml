@@ -9,7 +9,7 @@ title: Qualcomm MSM Serial UARTDM
 maintainers:
   - Andy Gross <agross@kernel.org>
   - Bjorn Andersson <bjorn.andersson@linaro.org>
-  - Krzysztof Kozlowski <krzysztof.kozlowski@linaro.org>
+  - Krzysztof Kozlowski <krzk@kernel.org>
 
 description: |
   The MSM serial UARTDM hardware is designed for high-speed use cases where the
@@ -17,7 +17,7 @@ description: |
   software perspective it's mostly compatible with the MSM serial UART except
   that it supports reading and writing multiple characters at a time.
 
-  Note:: Aliases may be defined to ensure the correct ordering of the UARTs.
+  Note: Aliases may be defined to ensure the correct ordering of the UARTs.
   The alias serialN will result in the UART being assigned port N.  If any
   serialN alias exists, then an alias must exist for each enabled UART.  The
   serialN aliases should be in a .dts file instead of in a .dtsi file.
@@ -48,7 +48,15 @@ properties:
       - const: tx
       - const: rx
 
+  interconnects:
+    maxItems: 1
+
   interrupts:
+    maxItems: 1
+
+  operating-points-v2: true
+
+  power-domains:
     maxItems: 1
 
   qcom,rx-crci:
@@ -78,8 +86,6 @@ required:
   - interrupts
   - reg
 
-unevaluatedProperties: false
-
 allOf:
   - $ref: /schemas/serial/serial.yaml#
 
@@ -97,9 +103,13 @@ allOf:
         reg:
           maxItems: 1
 
+unevaluatedProperties: false
+
 examples:
   - |
+    #include <dt-bindings/interconnect/qcom,msm8996.h>
     #include <dt-bindings/interrupt-controller/arm-gic.h>
+    #include <dt-bindings/power/qcom-rpmpd.h>
 
     serial@f991e000 {
         compatible = "qcom,msm-uartdm-v1.4", "qcom,msm-uartdm";
@@ -109,4 +119,7 @@ examples:
         clock-names = "core", "iface";
         dmas = <&dma0 0>, <&dma0 1>;
         dma-names = "tx", "rx";
+        power-domains = <&rpmpd MSM8996_VDDCX>;
+        operating-points-v2 = <&uart_opp_table>;
+        interconnects = <&pnoc MASTER_BLSP_1 &bimc SLAVE_EBI_CH0>;
     };

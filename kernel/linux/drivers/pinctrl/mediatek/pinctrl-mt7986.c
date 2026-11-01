@@ -16,7 +16,7 @@
 		PIN_FIELD_CALC(_s_pin, _e_pin, _i_base, _s_addr, _x_addrs, _s_bit,	\
 			_x_bits, 32, 0)
 
-/**
+/*
  * enum - Locking variants of the iocfg bases
  *
  * MT7986 have multiple bases to program pin configuration listed as the below:
@@ -878,19 +878,19 @@ static const char *mt7986_uart_groups[] = {
 static const char *mt7986_wdt_groups[] = { "watchdog", };
 static const char *mt7986_wf_groups[] = { "wf_2g", "wf_5g", "wf_dbdc", };
 
-static const struct function_desc mt7986_functions[] = {
-	{"audio", mt7986_audio_groups, ARRAY_SIZE(mt7986_audio_groups)},
-	{"emmc", mt7986_emmc_groups, ARRAY_SIZE(mt7986_emmc_groups)},
-	{"eth", mt7986_ethernet_groups, ARRAY_SIZE(mt7986_ethernet_groups)},
-	{"i2c", mt7986_i2c_groups, ARRAY_SIZE(mt7986_i2c_groups)},
-	{"led", mt7986_led_groups, ARRAY_SIZE(mt7986_led_groups)},
-	{"flash", mt7986_flash_groups, ARRAY_SIZE(mt7986_flash_groups)},
-	{"pcie", mt7986_pcie_groups, ARRAY_SIZE(mt7986_pcie_groups)},
-	{"pwm", mt7986_pwm_groups, ARRAY_SIZE(mt7986_pwm_groups)},
-	{"spi", mt7986_spi_groups, ARRAY_SIZE(mt7986_spi_groups)},
-	{"uart", mt7986_uart_groups, ARRAY_SIZE(mt7986_uart_groups)},
-	{"watchdog", mt7986_wdt_groups, ARRAY_SIZE(mt7986_wdt_groups)},
-	{"wifi", mt7986_wf_groups, ARRAY_SIZE(mt7986_wf_groups)},
+static const struct pinfunction mt7986_functions[] = {
+	PINCTRL_PIN_FUNCTION("audio", mt7986_audio),
+	PINCTRL_PIN_FUNCTION("emmc", mt7986_emmc),
+	PINCTRL_PIN_FUNCTION("eth", mt7986_ethernet),
+	PINCTRL_PIN_FUNCTION("i2c", mt7986_i2c),
+	PINCTRL_PIN_FUNCTION("led", mt7986_led),
+	PINCTRL_PIN_FUNCTION("flash", mt7986_flash),
+	PINCTRL_PIN_FUNCTION("pcie", mt7986_pcie),
+	PINCTRL_PIN_FUNCTION("pwm", mt7986_pwm),
+	PINCTRL_PIN_FUNCTION("spi", mt7986_spi),
+	PINCTRL_PIN_FUNCTION("uart", mt7986_uart),
+	PINCTRL_PIN_FUNCTION("watchdog", mt7986_wdt),
+	PINCTRL_PIN_FUNCTION("wifi", mt7986_wf),
 };
 
 static const struct mtk_eint_hw mt7986a_eint_hw = {
@@ -919,7 +919,7 @@ static struct mtk_pin_soc mt7986a_data = {
 	.nfuncs = ARRAY_SIZE(mt7986_functions),
 	.eint_hw = &mt7986a_eint_hw,
 	.gpio_m = 0,
-	.ies_present = false,
+	.ies_present = true,
 	.base_names = mt7986_pinctrl_register_base_names,
 	.nbase_names = ARRAY_SIZE(mt7986_pinctrl_register_base_names),
 	.bias_disable_set = mtk_pinconf_bias_disable_set,
@@ -945,7 +945,7 @@ static struct mtk_pin_soc mt7986b_data = {
 	.nfuncs = ARRAY_SIZE(mt7986_functions),
 	.eint_hw = &mt7986b_eint_hw,
 	.gpio_m = 0,
-	.ies_present = false,
+	.ies_present = true,
 	.base_names = mt7986_pinctrl_register_base_names,
 	.nbase_names = ARRAY_SIZE(mt7986_pinctrl_register_base_names),
 	.bias_disable_set = mtk_pinconf_bias_disable_set,
@@ -965,11 +965,13 @@ static const struct of_device_id mt7986a_pinctrl_of_match[] = {
 	{.compatible = "mediatek,mt7986a-pinctrl",},
 	{}
 };
+MODULE_DEVICE_TABLE(of, mt7986a_pinctrl_of_match);
 
 static const struct of_device_id mt7986b_pinctrl_of_match[] = {
 	{.compatible = "mediatek,mt7986b-pinctrl",},
 	{}
 };
+MODULE_DEVICE_TABLE(of, mt7986b_pinctrl_of_match);
 
 static int mt7986a_pinctrl_probe(struct platform_device *pdev)
 {
@@ -997,15 +999,18 @@ static struct platform_driver mt7986b_pinctrl_driver = {
 	.probe = mt7986b_pinctrl_probe,
 };
 
-static int __init mt7986a_pinctrl_init(void)
-{
-	return platform_driver_register(&mt7986a_pinctrl_driver);
-}
+static struct platform_driver * const mt7986_pinctrl_drivers[] = {
+	&mt7986a_pinctrl_driver,
+	&mt7986b_pinctrl_driver,
+};
 
-static int __init mt7986b_pinctrl_init(void)
+static int __init mt7986_pinctrl_init(void)
 {
-	return platform_driver_register(&mt7986b_pinctrl_driver);
+	return platform_register_drivers(mt7986_pinctrl_drivers,
+					 ARRAY_SIZE(mt7986_pinctrl_drivers));
 }
+arch_initcall(mt7986_pinctrl_init);
 
-arch_initcall(mt7986a_pinctrl_init);
-arch_initcall(mt7986b_pinctrl_init);
+MODULE_DESCRIPTION("MediaTek MT7986 Pinctrl Driver");
+MODULE_LICENSE("GPL v2");
+MODULE_IMPORT_NS("MTK_PINCTRL");

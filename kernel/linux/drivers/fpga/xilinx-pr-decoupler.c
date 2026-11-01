@@ -10,8 +10,10 @@
 #include <linux/clk.h>
 #include <linux/io.h>
 #include <linux/kernel.h>
-#include <linux/of_device.h>
 #include <linux/module.h>
+#include <linux/of.h>
+#include <linux/platform_device.h>
+#include <linux/property.h>
 #include <linux/fpga/fpga-bridge.h>
 
 #define CTRL_CMD_DECOUPLE	BIT(0)
@@ -81,7 +83,6 @@ static const struct fpga_bridge_ops xlnx_pr_decoupler_br_ops = {
 	.enable_show = xlnx_pr_decoupler_enable_show,
 };
 
-#ifdef CONFIG_OF
 static const struct xlnx_config_data decoupler_config = {
 	.name = "Xilinx PR Decoupler",
 };
@@ -100,11 +101,9 @@ static const struct of_device_id xlnx_pr_decoupler_of_match[] = {
 	{},
 };
 MODULE_DEVICE_TABLE(of, xlnx_pr_decoupler_of_match);
-#endif
 
 static int xlnx_pr_decoupler_probe(struct platform_device *pdev)
 {
-	struct device_node *np = pdev->dev.of_node;
 	struct xlnx_pr_decoupler_data *priv;
 	struct fpga_bridge *br;
 	int err;
@@ -113,30 +112,16 @@ static int xlnx_pr_decoupler_probe(struct platform_device *pdev)
 	if (!priv)
 		return -ENOMEM;
 
-	if (np) {
-		const struct of_device_id *match;
-
-		match = of_match_node(xlnx_pr_decoupler_of_match, np);
-		if (match && match->data)
-			priv->ipconfig = match->data;
-	}
+	priv->ipconfig = device_get_match_data(&pdev->dev);
 
 	priv->io_base = devm_platform_ioremap_resource(pdev, 0);
 	if (IS_ERR(priv->io_base))
 		return PTR_ERR(priv->io_base);
 
-	priv->clk = devm_clk_get(&pdev->dev, "aclk");
+	priv->clk = devm_clk_get_prepared(&pdev->dev, "aclk");
 	if (IS_ERR(priv->clk))
 		return dev_err_probe(&pdev->dev, PTR_ERR(priv->clk),
 				     "input clock not found\n");
-
-	err = clk_prepare_enable(priv->clk);
-	if (err) {
-		dev_err(&pdev->dev, "unable to enable clock\n");
-		return err;
-	}
-
-	clk_disable(priv->clk);
 
 	br = fpga_bridge_register(&pdev->dev, priv->ipconfig->name,
 				  &xlnx_pr_decoupler_br_ops, priv);
@@ -144,29 +129,19 @@ static int xlnx_pr_decoupler_probe(struct platform_device *pdev)
 		err = PTR_ERR(br);
 		dev_err(&pdev->dev, "unable to register %s",
 			priv->ipconfig->name);
-		goto err_clk;
+		return err;
 	}
 
 	platform_set_drvdata(pdev, br);
 
 	return 0;
-
-err_clk:
-	clk_unprepare(priv->clk);
-
-	return err;
 }
 
-static int xlnx_pr_decoupler_remove(struct platform_device *pdev)
+static void xlnx_pr_decoupler_remove(struct platform_device *pdev)
 {
 	struct fpga_bridge *bridge = platform_get_drvdata(pdev);
-	struct xlnx_pr_decoupler_data *p = bridge->priv;
 
 	fpga_bridge_unregister(bridge);
-
-	clk_unprepare(p->clk);
-
-	return 0;
 }
 
 static struct platform_driver xlnx_pr_decoupler_driver = {
@@ -174,7 +149,7 @@ static struct platform_driver xlnx_pr_decoupler_driver = {
 	.remove = xlnx_pr_decoupler_remove,
 	.driver = {
 		.name = "xlnx_pr_decoupler",
-		.of_match_table = of_match_ptr(xlnx_pr_decoupler_of_match),
+		.of_match_table = xlnx_pr_decoupler_of_match,
 	},
 };
 
@@ -182,5 +157,5 @@ module_platform_driver(xlnx_pr_decoupler_driver);
 
 MODULE_DESCRIPTION("Xilinx Partial Reconfiguration Decoupler");
 MODULE_AUTHOR("Moritz Fischer <mdf@kernel.org>");
-MODULE_AUTHOR("Michal Simek <michal.simek@xilinx.com>");
+MODULE_AUTHOR("Michal Simek <michal.simek@amd.com>");
 MODULE_LICENSE("GPL v2");

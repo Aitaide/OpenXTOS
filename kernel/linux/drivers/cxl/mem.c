@@ -45,48 +45,14 @@ static int cxl_mem_dpa_show(struct seq_file *file, void *data)
 	return 0;
 }
 
-static int devm_cxl_add_endpoint(struct device *host, struct cxl_memdev *cxlmd,
-				 struct cxl_dport *parent_dport)
-{
-	struct cxl_port *parent_port = parent_dport->port;
-	struct cxl_dev_state *cxlds = cxlmd->cxlds;
-	struct cxl_port *endpoint, *iter, *down;
-	int rc;
-
-	/*
-	 * Now that the path to the root is established record all the
-	 * intervening ports in the chain.
-	 */
-	for (iter = parent_port, down = NULL; !is_cxl_root(iter);
-	     down = iter, iter = to_cxl_port(iter->dev.parent)) {
-		struct cxl_ep *ep;
-
-		ep = cxl_ep_load(iter, cxlmd);
-		ep->next = down;
-	}
-
-	endpoint = devm_cxl_add_port(host, &cxlmd->dev,
-				     cxlds->component_reg_phys,
-				     parent_dport);
-	if (IS_ERR(endpoint))
-		return PTR_ERR(endpoint);
-
-	rc = cxl_endpoint_autoremove(cxlmd, endpoint);
-	if (rc)
-		return rc;
-
-	if (!endpoint->dev.driver) {
-		dev_err(&cxlmd->dev, "%s failed probe\n",
-			dev_name(&endpoint->dev));
-		return -ENXIO;
-	}
-
-	return 0;
-}
-
 static int cxl_debugfs_poison_inject(void *data, u64 dpa)
 {
 	struct cxl_memdev *cxlmd = data;
+	int rc;
+
+	ACQUIRE(device_intr, devlock)(&cxlmd->dev);
+	if ((rc = ACQUIRE_ERR(device_intr, &devlock)))
+		return rc;
 
 	return cxl_inject_poison(cxlmd, dpa);
 }
@@ -97,6 +63,11 @@ DEFINE_DEBUGFS_ATTRIBUTE(cxl_poison_inject_fops, NULL,
 static int cxl_debugfs_poison_clear(void *data, u64 dpa)
 {
 	struct cxl_memdev *cxlmd = data;
+	int rc;
+
+	ACQUIRE(device_intr, devlock)(&cxlmd->dev);
+	if ((rc = ACQUIRE_ERR(device_intr, &devlock)))
+		return rc;
 
 	return cxl_clear_poison(cxlmd, dpa);
 }
@@ -104,13 +75,32 @@ static int cxl_debugfs_poison_clear(void *data, u64 dpa)
 DEFINE_DEBUGFS_ATTRIBUTE(cxl_poison_clear_fops, NULL,
 			 cxl_debugfs_poison_clear, "%llx\n");
 
+static void cxl_memdev_poison_enable(struct cxl_memdev_state *mds,
+				     struct cxl_memdev *cxlmd,
+				     struct dentry *dentry)
+{
+	/*
+	 * Avoid poison debugfs for DEVMEM aka accelerators as they rely on
+	 * cxl_memdev_state.
+	 */
+	if (!mds)
+		return;
+
+	if (test_bit(CXL_POISON_ENABLED_INJECT, mds->poison.enabled_cmds))
+		debugfs_create_file("inject_poison", 0200, dentry, cxlmd,
+				    &cxl_poison_inject_fops);
+
+	if (test_bit(CXL_POISON_ENABLED_CLEAR, mds->poison.enabled_cmds))
+		debugfs_create_file("clear_poison", 0200, dentry, cxlmd,
+				    &cxl_poison_clear_fops);
+}
+
 static int cxl_mem_probe(struct device *dev)
 {
 	struct cxl_memdev *cxlmd = to_cxl_memdev(dev);
 	struct cxl_memdev_state *mds = to_cxl_memdev_state(cxlmd->cxlds);
 	struct cxl_dev_state *cxlds = cxlmd->cxlds;
 	struct device *endpoint_parent;
-	struct cxl_port *parent_port;
 	struct cxl_dport *dport;
 	struct dentry *dentry;
 	int rc;
@@ -132,12 +122,7 @@ static int cxl_mem_probe(struct device *dev)
 	dentry = cxl_debugfs_create_dir(dev_name(dev));
 	debugfs_create_devm_seqfile(dev, "dpamem", dentry, cxl_mem_dpa_show);
 
-	if (test_bit(CXL_POISON_ENABLED_INJECT, mds->poison.enabled_cmds))
-		debugfs_create_file("inject_poison", 0200, dentry, cxlmd,
-				    &cxl_poison_inject_fops);
-	if (test_bit(CXL_POISON_ENABLED_CLEAR, mds->poison.enabled_cmds))
-		debugfs_create_file("clear_poison", 0200, dentry, cxlmd,
-				    &cxl_poison_clear_fops);
+	cxl_memdev_poison_enable(mds, cxlmd, dentry);
 
 	rc = devm_add_action_or_reset(dev, remove_debugfs, dentry);
 	if (rc)
@@ -147,10 +132,20 @@ static int cxl_mem_probe(struct device *dev)
 	if (rc)
 		return rc;
 
-	parent_port = cxl_mem_find_port(cxlmd, &dport);
+	struct cxl_port *parent_port __free(put_cxl_port) =
+		cxl_mem_find_port(cxlmd, &dport);
 	if (!parent_port) {
 		dev_err(dev, "CXL port topology not found\n");
 		return -ENXIO;
+	}
+
+	if (cxl_pmem_size(cxlds) && IS_ENABLED(CONFIG_CXL_PMEM)) {
+		rc = devm_cxl_add_nvdimm(dev, parent_port, cxlmd);
+		if (rc) {
+			if (rc == -ENODEV)
+				dev_info(dev, "PMEM disabled by platform\n");
+			return rc;
+		}
 	}
 
 	if (dport->rch)
@@ -158,28 +153,27 @@ static int cxl_mem_probe(struct device *dev)
 	else
 		endpoint_parent = &parent_port->dev;
 
-	device_lock(endpoint_parent);
-	if (!endpoint_parent->driver) {
-		dev_err(dev, "CXL port topology %s not enabled\n",
-			dev_name(endpoint_parent));
-		rc = -ENXIO;
-		goto unlock;
-	}
+	scoped_guard(device, endpoint_parent) {
+		if (!endpoint_parent->driver) {
+			dev_err(dev, "CXL port topology %s not enabled\n",
+				dev_name(endpoint_parent));
+			return -ENXIO;
+		}
 
-	rc = devm_cxl_add_endpoint(endpoint_parent, cxlmd, dport);
-unlock:
-	device_unlock(endpoint_parent);
-	put_device(&parent_port->dev);
-	if (rc)
-		return rc;
-
-	if (resource_size(&cxlds->pmem_res) && IS_ENABLED(CONFIG_CXL_PMEM)) {
-		rc = devm_cxl_add_nvdimm(cxlmd);
-		if (rc == -ENODEV)
-			dev_info(dev, "PMEM disabled by platform\n");
-		else
+		rc = devm_cxl_add_endpoint(endpoint_parent, cxlmd, dport);
+		if (rc)
 			return rc;
 	}
+
+	if (cxlmd->attach) {
+		rc = cxlmd->attach->probe(cxlmd);
+		if (rc)
+			return rc;
+	}
+
+	rc = devm_cxl_memdev_edac_register(cxlmd);
+	if (rc)
+		dev_dbg(dev, "CXL memdev EDAC registration failed rc=%d\n", rc);
 
 	/*
 	 * The kernel may be operating out of CXL memory on this device,
@@ -198,6 +192,61 @@ unlock:
 	return devm_add_action_or_reset(dev, enable_suspend, NULL);
 }
 
+/**
+ * devm_cxl_add_classdev - Add a CXL memory class-code device
+ * @cxlds: CXL device state to associate with the memdev
+ *
+ * Upon return the device will have had a chance to attach to the
+ * cxl_mem driver, but may fail to attach if the CXL topology is not ready
+ * (hardware CXL link down, or software platform CXL root not attached).
+ *
+ * The parent of the resulting device and the devm context for allocations is
+ * @cxlds->dev.
+ */
+struct cxl_memdev *devm_cxl_add_classdev(struct cxl_dev_state *cxlds)
+{
+	return __devm_cxl_add_memdev(cxlds, NULL);
+}
+EXPORT_SYMBOL_NS_GPL(devm_cxl_add_classdev, "CXL");
+
+/**
+ * devm_cxl_probe_mem - Add a CXL memory device and probe its region
+ * @cxlds: CXL device state to associate with the memdev
+ * @hpa_range: CXL.mem physical address range result
+ *
+ * Upon return the device will have had a chance to attach to the
+ * cxl_mem driver, but may fail to attach if the CXL topology is not ready
+ * (hardware CXL link down, or software platform CXL root not attached).
+ *
+ * Failure to probe the memdev and/or setup a region for the memdev
+ * results in this function failing.
+ *
+ * The parent of the resulting device and the devm context for allocations is
+ * @cxlds->dev.
+ */
+struct cxl_memdev *devm_cxl_probe_mem(struct cxl_dev_state *cxlds,
+				      struct range *hpa_range)
+{
+	struct cxl_attach_region *attach =
+		devm_kmalloc(cxlds->dev, sizeof(*attach), GFP_KERNEL);
+	struct cxl_memdev *cxlmd;
+
+	if (!attach)
+		return ERR_PTR(-ENOMEM);
+
+	*attach = (struct cxl_attach_region) {
+		.attach = {
+			   .probe = cxl_memdev_attach_region,
+		},
+		.hpa_range = { 0, -1 },
+	};
+
+	cxlmd = __devm_cxl_add_memdev(cxlds, &attach->attach);
+	*hpa_range = attach->hpa_range;
+	return cxlmd;
+}
+EXPORT_SYMBOL_NS_GPL(devm_cxl_probe_mem, "CXL");
+
 static ssize_t trigger_poison_list_store(struct device *dev,
 					 struct device_attribute *attr,
 					 const char *buf, size_t len)
@@ -214,18 +263,25 @@ static ssize_t trigger_poison_list_store(struct device *dev,
 }
 static DEVICE_ATTR_WO(trigger_poison_list);
 
+static bool cxl_poison_attr_visible(struct kobject *kobj, struct attribute *a)
+{
+	struct device *dev = kobj_to_dev(kobj);
+	struct cxl_memdev *cxlmd = to_cxl_memdev(dev);
+	struct cxl_memdev_state *mds = to_cxl_memdev_state(cxlmd->cxlds);
+
+	if (!mds ||
+	    !test_bit(CXL_POISON_ENABLED_LIST, mds->poison.enabled_cmds))
+		return false;
+
+	return true;
+}
+
 static umode_t cxl_mem_visible(struct kobject *kobj, struct attribute *a, int n)
 {
-	if (a == &dev_attr_trigger_poison_list.attr) {
-		struct device *dev = kobj_to_dev(kobj);
-		struct cxl_memdev *cxlmd = to_cxl_memdev(dev);
-		struct cxl_memdev_state *mds =
-			to_cxl_memdev_state(cxlmd->cxlds);
+	if (a == &dev_attr_trigger_poison_list.attr &&
+	    !cxl_poison_attr_visible(kobj, a))
+		return 0;
 
-		if (!test_bit(CXL_POISON_ENABLED_LIST,
-			      mds->poison.enabled_cmds))
-			return 0;
-	}
 	return a->mode;
 }
 
@@ -246,17 +302,14 @@ static struct cxl_driver cxl_mem_driver = {
 	.probe = cxl_mem_probe,
 	.id = CXL_DEVICE_MEMORY_EXPANDER,
 	.drv = {
+		.probe_type = PROBE_FORCE_SYNCHRONOUS,
 		.dev_groups = cxl_mem_groups,
 	},
 };
 
 module_cxl_driver(cxl_mem_driver);
 
+MODULE_DESCRIPTION("CXL: Memory Expansion");
 MODULE_LICENSE("GPL v2");
-MODULE_IMPORT_NS(CXL);
+MODULE_IMPORT_NS("CXL");
 MODULE_ALIAS_CXL(CXL_DEVICE_MEMORY_EXPANDER);
-/*
- * create_endpoint() wants to validate port driver attach immediately after
- * endpoint registration.
- */
-MODULE_SOFTDEP("pre: cxl_port");

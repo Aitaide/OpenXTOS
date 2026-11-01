@@ -116,7 +116,7 @@
 #define WM8904_DRC_REGS  4
 #define WM8904_EQ_REGS   24
 
-/**
+/*
  * DRC configurations are specified with a label and a set of register
  * values to write (the enable bits will be ignored).  At runtime an
  * enumerated control will be presented for each DRC block allowing
@@ -131,7 +131,7 @@ struct wm8904_drc_cfg {
 	u16 regs[WM8904_DRC_REGS];
 };
 
-/**
+/*
  * ReTune Mobile configurations are specified with a label, sample
  * rate and set of values to write (the enable bits will be ignored).
  *
@@ -150,6 +150,9 @@ struct wm8904_pdata {
 
 	int num_retune_mobile_cfgs;
 	struct wm8904_retune_mobile_cfg *retune_mobile_cfgs;
+
+	bool in1l_as_dmicdat1;
+	bool in1r_as_dmicdat2;
 
 	u32 gpio_cfg[WM8904_GPIO_REGS];
 	u32 mic_cfg[WM8904_MIC_REGS];

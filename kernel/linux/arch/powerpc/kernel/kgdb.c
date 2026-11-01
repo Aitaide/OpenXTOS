@@ -21,7 +21,7 @@
 #include <asm/processor.h>
 #include <asm/machdep.h>
 #include <asm/debug.h>
-#include <asm/code-patching.h>
+#include <asm/text-patching.h>
 #include <linux/slab.h>
 #include <asm/inst.h>
 
@@ -45,7 +45,7 @@ static struct hard_trap_info
 	{ 0x0800, 0x08 /* SIGFPE */  },		/* fp unavailable */
 	{ 0x0900, 0x0e /* SIGALRM */ },		/* decrementer */
 	{ 0x0c00, 0x14 /* SIGCHLD */ },		/* system call */
-#ifdef CONFIG_BOOKE_OR_40x
+#ifdef CONFIG_BOOKE
 	{ 0x2002, 0x05 /* SIGTRAP */ },		/* debug */
 #if defined(CONFIG_PPC_85xx)
 	{ 0x2010, 0x08 /* SIGFPE */  },		/* spe unavailable */
@@ -64,7 +64,7 @@ static struct hard_trap_info
 	{ 0x2010, 0x08 /* SIGFPE */  },		/* fp unavailable */
 	{ 0x2020, 0x08 /* SIGFPE */  },		/* ap unavailable */
 #endif
-#else /* !CONFIG_BOOKE_OR_40x */
+#else /* !CONFIG_BOOKE */
 	{ 0x0d00, 0x05 /* SIGTRAP */ },		/* single-step */
 #if defined(CONFIG_PPC_8xx)
 	{ 0x1000, 0x04 /* SIGILL */  },		/* software emulation */
@@ -101,7 +101,6 @@ static int computeSignal(unsigned int tt)
 }
 
 /**
- *
  *	kgdb_skipexception - Bail out of KGDB when we've been triggered.
  *	@exception: Exception vector number
  *	@regs: Current &struct pt_regs.
@@ -109,6 +108,8 @@ static int computeSignal(unsigned int tt)
  *	On some architectures we need to skip a breakpoint exception when
  *	it occurs after a breakpoint has been removed.
  *
+ *	Return: return %1 if the breakpoint for this address has been removed,
+ *		otherwise return %0
  */
 int kgdb_skipexception(int exception, struct pt_regs *regs)
 {

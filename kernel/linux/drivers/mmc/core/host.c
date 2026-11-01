@@ -13,9 +13,7 @@
 #include <linux/err.h>
 #include <linux/idr.h>
 #include <linux/of.h>
-#include <linux/of_gpio.h>
 #include <linux/pagemap.h>
-#include <linux/pm_wakeup.h>
 #include <linux/export.h>
 #include <linux/leds.h>
 #include <linux/slab.h>
@@ -35,7 +33,6 @@
 
 static DEFINE_IDA(mmc_host_ida);
 
-#ifdef CONFIG_PM_SLEEP
 static int mmc_host_class_prepare(struct device *dev)
 {
 	struct mmc_host *host = cls_dev_to_mmc_host(dev);
@@ -62,21 +59,16 @@ static void mmc_host_class_complete(struct device *dev)
 }
 
 static const struct dev_pm_ops mmc_host_class_dev_pm_ops = {
-	.prepare = mmc_host_class_prepare,
-	.complete = mmc_host_class_complete,
+	.prepare = pm_sleep_ptr(mmc_host_class_prepare),
+	.complete = pm_sleep_ptr(mmc_host_class_complete),
 };
-
-#define MMC_HOST_CLASS_DEV_PM_OPS (&mmc_host_class_dev_pm_ops)
-#else
-#define MMC_HOST_CLASS_DEV_PM_OPS NULL
-#endif
 
 static void mmc_host_classdev_release(struct device *dev)
 {
 	struct mmc_host *host = cls_dev_to_mmc_host(dev);
 	wakeup_source_unregister(host->ws);
 	if (of_alias_get_id(host->parent->of_node, "mmc") < 0)
-		ida_simple_remove(&mmc_host_ida, host->index);
+		ida_free(&mmc_host_ida, host->index);
 	kfree(host);
 }
 
@@ -88,11 +80,11 @@ static int mmc_host_classdev_shutdown(struct device *dev)
 	return 0;
 }
 
-static struct class mmc_host_class = {
+static const struct class mmc_host_class = {
 	.name		= "mmc_host",
 	.dev_release	= mmc_host_classdev_release,
 	.shutdown_pre	= mmc_host_classdev_shutdown,
-	.pm		= MMC_HOST_CLASS_DEV_PM_OPS,
+	.pm		= pm_ptr(&mmc_host_class_dev_pm_ops),
 };
 
 int mmc_register_host_class(void)
@@ -119,13 +111,12 @@ void mmc_retune_enable(struct mmc_host *host)
 
 /*
  * Pause re-tuning for a small set of operations.  The pause begins after the
- * next command and after first doing re-tuning.
+ * next command.
  */
 void mmc_retune_pause(struct mmc_host *host)
 {
 	if (!host->retune_paused) {
 		host->retune_paused = 1;
-		mmc_retune_needed(host);
 		mmc_retune_hold(host);
 	}
 }
@@ -150,13 +141,13 @@ void mmc_retune_disable(struct mmc_host *host)
 {
 	mmc_retune_unpause(host);
 	host->can_retune = 0;
-	del_timer_sync(&host->retune_timer);
+	timer_delete_sync(&host->retune_timer);
 	mmc_retune_clear(host);
 }
 
 void mmc_retune_timer_stop(struct mmc_host *host)
 {
-	del_timer_sync(&host->retune_timer);
+	timer_delete_sync(&host->retune_timer);
 }
 EXPORT_SYMBOL(mmc_retune_timer_stop);
 
@@ -215,7 +206,7 @@ out:
 
 static void mmc_retune_timer(struct timer_list *t)
 {
-	struct mmc_host *host = from_timer(host, t, retune_timer);
+	struct mmc_host *host = timer_container_of(host, t, retune_timer);
 
 	mmc_retune_needed(host);
 }
@@ -235,10 +226,8 @@ static void mmc_of_parse_timing_phase(struct device *dev, const char *prop,
 }
 
 void
-mmc_of_parse_clk_phase(struct mmc_host *host, struct mmc_clk_phase_map *map)
+mmc_of_parse_clk_phase(struct device *dev, struct mmc_clk_phase_map *map)
 {
-	struct device *dev = host->parent;
-
 	mmc_of_parse_timing_phase(dev, "clk-phase-legacy",
 				  &map->phase[MMC_TIMING_LEGACY]);
 	mmc_of_parse_timing_phase(dev, "clk-phase-mmc-hs",
@@ -306,6 +295,8 @@ int mmc_of_parse(struct mmc_host *host)
 
 	/* f_max is obtained from the optional "max-frequency" property */
 	device_property_read_u32(dev, "max-frequency", &host->f_max);
+
+	device_property_read_u32(dev, "max-sd-hs-hz", &host->max_sd_hs_hz);
 
 	/*
 	 * Configure CD and WP pins. They are both by default active low to
@@ -382,8 +373,7 @@ int mmc_of_parse(struct mmc_host *host)
 		host->caps2 |= MMC_CAP2_FULL_PWR_CYCLE_IN_SUSPEND;
 	if (device_property_read_bool(dev, "keep-power-in-suspend"))
 		host->pm_caps |= MMC_PM_KEEP_POWER;
-	if (device_property_read_bool(dev, "wakeup-source") ||
-	    device_property_read_bool(dev, "enable-sdio-wakeup")) /* legacy */
+	if (device_property_read_bool(dev, "wakeup-source"))
 		host->pm_caps |= MMC_PM_WAKE_SDIO_IRQ;
 	if (device_property_read_bool(dev, "mmc-ddr-3_3v"))
 		host->caps |= MMC_CAP_3_3V_DDR;
@@ -539,7 +529,8 @@ struct mmc_host *mmc_alloc_host(int extra, struct device *dev)
 		min_idx = mmc_first_nonreserved_index();
 		max_idx = 0;
 
-		index = ida_simple_get(&mmc_host_ida, min_idx, max_idx, GFP_KERNEL);
+		index = ida_alloc_range(&mmc_host_ida, min_idx, max_idx - 1,
+					GFP_KERNEL);
 		if (index < 0) {
 			kfree(host);
 			return NULL;
@@ -567,6 +558,8 @@ struct mmc_host *mmc_alloc_host(int extra, struct device *dev)
 	INIT_DELAYED_WORK(&host->detect, mmc_rescan);
 	INIT_WORK(&host->sdio_irq_work, sdio_irq_work);
 	timer_setup(&host->retune_timer, mmc_retune_timer, 0);
+
+	INIT_WORK(&host->supply.uv_work, mmc_undervoltage_workfn);
 
 	/*
 	 * By default, hosts do not support SGIO or large requests.
@@ -624,11 +617,23 @@ static int mmc_validate_host_caps(struct mmc_host *host)
 		return -EINVAL;
 	}
 
+	/* UHS/DDR/HS200 modes require at least 4-bit bus */
+	if (!(caps & (MMC_CAP_4_BIT_DATA | MMC_CAP_8_BIT_DATA)) &&
+	    ((caps & (MMC_CAP_UHS | MMC_CAP_DDR)) || (caps2 & MMC_CAP2_HS200))) {
+		dev_warn(dev, "drop UHS/DDR/HS200 support since 1-bit bus only\n");
+		caps &= ~(MMC_CAP_UHS | MMC_CAP_DDR);
+		caps2 &= ~MMC_CAP2_HS200;
+	}
+
+	/* HS400 and HS400ES modes require 8-bit bus */
 	if (caps2 & (MMC_CAP2_HS400_ES | MMC_CAP2_HS400) &&
 	    !(caps & MMC_CAP_8_BIT_DATA) && !(caps2 & MMC_CAP2_NO_MMC)) {
 		dev_warn(dev, "drop HS400 support since no 8-bit bus\n");
-		host->caps2 = caps2 & ~MMC_CAP2_HS400_ES & ~MMC_CAP2_HS400;
+		caps2 &= ~(MMC_CAP2_HS400_ES | MMC_CAP2_HS400);
 	}
+
+	host->caps = caps;
+	host->caps2 = caps2;
 
 	return 0;
 }
@@ -692,6 +697,8 @@ EXPORT_SYMBOL(mmc_remove_host);
  */
 void mmc_free_host(struct mmc_host *host)
 {
+	cancel_delayed_work_sync(&host->detect);
+	cancel_work_sync(&host->sdio_irq_work);
 	mmc_pwrseq_free(host);
 	put_device(&host->class_dev);
 }

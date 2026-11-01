@@ -1536,13 +1536,11 @@ static void buf_cleanup(struct vb2_buffer *vb)
 
 static int start_streaming(struct vb2_queue *q, unsigned int count)
 {
-	int ret = 1;
 	int seqnr = 0;
 	struct bttv_buffer *buf;
 	struct bttv *btv = vb2_get_drv_priv(q);
 
-	ret = check_alloc_btres_lock(btv, RESOURCE_VIDEO_STREAM);
-	if (ret == 0) {
+	if (!check_alloc_btres_lock(btv, RESOURCE_VIDEO_STREAM)) {
 		if (btv->field_count)
 			seqnr++;
 		while (!list_empty(&btv->capture)) {
@@ -1553,7 +1551,7 @@ static int start_streaming(struct vb2_queue *q, unsigned int count)
 			vb2_buffer_done(&buf->vbuf.vb2_buf,
 					VB2_BUF_STATE_QUEUED);
 		}
-		return !ret;
+		return -EBUSY;
 	}
 	if (!vb2_is_streaming(&btv->vbiq)) {
 		init_irqreg(btv);
@@ -1586,8 +1584,6 @@ static const struct vb2_ops bttv_video_qops = {
 	.buf_cleanup    = buf_cleanup,
 	.start_streaming = start_streaming,
 	.stop_streaming = stop_streaming,
-	.wait_prepare   = vb2_ops_wait_prepare,
-	.wait_finish    = vb2_ops_wait_finish,
 };
 
 static void radio_enable(struct bttv *btv)
@@ -1624,7 +1620,7 @@ static int bttv_g_std(struct file *file, void *priv, v4l2_std_id *id)
 	return 0;
 }
 
-static int bttv_querystd(struct file *file, void *f, v4l2_std_id *id)
+static int bttv_querystd(struct file *file, void *priv, v4l2_std_id *id)
 {
 	struct bttv *btv = video_drvdata(file);
 
@@ -1754,7 +1750,7 @@ static int bttv_s_frequency(struct file *file, void *priv,
 	return 0;
 }
 
-static int bttv_log_status(struct file *file, void *f)
+static int bttv_log_status(struct file *file, void *priv)
 {
 	struct video_device *vdev = video_devdata(file);
 	struct bttv *btv = video_drvdata(file);
@@ -1765,7 +1761,7 @@ static int bttv_log_status(struct file *file, void *f)
 }
 
 #ifdef CONFIG_VIDEO_ADV_DEBUG
-static int bttv_g_register(struct file *file, void *f,
+static int bttv_g_register(struct file *file, void *priv,
 					struct v4l2_dbg_register *reg)
 {
 	struct bttv *btv = video_drvdata(file);
@@ -1778,7 +1774,7 @@ static int bttv_g_register(struct file *file, void *f,
 	return 0;
 }
 
-static int bttv_s_register(struct file *file, void *f,
+static int bttv_s_register(struct file *file, void *priv,
 					const struct v4l2_dbg_register *reg)
 {
 	struct bttv *btv = video_drvdata(file);
@@ -2163,7 +2159,7 @@ static int bttv_enum_fmt_vid_cap(struct file *file, void  *priv,
 	return 0;
 }
 
-static int bttv_g_parm(struct file *file, void *f,
+static int bttv_g_parm(struct file *file, void *priv,
 				struct v4l2_streamparm *parm)
 {
 	struct bttv *btv = video_drvdata(file);
@@ -2212,7 +2208,7 @@ static int bttv_g_pixelaspect(struct file *file, void *priv,
 	return 0;
 }
 
-static int bttv_g_selection(struct file *file, void *f, struct v4l2_selection *sel)
+static int bttv_g_selection(struct file *file, void *priv, struct v4l2_selection *sel)
 {
 	struct bttv *btv = video_drvdata(file);
 
@@ -2236,7 +2232,7 @@ static int bttv_g_selection(struct file *file, void *f, struct v4l2_selection *s
 	return 0;
 }
 
-static int bttv_s_selection(struct file *file, void *f, struct v4l2_selection *sel)
+static int bttv_s_selection(struct file *file, void *priv, struct v4l2_selection *sel)
 {
 	struct bttv *btv = video_drvdata(file);
 	const struct v4l2_rect *b;
@@ -2774,6 +2770,27 @@ bttv_irq_wakeup_vbi(struct bttv *btv, struct bttv_buffer *wakeup,
 		return;
 	wakeup->vbuf.vb2_buf.timestamp = ktime_get_ns();
 	wakeup->vbuf.sequence = btv->field_count >> 1;
+
+	/*
+	 * Ugly hack for backwards compatibility.
+	 * Some applications expect that the last 4 bytes of
+	 * the VBI data contains the sequence number.
+	 *
+	 * This makes it possible to associate the VBI data
+	 * with the video frame if you use read() to get the
+	 * VBI data.
+	 */
+	if (vb2_fileio_is_active(wakeup->vbuf.vb2_buf.vb2_queue)) {
+		u32 *vaddr = vb2_plane_vaddr(&wakeup->vbuf.vb2_buf, 0);
+		unsigned long size =
+			vb2_get_plane_payload(&wakeup->vbuf.vb2_buf, 0) / 4;
+
+		if (vaddr && size) {
+			vaddr += size - 1;
+			*vaddr = wakeup->vbuf.sequence;
+		}
+	}
+
 	vb2_buffer_done(&wakeup->vbuf.vb2_buf, state);
 	if (btv->field_count == 0)
 		btor(BT848_INT_VSYNC, BT848_INT_MASK);
@@ -2781,7 +2798,7 @@ bttv_irq_wakeup_vbi(struct bttv *btv, struct bttv_buffer *wakeup,
 
 static void bttv_irq_timeout(struct timer_list *t)
 {
-	struct bttv *btv = from_timer(btv, t, timeout);
+	struct bttv *btv = timer_container_of(btv, t, timeout);
 	struct bttv_buffer_set old,new;
 	struct bttv_buffer *ovbi;
 	struct bttv_buffer *item;
@@ -3094,7 +3111,7 @@ static int vdev_init(struct bttv *btv, struct video_device *vfd,
 	q->gfp_flags = __GFP_DMA32;
 	q->buf_struct_size = sizeof(struct bttv_buffer);
 	q->lock = &btv->lock;
-	q->min_buffers_needed = 2;
+	q->min_queued_buffers = 2;
 	q->dev = &btv->c.pci->dev;
 	err = vb2_queue_init(q);
 	if (err)
@@ -3199,7 +3216,7 @@ static int bttv_probe(struct pci_dev *dev, const struct pci_device_id *pci_id)
 	if (bttv_num == BTTV_MAX)
 		return -ENOMEM;
 	pr_info("Bt8xx card found (%d)\n", bttv_num);
-	bttvs[bttv_num] = btv = kzalloc(sizeof(*btv), GFP_KERNEL);
+	bttvs[bttv_num] = btv = kzalloc_obj(*btv);
 	if (btv == NULL) {
 		pr_err("out of memory\n");
 		return -ENOMEM;
@@ -3474,6 +3491,7 @@ static void bttv_remove(struct pci_dev *pci_dev)
 
 	/* free resources */
 	free_irq(btv->c.pci->irq,btv);
+	timer_delete_sync(&btv->timeout);
 	iounmap(btv->bt848_mmio);
 	release_mem_region(pci_resource_start(btv->c.pci,0),
 			   pci_resource_len(btv->c.pci,0));
@@ -3545,12 +3563,12 @@ static int __maybe_unused bttv_resume(struct device *dev)
 }
 
 static const struct pci_device_id bttv_pci_tbl[] = {
-	{PCI_VDEVICE(BROOKTREE, PCI_DEVICE_ID_BT848), 0},
-	{PCI_VDEVICE(BROOKTREE, PCI_DEVICE_ID_BT849), 0},
-	{PCI_VDEVICE(BROOKTREE, PCI_DEVICE_ID_BT878), 0},
-	{PCI_VDEVICE(BROOKTREE, PCI_DEVICE_ID_BT879), 0},
-	{PCI_VDEVICE(BROOKTREE, PCI_DEVICE_ID_FUSION879), 0},
-	{0,}
+	{ PCI_VDEVICE(BROOKTREE, PCI_DEVICE_ID_BT848) },
+	{ PCI_VDEVICE(BROOKTREE, PCI_DEVICE_ID_BT849) },
+	{ PCI_VDEVICE(BROOKTREE, PCI_DEVICE_ID_BT878) },
+	{ PCI_VDEVICE(BROOKTREE, PCI_DEVICE_ID_BT879) },
+	{ PCI_VDEVICE(BROOKTREE, PCI_DEVICE_ID_FUSION879) },
+	{ }
 };
 
 MODULE_DEVICE_TABLE(pci, bttv_pci_tbl);

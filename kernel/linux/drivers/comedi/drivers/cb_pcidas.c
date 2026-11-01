@@ -1288,16 +1288,16 @@ static int cb_pcidas_auto_attach(struct comedi_device *dev,
 	}
 	dev->irq = pcidev->irq;
 
-	dev->pacer = comedi_8254_init(dev->iobase + PCIDAS_AI_8254_BASE,
-				      I8254_OSC_BASE_10MHZ, I8254_IO8, 0);
-	if (!dev->pacer)
-		return -ENOMEM;
+	dev->pacer = comedi_8254_io_alloc(dev->iobase + PCIDAS_AI_8254_BASE,
+					  I8254_OSC_BASE_10MHZ, I8254_IO8, 0);
+	if (IS_ERR(dev->pacer))
+		return PTR_ERR(dev->pacer);
 
-	devpriv->ao_pacer = comedi_8254_init(dev->iobase + PCIDAS_AO_8254_BASE,
-					     I8254_OSC_BASE_10MHZ,
-					     I8254_IO8, 0);
-	if (!devpriv->ao_pacer)
-		return -ENOMEM;
+	devpriv->ao_pacer =
+	    comedi_8254_io_alloc(dev->iobase + PCIDAS_AO_8254_BASE,
+				 I8254_OSC_BASE_10MHZ, I8254_IO8, 0);
+	if (IS_ERR(devpriv->ao_pacer))
+		return PTR_ERR(devpriv->ao_pacer);
 
 	ret = comedi_alloc_subdevices(dev, 7);
 	if (ret)
@@ -1352,7 +1352,7 @@ static int cb_pcidas_auto_attach(struct comedi_device *dev,
 
 	/* 8255 */
 	s = &dev->subdevices[2];
-	ret = subdev_8255_init(dev, s, NULL, PCIDAS_8255_BASE);
+	ret = subdev_8255_io_init(dev, s, PCIDAS_8255_BASE);
 	if (ret)
 		return ret;
 
@@ -1453,7 +1453,8 @@ static void cb_pcidas_detach(struct comedi_device *dev)
 		if (devpriv->amcc)
 			outl(INTCSR_INBOX_INTR_STATUS,
 			     devpriv->amcc + AMCC_OP_REG_INTCSR);
-		kfree(devpriv->ao_pacer);
+		if (!IS_ERR(devpriv->ao_pacer))
+			kfree(devpriv->ao_pacer);
 	}
 	comedi_pci_detach(dev);
 }
@@ -1473,15 +1474,15 @@ static int cb_pcidas_pci_probe(struct pci_dev *dev,
 }
 
 static const struct pci_device_id cb_pcidas_pci_table[] = {
-	{ PCI_VDEVICE(CB, 0x0001), BOARD_PCIDAS1602_16 },
-	{ PCI_VDEVICE(CB, 0x000f), BOARD_PCIDAS1200 },
-	{ PCI_VDEVICE(CB, 0x0010), BOARD_PCIDAS1602_12 },
-	{ PCI_VDEVICE(CB, 0x0019), BOARD_PCIDAS1200_JR },
-	{ PCI_VDEVICE(CB, 0x001c), BOARD_PCIDAS1602_16_JR },
-	{ PCI_VDEVICE(CB, 0x004c), BOARD_PCIDAS1000 },
-	{ PCI_VDEVICE(CB, 0x001a), BOARD_PCIDAS1001 },
-	{ PCI_VDEVICE(CB, 0x001b), BOARD_PCIDAS1002 },
-	{ 0 }
+	{ PCI_VDEVICE(CB, 0x0001), .driver_data = BOARD_PCIDAS1602_16 },
+	{ PCI_VDEVICE(CB, 0x000f), .driver_data = BOARD_PCIDAS1200 },
+	{ PCI_VDEVICE(CB, 0x0010), .driver_data = BOARD_PCIDAS1602_12 },
+	{ PCI_VDEVICE(CB, 0x0019), .driver_data = BOARD_PCIDAS1200_JR },
+	{ PCI_VDEVICE(CB, 0x001c), .driver_data = BOARD_PCIDAS1602_16_JR },
+	{ PCI_VDEVICE(CB, 0x004c), .driver_data = BOARD_PCIDAS1000 },
+	{ PCI_VDEVICE(CB, 0x001a), .driver_data = BOARD_PCIDAS1001 },
+	{ PCI_VDEVICE(CB, 0x001b), .driver_data = BOARD_PCIDAS1002 },
+	{ }
 };
 MODULE_DEVICE_TABLE(pci, cb_pcidas_pci_table);
 

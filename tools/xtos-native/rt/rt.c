@@ -20,6 +20,7 @@
 #include <fcntl.h>
 #include <sys/stat.h>
 #include "xtos_ui.h"
+#include "xtos_rt_state.h"
 #include "rt_irq.h"
 
 #define LINE_MAX_LEN 512
@@ -187,7 +188,7 @@ static int show_status(int json) {
     char isolated[LINE_MAX_LEN] = "";
     read_first_line("/sys/devices/system/cpu/isolated", isolated, sizeof(isolated));
 
-    int realtime = (int)read_int("/sys/kernel/realtime");
+    int realtime = xtos_rt_active();
 
     if (json) {
         printf("{\n");
@@ -462,7 +463,7 @@ int main(int argc, char **argv) {
                 return 2;
             }
         }
-        int realtime = (int)read_int("/sys/kernel/realtime");
+        int realtime = xtos_rt_active();
         if (realtime != 1) {
             fprintf(stderr, "rt: refusing to tune a non-RT kernel\n");
             return 1;

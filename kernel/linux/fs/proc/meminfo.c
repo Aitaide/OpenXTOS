@@ -89,10 +89,9 @@ static int meminfo_proc_show(struct seq_file *m, void *v)
 	show_val_kb(m, "SwapTotal:      ", i.totalswap);
 	show_val_kb(m, "SwapFree:       ", i.freeswap);
 #ifdef CONFIG_ZSWAP
-	seq_printf(m,  "Zswap:          %8lu kB\n",
-		   (unsigned long)(zswap_pool_total_size >> 10));
+	show_val_kb(m, "Zswap:          ", zswap_total_pages());
 	seq_printf(m,  "Zswapped:       %8lu kB\n",
-		   (unsigned long)atomic_read(&zswap_stored_pages) <<
+		   (unsigned long)atomic_long_read(&zswap_stored_pages) <<
 		   (PAGE_SHIFT - 10));
 #endif
 	show_val_kb(m, "Dirty:          ",
@@ -121,15 +120,14 @@ static int meminfo_proc_show(struct seq_file *m, void *v)
 		    global_node_page_state(NR_SECONDARY_PAGETABLE));
 
 	show_val_kb(m, "NFS_Unstable:   ", 0);
-	show_val_kb(m, "Bounce:         ",
-		    global_zone_page_state(NR_BOUNCE));
-	show_val_kb(m, "WritebackTmp:   ",
-		    global_node_page_state(NR_WRITEBACK_TEMP));
+	show_val_kb(m, "Bounce:         ", 0);
+	show_val_kb(m, "WritebackTmp:   ", 0);
 	show_val_kb(m, "CommitLimit:    ", vm_commit_limit());
 	show_val_kb(m, "Committed_AS:   ", committed);
 	seq_printf(m, "VmallocTotal:   %8lu kB\n",
 		   (unsigned long)VMALLOC_TOTAL >> 10);
-	show_val_kb(m, "VmallocUsed:    ", vmalloc_nr_pages());
+	show_val_kb(m, "VmallocUsed:    ",
+		    global_node_page_state(NR_VMALLOC));
 	show_val_kb(m, "VmallocChunk:   ", 0ul);
 	show_val_kb(m, "Percpu:         ", pcpu_nr_pages());
 
@@ -163,6 +161,14 @@ static int meminfo_proc_show(struct seq_file *m, void *v)
 	show_val_kb(m, "Unaccepted:     ",
 		    global_zone_page_state(NR_UNACCEPTED));
 #endif
+	show_val_kb(m, "Balloon:        ",
+		    global_node_page_state(NR_BALLOON_PAGES));
+
+	show_val_kb(m, "GPUActive:      ",
+		    global_node_page_state(NR_GPU_ACTIVE));
+
+	show_val_kb(m, "GPUReclaim:     ",
+		    global_node_page_state(NR_GPU_RECLAIM));
 
 	hugetlb_report_meminfo(m);
 

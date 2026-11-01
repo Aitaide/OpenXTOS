@@ -41,9 +41,9 @@ static void name_card(struct snd_motu *motu)
 		}
 	}
 
-	strcpy(motu->card->driver, "FW-MOTU");
-	strcpy(motu->card->shortname, motu->spec->name);
-	strcpy(motu->card->mixername, motu->spec->name);
+	strscpy(motu->card->driver, "FW-MOTU");
+	strscpy(motu->card->shortname, motu->spec->name);
+	strscpy(motu->card->mixername, motu->spec->name);
 	snprintf(motu->card->longname, sizeof(motu->card->longname),
 		 "MOTU %s (version:%06x), GUID %08x%08x at %s, S%d",
 		 motu->spec->name, version,
@@ -78,7 +78,7 @@ static int motu_probe(struct fw_unit *unit, const struct ieee1394_device_id *ent
 	dev_set_drvdata(&unit->device, motu);
 	motu->card = card;
 
-	motu->spec = (const struct snd_motu_spec *)entry->driver_data;
+	motu->spec = entry->driver_data_ptr;
 	mutex_init(&motu->mutex);
 	spin_lock_init(&motu->lock);
 	init_waitqueue_head(&motu->hwdep_wait);
@@ -148,7 +148,7 @@ static void motu_bus_update(struct fw_unit *unit)
 	snd_motu_transaction_reregister(motu);
 }
 
-#define SND_MOTU_DEV_ENTRY(model, data)			\
+#define SND_MOTU_DEV_ENTRY(model, data_ptr)		\
 {							\
 	.match_flags	= IEEE1394_MATCH_VENDOR_ID |	\
 			  IEEE1394_MATCH_SPECIFIER_ID |	\
@@ -156,7 +156,7 @@ static void motu_bus_update(struct fw_unit *unit)
 	.vendor_id	= OUI_MOTU,			\
 	.specifier_id	= OUI_MOTU,			\
 	.version	= model,			\
-	.driver_data	= (kernel_ulong_t)data,		\
+	.driver_data_ptr = data_ptr,			\
 }
 
 static const struct ieee1394_device_id motu_id_table[] = {
@@ -168,10 +168,12 @@ static const struct ieee1394_device_id motu_id_table[] = {
 	SND_MOTU_DEV_ENTRY(0x00000d, &snd_motu_spec_ultralite),
 	SND_MOTU_DEV_ENTRY(0x00000f, &snd_motu_spec_8pre),
 	SND_MOTU_DEV_ENTRY(0x000015, &snd_motu_spec_828mk3_fw), // FireWire only.
+	SND_MOTU_DEV_ENTRY(0x000017, &snd_motu_spec_896mk3), // FireWire only.
 	SND_MOTU_DEV_ENTRY(0x000019, &snd_motu_spec_ultralite_mk3), // FireWire only.
 	SND_MOTU_DEV_ENTRY(0x00001b, &snd_motu_spec_traveler_mk3),
 	SND_MOTU_DEV_ENTRY(0x000030, &snd_motu_spec_ultralite_mk3), // Hybrid.
 	SND_MOTU_DEV_ENTRY(0x000035, &snd_motu_spec_828mk3_hybrid), // Hybrid.
+	SND_MOTU_DEV_ENTRY(0x000037, &snd_motu_spec_896mk3), // Hybrid.
 	SND_MOTU_DEV_ENTRY(0x000033, &snd_motu_spec_audio_express),
 	SND_MOTU_DEV_ENTRY(0x000039, &snd_motu_spec_track16),
 	SND_MOTU_DEV_ENTRY(0x000045, &snd_motu_spec_4pre),

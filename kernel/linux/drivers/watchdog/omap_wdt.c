@@ -27,7 +27,6 @@
 #define pr_fmt(fmt) KBUILD_MODNAME ": " fmt
 
 #include <linux/module.h>
-#include <linux/mod_devicetable.h>
 #include <linux/types.h>
 #include <linux/kernel.h>
 #include <linux/mm.h>
@@ -357,7 +356,7 @@ MODULE_DEVICE_TABLE(of, omap_wdt_of_match);
 
 static struct platform_driver omap_wdt_driver = {
 	.probe		= omap_wdt_probe,
-	.remove_new	= omap_wdt_remove,
+	.remove		= omap_wdt_remove,
 	.shutdown	= omap_wdt_shutdown,
 	.suspend	= pm_ptr(omap_wdt_suspend),
 	.resume		= pm_ptr(omap_wdt_resume),
@@ -370,5 +369,6 @@ static struct platform_driver omap_wdt_driver = {
 module_platform_driver(omap_wdt_driver);
 
 MODULE_AUTHOR("George G. Davis");
+MODULE_DESCRIPTION("Driver for the TI OMAP 16xx/24xx/34xx 32KHz (non-secure) watchdog");
 MODULE_LICENSE("GPL");
 MODULE_ALIAS("platform:omap_wdt");

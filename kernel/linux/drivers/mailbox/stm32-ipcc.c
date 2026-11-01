@@ -263,10 +263,8 @@ static int stm32_ipcc_probe(struct platform_device *pdev)
 		ret = devm_request_threaded_irq(dev, ipcc->irqs[i], NULL,
 						irq_thread[i], IRQF_ONESHOT,
 						dev_name(dev), ipcc);
-		if (ret) {
-			dev_err(dev, "failed to request irq %lu (%d)\n", i, ret);
+		if (ret)
 			goto err_clk;
-		}
 	}
 
 	/* mask and enable rx/tx irq */
@@ -331,7 +329,7 @@ err_clk:
 	return ret;
 }
 
-static int stm32_ipcc_remove(struct platform_device *pdev)
+static void stm32_ipcc_remove(struct platform_device *pdev)
 {
 	struct device *dev = &pdev->dev;
 
@@ -339,8 +337,6 @@ static int stm32_ipcc_remove(struct platform_device *pdev)
 		dev_pm_clear_wake_irq(&pdev->dev);
 
 	device_set_wakeup_capable(dev, false);
-
-	return 0;
 }
 
 #ifdef CONFIG_PM_SLEEP

@@ -25,15 +25,33 @@
 static DEFINE_MUTEX(leds_lookup_lock);
 static LIST_HEAD(leds_lookup_list);
 
+static struct workqueue_struct *leds_wq;
+
+static bool led_trigger_is_hw_controlled(struct led_classdev *led_cdev)
+{
+#ifdef CONFIG_LEDS_TRIGGERS
+	guard(rwsem_read)(&led_cdev->trigger_lock);
+	return led_cdev->trigger && led_cdev->trigger->trigger_type;
+#else
+	return false;
+#endif
+}
+
 static ssize_t brightness_show(struct device *dev,
 		struct device_attribute *attr, char *buf)
 {
 	struct led_classdev *led_cdev = dev_get_drvdata(dev);
+	unsigned int brightness;
 
-	/* no lock needed for this */
+	if (led_trigger_is_hw_controlled(led_cdev))
+		return -ENODATA;
+
+	mutex_lock(&led_cdev->led_access);
 	led_update_brightness(led_cdev);
+	brightness = led_cdev->brightness;
+	mutex_unlock(&led_cdev->led_access);
 
-	return sprintf(buf, "%u\n", led_cdev->brightness);
+	return sysfs_emit(buf, "%u\n", brightness);
 }
 
 static ssize_t brightness_store(struct device *dev,
@@ -57,7 +75,6 @@ static ssize_t brightness_store(struct device *dev,
 	if (state == LED_OFF)
 		led_trigger_remove(led_cdev);
 	led_set_brightness(led_cdev, state);
-	flush_work(&led_cdev->set_brightness_work);
 
 	ret = size;
 unlock:
@@ -70,27 +87,19 @@ static ssize_t max_brightness_show(struct device *dev,
 		struct device_attribute *attr, char *buf)
 {
 	struct led_classdev *led_cdev = dev_get_drvdata(dev);
+	unsigned int max_brightness;
 
-	return sprintf(buf, "%u\n", led_cdev->max_brightness);
+	mutex_lock(&led_cdev->led_access);
+	max_brightness = led_cdev->max_brightness;
+	mutex_unlock(&led_cdev->led_access);
+
+	return sysfs_emit(buf, "%u\n", max_brightness);
 }
 static DEVICE_ATTR_RO(max_brightness);
 
-static ssize_t color_show(struct device *dev,
-		struct device_attribute *attr, char *buf)
-{
-	const char *color_text = "invalid";
-	struct led_classdev *led_cdev = dev_get_drvdata(dev);
-
-	if (led_cdev->color < LED_COLOR_ID_MAX)
-		color_text = led_colors[led_cdev->color];
-
-	return sysfs_emit(buf, "%s\n", color_text);
-}
-static DEVICE_ATTR_RO(color);
-
 #ifdef CONFIG_LEDS_TRIGGERS
-static BIN_ATTR(trigger, 0644, led_trigger_read, led_trigger_write, 0);
-static struct bin_attribute *led_trigger_bin_attrs[] = {
+static const BIN_ATTR(trigger, 0644, led_trigger_read, led_trigger_write, 0);
+static const struct bin_attribute *const led_trigger_bin_attrs[] = {
 	&bin_attr_trigger,
 	NULL,
 };
@@ -102,7 +111,6 @@ static const struct attribute_group led_trigger_group = {
 static struct attribute *led_class_attrs[] = {
 	&dev_attr_brightness.attr,
 	&dev_attr_max_brightness.attr,
-	&dev_attr_color.attr,
 	NULL,
 };
 
@@ -127,7 +135,7 @@ static ssize_t brightness_hw_changed_show(struct device *dev,
 	if (led_cdev->brightness_hw_changed == -1)
 		return -ENODATA;
 
-	return sprintf(buf, "%u\n", led_cdev->brightness_hw_changed);
+	return sysfs_emit(buf, "%u\n", led_cdev->brightness_hw_changed);
 }
 
 static DEVICE_ATTR_RO(brightness_hw_changed);
@@ -254,29 +262,37 @@ static const struct class leds_class = {
 };
 
 /**
- * of_led_get() - request a LED device via the LED framework
- * @np: device node to get the LED device from
+ * fwnode_led_get() - request a LED device via the LED framework
+ * @fwnode: firmware node to get the LED device from
  * @index: the index of the LED
+ * @name: the name of the LED used to map it to its function, if present
  *
  * Returns the LED device parsed from the phandle specified in the "leds"
  * property of a device tree node or a negative error-code on failure.
  */
-struct led_classdev *of_led_get(struct device_node *np, int index)
+static struct led_classdev *fwnode_led_get(struct fwnode_handle *fwnode,
+					   int index, const char *name)
 {
+	struct fwnode_handle *led_node;
 	struct device *led_dev;
-	struct device_node *led_node;
 
-	led_node = of_parse_phandle(np, "leds", index);
-	if (!led_node)
-		return ERR_PTR(-ENOENT);
+	/*
+	 * For named LEDs, first look up the name in the "led-names" property.
+	 * If it cannot be found, then fwnode_find_reference() will propagate
+	 * the error.
+	 */
+	if (name)
+		index = fwnode_property_match_string(fwnode, "led-names",
+						     name);
+	led_node = fwnode_find_reference(fwnode, "leds", index);
+	if (IS_ERR(led_node))
+		return ERR_CAST(led_node);
 
-	led_dev = class_find_device_by_of_node(&leds_class, led_node);
-	of_node_put(led_node);
-	put_device(led_dev);
+	led_dev = class_find_device_by_fwnode(&leds_class, led_node);
+	fwnode_handle_put(led_node);
 
 	return led_module_get(led_dev);
 }
-EXPORT_SYMBOL_GPL(of_led_get);
 
 /**
  * led_put() - release a LED device
@@ -331,7 +347,7 @@ struct led_classdev *__must_check devm_of_led_get(struct device *dev,
 	if (!dev)
 		return ERR_PTR(-EINVAL);
 
-	led = of_led_get(dev->of_node, index);
+	led = fwnode_led_get(dev_fwnode(dev), index, NULL);
 	if (IS_ERR(led))
 		return led;
 
@@ -349,8 +365,13 @@ EXPORT_SYMBOL_GPL(devm_of_led_get);
 struct led_classdev *led_get(struct device *dev, char *con_id)
 {
 	struct led_lookup_data *lookup;
+	struct led_classdev *led_cdev;
 	const char *provider = NULL;
 	struct device *led_dev;
+
+	led_cdev = fwnode_led_get(dev_fwnode(dev), -1, con_id);
+	if (!IS_ERR(led_cdev) || PTR_ERR(led_cdev) != -ENOENT)
+		return led_cdev;
 
 	mutex_lock(&leds_lookup_lock);
 	list_for_each_entry(lookup, &leds_lookup_list, list) {
@@ -415,6 +436,9 @@ EXPORT_SYMBOL_GPL(led_add_lookup);
  */
 void led_remove_lookup(struct led_lookup_data *led_lookup)
 {
+	if (!led_lookup)
+		return;
+
 	mutex_lock(&leds_lookup_lock);
 	list_del(&led_lookup->list);
 	mutex_unlock(&leds_lookup_lock);
@@ -517,6 +541,11 @@ int led_classdev_register_ext(struct device *parent,
 	ret = led_classdev_next_name(proposed_name, final_name, sizeof(final_name));
 	if (ret < 0)
 		return ret;
+	else if (ret && led_cdev->flags & LED_REJECT_NAME_CONFLICT)
+		return -EEXIST;
+	else if (ret)
+		dev_warn(parent, "Led %s renamed to %s due to name collision\n",
+			 proposed_name, final_name);
 
 	if (led_cdev->color >= LED_COLOR_ID_MAX)
 		dev_warn(parent, "LED %s color identifier out of range\n", final_name);
@@ -531,10 +560,6 @@ int led_classdev_register_ext(struct device *parent,
 	}
 	if (init_data && init_data->fwnode)
 		device_set_node(led_cdev->dev, init_data->fwnode);
-
-	if (ret)
-		dev_warn(parent, "Led %s renamed to %s due to name collision",
-				proposed_name, dev_name(led_cdev->dev));
 
 	if (led_cdev->flags & LED_BRIGHT_HW_CHANGED) {
 		ret = led_add_brightness_hw_changed(led_cdev);
@@ -553,17 +578,19 @@ int led_classdev_register_ext(struct device *parent,
 #ifdef CONFIG_LEDS_BRIGHTNESS_HW_CHANGED
 	led_cdev->brightness_hw_changed = -1;
 #endif
-	/* add to the list of leds */
-	down_write(&leds_list_lock);
-	list_add_tail(&led_cdev->node, &leds_list);
-	up_write(&leds_list_lock);
-
 	if (!led_cdev->max_brightness)
 		led_cdev->max_brightness = LED_FULL;
 
 	led_update_brightness(led_cdev);
 
+	led_cdev->wq = leds_wq;
+
 	led_init_core(led_cdev);
+
+	/* add to the list of leds */
+	down_write(&leds_list_lock);
+	list_add_tail(&led_cdev->node, &leds_list);
+	up_write(&leds_list_lock);
 
 #ifdef CONFIG_LEDS_TRIGGERS
 	led_trigger_set_default(led_cdev);
@@ -681,12 +708,19 @@ EXPORT_SYMBOL_GPL(devm_led_classdev_unregister);
 
 static int __init leds_init(void)
 {
+	leds_wq = alloc_ordered_workqueue("leds", 0);
+	if (!leds_wq) {
+		pr_err("Failed to create LEDs ordered workqueue\n");
+		return -ENOMEM;
+	}
+
 	return class_register(&leds_class);
 }
 
 static void __exit leds_exit(void)
 {
 	class_unregister(&leds_class);
+	destroy_workqueue(leds_wq);
 }
 
 subsys_initcall(leds_init);

@@ -43,6 +43,10 @@ struct fib_rule {
 	struct fib_kuid_range	uid_range;
 	struct fib_rule_port_range	sport_range;
 	struct fib_rule_port_range	dport_range;
+	u16			sport_mask;
+	u16			dport_mask;
+	u8                      iif_is_l3_master;
+	u8                      oif_is_l3_master;
 	struct rcu_head		rcu;
 };
 
@@ -78,7 +82,7 @@ struct fib_rules_ops {
 					     struct fib_rule_hdr *,
 					     struct nlattr **,
 					     struct netlink_ext_ack *);
-	int			(*delete)(struct fib_rule *);
+	void			(*delete)(struct fib_rule *);
 	int			(*compare)(struct fib_rule *,
 					   struct fib_rule_hdr *,
 					   struct nlattr **);
@@ -89,11 +93,13 @@ struct fib_rules_ops {
 	/* Called after modifications to the rules set, must flush
 	 * the route cache if one exists. */
 	void			(*flush_cache)(struct fib_rules_ops *ops);
+	bool			(*need_rtnl)(struct net *net);
 
 	int			nlgroup;
 	struct list_head	rules_list;
 	struct module		*owner;
 	struct net		*fro_net;
+	struct mutex		lock;
 	struct rcu_head		rcu;
 };
 
@@ -105,6 +111,11 @@ struct fib_rule_notifier_info {
 static inline void fib_rule_get(struct fib_rule *rule)
 {
 	refcount_inc(&rule->refcnt);
+}
+
+static inline bool fib_rule_get_safe(struct fib_rule *rule)
+{
+	return refcount_inc_not_zero(&rule->refcnt);
 }
 
 static inline void fib_rule_put(struct fib_rule *rule)
@@ -146,6 +157,17 @@ static inline bool fib_rule_port_inrange(const struct fib_rule_port_range *a,
 		ntohs(port) <= a->end;
 }
 
+static inline bool fib_rule_port_match(const struct fib_rule_port_range *range,
+				       u16 port_mask, __be16 port)
+{
+	if ((range->start ^ ntohs(port)) & port_mask)
+		return false;
+	if (!port_mask && fib_rule_port_range_set(range) &&
+	    !fib_rule_port_inrange(range, port))
+		return false;
+	return true;
+}
+
 static inline bool fib_rule_port_range_valid(const struct fib_rule_port_range *a)
 {
 	return a->start != 0 && a->end != 0 && a->end < 0xffff &&
@@ -157,6 +179,12 @@ static inline bool fib_rule_port_range_compare(struct fib_rule_port_range *a,
 {
 	return a->start == b->start &&
 		a->end == b->end;
+}
+
+static inline bool
+fib_rule_port_is_range(const struct fib_rule_port_range *range)
+{
+	return range->start != range->end;
 }
 
 static inline bool fib_rule_requires_fldissect(struct fib_rule *rule)
@@ -172,17 +200,16 @@ void fib_rules_unregister(struct fib_rules_ops *);
 
 int fib_rules_lookup(struct fib_rules_ops *, struct flowi *, int flags,
 		     struct fib_lookup_arg *);
-int fib_default_rule_add(struct fib_rules_ops *, u32 pref, u32 table,
-			 u32 flags);
+int fib_default_rule_add(struct fib_rules_ops *, u32 pref, u32 table);
 bool fib_rule_matchall(const struct fib_rule *rule);
 int fib_rules_dump(struct net *net, struct notifier_block *nb, int family,
 		   struct netlink_ext_ack *extack);
-unsigned int fib_rules_seq_read(struct net *net, int family);
+unsigned int fib_rules_seq_read(const struct net *net, int family);
 
-int fib_nl_newrule(struct sk_buff *skb, struct nlmsghdr *nlh,
-		   struct netlink_ext_ack *extack);
-int fib_nl_delrule(struct sk_buff *skb, struct nlmsghdr *nlh,
-		   struct netlink_ext_ack *extack);
+int fib_newrule(struct net *net, struct sk_buff *skb, struct nlmsghdr *nlh,
+		struct netlink_ext_ack *extack, bool rtnl_held);
+int fib_delrule(struct net *net, struct sk_buff *skb, struct nlmsghdr *nlh,
+		struct netlink_ext_ack *extack, bool rtnl_held);
 
 INDIRECT_CALLABLE_DECLARE(int fib6_rule_match(struct fib_rule *rule,
 					    struct flowi *fl, int flags));

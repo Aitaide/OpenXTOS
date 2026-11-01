@@ -6,7 +6,6 @@
 #include <linux/err.h>
 #include <linux/io.h>
 #include <linux/module.h>
-#include <linux/mod_devicetable.h>
 #include <linux/platform_device.h>
 #include <linux/types.h>
 
@@ -231,7 +230,7 @@ static const struct pinmux_ops mlxbf3_pmx_ops = {
 	.gpio_request_enable = mlxbf3_gpio_request_enable,
 };
 
-static struct pinctrl_desc mlxbf3_pin_desc = {
+static const struct pinctrl_desc mlxbf3_pin_desc = {
 	.name = "pinctrl-mlxbf3",
 	.pins = mlxbf3_pins,
 	.npins = ARRAY_SIZE(mlxbf3_pins),
@@ -259,16 +258,16 @@ static int mlxbf3_pinctrl_probe(struct platform_device *pdev)
 		return PTR_ERR(priv->fw_ctrl_set0);
 
 	priv->fw_ctrl_clr0 = devm_platform_ioremap_resource(pdev, 1);
-	if (IS_ERR(priv->fw_ctrl_set0))
-		return PTR_ERR(priv->fw_ctrl_set0);
+	if (IS_ERR(priv->fw_ctrl_clr0))
+		return PTR_ERR(priv->fw_ctrl_clr0);
 
 	priv->fw_ctrl_set1 = devm_platform_ioremap_resource(pdev, 2);
-	if (IS_ERR(priv->fw_ctrl_set0))
-		return PTR_ERR(priv->fw_ctrl_set0);
+	if (IS_ERR(priv->fw_ctrl_set1))
+		return PTR_ERR(priv->fw_ctrl_set1);
 
 	priv->fw_ctrl_clr1 = devm_platform_ioremap_resource(pdev, 3);
-	if (IS_ERR(priv->fw_ctrl_set0))
-		return PTR_ERR(priv->fw_ctrl_set0);
+	if (IS_ERR(priv->fw_ctrl_clr1))
+		return PTR_ERR(priv->fw_ctrl_clr1);
 
 	ret = devm_pinctrl_register_and_init(dev,
 					     &mlxbf3_pin_desc,

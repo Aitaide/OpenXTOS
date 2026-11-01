@@ -14,11 +14,12 @@ Contents:
    can
    can_ucan_protocol
    device_drivers/index
+   diagnostic/index
    dsa/index
    devlink/index
-   caif/index
    ethtool-netlink
    ieee802154
+   iso15765-2
    j1939
    kapi
    msg_zerocopy
@@ -39,15 +40,13 @@ Contents:
    tls-handshake
    nfc
    6lowpan
-   6pack
    arcnet-hardware
    arcnet
    atm
-   ax25
    bonding
    cdc_mbim
-   dccp
    dctcp
+   devmem
    dns_resolver
    driver
    eql
@@ -55,11 +54,12 @@ Contents:
    filter
    generic-hdlc
    generic_netlink
+   ../netlink/specs/index
    gen_stats
    gtp
    ila
    ioam6-sysctl
-   ipddp
+   iou-zcrx
    ip_dynaddr
    ipsec
    ip-sysctl
@@ -72,25 +72,34 @@ Contents:
    mac80211-injection
    mctp
    mpls-sysctl
+   mptcp
    mptcp-sysctl
    multiqueue
+   multi-pf-netdev
    napi
+   net_cachelines/index
    netconsole
    netdev-features
    netdevices
    netfilter-sysctl
    netif-msg
+   netmem
    nexthop-group-resilient
    nf_conntrack-sysctl
    nf_flowtable
+   oa-tc6-framework
    openvswitch
    operstates
    packet_mmap
    phonet
+   phy-link-topology
+   phy-port
    pktgen
    plip
    ppp_generic
    proc_net_tcp
+   pse-pd/index
+   psp
    radiotap-headers
    rds
    regulatory
@@ -101,12 +110,14 @@ Contents:
    seg6-sysctl
    skbuff
    smc-sysctl
+   sriov
    statistics
    strparser
    switchdev
    sysfs-tagging
    tc-actions-env-rules
    tc-queue-filters
+   tcp_ao
    tcp-thin
    team
    timestamping
@@ -118,15 +129,6 @@ Contents:
    vxlan
    x25
    x25-iface
-   xfrm_device
-   xfrm_proc
-   xfrm_sync
-   xfrm_sysctl
+   xfrm/index
    xdp-rx-metadata
-
-.. only::  subproject and html
-
-   Indices
-   =======
-
-   * :ref:`genindex`
+   xsk-tx-metadata

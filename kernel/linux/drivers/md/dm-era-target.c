@@ -196,7 +196,7 @@ struct superblock_disk {
  * Superblock validation
  *--------------------------------------------------------------
  */
-static void sb_prepare_for_write(struct dm_block_validator *v,
+static void sb_prepare_for_write(const struct dm_block_validator *v,
 				 struct dm_block *b,
 				 size_t sb_block_size)
 {
@@ -221,7 +221,7 @@ static int check_metadata_version(struct superblock_disk *disk)
 	return 0;
 }
 
-static int sb_check(struct dm_block_validator *v,
+static int sb_check(const struct dm_block_validator *v,
 		    struct dm_block *b,
 		    size_t sb_block_size)
 {
@@ -254,7 +254,7 @@ static int sb_check(struct dm_block_validator *v,
 	return check_metadata_version(disk);
 }
 
-static struct dm_block_validator sb_validator = {
+static const struct dm_block_validator sb_validator = {
 	.name = "superblock",
 	.prepare_for_write = sb_prepare_for_write,
 	.check = sb_check
@@ -808,10 +808,12 @@ static struct era_metadata *metadata_open(struct block_device *bdev,
 					  bool may_format)
 {
 	int r;
-	struct era_metadata *md = kzalloc(sizeof(*md), GFP_KERNEL);
+	struct era_metadata *md = kzalloc_obj(*md);
 
-	if (!md)
-		return NULL;
+	if (!md) {
+		DMERR("could not allocate metadata struct");
+		return ERR_PTR(-ENOMEM);
+	}
 
 	md->bdev = bdev;
 	md->block_size = block_size;
@@ -1032,6 +1034,7 @@ static int metadata_checkpoint(struct era_metadata *md)
 static int metadata_take_snap(struct era_metadata *md)
 {
 	int r, inc;
+	dm_block_t location;
 	struct dm_block *clone;
 
 	if (md->metadata_snap != SUPERBLOCK_LOCATION) {
@@ -1069,7 +1072,9 @@ static int metadata_take_snap(struct era_metadata *md)
 	r = dm_sm_inc_block(md->sm, md->writeset_tree_root);
 	if (r) {
 		DMERR("%s: couldn't inc writeset tree root", __func__);
+		location = dm_block_location(clone);
 		dm_tm_unlock(md->tm, clone);
+		dm_sm_dec_block(md->sm, location);
 		return r;
 	}
 
@@ -1077,7 +1082,9 @@ static int metadata_take_snap(struct era_metadata *md)
 	if (r) {
 		DMERR("%s: couldn't inc era tree root", __func__);
 		dm_sm_dec_block(md->sm, md->writeset_tree_root);
+		location = dm_block_location(clone);
 		dm_tm_unlock(md->tm, clone);
+		dm_sm_dec_block(md->sm, location);
 		return r;
 	}
 
@@ -1229,6 +1236,7 @@ static dm_block_t get_block(struct era *era, struct bio *bio)
 static void remap_to_origin(struct era *era, struct bio *bio)
 {
 	bio_set_dev(bio, era->origin_dev->bdev);
+	bio->bi_iter.bi_sector = dm_target_offset(era->ti, bio->bi_iter.bi_sector);
 }
 
 /*
@@ -1272,8 +1280,7 @@ static void process_deferred_bios(struct era *era)
 	bio_list_init(&marked_bios);
 
 	spin_lock(&era->deferred_lock);
-	bio_list_merge(&deferred_bios, &era->deferred_bios);
-	bio_list_init(&era->deferred_bios);
+	bio_list_merge_init(&deferred_bios, &era->deferred_bios);
 	spin_unlock(&era->deferred_lock);
 
 	if (bio_list_empty(&deferred_bios))
@@ -1474,7 +1481,7 @@ static int era_ctr(struct dm_target *ti, unsigned int argc, char **argv)
 		return -EINVAL;
 	}
 
-	era = kzalloc(sizeof(*era), GFP_KERNEL);
+	era = kzalloc_obj(*era);
 	if (!era) {
 		ti->error = "Error allocating era structure";
 		return -ENOMEM;
@@ -1487,7 +1494,7 @@ static int era_ctr(struct dm_target *ti, unsigned int argc, char **argv)
 	if (r) {
 		ti->error = "Error opening metadata device";
 		era_destroy(era);
-		return -EINVAL;
+		return r;
 	}
 
 	r = dm_get_device(ti, argv[1], BLK_OPEN_READ | BLK_OPEN_WRITE,
@@ -1495,7 +1502,7 @@ static int era_ctr(struct dm_target *ti, unsigned int argc, char **argv)
 	if (r) {
 		ti->error = "Error opening data device";
 		era_destroy(era);
-		return -EINVAL;
+		return r;
 	}
 
 	r = sscanf(argv[2], "%u%c", &era->sectors_per_block, &dummy);
@@ -1509,7 +1516,7 @@ static int era_ctr(struct dm_target *ti, unsigned int argc, char **argv)
 	if (r) {
 		ti->error = "could not set max io len";
 		era_destroy(era);
-		return -EINVAL;
+		return r;
 	}
 
 	if (!valid_block_size(era->sectors_per_block)) {
@@ -1561,7 +1568,7 @@ static void era_dtr(struct dm_target *ti)
 static int era_map(struct dm_target *ti, struct bio *bio)
 {
 	struct era *era = ti->private;
-	dm_block_t block = get_block(era, bio);
+	dm_block_t block;
 
 	/*
 	 * All bios get remapped to the origin device.  We do this now, but
@@ -1569,6 +1576,7 @@ static int era_map(struct dm_target *ti, struct bio *bio)
 	 * block is marked in this era.
 	 */
 	remap_to_origin(era, bio);
+	block = get_block(era, bio);
 
 	/*
 	 * REQ_PREFLUSH bios carry no data, so we're not interested in them.
@@ -1734,8 +1742,8 @@ static void era_io_hints(struct dm_target *ti, struct queue_limits *limits)
 	 */
 	if (io_opt_sectors < era->sectors_per_block ||
 	    do_div(io_opt_sectors, era->sectors_per_block)) {
-		blk_limits_io_min(limits, 0);
-		blk_limits_io_opt(limits, era->sectors_per_block << SECTOR_SHIFT);
+		limits->io_min = 0;
+		limits->io_opt = era->sectors_per_block << SECTOR_SHIFT;
 	}
 }
 

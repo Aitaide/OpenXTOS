@@ -28,7 +28,6 @@
 #include <linux/usb/serial.h>
 #include <linux/serial_reg.h>
 #include <linux/module.h>
-#include <linux/uaccess.h>
 
 /* Serial Port register Address */
 #define F81534_UART_BASE_ADDRESS	0x1200
@@ -1538,7 +1537,6 @@ static int f81534_resume(struct usb_serial *serial)
 
 static struct usb_serial_driver f81534_device = {
 	.driver = {
-		   .owner = THIS_MODULE,
 		   .name = "f81534",
 	},
 	.description =		DRIVER_DESC,

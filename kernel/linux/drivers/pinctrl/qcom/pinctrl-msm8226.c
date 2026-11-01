@@ -282,7 +282,6 @@ static const unsigned int sdc2_data_pins[] = { 122 };
 		.io_reg = 0x1004 + 0x10 * id,		\
 		.intr_cfg_reg = 0x1008 + 0x10 * id,	\
 		.intr_status_reg = 0x100c + 0x10 * id,	\
-		.intr_target_reg = 0x1008 + 0x10 * id,	\
 		.mux_bit = 2,				\
 		.pull_bit = 0,				\
 		.drv_bit = 6,				\
@@ -308,7 +307,6 @@ static const unsigned int sdc2_data_pins[] = { 122 };
 		.io_reg = 0,				\
 		.intr_cfg_reg = 0,			\
 		.intr_status_reg = 0,			\
-		.intr_target_reg = 0,			\
 		.mux_bit = -1,				\
 		.pull_bit = pull,			\
 		.drv_bit = drv,				\
@@ -336,6 +334,7 @@ enum msm8226_functions {
 	msm_mux_blsp_i2c3,
 	msm_mux_blsp_i2c4,
 	msm_mux_blsp_i2c5,
+	msm_mux_blsp_i2c6,
 	msm_mux_blsp_spi1,
 	msm_mux_blsp_spi2,
 	msm_mux_blsp_spi3,
@@ -436,6 +435,8 @@ static const char * const blsp_spi5_groups[] = {
 	"gpio16", "gpio17", "gpio18", "gpio19"
 };
 
+static const char * const blsp_i2c6_groups[] = { "gpio22", "gpio23" };
+
 static const char * const cci_i2c0_groups[] = { "gpio29", "gpio30" };
 
 static const char * const cam_mclk0_groups[] = { "gpio26" };
@@ -459,6 +460,7 @@ static const struct pinfunction msm8226_functions[] = {
 	MSM_PIN_FUNCTION(blsp_i2c3),
 	MSM_PIN_FUNCTION(blsp_i2c4),
 	MSM_PIN_FUNCTION(blsp_i2c5),
+	MSM_PIN_FUNCTION(blsp_i2c6),
 	MSM_PIN_FUNCTION(blsp_spi1),
 	MSM_PIN_FUNCTION(blsp_spi2),
 	MSM_PIN_FUNCTION(blsp_spi3),
@@ -479,7 +481,7 @@ static const struct pinfunction msm8226_functions[] = {
 	MSM_PIN_FUNCTION(cci_i2c0),
 	MSM_PIN_FUNCTION(gp0_clk),
 	MSM_PIN_FUNCTION(gp1_clk),
-	MSM_PIN_FUNCTION(gpio),
+	MSM_GPIO_PIN_FUNCTION(gpio),
 	MSM_PIN_FUNCTION(sdc3),
 	MSM_PIN_FUNCTION(wlan),
 };
@@ -507,8 +509,8 @@ static const struct msm_pingroup msm8226_groups[] = {
 	PINGROUP(19,  blsp_spi5, blsp_uart5, blsp_i2c5, NA, NA, NA, NA),
 	PINGROUP(20,  NA, NA, NA, NA, NA, NA, NA),
 	PINGROUP(21,  NA, NA, NA, NA, NA, NA, NA),
-	PINGROUP(22,  NA, NA, NA, NA, NA, NA, NA),
-	PINGROUP(23,  NA, NA, NA, NA, NA, NA, NA),
+	PINGROUP(22,  NA, NA, blsp_i2c6, NA, NA, NA, NA),
+	PINGROUP(23,  NA, NA, blsp_i2c6, NA, NA, NA, NA),
 	PINGROUP(24,  NA, NA, NA, NA, NA, NA, NA),
 	PINGROUP(25,  NA, NA, NA, NA, NA, NA, NA),
 	PINGROUP(26,  cam_mclk0, NA, NA, NA, NA, NA, NA),
@@ -612,6 +614,16 @@ static const struct msm_pingroup msm8226_groups[] = {
 
 #define NUM_GPIO_PINGROUPS 117
 
+static const struct msm_gpio_wakeirq_map msm8226_mpm_map[] = {
+	{ 1, 3 }, { 4, 4 }, { 5, 5 }, { 9, 6 }, { 13, 7 }, { 17, 8 },
+	{ 21, 9 }, { 27, 10 }, { 29, 11 }, { 31, 12 }, { 33, 13 }, { 35, 14 },
+	{ 37, 15 }, { 38, 16 }, { 39, 17 }, { 41, 18 }, { 46, 19 }, { 48, 20 },
+	{ 49, 21 }, { 50, 22 }, { 51, 23 }, { 52, 24 }, { 54, 25 }, { 62, 26 },
+	{ 63, 27 }, { 64, 28 }, { 65, 29 }, { 66, 30 }, { 67, 31 }, { 68, 32 },
+	{ 69, 33 }, { 71, 34 }, { 72, 35 }, { 106, 36 }, { 107, 37 }, { 108, 38 },
+	{ 109, 39 }, { 110, 40 }, { 111, 54 }, { 113, 55 }, { 115, 41 },
+};
+
 static const struct msm_pinctrl_soc_data msm8226_pinctrl = {
 	.pins = msm8226_pins,
 	.npins = ARRAY_SIZE(msm8226_pins),
@@ -620,6 +632,8 @@ static const struct msm_pinctrl_soc_data msm8226_pinctrl = {
 	.groups = msm8226_groups,
 	.ngroups = ARRAY_SIZE(msm8226_groups),
 	.ngpios = NUM_GPIO_PINGROUPS,
+	.wakeirq_map = msm8226_mpm_map,
+	.nwakeirq_map = ARRAY_SIZE(msm8226_mpm_map),
 };
 
 static int msm8226_pinctrl_probe(struct platform_device *pdev)
@@ -631,6 +645,7 @@ static const struct of_device_id msm8226_pinctrl_of_match[] = {
 	{ .compatible = "qcom,msm8226-pinctrl", },
 	{ },
 };
+MODULE_DEVICE_TABLE(of, msm8226_pinctrl_of_match);
 
 static struct platform_driver msm8226_pinctrl_driver = {
 	.driver = {
@@ -638,7 +653,6 @@ static struct platform_driver msm8226_pinctrl_driver = {
 		.of_match_table = msm8226_pinctrl_of_match,
 	},
 	.probe = msm8226_pinctrl_probe,
-	.remove = msm_pinctrl_remove,
 };
 
 static int __init msm8226_pinctrl_init(void)
@@ -656,4 +670,3 @@ module_exit(msm8226_pinctrl_exit);
 MODULE_AUTHOR("Bartosz Dudziak <bartosz.dudziak@snejp.pl>");
 MODULE_DESCRIPTION("Qualcomm MSM8226 pinctrl driver");
 MODULE_LICENSE("GPL v2");
-MODULE_DEVICE_TABLE(of, msm8226_pinctrl_of_match);

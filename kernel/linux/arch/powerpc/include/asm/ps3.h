@@ -65,6 +65,7 @@ struct ps3_dma_region_ops;
 
 /**
  * struct ps3_dma_region - A per device dma state variables structure
+ * @dev: device structure
  * @did: The HV device id.
  * @page_size: The ioc pagesize.
  * @region_type: The HV region type.
@@ -108,15 +109,15 @@ struct ps3_dma_region_ops {
 		     dma_addr_t bus_addr,
 		     unsigned long len);
 };
+
+struct ps3_system_bus_device;
+
 /**
  * struct ps3_dma_region_init - Helper to initialize structure variables
  *
  * Helper to properly initialize variables prior to calling
  * ps3_system_bus_device_register.
  */
-
-struct ps3_system_bus_device;
-
 int ps3_dma_region_init(struct ps3_system_bus_device *dev,
 	struct ps3_dma_region *r, enum ps3_dma_page_size page_size,
 	enum ps3_dma_region_type region_type, void *addr, unsigned long len);
@@ -156,10 +157,12 @@ struct ps3_mmio_region_ops {
 	int (*free)(struct ps3_mmio_region *);
 };
 /**
- * struct ps3_mmio_region_init - Helper to initialize structure variables
+ * ps3_mmio_region_init - Helper to initialize structure variables
  *
  * Helper to properly initialize variables prior to calling
  * ps3_system_bus_device_register.
+ *
+ * Returns: %0 on success, %-errno on error (or BUG())
  */
 
 int ps3_mmio_region_init(struct ps3_system_bus_device *dev,
@@ -390,11 +393,7 @@ int ps3_system_bus_device_register(struct ps3_system_bus_device *dev);
 int ps3_system_bus_driver_register(struct ps3_system_bus_driver *drv);
 void ps3_system_bus_driver_unregister(struct ps3_system_bus_driver *drv);
 
-static inline struct ps3_system_bus_driver *ps3_drv_to_system_bus_drv(
-	struct device_driver *_drv)
-{
-	return container_of(_drv, struct ps3_system_bus_driver, core);
-}
+#define ps3_drv_to_system_bus_drv(_drv) container_of_const(_drv, struct ps3_system_bus_driver, core)
 static inline struct ps3_system_bus_device *ps3_dev_to_system_bus_dev(
 	const struct device *_dev)
 {
@@ -409,7 +408,7 @@ static inline struct ps3_system_bus_driver *
 }
 
 /**
- * ps3_system_bus_set_drvdata -
+ * ps3_system_bus_set_drvdata - set driver's private data for this device
  * @dev: device structure
  * @data: Data to set
  */
@@ -468,7 +467,7 @@ enum ps3_lpm_rights {
  * enum ps3_lpm_tb_type - Type of trace buffer lv1 should use.
  *
  * @PS3_LPM_TB_TYPE_NONE: Do not use a trace buffer.
- * @PS3_LPM_RIGHTS_USE_TB: Use the lv1 internal trace buffer.  Must have
+ * @PS3_LPM_TB_TYPE_INTERNAL: Use the lv1 internal trace buffer.  Must have
  *  rights @PS3_LPM_RIGHTS_USE_TB.
  */
 
@@ -513,5 +512,11 @@ u32 ps3_get_hw_thread_id(int cpu);
 u64 ps3_get_spe_id(void *arg);
 
 void ps3_early_mm_init(void);
+
+#ifdef CONFIG_PPC_EARLY_DEBUG_PS3GELIC
+void udbg_shutdown_ps3gelic(void);
+#else
+static inline void udbg_shutdown_ps3gelic(void) {}
+#endif
 
 #endif

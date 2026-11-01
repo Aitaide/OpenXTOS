@@ -110,6 +110,7 @@ module_param_array(card, int, NULL, 0);
 MODULE_PARM_DESC(card, "card type (0=NCR5380, 1=NCR53C400, 2=NCR53C400A, 3=DTC3181E, 4=HP C2502)");
 
 MODULE_ALIAS("g_NCR5380_mmio");
+MODULE_DESCRIPTION("Generic NCR5380/NCR53C400 SCSI driver");
 MODULE_LICENSE("GPL");
 
 static void g_NCR5380_trigger_irq(struct Scsi_Host *instance)
@@ -738,7 +739,7 @@ static struct isa_driver generic_NCR5380_isa_driver = {
 #ifdef CONFIG_PNP
 static const struct pnp_device_id generic_NCR5380_pnp_ids[] = {
 	{ .id = "DTC436e", .driver_data = BOARD_DTC3181E },
-	{ .id = "" }
+	{ }
 };
 MODULE_DEVICE_TABLE(pnp, generic_NCR5380_pnp_ids);
 

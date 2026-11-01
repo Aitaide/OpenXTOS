@@ -33,7 +33,7 @@
 	cpus {
 		#address-cells = <1>;
 		#size-cells = <0>;
-		cpu@0 {
+		cpu0: cpu@0 {
 			device_type = "cpu";
 			compatible = "arm,cortex-a9";
 			reg = <0>;
@@ -52,8 +52,9 @@
 			clock-latency = <100000>;
 			cpu0-supply = <&pwm_regulator>;
 			st,syscfg = <&syscfg_core 0x8e0>;
+			#cooling-cells = <2>;
 		};
-		cpu@1 {
+		cpu1: cpu@1 {
 			device_type = "cpu";
 			compatible = "arm,cortex-a9";
 			reg = <1>;
@@ -66,6 +67,7 @@
 					    1200000 0
 					    800000  0
 					    500000  0>;
+			#cooling-cells = <2>;
 		};
 	};
 
@@ -111,7 +113,6 @@
 		regulator-min-microvolt = <784000>;
 		regulator-max-microvolt = <1299000>;
 		regulator-always-on;
-		max-duty-cycle = <255>;
 		status = "okay";
 	};
 
@@ -595,7 +596,7 @@
 			status = "disabled";
 		};
 
-		mmc0: sdhci@9060000 {
+		mmc0: mmc@9060000 {
 			compatible = "st,sdhci-stih407", "st,sdhci";
 			status = "disabled";
 			reg = <0x09060000 0x7ff>, <0x9061008 0x20>;
@@ -610,7 +611,7 @@
 			bus-width = <8>;
 		};
 
-		mmc1: sdhci@9080000 {
+		mmc1: mmc@9080000 {
 			compatible = "st,sdhci-stih407", "st,sdhci";
 			status = "disabled";
 			reg = <0x09080000 0x7ff>;
@@ -668,7 +669,7 @@
 			interrupt-names = "hostc";
 
 			phys = <&phy_port0 PHY_TYPE_SATA>;
-			phy-names = "ahci_phy";
+			phy-names = "sata-phy";
 
 			resets = <&powerdown STIH407_SATA0_POWERDOWN>,
 				 <&softreset STIH407_SATA0_SOFTRESET>,
@@ -691,7 +692,7 @@
 			interrupt-names = "hostc";
 
 			phys = <&phy_port1 PHY_TYPE_SATA>;
-			phy-names = "ahci_phy";
+			phy-names = "sata-phy";
 
 			resets = <&powerdown STIH407_SATA1_POWERDOWN>,
 				 <&softreset STIH407_SATA1_SOFTRESET>,
@@ -811,7 +812,7 @@
 				 <&clk_s_c0_flexgen CLK_ETH_PHY>;
 		};
 
-		mailbox0: mailbox@8f00000  {
+		mailbox0: mailbox@8f00000 {
 			compatible = "st,stih407-mailbox";
 			reg = <0x8f00000 0x1000>;
 			interrupts = <GIC_SPI 1 IRQ_TYPE_LEVEL_HIGH>;

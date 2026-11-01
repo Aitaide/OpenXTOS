@@ -18,6 +18,8 @@
 
 #include <asm/cacheflush.h>
 
+#include "kernel.h"
+
 /* Compute the address of the breakpoint instruction and return it.
  *
  * Note that uprobe_get_swbp_addr is defined as a weak symbol in
@@ -278,6 +280,7 @@ int arch_uprobe_exception_notify(struct notifier_block *self,
 	case DIE_SSTEP:
 		if (uprobe_post_sstep_notifier(args->regs))
 			ret = NOTIFY_STOP;
+		break;
 
 	default:
 		break;

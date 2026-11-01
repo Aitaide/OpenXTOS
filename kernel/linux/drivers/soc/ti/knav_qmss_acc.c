@@ -450,7 +450,7 @@ static int knav_acc_free_range(struct knav_range_info *range)
 	return 0;
 }
 
-static struct knav_range_ops knav_acc_range_ops = {
+static const struct knav_range_ops knav_acc_range_ops = {
 	.set_notify	= knav_acc_set_notify,
 	.init_queue	= knav_acc_init_queue,
 	.open_queue	= knav_acc_open_queue,
@@ -466,7 +466,7 @@ static struct knav_range_ops knav_acc_range_ops = {
  * @node:		device node
  * @range:		qmms range information
  *
- * Return 0 on success or error
+ * Return: 0 on success, errno otherwise.
  */
 int knav_init_acc_range(struct knav_device *kdev,
 			struct device_node *node,

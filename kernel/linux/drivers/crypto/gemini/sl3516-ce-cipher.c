@@ -56,10 +56,6 @@ static bool sl3516_ce_need_fallback(struct skcipher_request *areq)
 			ce->fallback_mod16++;
 			return true;
 		}
-		if ((sg_dma_len(sg) % 16) != 0) {
-			ce->fallback_mod16++;
-			return true;
-		}
 		if (!IS_ALIGNED(sg->offset, 16)) {
 			ce->fallback_align16++;
 			return true;
@@ -69,10 +65,6 @@ static bool sl3516_ce_need_fallback(struct skcipher_request *areq)
 	sg = areq->dst;
 	while (sg) {
 		if ((sg->length % 16) != 0) {
-			ce->fallback_mod16++;
-			return true;
-		}
-		if ((sg_dma_len(sg) % 16) != 0) {
 			ce->fallback_mod16++;
 			return true;
 		}
@@ -332,8 +324,8 @@ int sl3516_ce_cipher_init(struct crypto_tfm *tfm)
 		return PTR_ERR(op->fallback_tfm);
 	}
 
-	sktfm->reqsize = sizeof(struct sl3516_ce_cipher_req_ctx) +
-			 crypto_skcipher_reqsize(op->fallback_tfm);
+	crypto_skcipher_set_reqsize(sktfm, sizeof(struct sl3516_ce_cipher_req_ctx) +
+				    crypto_skcipher_reqsize(op->fallback_tfm));
 
 	dev_info(op->ce->dev, "Fallback for %s is %s\n",
 		 crypto_tfm_alg_driver_name(&sktfm->base),

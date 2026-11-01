@@ -26,6 +26,7 @@
 #include <string.h>
 #include <poll.h>
 #include <endian.h>
+#include <float.h>
 #include <getopt.h>
 #include <inttypes.h>
 #include <stdbool.h>
@@ -54,9 +55,12 @@ enum autochan {
 static unsigned int size_from_channelarray(struct iio_channel_info *channels, int num_channels)
 {
 	unsigned int bytes = 0;
-	int i = 0;
+	int i = 0, max = 0;
+	unsigned int misalignment;
 
 	while (i < num_channels) {
+		if (channels[i].bytes > max)
+			max = channels[i].bytes;
 		if (bytes % channels[i].bytes == 0)
 			channels[i].location = bytes;
 		else
@@ -66,6 +70,14 @@ static unsigned int size_from_channelarray(struct iio_channel_info *channels, in
 		bytes = channels[i].location + channels[i].bytes;
 		i++;
 	}
+	/*
+	 * We want the data in next sample to also be properly aligned so
+	 * we'll add padding at the end if needed. Adding padding only
+	 * works for channel data which size is 2^n bytes.
+	 */
+	misalignment = bytes % max;
+	if (misalignment)
+		bytes += max - misalignment;
 
 	return bytes;
 }
@@ -78,12 +90,19 @@ static void print1byte(uint8_t input, struct iio_channel_info *info)
 	 */
 	input >>= info->shift;
 	input &= info->mask;
-	if (info->is_signed) {
+	switch (info->format) {
+	case 's': {
 		int8_t val = (int8_t)(input << (8 - info->bits_used)) >>
 			     (8 - info->bits_used);
 		printf("%05f ", ((float)val + info->offset) * info->scale);
-	} else {
+		break;
+	}
+	case 'u':
 		printf("%05f ", ((float)input + info->offset) * info->scale);
+		break;
+	case 'f':
+		printf("<invalid 1-byte float> ");
+		break;
 	}
 }
 
@@ -101,12 +120,30 @@ static void print2byte(uint16_t input, struct iio_channel_info *info)
 	 */
 	input >>= info->shift;
 	input &= info->mask;
-	if (info->is_signed) {
+	switch (info->format) {
+	case 's': {
 		int16_t val = (int16_t)(input << (16 - info->bits_used)) >>
 			      (16 - info->bits_used);
 		printf("%05f ", ((float)val + info->offset) * info->scale);
-	} else {
+		break;
+	}
+	case 'u':
 		printf("%05f ", ((float)input + info->offset) * info->scale);
+		break;
+	case 'f': {
+#if defined(__FLT16_MAX__)
+		union {
+			uint16_t u;
+			_Float16 f;
+		} converter;
+
+		converter.u = input;
+		printf("%05f ", ((float)converter.f + info->offset) * info->scale);
+#else
+		printf("<unsupported 2-byte float> ");
+#endif
+		break;
+	}
 	}
 }
 
@@ -124,12 +161,26 @@ static void print4byte(uint32_t input, struct iio_channel_info *info)
 	 */
 	input >>= info->shift;
 	input &= info->mask;
-	if (info->is_signed) {
+	switch (info->format) {
+	case 's': {
 		int32_t val = (int32_t)(input << (32 - info->bits_used)) >>
 			      (32 - info->bits_used);
 		printf("%05f ", ((float)val + info->offset) * info->scale);
-	} else {
+		break;
+	}
+	case 'u':
 		printf("%05f ", ((float)input + info->offset) * info->scale);
+		break;
+	case 'f': {
+		union {
+			uint32_t u;
+			float f;
+		} converter;
+
+		converter.u = input;
+		printf("%05f ", (converter.f + info->offset) * info->scale);
+		break;
+	}
 	}
 }
 
@@ -147,7 +198,8 @@ static void print8byte(uint64_t input, struct iio_channel_info *info)
 	 */
 	input >>= info->shift;
 	input &= info->mask;
-	if (info->is_signed) {
+	switch (info->format) {
+	case 's': {
 		int64_t val = (int64_t)(input << (64 - info->bits_used)) >>
 			      (64 - info->bits_used);
 		/* special case for timestamp */
@@ -156,8 +208,21 @@ static void print8byte(uint64_t input, struct iio_channel_info *info)
 		else
 			printf("%05f ",
 			       ((float)val + info->offset) * info->scale);
-	} else {
+		break;
+	}
+	case 'u':
 		printf("%05f ", ((float)input + info->offset) * info->scale);
+		break;
+	case 'f': {
+		union {
+			uint64_t u;
+			double f;
+		} converter;
+
+		converter.u = input;
+		printf("%05f ", (converter.f + info->offset) * info->scale);
+		break;
+	}
 	}
 }
 
@@ -324,7 +389,7 @@ static const struct option longopts[] = {
 	{ "device-num",		1, 0, 'N' },
 	{ "trigger-name",	1, 0, 't' },
 	{ "trigger-num",	1, 0, 'T' },
-	{ },
+	{ }
 };
 
 int main(int argc, char **argv)
@@ -487,6 +552,10 @@ int main(int argc, char **argv)
 			return -ENOMEM;
 		}
 		trigger_name = malloc(IIO_MAX_NAME_LENGTH);
+		if (!trigger_name) {
+			ret = -ENOMEM;
+			goto error;
+		}
 		ret = read_sysfs_string("name", trig_dev_name, trigger_name);
 		free(trig_dev_name);
 		if (ret < 0) {

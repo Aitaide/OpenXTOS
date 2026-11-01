@@ -22,7 +22,6 @@
 #include <linux/seq_file.h>
 #include <linux/ioport.h>
 #include <linux/console.h>
-#include <linux/screen_info.h>
 #include <linux/root_dev.h>
 #include <linux/cpu.h>
 #include <linux/unistd.h>
@@ -68,6 +67,8 @@
 #include <asm/cpu_has_feature.h>
 #include <asm/kasan.h>
 #include <asm/mce.h>
+#include <asm/systemcfg.h>
+#include <linux/kmsg_dump.h>
 
 #include "setup.h"
 
@@ -86,6 +87,7 @@ EXPORT_SYMBOL(machine_id);
 
 int boot_cpuid = -1;
 EXPORT_SYMBOL_GPL(boot_cpuid);
+int __initdata boot_core_hwid = -1;
 
 #ifdef CONFIG_PPC64
 int boot_cpu_hwid = -1;
@@ -97,21 +99,6 @@ int boot_cpu_hwid = -1;
  */
 int dcache_bsize;
 int icache_bsize;
-
-/*
- * This still seems to be needed... -- paulus
- */ 
-struct screen_info screen_info = {
-	.orig_x = 0,
-	.orig_y = 25,
-	.orig_video_cols = 80,
-	.orig_video_lines = 25,
-	.orig_video_isVGA = 1,
-	.orig_video_points = 16
-};
-#if defined(CONFIG_FB_VGA16_MODULE)
-EXPORT_SYMBOL(screen_info);
-#endif
 
 /* Variables required to store legacy IO irq routing */
 int of_i8042_kbd_irq;
@@ -125,7 +112,7 @@ int ppc_do_canonicalize_irqs;
 EXPORT_SYMBOL(ppc_do_canonicalize_irqs);
 #endif
 
-#ifdef CONFIG_CRASH_CORE
+#ifdef CONFIG_CRASH_DUMP
 /* This keeps a track of which one is the crashing cpu. */
 int crashing_cpu = -1;
 #endif
@@ -317,6 +304,7 @@ static int show_cpuinfo(struct seq_file *m, void *v)
 				break;
 			case 0x004e: /* POWER9 bits 12-15 give chip type */
 			case 0x0080: /* POWER10 bit 12 gives SMT8/4 */
+			case 0x0083: /* POWER12 bit 12 gives SMT8/4 */
 				maj = (pvr >> 8) & 0x0F;
 				min = pvr & 0xFF;
 				break;
@@ -337,7 +325,7 @@ static int show_cpuinfo(struct seq_file *m, void *v)
 	seq_putc(m, '\n');
 
 	/* If this is the last cpu, print the summary */
-	if (cpumask_next(cpu_id, cpu_online_mask) >= nr_cpu_ids)
+	if (cpu_id == cpumask_last(cpu_online_mask))
 		show_cpuinfo_summary(m);
 
 	return 0;
@@ -345,10 +333,7 @@ static int show_cpuinfo(struct seq_file *m, void *v)
 
 static void *c_start(struct seq_file *m, loff_t *pos)
 {
-	if (*pos == 0)	/* just in case, cpu 0 is not the first */
-		*pos = cpumask_first(cpu_online_mask);
-	else
-		*pos = cpumask_next(*pos - 1, cpu_online_mask);
+	*pos = cpumask_next(*pos - 1, cpu_online_mask);
 	if ((*pos) < nr_cpu_ids)
 		return (void *)(unsigned long)(*pos + 1);
 	return NULL;
@@ -420,12 +405,31 @@ static void __init cpu_init_thread_core_maps(int tpc)
 		cpumask_set_cpu(i, &threads_core_mask);
 
 	printk(KERN_INFO "CPU maps initialized for %d thread%s per core\n",
-	       tpc, tpc > 1 ? "s" : "");
+	       tpc, str_plural(tpc));
 	printk(KERN_DEBUG " (thread shift is %d)\n", threads_shift);
 }
 
 
 u32 *cpu_to_phys_id = NULL;
+
+static int assign_threads(unsigned int cpu, unsigned int nthreads, bool present,
+			  const __be32 *hw_ids)
+{
+	for (int i = 0; i < nthreads && cpu < nr_cpu_ids; i++) {
+		__be32 hwid;
+
+		hwid = be32_to_cpu(hw_ids[i]);
+
+		DBG("    thread %d -> cpu %d (hard id %d)\n", i, cpu, hwid);
+
+		set_cpu_present(cpu, present);
+		set_cpu_possible(cpu, true);
+		cpu_to_phys_id[cpu] = hwid;
+		cpu++;
+	}
+
+	return cpu;
+}
 
 /**
  * setup_cpu_maps - initialize the following cpu maps:
@@ -453,16 +457,13 @@ void __init smp_setup_cpu_maps(void)
 
 	DBG("smp_setup_cpu_maps()\n");
 
-	cpu_to_phys_id = memblock_alloc(nr_cpu_ids * sizeof(u32),
+	cpu_to_phys_id = memblock_alloc_or_panic(nr_cpu_ids * sizeof(u32),
 					__alignof__(u32));
-	if (!cpu_to_phys_id)
-		panic("%s: Failed to allocate %zu bytes align=0x%zx\n",
-		      __func__, nr_cpu_ids * sizeof(u32), __alignof__(u32));
 
 	for_each_node_by_type(dn, "cpu") {
 		const __be32 *intserv;
 		__be32 cpu_be;
-		int j, len;
+		int len;
 
 		DBG("  * %pOF...\n", dn);
 
@@ -484,27 +485,31 @@ void __init smp_setup_cpu_maps(void)
 
 		nthreads = len / sizeof(int);
 
-		for (j = 0; j < nthreads && cpu < nr_cpu_ids; j++) {
-			bool avail;
+		bool avail = of_device_is_available(dn);
+		if (!avail)
+			avail = !of_property_match_string(dn,
+					"enable-method", "spin-table");
 
-			DBG("    thread %d -> cpu %d (hard id %d)\n",
-			    j, cpu, be32_to_cpu(intserv[j]));
+		if (boot_core_hwid >= 0) {
+			if (cpu == 0) {
+				pr_info("Skipping CPU node %pOF to allow for boot core.\n", dn);
+				cpu = nthreads;
+				continue;
+			}
 
-			avail = of_device_is_available(dn);
-			if (!avail)
-				avail = !of_property_match_string(dn,
-						"enable-method", "spin-table");
-
-			set_cpu_present(cpu, avail);
-			set_cpu_possible(cpu, true);
-			cpu_to_phys_id[cpu] = be32_to_cpu(intserv[j]);
-			cpu++;
-		}
-
-		if (cpu >= nr_cpu_ids) {
+			if (be32_to_cpu(intserv[0]) == boot_core_hwid) {
+				pr_info("Renumbered boot core %pOF to logical 0\n", dn);
+				assign_threads(0, nthreads, avail, intserv);
+				of_node_put(dn);
+				break;
+			}
+		} else if (cpu >= nr_cpu_ids) {
 			of_node_put(dn);
 			break;
 		}
+
+		if (cpu < nr_cpu_ids)
+			cpu = assign_threads(cpu, nthreads, avail, intserv);
 	}
 
 	/* If no SMT supported, nthreads is forced to 1 */
@@ -552,7 +557,9 @@ void __init smp_setup_cpu_maps(void)
 	out:
 		of_node_put(dn);
 	}
-	vdso_data->processorCount = num_present_cpus();
+#endif
+#ifdef CONFIG_PPC64_PROC_SYSTEMCFG
+	systemcfg->processorCount = num_present_cpus();
 #endif /* CONFIG_PPC64 */
 
         /* Initialize CPU <=> thread mapping/
@@ -601,7 +608,6 @@ struct seq_buf ppc_hw_desc __initdata = {
 	.buffer = ppc_hw_desc_buf,
 	.size = sizeof(ppc_hw_desc_buf),
 	.len = 0,
-	.readpos = 0,
 };
 
 static __init void probe_machine(void)
@@ -632,6 +638,8 @@ static __init void probe_machine(void)
 	     machine_id++) {
 		DBG("  %s ...\n", machine_id->name);
 		if (machine_id->compatible && !of_machine_is_compatible(machine_id->compatible))
+			continue;
+		if (machine_id->compatibles && !of_machine_compatible_match(machine_id->compatibles))
 			continue;
 		memcpy(&ppc_md, machine_id, sizeof(struct machdep_calls));
 		if (ppc_md.probe && !ppc_md.probe())
@@ -736,6 +744,13 @@ static int ppc_panic_fadump_handler(struct notifier_block *this,
 	hard_irq_disable();
 
 	/*
+	 * Invoke kmsg_dump (e.g., pstore) before crash_fadump() as fadump
+	 * runs before panic()'s kmsg_dump_desc() call.
+	 */
+	if (should_fadump_crash())
+		kmsg_dump_desc(KMSG_DUMP_PANIC, (char *)ptr);
+
+	/*
 	 * If firmware-assisted dump has been registered then trigger
 	 * its callback and let the firmware handles everything else.
 	 */
@@ -822,8 +837,8 @@ static int __init check_cache_coherency(void)
 	if (devtree_coherency != KERNEL_COHERENCY) {
 		printk(KERN_ERR
 			"kernel coherency:%s != device tree_coherency:%s\n",
-			KERNEL_COHERENCY ? "on" : "off",
-			devtree_coherency ? "on" : "off");
+			str_on_off(KERNEL_COHERENCY),
+			str_on_off(devtree_coherency));
 		BUG();
 	}
 
@@ -856,6 +871,10 @@ static __init void print_system_info(void)
 		cur_cpu_spec->cpu_user_features,
 		cur_cpu_spec->cpu_user_features2);
 	pr_info("mmu_features      = 0x%08x\n", cur_cpu_spec->mmu_features);
+	pr_info("  possible        = 0x%016lx\n",
+		(unsigned long)MMU_FTRS_POSSIBLE);
+	pr_info("  always          = 0x%016lx\n",
+		(unsigned long)MMU_FTRS_ALWAYS);
 #ifdef CONFIG_PPC64
 	pr_info("firmware_features = 0x%016lx\n", powerpc_firmware_features);
 #ifdef CONFIG_PPC_BOOK3S
@@ -948,8 +967,7 @@ void __init setup_arch(char **cmdline_p)
 
 	/* Parse memory topology */
 	mem_topology_setup();
-	/* Set max_mapnr before paging_init() */
-	set_max_mapnr(max_pfn);
+	high_memory = (void *)__va(max_low_pfn * PAGE_SIZE);
 
 	/*
 	 * Release secondary cpus out of their spinloops at 0x60 now that
@@ -985,13 +1003,6 @@ void __init setup_arch(char **cmdline_p)
 	smp_release_cpus();
 
 	initmem_init();
-
-	/*
-	 * Reserve large chunks of memory for use by CMA for KVM and hugetlb. These must
-	 * be called after initmem_init(), so that pageblock_order is initialised.
-	 */
-	kvm_cma_reserve();
-	gigantic_hugetlb_cma_reserve();
 
 	early_memtest(min_low_pfn << PAGE_SHIFT, max_low_pfn << PAGE_SHIFT);
 

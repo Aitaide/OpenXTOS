@@ -28,7 +28,6 @@ static int test__syscall_openat_tp_fields(struct test_suite *test __maybe_unused
 {
 	struct record_opts opts = {
 		.target = {
-			.uid = UINT_MAX,
 			.uses_mmap = true,
 		},
 		.no_buffering = true,
@@ -40,7 +39,7 @@ static int test__syscall_openat_tp_fields(struct test_suite *test __maybe_unused
 	int flags = O_RDONLY | O_DIRECTORY;
 	struct evlist *evlist = evlist__new();
 	struct evsel *evsel;
-	int err = -1, i, nr_events = 0, nr_polls = 0;
+	int ret = TEST_FAIL, err, i, nr_events = 0, nr_polls = 0;
 	char sbuf[STRERR_BUFSIZE];
 
 	if (evlist == NULL) {
@@ -51,7 +50,8 @@ static int test__syscall_openat_tp_fields(struct test_suite *test __maybe_unused
 	evsel = evsel__newtp("syscalls", "sys_enter_openat");
 	if (IS_ERR(evsel)) {
 		pr_debug("%s: evsel__newtp\n", __func__);
-		goto out_delete_evlist;
+		ret = PTR_ERR(evsel) == -EACCES ? TEST_SKIP : TEST_FAIL;
+		goto out_put_evlist;
 	}
 
 	evlist__add(evlist, evsel);
@@ -59,25 +59,25 @@ static int test__syscall_openat_tp_fields(struct test_suite *test __maybe_unused
 	err = evlist__create_maps(evlist, &opts.target);
 	if (err < 0) {
 		pr_debug("%s: evlist__create_maps\n", __func__);
-		goto out_delete_evlist;
+		goto out_put_evlist;
 	}
 
 	evsel__config(evsel, &opts, NULL);
 
-	perf_thread_map__set_pid(evlist->core.threads, 0, getpid());
+	perf_thread_map__set_pid(evlist__core(evlist)->threads, 0, getpid());
 
 	err = evlist__open(evlist);
 	if (err < 0) {
 		pr_debug("perf_evlist__open: %s\n",
 			 str_error_r(errno, sbuf, sizeof(sbuf)));
-		goto out_delete_evlist;
+		goto out_put_evlist;
 	}
 
-	err = evlist__mmap(evlist, UINT_MAX);
+	err = evlist__do_mmap(evlist, UINT_MAX);
 	if (err < 0) {
 		pr_debug("evlist__mmap: %s\n",
 			 str_error_r(errno, sbuf, sizeof(sbuf)));
-		goto out_delete_evlist;
+		goto out_put_evlist;
 	}
 
 	evlist__enable(evlist);
@@ -90,11 +90,11 @@ static int test__syscall_openat_tp_fields(struct test_suite *test __maybe_unused
 	while (1) {
 		int before = nr_events;
 
-		for (i = 0; i < evlist->core.nr_mmaps; i++) {
+		for (i = 0; i < evlist__core(evlist)->nr_mmaps; i++) {
 			union perf_event *event;
 			struct mmap *md;
 
-			md = &evlist->mmap[i];
+			md = &evlist__mmap(evlist)[i];
 			if (perf_mmap__read_init(&md->core) < 0)
 				continue;
 
@@ -110,18 +110,23 @@ static int test__syscall_openat_tp_fields(struct test_suite *test __maybe_unused
 					continue;
 				}
 
+				perf_sample__init(&sample, /*all=*/false);
 				err = evsel__parse_sample(evsel, event, &sample);
 				if (err) {
 					pr_debug("Can't parse sample, err = %d\n", err);
-					goto out_delete_evlist;
+					perf_sample__exit(&sample);
+					goto out_put_evlist;
 				}
 
-				tp_flags = evsel__intval(evsel, &sample, "flags");
-
-				if (flags != tp_flags) {
+				tp_flags = perf_sample__intval(&sample, "flags");
+				perf_sample__exit(&sample);
+				/* C library wrapper may set additional flags,
+				   access mode must be unchanged */
+				if ((tp_flags & O_ACCMODE) != (flags & O_ACCMODE) ||
+				    (tp_flags & flags) != flags) {
 					pr_debug("%s: Expected flags=%#x, got %#x\n",
 						 __func__, flags, tp_flags);
-					goto out_delete_evlist;
+					goto out_put_evlist;
 				}
 
 				goto out_ok;
@@ -134,15 +139,25 @@ static int test__syscall_openat_tp_fields(struct test_suite *test __maybe_unused
 
 		if (++nr_polls > 5) {
 			pr_debug("%s: no events!\n", __func__);
-			goto out_delete_evlist;
+			goto out_put_evlist;
 		}
 	}
 out_ok:
-	err = 0;
-out_delete_evlist:
-	evlist__delete(evlist);
+	ret = TEST_OK;
+out_put_evlist:
+	evlist__put(evlist);
 out:
-	return err;
+	return ret;
 }
 
-DEFINE_SUITE("syscalls:sys_enter_openat event fields", syscall_openat_tp_fields);
+static struct test_case tests__syscall_openat_tp_fields[] = {
+	TEST_CASE_REASON("syscalls:sys_enter_openat event fields",
+			 syscall_openat_tp_fields,
+			 "permissions"),
+	{	.name = NULL, }
+};
+
+struct test_suite suite__syscall_openat_tp_fields = {
+	.desc = "syscalls:sys_enter_openat event fields",
+	.test_cases = tests__syscall_openat_tp_fields,
+};

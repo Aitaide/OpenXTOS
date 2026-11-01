@@ -41,8 +41,8 @@ struct kstat {
 	u64		ino;
 	dev_t		dev;
 	dev_t		rdev;
-	kuid_t		uid;
-	kgid_t		gid;
+	kuid_t		uid;		/* This is logically a vfsuid_t. */
+	kgid_t		gid;		/* This is logically a vfsgid_t. */
 	loff_t		size;
 	struct timespec64 atime;
 	struct timespec64 mtime;
@@ -50,9 +50,15 @@ struct kstat {
 	struct timespec64 btime;			/* File creation time */
 	u64		blocks;
 	u64		mnt_id;
+	u64		change_cookie;
+	u64		subvol;
 	u32		dio_mem_align;
 	u32		dio_offset_align;
-	u64		change_cookie;
+	u32		dio_read_offset_align;
+	u32		atomic_write_unit_min;
+	u32		atomic_write_unit_max;
+	u32		atomic_write_unit_max_opt;
+	u32		atomic_write_segments_max;
 };
 
 /* These definitions are internal to the kernel for now. Mainly used by nfsd. */

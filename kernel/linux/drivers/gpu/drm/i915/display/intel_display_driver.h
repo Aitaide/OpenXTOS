@@ -8,29 +8,48 @@
 
 #include <linux/types.h>
 
-struct drm_atomic_state;
-struct drm_i915_private;
+struct drm_atomic_commit;
 struct drm_modeset_acquire_ctx;
+struct intel_display;
 struct pci_dev;
 
 bool intel_display_driver_probe_defer(struct pci_dev *pdev);
-void intel_display_driver_init_hw(struct drm_i915_private *i915);
-void intel_display_driver_early_probe(struct drm_i915_private *i915);
-int intel_display_driver_probe_noirq(struct drm_i915_private *i915);
-int intel_display_driver_probe_nogem(struct drm_i915_private *i915);
-int intel_display_driver_probe(struct drm_i915_private *i915);
-void intel_display_driver_register(struct drm_i915_private *i915);
-void intel_display_driver_remove(struct drm_i915_private *i915);
-void intel_display_driver_remove_noirq(struct drm_i915_private *i915);
-void intel_display_driver_remove_nogem(struct drm_i915_private *i915);
-void intel_display_driver_unregister(struct drm_i915_private *i915);
-int intel_display_driver_suspend(struct drm_i915_private *i915);
-void intel_display_driver_resume(struct drm_i915_private *i915);
+void intel_display_driver_init_hw(struct intel_display *display);
+void intel_display_driver_early_probe(struct intel_display *display);
+int intel_display_driver_probe_noirq(struct intel_display *display);
+int intel_display_driver_probe_nogem(struct intel_display *display);
+int intel_display_driver_probe(struct intel_display *display);
+void intel_display_driver_register(struct intel_display *display);
+void intel_display_driver_remove(struct intel_display *display);
+void intel_display_driver_remove_noirq(struct intel_display *display);
+void intel_display_driver_remove_nogem(struct intel_display *display);
+void intel_display_driver_unregister(struct intel_display *display);
+void intel_display_driver_shutdown(struct intel_display *display);
+void intel_display_driver_shutdown_late(struct intel_display *display);
+
+int intel_display_driver_pm_suspend(struct intel_display *display);
+void intel_display_driver_pm_suspend_late(struct intel_display *display, bool s2idle);
+void intel_display_driver_pm_resume_early(struct intel_display *display);
+void intel_display_driver_pm_resume(struct intel_display *display);
 
 /* interface for intel_display_reset.c */
-int __intel_display_driver_resume(struct drm_i915_private *i915,
-				  struct drm_atomic_state *state,
+int __intel_display_driver_resume(struct intel_display *display,
+				  struct drm_atomic_commit *state,
 				  struct drm_modeset_acquire_ctx *ctx);
+
+void intel_display_driver_enable_user_access(struct intel_display *display);
+void intel_display_driver_disable_user_access(struct intel_display *display);
+void intel_display_driver_suspend_access(struct intel_display *display);
+void intel_display_driver_resume_access(struct intel_display *display);
+bool intel_display_driver_check_access(struct intel_display *display);
+
+void intel_display_driver_runtime_pm_enable(struct intel_display *display);
+void intel_display_driver_runtime_pm_disable(struct intel_display *display);
+
+void intel_display_driver_pm_runtime_suspend(struct intel_display *display);
+void intel_display_driver_pm_runtime_suspend_late(struct intel_display *display);
+void intel_display_driver_pm_runtime_resume_early(struct intel_display *display);
+void intel_display_driver_pm_runtime_resume(struct intel_display *display);
 
 #endif /* __INTEL_DISPLAY_DRIVER_H__ */
 

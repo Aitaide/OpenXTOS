@@ -1,13 +1,9 @@
 // SPDX-License-Identifier: GPL-2.0
 /* Converted from tools/testing/selftests/bpf/verifier/sock.c */
 
-#include <linux/bpf.h>
+#include "vmlinux.h"
 #include <bpf/bpf_helpers.h>
 #include "bpf_misc.h"
-
-#define sizeof_field(TYPE, MEMBER) sizeof((((TYPE *)0)->MEMBER))
-#define offsetofend(TYPE, MEMBER) \
-	(offsetof(TYPE, MEMBER)	+ sizeof_field(TYPE, MEMBER))
 
 struct {
 	__uint(type, BPF_MAP_TYPE_REUSEPORT_SOCKARRAY);
@@ -50,6 +46,13 @@ struct {
 	__uint(map_flags, BPF_F_NO_PREALLOC);
 } sk_storage_map SEC(".maps");
 
+struct {
+	__uint(type, BPF_MAP_TYPE_PROG_ARRAY);
+	__uint(max_entries, 1);
+	__uint(key_size, sizeof(__u32));
+	__uint(value_size, sizeof(__u32));
+} jmp_table SEC(".maps");
+
 SEC("cgroup/skb")
 __description("skb->sk: no NULL check")
 __failure __msg("invalid mem access 'sock_common_or_null'")
@@ -82,6 +85,44 @@ l0_%=:	r0 = *(u32*)(r1 + %[bpf_sock_family]);		\
 "	:
 	: __imm_const(__sk_buff_sk, offsetof(struct __sk_buff, sk)),
 	  __imm_const(bpf_sock_family, offsetof(struct bpf_sock, family))
+	: __clobber_all);
+}
+
+SEC("socket")
+__description("skb->sk: sk->rx_queue_mapping [no sign extension]")
+__success __success_unpriv __retval(0)
+__naked void sk_rx_queue_mapping_no_sign_ext(void)
+{
+	asm volatile ("					\
+	r1 = *(u64*)(r1 + %[__sk_buff_sk]);		\
+	if r1 != 0 goto l0_%=;				\
+	r0 = 0xdead;					\
+	exit;						\
+l0_%=:	r0 = *(u32*)(r1 + %[bpf_sock_rx_queue_mapping]);	\
+	r0 >>= 32;					\
+	exit;						\
+"	:
+	: __imm_const(__sk_buff_sk, offsetof(struct __sk_buff, sk)),
+	  __imm_const(bpf_sock_rx_queue_mapping, offsetof(struct bpf_sock, rx_queue_mapping))
+	: __clobber_all);
+}
+
+SEC("socket")
+__description("skb->sk: sk->rx_queue_mapping [narrow load mask]")
+__success __success_unpriv __retval(0)
+__naked void sk_rx_queue_mapping_narrow_load_mask(void)
+{
+	asm volatile ("					\
+	r1 = *(u64*)(r1 + %[__sk_buff_sk]);		\
+	if r1 != 0 goto l0_%=;				\
+	r0 = 0xdead;					\
+	exit;						\
+l0_%=:	r0 = *(u16*)(r1 + %[bpf_sock_rx_queue_mapping]);	\
+	r0 >>= 16;					\
+	exit;						\
+"	:
+	: __imm_const(__sk_buff_sk, offsetof(struct __sk_buff, sk)),
+	  __imm_const(bpf_sock_rx_queue_mapping, offsetof(struct bpf_sock, rx_queue_mapping))
 	: __clobber_all);
 }
 
@@ -600,7 +641,7 @@ l2_%=:	r0 = *(u32*)(r0 + %[bpf_tcp_sock_snd_cwnd]);	\
 
 SEC("tc")
 __description("bpf_sk_release(skb->sk)")
-__failure __msg("R1 must be referenced when passed to release function")
+__failure __msg("release helper bpf_sk_release expects referenced PTR_TO_BTF_ID passed to R1")
 __naked void bpf_sk_release_skb_sk(void)
 {
 	asm volatile ("					\
@@ -617,7 +658,7 @@ l0_%=:	r0 = 0;						\
 
 SEC("tc")
 __description("bpf_sk_release(bpf_sk_fullsock(skb->sk))")
-__failure __msg("R1 must be referenced when passed to release function")
+__failure __msg("release helper bpf_sk_release expects referenced PTR_TO_BTF_ID passed to R1")
 __naked void bpf_sk_fullsock_skb_sk(void)
 {
 	asm volatile ("					\
@@ -641,7 +682,7 @@ l1_%=:	r1 = r0;					\
 
 SEC("tc")
 __description("bpf_sk_release(bpf_tcp_sock(skb->sk))")
-__failure __msg("R1 must be referenced when passed to release function")
+__failure __msg("release helper bpf_sk_release expects referenced PTR_TO_BTF_ID passed to R1")
 __naked void bpf_tcp_sock_skb_sk(void)
 {
 	asm volatile ("					\
@@ -975,6 +1016,197 @@ l1_%=:	r0 = *(u8*)(r7 + 0);				\
 	  __imm(bpf_skc_to_tcp_sock),
 	  __imm_const(__sk_buff_sk, offsetof(struct __sk_buff, sk))
 	: __clobber_all);
+}
+
+SEC("cgroup/post_bind4")
+__description("sk->src_ip6[0] [load 1st byte]")
+__failure __msg("invalid bpf_context access off=28 size=2")
+__naked void post_bind4_read_src_ip6(void)
+{
+	asm volatile ("					\
+	r6 = r1;					\
+	r7 = *(u16*)(r6 + %[bpf_sock_src_ip6_0]);	\
+	r0 = 1;						\
+	exit;						\
+"	:
+	: __imm_const(bpf_sock_src_ip6_0, offsetof(struct bpf_sock, src_ip6[0]))
+	: __clobber_all);
+}
+
+SEC("cgroup/post_bind4")
+__description("sk->mark [load mark]")
+__failure __msg("invalid bpf_context access off=16 size=2")
+__naked void post_bind4_read_mark(void)
+{
+	asm volatile ("					\
+	r6 = r1;					\
+	r7 = *(u16*)(r6 + %[bpf_sock_mark]);		\
+	r0 = 1;						\
+	exit;						\
+"	:
+	: __imm_const(bpf_sock_mark, offsetof(struct bpf_sock, mark))
+	: __clobber_all);
+}
+
+SEC("cgroup/post_bind6")
+__description("sk->src_ip4 [load src_ip4]")
+__failure __msg("invalid bpf_context access off=24 size=2")
+__naked void post_bind6_read_src_ip4(void)
+{
+	asm volatile ("					\
+	r6 = r1;					\
+	r7 = *(u16*)(r6 + %[bpf_sock_src_ip4]);		\
+	r0 = 1;						\
+	exit;						\
+"	:
+	: __imm_const(bpf_sock_src_ip4, offsetof(struct bpf_sock, src_ip4))
+	: __clobber_all);
+}
+
+SEC("cgroup/sock_create")
+__description("sk->src_port [word load]")
+__failure __msg("invalid bpf_context access off=44 size=2")
+__naked void sock_create_read_src_port(void)
+{
+	asm volatile ("					\
+	r6 = r1;					\
+	r7 = *(u16*)(r6 + %[bpf_sock_src_port]);	\
+	r0 = 1;						\
+	exit;						\
+"	:
+	: __imm_const(bpf_sock_src_port, offsetof(struct bpf_sock, src_port))
+	: __clobber_all);
+}
+
+__noinline
+long skb_pull_data2(struct __sk_buff *sk, __u32 len)
+{
+	return bpf_skb_pull_data(sk, len);
+}
+
+__noinline
+long skb_pull_data1(struct __sk_buff *sk, __u32 len)
+{
+	return skb_pull_data2(sk, len);
+}
+
+/* global function calls bpf_skb_pull_data(), which invalidates packet
+ * pointers established before global function call.
+ */
+SEC("tc")
+__failure __msg("invalid mem access")
+int invalidate_pkt_pointers_from_global_func(struct __sk_buff *sk)
+{
+	int *p = (void *)(long)sk->data;
+
+	if ((void *)(p + 1) > (void *)(long)sk->data_end)
+		return TCX_DROP;
+	skb_pull_data1(sk, 0);
+	*p = 42; /* this is unsafe */
+	return TCX_PASS;
+}
+
+__noinline
+long xdp_pull_data2(struct xdp_md *x, __u32 len)
+{
+	return bpf_xdp_pull_data(x, len);
+}
+
+__noinline
+long xdp_pull_data1(struct xdp_md *x, __u32 len)
+{
+	return xdp_pull_data2(x, len);
+}
+
+/* global function calls bpf_xdp_pull_data(), which invalidates packet
+ * pointers established before global function call.
+ */
+SEC("xdp")
+__failure __msg("invalid mem access")
+int invalidate_xdp_pkt_pointers_from_global_func(struct xdp_md *x)
+{
+	int *p = (void *)(long)x->data;
+
+	if ((void *)(p + 1) > (void *)(long)x->data_end)
+		return XDP_DROP;
+	xdp_pull_data1(x, 0);
+	*p = 42; /* this is unsafe */
+	return XDP_PASS;
+}
+
+/* XDP packet changing kfunc calls invalidate packet pointers */
+SEC("xdp")
+__failure __msg("invalid mem access")
+int invalidate_xdp_pkt_pointers(struct xdp_md *x)
+{
+	int *p = (void *)(long)x->data;
+
+	if ((void *)(p + 1) > (void *)(long)x->data_end)
+		return XDP_DROP;
+	bpf_xdp_pull_data(x, 0);
+	*p = 42; /* this is unsafe */
+	return XDP_PASS;
+}
+
+__noinline
+int tail_call(struct __sk_buff *sk)
+{
+	bpf_tail_call_static(sk, &jmp_table, 0);
+	return 0;
+}
+
+static __noinline
+int static_tail_call(struct __sk_buff *sk)
+{
+	int ret = 0;
+
+	bpf_tail_call_static(sk, &jmp_table, 0);
+	barrier_var(ret);
+	return ret;
+}
+
+/* Tail calls in sub-programs invalidate packet pointers. */
+SEC("tc")
+__failure __msg("invalid mem access")
+int invalidate_pkt_pointers_by_global_tail_call(struct __sk_buff *sk)
+{
+	int *p = (void *)(long)sk->data;
+
+	if ((void *)(p + 1) > (void *)(long)sk->data_end)
+		return TCX_DROP;
+	tail_call(sk);
+	*p = 42; /* this is unsafe */
+	return TCX_PASS;
+}
+
+/* Tail calls in static sub-programs invalidate packet pointers. */
+SEC("tc")
+__failure __msg("invalid mem access")
+int invalidate_pkt_pointers_by_static_tail_call(struct __sk_buff *sk)
+{
+	int *p = (void *)(long)sk->data;
+	int ret;
+
+	if ((void *)(p + 1) > (void *)(long)sk->data_end)
+		return TCX_DROP;
+	ret = static_tail_call(sk);
+	__sink(ret);
+	*p = 42; /* this is unsafe */
+	return TCX_PASS;
+}
+
+/* Direct tail calls do not invalidate packet pointers. */
+SEC("tc")
+__success
+int invalidate_pkt_pointers_by_tail_call(struct __sk_buff *sk)
+{
+	int *p = (void *)(long)sk->data;
+
+	if ((void *)(p + 1) > (void *)(long)sk->data_end)
+		return TCX_DROP;
+	bpf_tail_call_static(sk, &jmp_table, 0);
+	*p = 42; /* this is NOT unsafe: tail calls don't return */
+	return TCX_PASS;
 }
 
 char _license[] SEC("license") = "GPL";

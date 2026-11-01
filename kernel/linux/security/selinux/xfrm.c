@@ -76,7 +76,6 @@ static int selinux_xfrm_alloc_user(struct xfrm_sec_ctx **ctxp,
 				   gfp_t gfp)
 {
 	int rc;
-	const struct task_security_struct *tsec = selinux_cred(current_cred());
 	struct xfrm_sec_ctx *ctx = NULL;
 	u32 str_len;
 
@@ -89,13 +88,13 @@ static int selinux_xfrm_alloc_user(struct xfrm_sec_ctx **ctxp,
 	if (str_len >= PAGE_SIZE)
 		return -ENOMEM;
 
-	ctx = kmalloc(struct_size(ctx, ctx_str, str_len + 1), gfp);
+	ctx = kmalloc_flex(*ctx, ctx_str, str_len + 1, gfp);
 	if (!ctx)
 		return -ENOMEM;
 
 	ctx->ctx_doi = XFRM_SC_DOI_LSM;
 	ctx->ctx_alg = XFRM_SC_ALG_SELINUX;
-	ctx->ctx_len = str_len;
+	ctx->ctx_len = str_len + 1;
 	memcpy(ctx->ctx_str, &uctx[1], str_len);
 	ctx->ctx_str[str_len] = '\0';
 	rc = security_context_to_sid(ctx->ctx_str, str_len,
@@ -103,7 +102,7 @@ static int selinux_xfrm_alloc_user(struct xfrm_sec_ctx **ctxp,
 	if (rc)
 		goto err;
 
-	rc = avc_has_perm(tsec->sid, ctx->ctx_sid,
+	rc = avc_has_perm(current_sid(), ctx->ctx_sid,
 			  SECCLASS_ASSOCIATION, ASSOCIATION__SETCONTEXT, NULL);
 	if (rc)
 		goto err;
@@ -134,12 +133,10 @@ static void selinux_xfrm_free(struct xfrm_sec_ctx *ctx)
  */
 static int selinux_xfrm_delete(struct xfrm_sec_ctx *ctx)
 {
-	const struct task_security_struct *tsec = selinux_cred(current_cred());
-
 	if (!ctx)
 		return 0;
 
-	return avc_has_perm(tsec->sid, ctx->ctx_sid,
+	return avc_has_perm(current_sid(), ctx->ctx_sid,
 			    SECCLASS_ASSOCIATION, ASSOCIATION__SETCONTEXT,
 			    NULL);
 }
@@ -357,7 +354,7 @@ int selinux_xfrm_state_alloc_acquire(struct xfrm_state *x,
 	if (rc)
 		return rc;
 
-	ctx = kmalloc(struct_size(ctx, ctx_str, str_len), GFP_ATOMIC);
+	ctx = kmalloc_flex(*ctx, ctx_str, str_len, GFP_ATOMIC);
 	if (!ctx) {
 		rc = -ENOMEM;
 		goto out;

@@ -15,7 +15,7 @@
 #include <linux/slab.h>
 #include <linux/sched/signal.h>
 #include <linux/module.h>
-#include <asm/unaligned.h>
+#include <linux/unaligned.h>
 #include <net/tcp.h>
 #include <scsi/scsi_cmnd.h>
 #include <scsi/scsi_device.h>
@@ -918,7 +918,7 @@ invalid_datalen:
 		}
 
 		senselen = get_unaligned_be16(data);
-		if (datalen < senselen)
+		if (datalen < senselen + 2)
 			goto invalid_datalen;
 
 		memcpy(sc->sense_buffer, data + 2,
@@ -1142,13 +1142,15 @@ static int iscsi_handle_reject(struct iscsi_conn *conn, struct iscsi_hdr *hdr,
 			spin_unlock(&conn->session->frwd_lock);
 			spin_lock(&conn->session->back_lock);
 		} else {
-			struct iscsi_task *task;
+			struct iscsi_task *task = NULL;
 			/*
 			 * Our nop as ping got dropped. We know the target
 			 * and transport are ok so just clean up
 			 */
-			task = iscsi_itt_to_task(conn, rejected_pdu.itt);
-			if (!task) {
+			if (!iscsi_verify_itt(conn, rejected_pdu.itt))
+				task = iscsi_itt_to_task(conn, rejected_pdu.itt);
+			if (!task || task->state == ISCSI_TASK_FREE ||
+			    task->sc) {
 				iscsi_conn_printk(KERN_ERR, conn,
 						 "Invalid pdu reject. Could "
 						 "not lookup rejected task.\n");
@@ -1191,7 +1193,7 @@ struct iscsi_task *iscsi_itt_to_task(struct iscsi_conn *conn, itt_t itt)
 		session->tt->parse_pdu_itt(conn, itt, &i, NULL);
 	else
 		i = get_itt(itt);
-	if (i >= session->cmds_max)
+	if (i < 0 || i >= session->cmds_max)
 		return NULL;
 
 	return session->cmds[i];
@@ -1284,7 +1286,7 @@ int __iscsi_complete_pdu(struct iscsi_conn *conn, struct iscsi_hdr *hdr,
 	case ISCSI_OP_SCSI_TMFUNC_RSP:
 	case ISCSI_OP_NOOP_IN:
 		task = iscsi_itt_to_task(conn, hdr->itt);
-		if (!task)
+		if (!task || task->state == ISCSI_TASK_FREE || task->sc)
 			return ISCSI_ERR_BAD_ITT;
 		break;
 	default:
@@ -1384,7 +1386,7 @@ int iscsi_verify_itt(struct iscsi_conn *conn, itt_t itt)
 		return ISCSI_ERR_BAD_ITT;
 	}
 
-	if (i >= session->cmds_max) {
+	if (i < 0 || i >= session->cmds_max) {
 		iscsi_conn_printk(KERN_ERR, conn,
 				  "received invalid itt index %u (max cmds "
 				   "%u.\n", i, session->cmds_max);
@@ -1747,7 +1749,8 @@ enum {
 	FAILURE_SESSION_NOT_READY,
 };
 
-int iscsi_queuecommand(struct Scsi_Host *host, struct scsi_cmnd *sc)
+enum scsi_qc_status iscsi_queuecommand(struct Scsi_Host *host,
+				       struct scsi_cmnd *sc)
 {
 	struct iscsi_cls_session *cls_session;
 	struct iscsi_host *ihost;
@@ -1898,7 +1901,8 @@ EXPORT_SYMBOL_GPL(iscsi_target_alloc);
 
 static void iscsi_tmf_timedout(struct timer_list *t)
 {
-	struct iscsi_session *session = from_timer(session, t, tmf_timer);
+	struct iscsi_session *session = timer_container_of(session, t,
+							   tmf_timer);
 
 	spin_lock(&session->frwd_lock);
 	if (session->tmf_state == TMF_QUEUED) {
@@ -1945,7 +1949,7 @@ static int iscsi_exec_task_mgmt_fn(struct iscsi_conn *conn,
 				 session->tmf_state != TMF_QUEUED);
 	if (signal_pending(current))
 		flush_signals(current);
-	del_timer_sync(&session->tmf_timer);
+	timer_delete_sync(&session->tmf_timer);
 
 	mutex_lock(&session->eh_mutex);
 	spin_lock_bh(&session->frwd_lock);
@@ -2240,7 +2244,7 @@ EXPORT_SYMBOL_GPL(iscsi_eh_cmd_timed_out);
 
 static void iscsi_check_transport_timeouts(struct timer_list *t)
 {
-	struct iscsi_conn *conn = from_timer(conn, t, transport_timer);
+	struct iscsi_conn *conn = timer_container_of(conn, t, transport_timer);
 	struct iscsi_session *session = conn->session;
 	unsigned long recv_timeout, next_timeout = 0, last_recv;
 
@@ -3010,7 +3014,7 @@ static void iscsi_host_dec_session_cnt(struct Scsi_Host *shost)
  * This can be used by software iscsi_transports that allocate
  * a session per scsi host.
  *
- * Callers should set cmds_max to the largest total numer (mgmt + scsi) of
+ * Callers should set cmds_max to the largest total number (mgmt + scsi) of
  * tasks they support. The iscsi layer reserves ISCSI_MGMT_CMDS_MAX tasks
  * for nop handling and login/logout requests.
  */
@@ -3184,7 +3188,8 @@ iscsi_conn_setup(struct iscsi_cls_session *cls_session, int dd_size,
 		return NULL;
 	conn = cls_conn->dd_data;
 
-	conn->dd_data = cls_conn->dd_data + sizeof(*conn);
+	if (dd_size)
+		conn->dd_data = cls_conn->dd_data + sizeof(*conn);
 	conn->session = session;
 	conn->cls_conn = cls_conn;
 	conn->c_stage = ISCSI_CONN_INITIAL_STAGE;
@@ -3247,7 +3252,7 @@ void iscsi_conn_teardown(struct iscsi_cls_conn *cls_conn)
 
 	iscsi_remove_conn(cls_conn);
 
-	del_timer_sync(&conn->transport_timer);
+	timer_delete_sync(&conn->transport_timer);
 
 	mutex_lock(&session->eh_mutex);
 	spin_lock_bh(&session->frwd_lock);
@@ -3304,7 +3309,7 @@ int iscsi_conn_start(struct iscsi_cls_conn *cls_conn)
 
 	if (conn->ping_timeout && !conn->recv_timeout) {
 		iscsi_conn_printk(KERN_ERR, conn, "invalid recv timeout of "
-				  "zero. Using 5 seconds\n.");
+				  "zero. Using 5 seconds.\n");
 		conn->recv_timeout = 5;
 	}
 
@@ -3411,7 +3416,7 @@ void iscsi_conn_stop(struct iscsi_cls_conn *cls_conn, int flag)
 	conn->stop_stage = flag;
 	spin_unlock_bh(&session->frwd_lock);
 
-	del_timer_sync(&conn->transport_timer);
+	timer_delete_sync(&conn->transport_timer);
 	iscsi_suspend_tx(conn);
 
 	spin_lock_bh(&session->frwd_lock);

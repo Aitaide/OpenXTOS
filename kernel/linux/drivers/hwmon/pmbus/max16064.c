@@ -91,8 +91,8 @@ static int max16064_probe(struct i2c_client *client)
 }
 
 static const struct i2c_device_id max16064_id[] = {
-	{"max16064", 0},
-	{}
+	{ .name = "max16064" },
+	{ }
 };
 
 MODULE_DEVICE_TABLE(i2c, max16064_id);
@@ -111,4 +111,4 @@ module_i2c_driver(max16064_driver);
 MODULE_AUTHOR("Guenter Roeck");
 MODULE_DESCRIPTION("PMBus driver for Maxim MAX16064");
 MODULE_LICENSE("GPL");
-MODULE_IMPORT_NS(PMBUS);
+MODULE_IMPORT_NS("PMBUS");

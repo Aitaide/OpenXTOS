@@ -120,7 +120,7 @@ static void __cvmx_pko_port_map_o68(void)
 {
 	int port;
 	int interface, index;
-	cvmx_helper_interface_mode_t mode;
+	enum cvmx_helper_interface_mode mode;
 	union cvmx_pko_mem_iport_ptrs config;
 
 	/*
@@ -323,11 +323,11 @@ EXPORT_SYMBOL_GPL(cvmx_pko_shutdown);
  *		     queues have higher priority than higher numbered queues.
  *		     There must be num_queues elements in the array.
  */
-cvmx_pko_status_t cvmx_pko_config_port(uint64_t port, uint64_t base_queue,
+enum cvmx_pko_status cvmx_pko_config_port(uint64_t port, uint64_t base_queue,
 				       uint64_t num_queues,
 				       const uint64_t priority[])
 {
-	cvmx_pko_status_t result_code;
+	enum cvmx_pko_status result_code;
 	uint64_t queue;
 	union cvmx_pko_mem_queue_ptrs config;
 	union cvmx_pko_reg_queue_ptrs1 config1;
@@ -615,7 +615,7 @@ int cvmx_pko_rate_limit_bits(int port, uint64_t bits_s, int burst)
 	/*
 	 * Each packet has a 12 bytes of interframe gap, an 8 byte
 	 * preamble, and a 4 byte CRC. These are not included in the
-	 * per word count. Multiply by 8 to covert to bits and divide
+	 * per word count. Multiply by 8 to convert to bits and divide
 	 * by 256 for limit granularity.
 	 */
 	pko_mem_port_rate0.s.rate_pkt = (12 + 8 + 4) * 8 * tokens_per_bit / 256;

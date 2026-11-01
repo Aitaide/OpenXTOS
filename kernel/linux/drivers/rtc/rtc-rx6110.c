@@ -324,13 +324,11 @@ static int rx6110_probe(struct rx6110_data *rx6110, struct device *dev)
 	if (err)
 		return err;
 
-	rx6110->rtc->max_user_freq = 1;
-
 	return 0;
 }
 
 #if IS_ENABLED(CONFIG_SPI_MASTER)
-static struct regmap_config regmap_spi_config = {
+static const struct regmap_config regmap_spi_config = {
 	.reg_bits = 8,
 	.val_bits = 8,
 	.max_register = RX6110_REG_IRQ,
@@ -410,7 +408,7 @@ static void rx6110_spi_unregister(void)
 #endif /* CONFIG_SPI_MASTER */
 
 #if IS_ENABLED(CONFIG_I2C)
-static struct regmap_config regmap_i2c_config = {
+static const struct regmap_config regmap_i2c_config = {
 	.reg_bits = 8,
 	.val_bits = 8,
 	.max_register = RX6110_REG_IRQ,
@@ -451,7 +449,7 @@ static const struct acpi_device_id rx6110_i2c_acpi_match[] = {
 MODULE_DEVICE_TABLE(acpi, rx6110_i2c_acpi_match);
 
 static const struct i2c_device_id rx6110_i2c_id[] = {
-	{ "rx6110", 0 },
+	{ .name = "rx6110" },
 	{ }
 };
 MODULE_DEVICE_TABLE(i2c, rx6110_i2c_id);

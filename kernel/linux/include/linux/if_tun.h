@@ -19,52 +19,61 @@ struct tun_msg_ctl {
 	void *ptr;
 };
 
-struct tun_xdp_hdr {
-	int buflen;
-	struct virtio_net_hdr gso;
-};
-
 #if defined(CONFIG_TUN) || defined(CONFIG_TUN_MODULE)
 struct socket *tun_get_socket(struct file *);
 struct ptr_ring *tun_get_tx_ring(struct file *file);
+/* Callers must hold the consumer_lock of the ring of file */
+void tun_wake_queue(struct file *file, int consumed);
+
 static inline bool tun_is_xdp_frame(void *ptr)
 {
-       return (unsigned long)ptr & TUN_XDP_FLAG;
+	return (unsigned long)ptr & TUN_XDP_FLAG;
 }
+
 static inline void *tun_xdp_to_ptr(struct xdp_frame *xdp)
 {
-       return (void *)((unsigned long)xdp | TUN_XDP_FLAG);
+	return (void *)((unsigned long)xdp | TUN_XDP_FLAG);
 }
+
 static inline struct xdp_frame *tun_ptr_to_xdp(void *ptr)
 {
-       return (void *)((unsigned long)ptr & ~TUN_XDP_FLAG);
+	return (void *)((unsigned long)ptr & ~TUN_XDP_FLAG);
 }
+
 void tun_ptr_free(void *ptr);
 #else
 #include <linux/err.h>
 #include <linux/errno.h>
 struct file;
 struct socket;
+
 static inline struct socket *tun_get_socket(struct file *f)
 {
 	return ERR_PTR(-EINVAL);
 }
+
 static inline struct ptr_ring *tun_get_tx_ring(struct file *f)
 {
 	return ERR_PTR(-EINVAL);
 }
+
+static inline void tun_wake_queue(struct file *f, int consumed) {}
+
 static inline bool tun_is_xdp_frame(void *ptr)
 {
 	return false;
 }
+
 static inline void *tun_xdp_to_ptr(struct xdp_frame *xdp)
 {
 	return NULL;
 }
+
 static inline struct xdp_frame *tun_ptr_to_xdp(void *ptr)
 {
 	return NULL;
 }
+
 static inline void tun_ptr_free(void *ptr)
 {
 }

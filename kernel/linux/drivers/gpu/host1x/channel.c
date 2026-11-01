@@ -16,8 +16,7 @@
 int host1x_channel_list_init(struct host1x_channel_list *chlist,
 			     unsigned int num_channels)
 {
-	chlist->channels = kcalloc(num_channels, sizeof(struct host1x_channel),
-				   GFP_KERNEL);
+	chlist->channels = kzalloc_objs(struct host1x_channel, num_channels);
 	if (!chlist->channels)
 		return -ENOMEM;
 
@@ -26,6 +25,8 @@ int host1x_channel_list_init(struct host1x_channel_list *chlist,
 		kfree(chlist->channels);
 		return -ENOMEM;
 	}
+
+	mutex_init(&chlist->lock);
 
 	return 0;
 }
@@ -79,6 +80,25 @@ void host1x_channel_stop(struct host1x_channel *channel)
 }
 EXPORT_SYMBOL(host1x_channel_stop);
 
+/**
+ * host1x_channel_stop_all() - disable CDMA on allocated channels
+ * @host: host1x instance
+ *
+ * Stop CDMA on allocated channels
+ */
+void host1x_channel_stop_all(struct host1x *host)
+{
+	struct host1x_channel_list *chlist = &host->channel_list;
+	int bit;
+
+	mutex_lock(&chlist->lock);
+
+	for_each_set_bit(bit, chlist->allocated_channels, host->info->nb_channels)
+		host1x_channel_stop(&chlist->channels[bit]);
+
+	mutex_unlock(&chlist->lock);
+}
+
 static void release_channel(struct kref *kref)
 {
 	struct host1x_channel *channel =
@@ -104,8 +124,11 @@ static struct host1x_channel *acquire_unused_channel(struct host1x *host)
 	unsigned int max_channels = host->info->nb_channels;
 	unsigned int index;
 
+	mutex_lock(&chlist->lock);
+
 	index = find_first_zero_bit(chlist->allocated_channels, max_channels);
 	if (index >= max_channels) {
+		mutex_unlock(&chlist->lock);
 		dev_err(host->dev, "failed to find free channel\n");
 		return NULL;
 	}
@@ -113,6 +136,8 @@ static struct host1x_channel *acquire_unused_channel(struct host1x *host)
 	chlist->channels[index].id = index;
 
 	set_bit(index, chlist->allocated_channels);
+
+	mutex_unlock(&chlist->lock);
 
 	return &chlist->channels[index];
 }

@@ -363,7 +363,7 @@ static void wf_fcu_add_fan(struct wf_fcu_priv *pv, const char *name,
 {
 	struct wf_fcu_fan *fan;
 
-	fan = kzalloc(sizeof(*fan), GFP_KERNEL);
+	fan = kzalloc_obj(*fan);
 	if (!fan)
 		return;
 	fan->fcu_priv = pv;
@@ -518,7 +518,7 @@ static int wf_fcu_probe(struct i2c_client *client)
 {
 	struct wf_fcu_priv *pv;
 
-	pv = kzalloc(sizeof(*pv), GFP_KERNEL);
+	pv = kzalloc_obj(*pv);
 	if (!pv)
 		return -ENOMEM;
 
@@ -573,7 +573,7 @@ static void wf_fcu_remove(struct i2c_client *client)
 }
 
 static const struct i2c_device_id wf_fcu_id[] = {
-	{ "MAC,fcu", 0 },
+	{ "MAC,fcu" },
 	{ }
 };
 MODULE_DEVICE_TABLE(i2c, wf_fcu_id);

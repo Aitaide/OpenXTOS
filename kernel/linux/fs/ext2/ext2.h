@@ -114,8 +114,6 @@ struct ext2_sb_info {
 	 */
 	spinlock_t s_lock;
 	struct mb_cache *s_ea_block_cache;
-	struct dax_device *s_daxdev;
-	u64 s_dax_part_off;
 };
 
 static inline spinlock_t *
@@ -357,7 +355,6 @@ struct ext2_inode {
  */
 #define	EXT2_VALID_FS			0x0001	/* Unmounted cleanly */
 #define	EXT2_ERROR_FS			0x0002	/* Errors detected */
-#define	EFSCORRUPTED			EUCLEAN	/* Filesystem is corrupted */
 
 /*
  * Mount flags
@@ -368,16 +365,15 @@ struct ext2_inode {
 #define EXT2_MOUNT_ERRORS_CONT		0x000010  /* Continue on errors */
 #define EXT2_MOUNT_ERRORS_RO		0x000020  /* Remount fs ro on errors */
 #define EXT2_MOUNT_ERRORS_PANIC		0x000040  /* Panic on errors */
+#define EXT2_MOUNT_ERRORS_MASK		0x000070
 #define EXT2_MOUNT_MINIX_DF		0x000080  /* Mimics the Minix statfs */
 #define EXT2_MOUNT_NOBH			0x000100  /* No buffer_heads */
 #define EXT2_MOUNT_NO_UID32		0x000200  /* Disable 32-bit UIDs */
 #define EXT2_MOUNT_XATTR_USER		0x004000  /* Extended user attributes */
 #define EXT2_MOUNT_POSIX_ACL		0x008000  /* POSIX Access Control Lists */
-#define EXT2_MOUNT_XIP			0x010000  /* Obsolete, use DAX */
 #define EXT2_MOUNT_USRQUOTA		0x020000  /* user quota */
 #define EXT2_MOUNT_GRPQUOTA		0x040000  /* group quota */
 #define EXT2_MOUNT_RESERVATION		0x080000  /* Preallocation */
-#define EXT2_MOUNT_DAX			0x100000  /* Direct Access */
 
 
 #define clear_opt(o, opt)		o &= ~EXT2_MOUNT_##opt
@@ -674,8 +670,9 @@ struct ext2_inode_info {
 	struct inode	vfs_inode;
 	struct list_head i_orphan;	/* unlinked but open inodes */
 #ifdef CONFIG_QUOTA
-	struct dquot *i_dquot[MAXQUOTAS];
+	struct dquot __rcu *i_dquot[MAXQUOTAS];
 #endif
+	struct mapping_metadata_bhs i_metadata_bhs;
 };
 
 /*
@@ -717,22 +714,17 @@ extern void ext2_init_block_alloc_info(struct inode *);
 extern void ext2_rsv_window_add(struct super_block *sb, struct ext2_reserve_window_node *rsv);
 
 /* dir.c */
-extern int ext2_add_link (struct dentry *, struct inode *);
-extern int ext2_inode_by_name(struct inode *dir,
+int ext2_add_link(struct dentry *, struct inode *);
+int ext2_inode_by_name(struct inode *dir,
 			      const struct qstr *child, ino_t *ino);
-extern int ext2_make_empty(struct inode *, struct inode *);
-extern struct ext2_dir_entry_2 *ext2_find_entry(struct inode *, const struct qstr *,
-						struct page **);
-extern int ext2_delete_entry(struct ext2_dir_entry_2 *dir, struct page *page);
-extern int ext2_empty_dir (struct inode *);
-extern struct ext2_dir_entry_2 *ext2_dotdot(struct inode *dir, struct page **p);
+int ext2_make_empty(struct inode *, struct inode *);
+struct ext2_dir_entry_2 *ext2_find_entry(struct inode *, const struct qstr *,
+		struct folio **foliop);
+int ext2_delete_entry(struct ext2_dir_entry_2 *dir, struct folio *folio);
+int ext2_empty_dir(struct inode *);
+struct ext2_dir_entry_2 *ext2_dotdot(struct inode *dir, struct folio **foliop);
 int ext2_set_link(struct inode *dir, struct ext2_dir_entry_2 *de,
-		struct page *page, struct inode *inode, bool update_times);
-static inline void ext2_put_page(struct page *page, void *page_addr)
-{
-	kunmap_local(page_addr);
-	put_page(page);
-}
+		struct folio *folio, struct inode *inode, bool update_times);
 
 /* ialloc.c */
 extern struct inode * ext2_new_inode (struct inode *, umode_t, const struct qstr *);
@@ -743,6 +735,7 @@ extern unsigned long ext2_count_free (struct buffer_head *, unsigned);
 /* inode.c */
 extern struct inode *ext2_iget (struct super_block *, unsigned long);
 extern int ext2_write_inode (struct inode *, struct writeback_control *);
+extern int ext2_sync_inode_metadata(struct inode *, struct writeback_control *);
 extern void ext2_evict_inode(struct inode *);
 void ext2_write_failed(struct address_space *mapping, loff_t to);
 extern int ext2_get_block(struct inode *, sector_t, struct buffer_head *, int);
@@ -754,9 +747,9 @@ extern int ext2_fiemap(struct inode *inode, struct fiemap_extent_info *fieinfo,
 		       u64 start, u64 len);
 
 /* ioctl.c */
-extern int ext2_fileattr_get(struct dentry *dentry, struct fileattr *fa);
+extern int ext2_fileattr_get(struct dentry *dentry, struct file_kattr *fa);
 extern int ext2_fileattr_set(struct mnt_idmap *idmap,
-			     struct dentry *dentry, struct fileattr *fa);
+			     struct dentry *dentry, struct file_kattr *fa);
 extern long ext2_ioctl(struct file *, unsigned int, unsigned long);
 extern long ext2_compat_ioctl(struct file *, unsigned int, unsigned long);
 
@@ -780,8 +773,6 @@ extern void ext2_sync_super(struct super_block *sb, struct ext2_super_block *es,
 extern const struct file_operations ext2_dir_operations;
 
 /* file.c */
-extern int ext2_fsync(struct file *file, loff_t start, loff_t end,
-		      int datasync);
 extern const struct inode_operations ext2_file_inode_operations;
 extern const struct file_operations ext2_file_operations;
 

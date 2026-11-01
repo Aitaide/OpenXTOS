@@ -1,9 +1,9 @@
 #!/bin/bash
 # SPDX-License-Identifier: GPL-2.0
 
-ret=0
-ksft_skip=4
 ipv6=true
+
+source ./hsr_common.sh
 
 optstring="h4"
 usage() {
@@ -27,113 +27,34 @@ while getopts "$optstring" option;do
 esac
 done
 
-sec=$(date +%s)
-rndh=$(printf %x $sec)-$(mktemp -u XXXXXX)
-ns1="ns1-$rndh"
-ns2="ns2-$rndh"
-ns3="ns3-$rndh"
-
-cleanup()
+do_ping_tests()
 {
-	local netns
-	for netns in "$ns1" "$ns2" "$ns3" ;do
-		ip netns del $netns
-	done
-}
+	local netid="$1"
 
-# $1: IP address
-is_v6()
-{
-	[ -z "${1##*:*}" ]
-}
+	echo "INFO: Running ping tests."
 
-do_ping()
-{
-	local netns="$1"
-	local connect_addr="$2"
-	local ping_args="-q -c 2"
-
-	if is_v6 "${connect_addr}"; then
-		$ipv6 || return 0
-		ping_args="${ping_args} -6"
-	fi
-
-	ip netns exec ${netns} ping ${ping_args} $connect_addr >/dev/null
-	if [ $? -ne 0 ] ; then
-		echo "$netns -> $connect_addr connectivity [ FAIL ]" 1>&2
-		ret=1
-		return 1
-	fi
-
-	return 0
-}
-
-do_ping_long()
-{
-	local netns="$1"
-	local connect_addr="$2"
-	local ping_args="-q -c 10"
-
-	if is_v6 "${connect_addr}"; then
-		$ipv6 || return 0
-		ping_args="${ping_args} -6"
-	fi
-
-	OUT="$(LANG=C ip netns exec ${netns} ping ${ping_args} $connect_addr | grep received)"
-	if [ $? -ne 0 ] ; then
-		echo "$netns -> $connect_addr ping [ FAIL ]" 1>&2
-		ret=1
-		return 1
-	fi
-
-	VAL="$(echo $OUT | cut -d' ' -f1-8)"
-	if [ "$VAL" != "10 packets transmitted, 10 received, 0% packet loss," ]
-	then
-		echo "$netns -> $connect_addr ping TEST [ FAIL ]"
-		echo "Expect to send and receive 10 packets and no duplicates."
-		echo "Full message: ${OUT}."
-		ret=1
-		return 1
-	fi
-
-	return 0
-}
-
-stop_if_error()
-{
-	local msg="$1"
-
-	if [ ${ret} -ne 0 ]; then
-		echo "FAIL: ${msg}" 1>&2
-		exit ${ret}
-	fi
-}
-
-do_complete_ping_test()
-{
 	echo "INFO: Initial validation ping."
-	# Each node has to be able each one.
-	do_ping "$ns1" 100.64.0.2
-	do_ping "$ns2" 100.64.0.1
-	do_ping "$ns3" 100.64.0.1
-	stop_if_error "Initial validation failed."
+	# Each node has to be able to reach each one.
+	do_ping "$ns1" "100.64.$netid.2"
+	do_ping "$ns1" "100.64.$netid.3"
+	do_ping "$ns2" "100.64.$netid.1"
+	do_ping "$ns2" "100.64.$netid.3"
+	do_ping "$ns3" "100.64.$netid.1"
+	do_ping "$ns3" "100.64.$netid.2"
+	stop_if_error "Initial validation failed on IPv4."
 
-	do_ping "$ns1" 100.64.0.3
-	do_ping "$ns2" 100.64.0.3
-	do_ping "$ns3" 100.64.0.2
-
-	do_ping "$ns1" dead:beef:1::2
-	do_ping "$ns1" dead:beef:1::3
-	do_ping "$ns2" dead:beef:1::1
-	do_ping "$ns2" dead:beef:1::2
-	do_ping "$ns3" dead:beef:1::1
-	do_ping "$ns3" dead:beef:1::2
-
-	stop_if_error "Initial validation failed."
+	do_ping "$ns1" "dead:beef:$netid::2"
+	do_ping "$ns1" "dead:beef:$netid::3"
+	do_ping "$ns2" "dead:beef:$netid::1"
+	do_ping "$ns2" "dead:beef:$netid::2"
+	do_ping "$ns3" "dead:beef:$netid::1"
+	do_ping "$ns3" "dead:beef:$netid::2"
+	stop_if_error "Initial validation failed on IPv6."
 
 # Wait until supervisor all supervision frames have been processed and the node
 # entries have been merged. Otherwise duplicate frames will be observed which is
 # valid at this stage.
+	echo "INFO: Wait for node table entries to be merged."
 	WAIT=5
 	while [ ${WAIT} -gt 0 ]
 	do
@@ -150,62 +71,30 @@ do_complete_ping_test()
 	sleep 1
 
 	echo "INFO: Longer ping test."
-	do_ping_long "$ns1" 100.64.0.2
-	do_ping_long "$ns1" dead:beef:1::2
-	do_ping_long "$ns1" 100.64.0.3
-	do_ping_long "$ns1" dead:beef:1::3
+	do_ping_long "$ns1" "100.64.$netid.2"
+	do_ping_long "$ns1" "dead:beef:$netid::2"
+	do_ping_long "$ns1" "100.64.$netid.3"
+	do_ping_long "$ns1" "dead:beef:$netid::3"
+	stop_if_error "Longer ping test failed (ns1)."
 
-	stop_if_error "Longer ping test failed."
+	do_ping_long "$ns2" "100.64.$netid.1"
+	do_ping_long "$ns2" "dead:beef:$netid::1"
+	do_ping_long "$ns2" "100.64.$netid.3"
+	do_ping_long "$ns2" "dead:beef:$netid::3"
+	stop_if_error "Longer ping test failed (ns2)."
 
-	do_ping_long "$ns2" 100.64.0.1
-	do_ping_long "$ns2" dead:beef:1::1
-	do_ping_long "$ns2" 100.64.0.3
-	do_ping_long "$ns2" dead:beef:1::2
-	stop_if_error "Longer ping test failed."
-
-	do_ping_long "$ns3" 100.64.0.1
-	do_ping_long "$ns3" dead:beef:1::1
-	do_ping_long "$ns3" 100.64.0.2
-	do_ping_long "$ns3" dead:beef:1::2
-	stop_if_error "Longer ping test failed."
-
-	echo "INFO: Cutting one link."
-	do_ping_long "$ns1" 100.64.0.3 &
-
-	sleep 3
-	ip -net "$ns3" link set ns3eth1 down
-	wait
-
-	ip -net "$ns3" link set ns3eth1 up
-
-	stop_if_error "Failed with one link down."
-
-	echo "INFO: Delay the link and drop a few packages."
-	tc -net "$ns3" qdisc add dev ns3eth1 root netem delay 50ms
-	tc -net "$ns2" qdisc add dev ns2eth1 root netem delay 5ms loss 25%
-
-	do_ping_long "$ns1" 100.64.0.2
-	do_ping_long "$ns1" 100.64.0.3
-
-	stop_if_error "Failed with delay and packetloss."
-
-	do_ping_long "$ns2" 100.64.0.1
-	do_ping_long "$ns2" 100.64.0.3
-
-	stop_if_error "Failed with delay and packetloss."
-
-	do_ping_long "$ns3" 100.64.0.1
-	do_ping_long "$ns3" 100.64.0.2
-	stop_if_error "Failed with delay and packetloss."
-
-	echo "INFO: All good."
+	do_ping_long "$ns3" "100.64.$netid.1"
+	do_ping_long "$ns3" "dead:beef:$netid::1"
+	do_ping_long "$ns3" "100.64.$netid.2"
+	do_ping_long "$ns3" "dead:beef:$netid::2"
+	stop_if_error "Longer ping test failed (ns3)."
 }
 
 setup_hsr_interfaces()
 {
 	local HSRv="$1"
 
-	echo "INFO: preparing interfaces for HSRv${HSRv}."
+	echo "INFO: Preparing interfaces for HSRv${HSRv}."
 # Three HSR nodes. Each node has one link to each of its neighbour, two links in total.
 #
 #    ns1eth1 ----- ns2eth1
@@ -222,17 +111,29 @@ setup_hsr_interfaces()
 	ip link add ns3eth2 netns "$ns3" type veth peer name ns2eth2 netns "$ns2"
 
 	# HSRv0/1
-	ip -net "$ns1" link add name hsr1 type hsr slave1 ns1eth1 slave2 ns1eth2 supervision 45 version $HSRv proto 0
-	ip -net "$ns2" link add name hsr2 type hsr slave1 ns2eth1 slave2 ns2eth2 supervision 45 version $HSRv proto 0
-	ip -net "$ns3" link add name hsr3 type hsr slave1 ns3eth1 slave2 ns3eth2 supervision 45 version $HSRv proto 0
+	ip -net "$ns1" link add name hsr1 type hsr slave1 ns1eth1 \
+		slave2 ns1eth2 supervision 45 version "$HSRv" proto 0
+	ip -net "$ns2" link add name hsr2 type hsr slave1 ns2eth1 \
+		slave2 ns2eth2 supervision 45 version "$HSRv" proto 0
+	ip -net "$ns3" link add name hsr3 type hsr slave1 ns3eth1 \
+		slave2 ns3eth2 supervision 45 version "$HSRv" proto 0
 
 	# IP for HSR
 	ip -net "$ns1" addr add 100.64.0.1/24 dev hsr1
-	ip -net "$ns1" addr add dead:beef:1::1/64 dev hsr1 nodad
+	ip -net "$ns1" addr add dead:beef:0::1/64 dev hsr1 nodad
 	ip -net "$ns2" addr add 100.64.0.2/24 dev hsr2
-	ip -net "$ns2" addr add dead:beef:1::2/64 dev hsr2 nodad
+	ip -net "$ns2" addr add dead:beef:0::2/64 dev hsr2 nodad
 	ip -net "$ns3" addr add 100.64.0.3/24 dev hsr3
-	ip -net "$ns3" addr add dead:beef:1::3/64 dev hsr3 nodad
+	ip -net "$ns3" addr add dead:beef:0::3/64 dev hsr3 nodad
+
+	ip -net "$ns1" link set address 00:11:22:00:01:01 dev ns1eth1
+	ip -net "$ns1" link set address 00:11:22:00:01:02 dev ns1eth2
+
+	ip -net "$ns2" link set address 00:11:22:00:02:01 dev ns2eth1
+	ip -net "$ns2" link set address 00:11:22:00:02:02 dev ns2eth2
+
+	ip -net "$ns3" link set address 00:11:22:00:03:01 dev ns3eth1
+	ip -net "$ns3" link set address 00:11:22:00:03:02 dev ns3eth2
 
 	# All Links up
 	ip -net "$ns1" link set ns1eth1 up
@@ -248,29 +149,58 @@ setup_hsr_interfaces()
 	ip -net "$ns3" link set hsr3 up
 }
 
-ip -Version > /dev/null 2>&1
-if [ $? -ne 0 ];then
-	echo "SKIP: Could not run test without ip tool"
-	exit $ksft_skip
-fi
+setup_vlan_interfaces() {
+	ip -net "$ns1" link add link hsr1 name hsr1.2 type vlan id 2
+	ip -net "$ns2" link add link hsr2 name hsr2.2 type vlan id 2
+	ip -net "$ns3" link add link hsr3 name hsr3.2 type vlan id 2
 
-trap cleanup EXIT
+	ip -net "$ns1" addr add 100.64.2.1/24 dev hsr1.2
+	ip -net "$ns1" addr add dead:beef:2::1/64 dev hsr1.2 nodad
 
-for i in "$ns1" "$ns2" "$ns3" ;do
-	ip netns add $i || exit $ksft_skip
-	ip -net $i link set lo up
-done
+	ip -net "$ns2" addr add 100.64.2.2/24 dev hsr2.2
+	ip -net "$ns2" addr add dead:beef:2::2/64 dev hsr2.2 nodad
 
+	ip -net "$ns3" addr add 100.64.2.3/24 dev hsr3.2
+	ip -net "$ns3" addr add dead:beef:2::3/64 dev hsr3.2 nodad
+
+	ip -net "$ns1" link set dev hsr1.2 up
+	ip -net "$ns2" link set dev hsr2.2 up
+	ip -net "$ns3" link set dev hsr3.2 up
+
+}
+
+run_ping_tests()
+{
+	echo "INFO: Running ping tests."
+	do_ping_tests 0
+}
+
+run_vlan_tests()
+{
+	vlan_challenged_hsr1=$(ip net exec "$ns1" ethtool -k hsr1 | grep "vlan-challenged" | awk '{print $2}')
+	vlan_challenged_hsr2=$(ip net exec "$ns2" ethtool -k hsr2 | grep "vlan-challenged" | awk '{print $2}')
+	vlan_challenged_hsr3=$(ip net exec "$ns3" ethtool -k hsr3 | grep "vlan-challenged" | awk '{print $2}')
+
+	if [[ "$vlan_challenged_hsr1" = "off" || "$vlan_challenged_hsr2" = "off" || "$vlan_challenged_hsr3" = "off" ]]; then
+		echo "INFO: Running VLAN ping tests"
+		setup_vlan_interfaces
+		do_ping_tests 2
+	else
+		echo "INFO: Not Running VLAN tests as the device does not support VLAN"
+	fi
+}
+
+check_prerequisites
+trap cleanup_all_ns EXIT
+
+setup_ns ns1 ns2 ns3
 setup_hsr_interfaces 0
-do_complete_ping_test
-cleanup
+run_ping_tests
+run_vlan_tests
 
-for i in "$ns1" "$ns2" "$ns3" ;do
-	ip netns add $i || exit $ksft_skip
-	ip -net $i link set lo up
-done
-
+setup_ns ns1 ns2 ns3
 setup_hsr_interfaces 1
-do_complete_ping_test
+run_ping_tests
+run_vlan_tests
 
 exit $ret

@@ -677,12 +677,14 @@ okay:
 
 	/* calculate how much information we're going to return */
 	ret = -ENOMEM;
+	down_read(&key->sem);
 	infobuf = kasprintf(GFP_KERNEL,
 			    "%s;%d;%d;%08x;",
 			    key->type->name,
 			    from_kuid_munged(current_user_ns(), key->uid),
 			    from_kgid_munged(current_user_ns(), key->gid),
 			    key->perm);
+	up_read(&key->sem);
 	if (!infobuf)
 		goto error2;
 	infolen = strlen(infobuf);
@@ -806,8 +808,12 @@ static long __keyctl_read_key(struct key *key, char *buffer, size_t buflen)
 
 	down_read(&key->sem);
 	ret = key_validate(key);
-	if (ret == 0)
-		ret = key->type->read(key, buffer, buflen);
+	if (ret == 0) {
+		if (key->type->read)
+			ret = key->type->read(key, buffer, buflen);
+		else
+			ret = -EOPNOTSUPP;
+	}
 	up_read(&key->sem);
 	return ret;
 }
@@ -861,11 +867,6 @@ long keyctl_read_key(key_serial_t keyid, char __user *buffer, size_t buflen)
 
 	/* the key is probably readable - now try to read it */
 can_read_key:
-	if (!key->type->read) {
-		ret = -EOPNOTSUPP;
-		goto key_put_out;
-	}
-
 	if (!buffer || !buflen) {
 		/* Get the key length from the read method */
 		ret = __keyctl_read_key(key, NULL, 0);
@@ -954,6 +955,7 @@ long keyctl_chown_key(key_serial_t id, uid_t user, gid_t group)
 	long ret;
 	kuid_t uid;
 	kgid_t gid;
+	unsigned long flags;
 
 	uid = make_kuid(current_user_ns(), user);
 	gid = make_kgid(current_user_ns(), group);
@@ -1010,7 +1012,7 @@ long keyctl_chown_key(key_serial_t id, uid_t user, gid_t group)
 			unsigned maxbytes = uid_eq(uid, GLOBAL_ROOT_UID) ?
 				key_quota_root_maxbytes : key_quota_maxbytes;
 
-			spin_lock(&newowner->lock);
+			spin_lock_irqsave(&newowner->lock, flags);
 			if (newowner->qnkeys + 1 > maxkeys ||
 			    newowner->qnbytes + key->quotalen > maxbytes ||
 			    newowner->qnbytes + key->quotalen <
@@ -1019,12 +1021,12 @@ long keyctl_chown_key(key_serial_t id, uid_t user, gid_t group)
 
 			newowner->qnkeys++;
 			newowner->qnbytes += key->quotalen;
-			spin_unlock(&newowner->lock);
+			spin_unlock_irqrestore(&newowner->lock, flags);
 
-			spin_lock(&key->user->lock);
+			spin_lock_irqsave(&key->user->lock, flags);
 			key->user->qnkeys--;
 			key->user->qnbytes -= key->quotalen;
-			spin_unlock(&key->user->lock);
+			spin_unlock_irqrestore(&key->user->lock, flags);
 		}
 
 		atomic_dec(&key->user->nkeys);
@@ -1056,7 +1058,7 @@ error:
 	return ret;
 
 quota_overrun:
-	spin_unlock(&newowner->lock);
+	spin_unlock_irqrestore(&newowner->lock, flags);
 	zapowner = newowner;
 	ret = -EDQUOT;
 	goto error_put;
@@ -1196,9 +1198,13 @@ static long keyctl_instantiate_key_common(key_serial_t id,
 	if (!instkey)
 		goto error;
 
-	rka = instkey->payload.data[0];
-	if (rka->target_key->serial != id)
+	rka = request_key_auth_get(instkey);
+	if (!rka) {
+		ret = -EKEYREVOKED;
 		goto error;
+	}
+	if (rka->target_key->serial != id)
+		goto error_put_rka;
 
 	/* pull the payload in if one was supplied */
 	payload = NULL;
@@ -1207,7 +1213,7 @@ static long keyctl_instantiate_key_common(key_serial_t id,
 		ret = -ENOMEM;
 		payload = kvmalloc(plen, GFP_KERNEL);
 		if (!payload)
-			goto error;
+			goto error_put_rka;
 
 		ret = -EFAULT;
 		if (!copy_from_iter_full(payload, plen, from))
@@ -1233,6 +1239,8 @@ static long keyctl_instantiate_key_common(key_serial_t id,
 
 error2:
 	kvfree_sensitive(payload, plen);
+error_put_rka:
+	request_key_auth_put(rka);
 error:
 	return ret;
 }
@@ -1252,12 +1260,11 @@ long keyctl_instantiate_key(key_serial_t id,
 			    key_serial_t ringid)
 {
 	if (_payload && plen) {
-		struct iovec iov;
 		struct iov_iter from;
 		int ret;
 
-		ret = import_single_range(ITER_SOURCE, (void __user *)_payload, plen,
-					  &iov, &from);
+		ret = import_ubuf(ITER_SOURCE, (void __user *)_payload, plen,
+				  &from);
 		if (unlikely(ret))
 			return ret;
 
@@ -1358,15 +1365,19 @@ long keyctl_reject_key(key_serial_t id, unsigned timeout, unsigned error,
 	if (!instkey)
 		goto error;
 
-	rka = instkey->payload.data[0];
-	if (rka->target_key->serial != id)
+	rka = request_key_auth_get(instkey);
+	if (!rka) {
+		ret = -EKEYREVOKED;
 		goto error;
+	}
+	if (rka->target_key->serial != id)
+		goto error_put_rka;
 
 	/* find the destination keyring if present (which must also be
 	 * writable) */
 	ret = get_instantiation_keyring(ringid, rka, &dest_keyring);
 	if (ret < 0)
-		goto error;
+		goto error_put_rka;
 
 	/* instantiate the key and link it into a keyring */
 	ret = key_reject_and_link(rka->target_key, timeout, error,
@@ -1379,6 +1390,8 @@ long keyctl_reject_key(key_serial_t id, unsigned timeout, unsigned error,
 	if (ret == 0)
 		keyctl_change_reqkey_auth(NULL);
 
+error_put_rka:
+	request_key_auth_put(rka);
 error:
 	return ret;
 }
@@ -1694,7 +1707,7 @@ long keyctl_session_to_parent(void)
 		goto unlock;
 
 	/* cancel an already pending keyring replacement */
-	oldwork = task_work_cancel(parent, key_change_session_keyring);
+	oldwork = task_work_cancel_func(parent, key_change_session_keyring);
 
 	/* the replacement session keyring is applied just prior to userspace
 	 * restarting */
@@ -1796,13 +1809,13 @@ long keyctl_watch_key(key_serial_t id, int watch_queue_fd, int watch_id)
 	if (watch_id >= 0) {
 		ret = -ENOMEM;
 		if (!key->watchers) {
-			wlist = kzalloc(sizeof(*wlist), GFP_KERNEL);
+			wlist = kzalloc_obj(*wlist);
 			if (!wlist)
 				goto err_wqueue;
 			init_watch_list(wlist, NULL);
 		}
 
-		watch = kzalloc(sizeof(*watch), GFP_KERNEL);
+		watch = kzalloc_obj(*watch);
 		if (!watch)
 			goto err_wlist;
 

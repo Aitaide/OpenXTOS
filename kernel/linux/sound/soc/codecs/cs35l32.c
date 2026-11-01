@@ -13,13 +13,12 @@
 #include <linux/init.h>
 #include <linux/delay.h>
 #include <linux/i2c.h>
-#include <linux/gpio.h>
 #include <linux/regmap.h>
 #include <linux/slab.h>
 #include <linux/platform_device.h>
 #include <linux/regulator/consumer.h>
 #include <linux/gpio/consumer.h>
-#include <linux/of_device.h>
+#include <linux/of.h>
 #include <sound/core.h>
 #include <sound/pcm.h>
 #include <sound/pcm_params.h>
@@ -154,12 +153,12 @@ static int cs35l32_set_dai_fmt(struct snd_soc_dai *codec_dai, unsigned int fmt)
 	struct snd_soc_component *component = codec_dai->component;
 
 	switch (fmt & SND_SOC_DAIFMT_MASTER_MASK) {
-	case SND_SOC_DAIFMT_CBM_CFM:
+	case SND_SOC_DAIFMT_CBP_CFP:
 		snd_soc_component_update_bits(component, CS35L32_ADSP_CTL,
 				    CS35L32_ADSP_MASTER_MASK,
 				CS35L32_ADSP_MASTER_MASK);
 		break;
-	case SND_SOC_DAIFMT_CBS_CFS:
+	case SND_SOC_DAIFMT_CBC_CFC:
 		snd_soc_component_update_bits(component, CS35L32_ADSP_CTL,
 				    CS35L32_ADSP_MASTER_MASK, 0);
 		break;
@@ -505,7 +504,6 @@ static void cs35l32_i2c_remove(struct i2c_client *i2c_client)
 	gpiod_set_value_cansleep(cs35l32->reset_gpio, 0);
 }
 
-#ifdef CONFIG_PM
 static int cs35l32_runtime_suspend(struct device *dev)
 {
 	struct cs35l32_private *cs35l32 = dev_get_drvdata(dev);
@@ -540,15 +538,21 @@ static int cs35l32_runtime_resume(struct device *dev)
 	gpiod_set_value_cansleep(cs35l32->reset_gpio, 1);
 
 	regcache_cache_only(cs35l32->regmap, false);
-	regcache_sync(cs35l32->regmap);
+	ret = regcache_sync(cs35l32->regmap);
+	if (ret) {
+		regcache_cache_only(cs35l32->regmap, true);
+		regcache_mark_dirty(cs35l32->regmap);
+		gpiod_set_value_cansleep(cs35l32->reset_gpio, 0);
+		regulator_bulk_disable(ARRAY_SIZE(cs35l32->supplies),
+				       cs35l32->supplies);
+		return ret;
+	}
 
 	return 0;
 }
-#endif
 
 static const struct dev_pm_ops cs35l32_runtime_pm = {
-	SET_RUNTIME_PM_OPS(cs35l32_runtime_suspend, cs35l32_runtime_resume,
-			   NULL)
+	RUNTIME_PM_OPS(cs35l32_runtime_suspend, cs35l32_runtime_resume, NULL)
 };
 
 static const struct of_device_id cs35l32_of_match[] = {
@@ -559,8 +563,8 @@ MODULE_DEVICE_TABLE(of, cs35l32_of_match);
 
 
 static const struct i2c_device_id cs35l32_id[] = {
-	{"cs35l32", 0},
-	{}
+	{ .name = "cs35l32" },
+	{ }
 };
 
 MODULE_DEVICE_TABLE(i2c, cs35l32_id);
@@ -568,7 +572,7 @@ MODULE_DEVICE_TABLE(i2c, cs35l32_id);
 static struct i2c_driver cs35l32_i2c_driver = {
 	.driver = {
 		   .name = "cs35l32",
-		   .pm = &cs35l32_runtime_pm,
+		   .pm = pm_ptr(&cs35l32_runtime_pm),
 		   .of_match_table = cs35l32_of_match,
 		   },
 	.id_table = cs35l32_id,

@@ -796,7 +796,7 @@ struct dvb_frontend *dvb_pll_attach(struct dvb_frontend *fe, int pll_addr,
 	b1[0] = 0;
 	msg.buf = b1;
 
-	nr = ida_simple_get(&pll_ida, 0, DVB_PLL_MAX, GFP_KERNEL);
+	nr = ida_alloc_max(&pll_ida, DVB_PLL_MAX - 1, GFP_KERNEL);
 	if (nr < 0) {
 		kfree(b1);
 		return NULL;
@@ -820,7 +820,7 @@ struct dvb_frontend *dvb_pll_attach(struct dvb_frontend *fe, int pll_addr,
 			     fe->ops.i2c_gate_ctrl(fe, 0);
 	}
 
-	priv = kzalloc(sizeof(struct dvb_pll_priv), GFP_KERNEL);
+	priv = kzalloc_obj(struct dvb_pll_priv);
 	if (!priv)
 		goto out;
 
@@ -862,7 +862,7 @@ struct dvb_frontend *dvb_pll_attach(struct dvb_frontend *fe, int pll_addr,
 	return fe;
 out:
 	kfree(b1);
-	ida_simple_remove(&pll_ida, nr);
+	ida_free(&pll_ida, nr);
 
 	return NULL;
 }
@@ -905,34 +905,34 @@ static void dvb_pll_remove(struct i2c_client *client)
 	struct dvb_frontend *fe = i2c_get_clientdata(client);
 	struct dvb_pll_priv *priv = fe->tuner_priv;
 
-	ida_simple_remove(&pll_ida, priv->nr);
+	ida_free(&pll_ida, priv->nr);
 	dvb_pll_release(fe);
 }
 
 
 static const struct i2c_device_id dvb_pll_id[] = {
-	{"dtt7579",		DVB_PLL_THOMSON_DTT7579},
-	{"dtt759x",		DVB_PLL_THOMSON_DTT759X},
-	{"z201",		DVB_PLL_LG_Z201},
-	{"unknown_1",		DVB_PLL_UNKNOWN_1},
-	{"tua6010xs",		DVB_PLL_TUA6010XS},
-	{"env57h1xd5",		DVB_PLL_ENV57H1XD5},
-	{"tua6034",		DVB_PLL_TUA6034},
-	{"tda665x",		DVB_PLL_TDA665X},
-	{"tded4",		DVB_PLL_TDED4},
-	{"tdhu2",		DVB_PLL_TDHU2},
-	{"tbmv",		DVB_PLL_SAMSUNG_TBMV},
-	{"sd1878_tda8261",	DVB_PLL_PHILIPS_SD1878_TDA8261},
-	{"opera1",		DVB_PLL_OPERA1},
-	{"dtos403ih102a",	DVB_PLL_SAMSUNG_DTOS403IH102A},
-	{"tdtc9251dh0",		DVB_PLL_SAMSUNG_TDTC9251DH0},
-	{"tbdu18132",		DVB_PLL_SAMSUNG_TBDU18132},
-	{"tbmu24112",		DVB_PLL_SAMSUNG_TBMU24112},
-	{"tdee4",		DVB_PLL_TDEE4},
-	{"dtt7520x",		DVB_PLL_THOMSON_DTT7520X},
-	{"tua6034_friio",	DVB_PLL_TUA6034_FRIIO},
-	{"tda665x_earthpt1",	DVB_PLL_TDA665X_EARTH_PT1},
-	{}
+	{ .name = "dtt7579",             .driver_data = DVB_PLL_THOMSON_DTT7579 },
+	{ .name = "dtt759x",             .driver_data = DVB_PLL_THOMSON_DTT759X },
+	{ .name = "z201",                .driver_data = DVB_PLL_LG_Z201 },
+	{ .name = "unknown_1",           .driver_data = DVB_PLL_UNKNOWN_1 },
+	{ .name = "tua6010xs",           .driver_data = DVB_PLL_TUA6010XS },
+	{ .name = "env57h1xd5",          .driver_data = DVB_PLL_ENV57H1XD5 },
+	{ .name = "tua6034",             .driver_data = DVB_PLL_TUA6034 },
+	{ .name = "tda665x",             .driver_data = DVB_PLL_TDA665X },
+	{ .name = "tded4",               .driver_data = DVB_PLL_TDED4 },
+	{ .name = "tdhu2",               .driver_data = DVB_PLL_TDHU2 },
+	{ .name = "tbmv",                .driver_data = DVB_PLL_SAMSUNG_TBMV },
+	{ .name = "sd1878_tda8261",      .driver_data = DVB_PLL_PHILIPS_SD1878_TDA8261 },
+	{ .name = "opera1",              .driver_data = DVB_PLL_OPERA1 },
+	{ .name = "dtos403ih102a",       .driver_data = DVB_PLL_SAMSUNG_DTOS403IH102A },
+	{ .name = "tdtc9251dh0",         .driver_data = DVB_PLL_SAMSUNG_TDTC9251DH0 },
+	{ .name = "tbdu18132",           .driver_data = DVB_PLL_SAMSUNG_TBDU18132 },
+	{ .name = "tbmu24112",           .driver_data = DVB_PLL_SAMSUNG_TBMU24112 },
+	{ .name = "tdee4",               .driver_data = DVB_PLL_TDEE4 },
+	{ .name = "dtt7520x",            .driver_data = DVB_PLL_THOMSON_DTT7520X },
+	{ .name = "tua6034_friio",       .driver_data = DVB_PLL_TUA6034_FRIIO },
+	{ .name = "tda665x_earthpt1",    .driver_data = DVB_PLL_TDA665X_EARTH_PT1 },
+	{ }
 };
 
 

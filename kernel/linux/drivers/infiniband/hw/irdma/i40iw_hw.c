@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-2.0 or Linux-OpenIB
+// SPDX-License-Identifier: GPL-2.0 OR Linux-OpenIB
 /* Copyright (c) 2015 - 2021 Intel Corporation */
 #include "osdep.h"
 #include "type.h"
@@ -29,7 +29,9 @@ static u32 i40iw_regs[IRDMA_MAX_REGS] = {
 	I40E_PFHMC_PDINV,
 	I40E_GLHMC_VFPDINV(0),
 	I40E_GLPE_CRITERR,
-	0xffffffff      /* PFINT_RATEN not used in FPK */
+	0xffffffff,     /* PFINT_RATEN not used in FPK */
+	0xffffffff,     /* PFHMC_ERRORINFO not used in FPK */
+	0xffffffff      /* PFHMC_ERRORDATA not used in FPK */
 };
 
 static u32 i40iw_stat_offsets[] = {
@@ -85,6 +87,7 @@ static u64 i40iw_masks[IRDMA_MAX_MASKS] = {
 	I40E_CQPSQ_CQ_CEQID,
 	I40E_CQPSQ_CQ_CQID,
 	I40E_COMMIT_FPM_CQCNT,
+	I40E_CQPSQ_UPESD_HMCFNID,
 };
 
 static u64 i40iw_shifts[IRDMA_MAX_SHIFTS] = {
@@ -94,6 +97,7 @@ static u64 i40iw_shifts[IRDMA_MAX_SHIFTS] = {
 	I40E_CQPSQ_CQ_CEQID_S,
 	I40E_CQPSQ_CQ_CQID_S,
 	I40E_COMMIT_FPM_CQCNT_S,
+	I40E_CQPSQ_UPESD_HMCFNID_S,
 };
 
 /**

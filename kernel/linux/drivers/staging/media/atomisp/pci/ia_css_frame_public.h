@@ -2,15 +2,6 @@
 /*
  * Support for Intel Camera Imaging ISP subsystem.
  * Copyright (c) 2015, Intel Corporation.
- *
- * This program is free software; you can redistribute it and/or modify it
- * under the terms and conditions of the GNU General Public License,
- * version 2, as published by the Free Software Foundation.
- *
- * This program is distributed in the hope it will be useful, but WITHOUT
- * ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
- * FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License for
- * more details.
  */
 
 #ifndef __IA_CSS_FRAME_PUBLIC_H
@@ -128,19 +119,13 @@ struct ia_css_frame_info {
 	.raw_bayer_order	= IA_CSS_BAYER_ORDER_NUM, \
 }
 
-/**
+/*
  *  Specifies the DVS loop delay in "frame periods"
  */
 enum ia_css_frame_delay {
 	IA_CSS_FRAME_DELAY_0, /** Frame delay = 0 */
 	IA_CSS_FRAME_DELAY_1, /** Frame delay = 1 */
 	IA_CSS_FRAME_DELAY_2  /** Frame delay = 2 */
-};
-
-enum ia_css_frame_flash_state {
-	IA_CSS_FRAME_FLASH_STATE_NONE,
-	IA_CSS_FRAME_FLASH_STATE_PARTIAL,
-	IA_CSS_FRAME_FLASH_STATE_FULL
 };
 
 /* Frame structure. This structure describes an image buffer or frame.
@@ -176,7 +161,6 @@ struct ia_css_frame {
 	 * binary, we use output port, but we expect VF_OUTPUT_DONE event
 	 */
 	enum ia_css_buffer_type buf_type;
-	enum ia_css_frame_flash_state flash_state;
 	unsigned int exp_id;
 	/** exposure id, see ia_css_event_public.h for more detail */
 	u32 isp_config_id; /** Unique ID to track which config was actually applied to a particular frame */
@@ -202,7 +186,6 @@ struct ia_css_frame {
 	.frame_info		= IA_CSS_BINARY_DEFAULT_FRAME_INFO, \
 	.dynamic_queue_id	= SH_CSS_INVALID_QUEUE_ID, \
 	.buf_type		= IA_CSS_BUFFER_TYPE_INVALID, \
-	.flash_state		= IA_CSS_FRAME_FLASH_STATE_NONE, \
 }
 
 /* @brief Allocate a CSS frame structure

@@ -2,7 +2,6 @@
 #include <linux/device.h>
 #include <linux/kernel.h>
 #include <linux/module.h>
-#include <linux/mod_devicetable.h>
 #include <linux/slab.h>
 #include <linux/i2c.h>
 #include <linux/delay.h>
@@ -38,13 +37,13 @@ static void kxsd9_i2c_remove(struct i2c_client *client)
 
 static const struct of_device_id kxsd9_of_match[] = {
 	{ .compatible = "kionix,kxsd9", },
-	{ },
+	{ }
 };
 MODULE_DEVICE_TABLE(of, kxsd9_of_match);
 
 static const struct i2c_device_id kxsd9_i2c_id[] = {
-	{"kxsd9", 0},
-	{ },
+	{ .name = "kxsd9" },
+	{ }
 };
 MODULE_DEVICE_TABLE(i2c, kxsd9_i2c_id);
 
@@ -62,4 +61,4 @@ module_i2c_driver(kxsd9_i2c_driver);
 
 MODULE_LICENSE("GPL v2");
 MODULE_DESCRIPTION("KXSD9 accelerometer I2C interface");
-MODULE_IMPORT_NS(IIO_KXSD9);
+MODULE_IMPORT_NS("IIO_KXSD9");

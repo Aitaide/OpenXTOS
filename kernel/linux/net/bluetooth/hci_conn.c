@@ -1,13 +1,10 @@
+// SPDX-License-Identifier: GPL-2.0
 /*
    BlueZ - Bluetooth protocol stack for Linux
    Copyright (c) 2000-2001, 2010, Code Aurora Forum. All rights reserved.
-   Copyright 2023 NXP
+   Copyright 2023-2024 NXP
 
    Written 2000,2001 by Maxim Krasnyansky <maxk@qualcomm.com>
-
-   This program is free software; you can redistribute it and/or modify
-   it under the terms of the GNU General Public License version 2 as
-   published by the Free Software Foundation;
 
    THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS
    OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
@@ -27,6 +24,7 @@
 
 #include <linux/export.h>
 #include <linux/debugfs.h>
+#include <linux/errqueue.h>
 
 #include <net/bluetooth/bluetooth.h>
 #include <net/bluetooth/hci_core.h>
@@ -34,9 +32,7 @@
 #include <net/bluetooth/iso.h>
 #include <net/bluetooth/mgmt.h>
 
-#include "hci_request.h"
 #include "smp.h"
-#include "a2mp.h"
 #include "eir.h"
 
 struct sco_param {
@@ -69,7 +65,7 @@ static const struct sco_param esco_param_msbc[] = {
 };
 
 /* This function requires the caller holds hdev->lock */
-static void hci_connect_le_scan_cleanup(struct hci_conn *conn, u8 status)
+void hci_connect_le_scan_cleanup(struct hci_conn *conn, u8 status)
 {
 	struct hci_conn_params *params;
 	struct hci_dev *hdev = conn->hdev;
@@ -108,8 +104,7 @@ static void hci_connect_le_scan_cleanup(struct hci_conn *conn, u8 status)
 	 * where a timeout + cancel does indicate an actual failure.
 	 */
 	if (status && status != HCI_ERROR_UNKNOWN_CONN_ID)
-		mgmt_connect_failed(hdev, &conn->dst, conn->type,
-				    conn->dst_type, status);
+		mgmt_connect_failed(hdev, conn, status);
 
 	/* The connection attempt was doing scan for new RPA, and is
 	 * in scan phase. If params are not associated with any other
@@ -151,7 +146,8 @@ static void hci_conn_cleanup(struct hci_conn *conn)
 
 	hci_chan_list_flush(conn);
 
-	hci_conn_hash_del(hdev, conn);
+	if (HCI_CONN_HANDLE_UNSET(conn->handle))
+		ida_free(&hdev->unset_handle_ida, conn->handle);
 
 	if (conn->cleanup)
 		conn->cleanup(conn);
@@ -169,71 +165,11 @@ static void hci_conn_cleanup(struct hci_conn *conn)
 			hdev->notify(hdev, HCI_NOTIFY_CONN_DEL);
 	}
 
-	hci_conn_del_sysfs(conn);
-
 	debugfs_remove_recursive(conn->debugfs);
 
+	hci_conn_del_sysfs(conn);
+
 	hci_dev_put(hdev);
-
-	hci_conn_put(conn);
-}
-
-static void hci_acl_create_connection(struct hci_conn *conn)
-{
-	struct hci_dev *hdev = conn->hdev;
-	struct inquiry_entry *ie;
-	struct hci_cp_create_conn cp;
-
-	BT_DBG("hcon %p", conn);
-
-	/* Many controllers disallow HCI Create Connection while it is doing
-	 * HCI Inquiry. So we cancel the Inquiry first before issuing HCI Create
-	 * Connection. This may cause the MGMT discovering state to become false
-	 * without user space's request but it is okay since the MGMT Discovery
-	 * APIs do not promise that discovery should be done forever. Instead,
-	 * the user space monitors the status of MGMT discovering and it may
-	 * request for discovery again when this flag becomes false.
-	 */
-	if (test_bit(HCI_INQUIRY, &hdev->flags)) {
-		/* Put this connection to "pending" state so that it will be
-		 * executed after the inquiry cancel command complete event.
-		 */
-		conn->state = BT_CONNECT2;
-		hci_send_cmd(hdev, HCI_OP_INQUIRY_CANCEL, 0, NULL);
-		return;
-	}
-
-	conn->state = BT_CONNECT;
-	conn->out = true;
-	conn->role = HCI_ROLE_MASTER;
-
-	conn->attempt++;
-
-	conn->link_policy = hdev->link_policy;
-
-	memset(&cp, 0, sizeof(cp));
-	bacpy(&cp.bdaddr, &conn->dst);
-	cp.pscan_rep_mode = 0x02;
-
-	ie = hci_inquiry_cache_lookup(hdev, &conn->dst);
-	if (ie) {
-		if (inquiry_entry_age(ie) <= INQUIRY_ENTRY_AGE_MAX) {
-			cp.pscan_rep_mode = ie->data.pscan_rep_mode;
-			cp.pscan_mode     = ie->data.pscan_mode;
-			cp.clock_offset   = ie->data.clock_offset |
-					    cpu_to_le16(0x8000);
-		}
-
-		memcpy(conn->dev_class, ie->data.dev_class, 3);
-	}
-
-	cp.pkt_type = cpu_to_le16(conn->pkt_type);
-	if (lmp_rswitch_capable(hdev) && !(hdev->link_mode & HCI_LM_MASTER))
-		cp.role_switch = 0x01;
-	else
-		cp.role_switch = 0x00;
-
-	hci_send_cmd(hdev, HCI_OP_CREATE_CONN, sizeof(cp), &cp);
 }
 
 int hci_disconnect(struct hci_conn *conn, __u8 reason)
@@ -299,6 +235,13 @@ static int configure_datapath_sync(struct hci_dev *hdev, struct bt_codec *codec)
 	__u8 vnd_len, *vnd_data = NULL;
 	struct hci_op_configure_data_path *cmd = NULL;
 
+	/* Do not take below 2 checks as error since the 1st means user do not
+	 * want to use HFP offload mode and the 2nd means the vendor controller
+	 * do not need to send below HCI command for offload mode.
+	 */
+	if (!codec->data_path || !hdev->get_codec_config_data)
+		return 0;
+
 	err = hdev->get_codec_config_data(hdev, ESCO_LINK, codec, &vnd_len,
 					  &vnd_data);
 	if (err < 0)
@@ -340,13 +283,12 @@ static int hci_enhanced_setup_sync(struct hci_dev *hdev, void *data)
 	struct hci_cp_enhanced_setup_sync_conn cp;
 	const struct sco_param *param;
 
-	kfree(conn_handle);
+	if (!hci_conn_valid(hdev, conn))
+		return -ECANCELED;
 
 	bt_dev_dbg(hdev, "hcon %p", conn);
 
-	/* for offload use case, codec needs to configured before opening SCO */
-	if (conn->codec.data_path)
-		configure_datapath_sync(hdev, &conn->codec);
+	configure_datapath_sync(hdev, &conn->codec);
 
 	conn->state = BT_CONNECT;
 	conn->out = true;
@@ -360,11 +302,13 @@ static int hci_enhanced_setup_sync(struct hci_dev *hdev, void *data)
 	cp.tx_bandwidth   = cpu_to_le32(0x00001f40);
 	cp.rx_bandwidth   = cpu_to_le32(0x00001f40);
 
+	hci_dev_lock(hdev);
+
 	switch (conn->codec.id) {
 	case BT_CODEC_MSBC:
 		if (!find_next_esco_param(conn, esco_param_msbc,
 					  ARRAY_SIZE(esco_param_msbc)))
-			return -EINVAL;
+			goto unlock;
 
 		param = &esco_param_msbc[conn->attempt - 1];
 		cp.tx_coding_format.id = 0x05;
@@ -390,7 +334,8 @@ static int hci_enhanced_setup_sync(struct hci_dev *hdev, void *data)
 	case BT_CODEC_TRANSPARENT:
 		if (!find_next_esco_param(conn, esco_param_msbc,
 					  ARRAY_SIZE(esco_param_msbc)))
-			return false;
+			goto unlock;
+
 		param = &esco_param_msbc[conn->attempt - 1];
 		cp.tx_coding_format.id = 0x03;
 		cp.rx_coding_format.id = 0x03;
@@ -416,11 +361,11 @@ static int hci_enhanced_setup_sync(struct hci_dev *hdev, void *data)
 		if (conn->parent && lmp_esco_capable(conn->parent)) {
 			if (!find_next_esco_param(conn, esco_param_cvsd,
 						  ARRAY_SIZE(esco_param_cvsd)))
-				return -EINVAL;
+				goto unlock;
 			param = &esco_param_cvsd[conn->attempt - 1];
 		} else {
 			if (conn->attempt > ARRAY_SIZE(sco_param_cvsd))
-				return -EINVAL;
+				goto unlock;
 			param = &sco_param_cvsd[conn->attempt - 1];
 		}
 		cp.tx_coding_format.id = 2;
@@ -443,8 +388,10 @@ static int hci_enhanced_setup_sync(struct hci_dev *hdev, void *data)
 		cp.out_transport_unit_size = 16;
 		break;
 	default:
-		return -EINVAL;
+		goto unlock;
 	}
+
+	hci_dev_unlock(hdev);
 
 	cp.retrans_effort = param->retrans_effort;
 	cp.pkt_type = __cpu_to_le16(param->pkt_type);
@@ -454,6 +401,10 @@ static int hci_enhanced_setup_sync(struct hci_dev *hdev, void *data)
 		return -EIO;
 
 	return 0;
+
+unlock:
+	hci_dev_unlock(hdev);
+	return -EINVAL;
 }
 
 static bool hci_setup_sync_conn(struct hci_conn *conn, __u16 handle)
@@ -508,23 +459,35 @@ static bool hci_setup_sync_conn(struct hci_conn *conn, __u16 handle)
 	return true;
 }
 
+static void hci_enhanced_setup_sync_destroy(struct hci_dev *hdev, void *data,
+					    int err)
+{
+	struct conn_handle_t *conn_handle = data;
+
+	hci_conn_put(conn_handle->conn);
+	kfree(conn_handle);
+}
+
 bool hci_setup_sync(struct hci_conn *conn, __u16 handle)
 {
 	int result;
 	struct conn_handle_t *conn_handle;
 
 	if (enhanced_sync_conn_capable(conn->hdev)) {
-		conn_handle = kzalloc(sizeof(*conn_handle), GFP_KERNEL);
+		conn_handle = kzalloc_obj(*conn_handle);
 
 		if (!conn_handle)
 			return false;
 
-		conn_handle->conn = conn;
+		conn_handle->conn = hci_conn_get(conn);
 		conn_handle->handle = handle;
 		result = hci_cmd_sync_queue(conn->hdev, hci_enhanced_setup_sync,
-					    conn_handle, NULL);
-		if (result < 0)
+					    conn_handle,
+					    hci_enhanced_setup_sync_destroy);
+		if (result < 0) {
+			hci_conn_put(conn);
 			kfree(conn_handle);
+		}
 
 		return result == 0;
 	}
@@ -532,40 +495,107 @@ bool hci_setup_sync(struct hci_conn *conn, __u16 handle)
 	return hci_setup_sync_conn(conn, handle);
 }
 
-u8 hci_le_conn_update(struct hci_conn *conn, u16 min, u16 max, u16 latency,
-		      u16 to_multiplier)
+struct le_conn_update_data {
+	struct hci_conn *conn;
+	u16	min;
+	u16	max;
+	u16	latency;
+	u16	to_multiplier;
+};
+
+static int le_conn_update_sync(struct hci_dev *hdev, void *data)
 {
-	struct hci_dev *hdev = conn->hdev;
+	struct le_conn_update_data *d = data;
+	struct hci_conn *conn = d->conn;
 	struct hci_conn_params *params;
 	struct hci_cp_le_conn_update cp;
+	u16 timeout;
+	u8 store_hint;
+	int err;
 
+	/* Verify connection is still alive and read conn fields under
+	 * the same lock to prevent a concurrent disconnect from freeing
+	 * or reusing the connection while we build the HCI command.
+	 */
+	hci_dev_lock(hdev);
+
+	if (!hci_conn_valid(hdev, conn)) {
+		hci_dev_unlock(hdev);
+		return -ECANCELED;
+	}
+
+	memset(&cp, 0, sizeof(cp));
+	cp.handle		= cpu_to_le16(conn->handle);
+	cp.conn_interval_min	= cpu_to_le16(d->min);
+	cp.conn_interval_max	= cpu_to_le16(d->max);
+	cp.conn_latency		= cpu_to_le16(d->latency);
+	cp.supervision_timeout	= cpu_to_le16(d->to_multiplier);
+	cp.min_ce_len		= cpu_to_le16(0x0000);
+	cp.max_ce_len		= cpu_to_le16(0x0000);
+	timeout			= conn->conn_timeout;
+
+	hci_dev_unlock(hdev);
+
+	err = __hci_cmd_sync_status_sk(hdev, HCI_OP_LE_CONN_UPDATE,
+				       sizeof(cp), &cp,
+				       HCI_EV_LE_CONN_UPDATE_COMPLETE,
+				       timeout, NULL);
+	if (err)
+		return err;
+
+	/* Update stored connection parameters after the controller has
+	 * confirmed the update via the LE Connection Update Complete event.
+	 */
 	hci_dev_lock(hdev);
 
 	params = hci_conn_params_lookup(hdev, &conn->dst, conn->dst_type);
 	if (params) {
-		params->conn_min_interval = min;
-		params->conn_max_interval = max;
-		params->conn_latency = latency;
-		params->supervision_timeout = to_multiplier;
+		params->conn_min_interval = d->min;
+		params->conn_max_interval = d->max;
+		params->conn_latency = d->latency;
+		params->supervision_timeout = d->to_multiplier;
+		store_hint = 0x01;
+	} else {
+		store_hint = 0x00;
 	}
 
 	hci_dev_unlock(hdev);
 
-	memset(&cp, 0, sizeof(cp));
-	cp.handle		= cpu_to_le16(conn->handle);
-	cp.conn_interval_min	= cpu_to_le16(min);
-	cp.conn_interval_max	= cpu_to_le16(max);
-	cp.conn_latency		= cpu_to_le16(latency);
-	cp.supervision_timeout	= cpu_to_le16(to_multiplier);
-	cp.min_ce_len		= cpu_to_le16(0x0000);
-	cp.max_ce_len		= cpu_to_le16(0x0000);
+	mgmt_new_conn_param(hdev, &conn->dst, conn->dst_type, store_hint,
+			    d->min, d->max, d->latency, d->to_multiplier);
 
-	hci_send_cmd(hdev, HCI_OP_LE_CONN_UPDATE, sizeof(cp), &cp);
+	return 0;
+}
 
-	if (params)
-		return 0x01;
+static void le_conn_update_complete(struct hci_dev *hdev, void *data, int err)
+{
+	struct le_conn_update_data *d = data;
 
-	return 0x00;
+	hci_conn_put(d->conn);
+	kfree(d);
+}
+
+void hci_le_conn_update(struct hci_conn *conn, u16 min, u16 max, u16 latency,
+			u16 to_multiplier)
+{
+	struct le_conn_update_data *d;
+
+	d = kzalloc_obj(*d);
+	if (!d)
+		return;
+
+	hci_conn_get(conn);
+	d->conn = conn;
+	d->min = min;
+	d->max = max;
+	d->latency = latency;
+	d->to_multiplier = to_multiplier;
+
+	if (hci_cmd_sync_queue(conn->hdev, le_conn_update_sync, d,
+			       le_conn_update_complete) < 0) {
+		hci_conn_put(conn);
+		kfree(d);
+	}
 }
 
 void hci_le_start_enc(struct hci_conn *conn, __le16 ediv, __le64 rand,
@@ -717,11 +747,6 @@ static void le_conn_timeout(struct work_struct *work)
 	hci_abort_conn(conn, HCI_ERROR_REMOTE_USER_TERM);
 }
 
-struct iso_cig_params {
-	struct hci_cp_le_set_cig_params cp;
-	struct hci_cis_params cis[0x1f];
-};
-
 struct iso_list_data {
 	union {
 		u8  cig;
@@ -759,6 +784,7 @@ static int terminate_big_sync(struct hci_dev *hdev, void *data)
 
 	bt_dev_dbg(hdev, "big 0x%2.2x bis 0x%2.2x", d->big, d->bis);
 
+	hci_disable_per_advertising_sync(hdev, d->bis);
 	hci_remove_ext_adv_instance_sync(hdev, d->bis, NULL);
 
 	/* Only terminate BIG if it has been created */
@@ -782,7 +808,7 @@ static int hci_le_terminate_big(struct hci_dev *hdev, struct hci_conn *conn)
 	bt_dev_dbg(hdev, "big 0x%2.2x bis 0x%2.2x", conn->iso_qos.bcast.big,
 		   conn->iso_qos.bcast.bis);
 
-	d = kzalloc(sizeof(*d), GFP_KERNEL);
+	d = kzalloc_obj(*d);
 	if (!d)
 		return -ENOMEM;
 
@@ -814,21 +840,55 @@ static int big_terminate_sync(struct hci_dev *hdev, void *data)
 	return 0;
 }
 
-static int hci_le_big_terminate(struct hci_dev *hdev, u8 big, struct hci_conn *conn)
+static void find_bis(struct hci_conn *conn, void *data)
+{
+	struct iso_list_data *d = data;
+
+	/* Ignore if BIG doesn't match */
+	if (d->big != conn->iso_qos.bcast.big)
+		return;
+
+	d->count++;
+}
+
+static int hci_le_big_terminate(struct hci_dev *hdev, struct hci_conn *conn)
 {
 	struct iso_list_data *d;
 	int ret;
 
-	bt_dev_dbg(hdev, "big 0x%2.2x sync_handle 0x%4.4x", big, conn->sync_handle);
+	bt_dev_dbg(hdev, "hcon %p big 0x%2.2x sync_handle 0x%4.4x", conn,
+		   conn->iso_qos.bcast.big, conn->sync_handle);
 
-	d = kzalloc(sizeof(*d), GFP_KERNEL);
+	d = kzalloc_obj(*d);
 	if (!d)
 		return -ENOMEM;
 
-	d->big = big;
+	d->big = conn->iso_qos.bcast.big;
 	d->sync_handle = conn->sync_handle;
-	d->pa_sync_term = test_and_clear_bit(HCI_CONN_PA_SYNC, &conn->flags);
-	d->big_sync_term = test_and_clear_bit(HCI_CONN_BIG_SYNC, &conn->flags);
+
+	if (conn->type == PA_LINK &&
+	    test_and_clear_bit(HCI_CONN_PA_SYNC, &conn->flags)) {
+		hci_conn_hash_list_flag(hdev, find_bis, PA_LINK,
+					HCI_CONN_PA_SYNC, d);
+
+		if (!d->count)
+			d->pa_sync_term = true;
+
+		d->count = 0;
+	}
+
+	if (test_and_clear_bit(HCI_CONN_BIG_SYNC, &conn->flags)) {
+		hci_conn_hash_list_flag(hdev, find_bis, BIS_LINK,
+					HCI_CONN_BIG_SYNC, d);
+
+		if (!d->count)
+			d->big_sync_term = true;
+	}
+
+	if (!d->pa_sync_term && !d->big_sync_term) {
+		kfree(d);
+		return 0;
+	}
 
 	ret = hci_cmd_sync_queue(hdev, big_terminate_sync, d,
 				 terminate_big_destroy);
@@ -842,7 +902,7 @@ static int hci_le_big_terminate(struct hci_dev *hdev, u8 big, struct hci_conn *c
  *
  * Detects if there any BIS left connected in a BIG
  * broadcaster: Remove advertising instance and terminate BIG.
- * broadcaster receiver: Teminate BIG sync and terminate PA sync.
+ * broadcaster receiver: Terminate BIG sync and terminate PA sync.
  */
 static void bis_cleanup(struct hci_conn *conn)
 {
@@ -858,20 +918,30 @@ static void bis_cleanup(struct hci_conn *conn)
 		/* Check if ISO connection is a BIS and terminate advertising
 		 * set and BIG if there are no other connections using it.
 		 */
-		bis = hci_conn_hash_lookup_big(hdev, conn->iso_qos.bcast.big);
+		bis = hci_conn_hash_lookup_big_state(hdev,
+						     conn->iso_qos.bcast.big,
+						     BT_CONNECTED,
+						     HCI_ROLE_MASTER);
+		if (bis)
+			return;
+
+		bis = hci_conn_hash_lookup_big_state(hdev,
+						     conn->iso_qos.bcast.big,
+						     BT_CONNECT,
+						     HCI_ROLE_MASTER);
+		if (bis)
+			return;
+
+		bis = hci_conn_hash_lookup_big_state(hdev,
+						     conn->iso_qos.bcast.big,
+						     BT_OPEN,
+						     HCI_ROLE_MASTER);
 		if (bis)
 			return;
 
 		hci_le_terminate_big(hdev, conn);
 	} else {
-		bis = hci_conn_hash_lookup_big_any_dst(hdev,
-						       conn->iso_qos.bcast.big);
-
-		if (bis)
-			return;
-
-		hci_le_big_terminate(hdev, conn->iso_qos.bcast.big,
-				     conn);
+		hci_le_big_terminate(hdev, conn);
 	}
 }
 
@@ -919,48 +989,89 @@ static void cis_cleanup(struct hci_conn *conn)
 	/* Check if ISO connection is a CIS and remove CIG if there are
 	 * no other connections using it.
 	 */
-	hci_conn_hash_list_state(hdev, find_cis, ISO_LINK, BT_BOUND, &d);
-	hci_conn_hash_list_state(hdev, find_cis, ISO_LINK, BT_CONNECT, &d);
-	hci_conn_hash_list_state(hdev, find_cis, ISO_LINK, BT_CONNECTED, &d);
+	hci_conn_hash_list_state(hdev, find_cis, CIS_LINK, BT_BOUND, &d);
+	hci_conn_hash_list_state(hdev, find_cis, CIS_LINK, BT_CONNECT,
+				 &d);
+	hci_conn_hash_list_state(hdev, find_cis, CIS_LINK, BT_CONNECTED,
+				 &d);
 	if (d.count)
 		return;
 
 	hci_le_remove_cig(hdev, conn->iso_qos.ucast.cig);
 }
 
-static u16 hci_conn_hash_alloc_unset(struct hci_dev *hdev)
+static int hci_conn_hash_alloc_unset(struct hci_dev *hdev)
 {
-	struct hci_conn_hash *h = &hdev->conn_hash;
-	struct hci_conn  *c;
-	u16 handle = HCI_CONN_HANDLE_MAX + 1;
-
-	rcu_read_lock();
-
-	list_for_each_entry_rcu(c, &h->list, list) {
-		/* Find the first unused handle */
-		if (handle == 0xffff || c->handle != handle)
-			break;
-		handle++;
-	}
-	rcu_read_unlock();
-
-	return handle;
+	return ida_alloc_range(&hdev->unset_handle_ida, HCI_CONN_HANDLE_MAX + 1,
+			       U16_MAX, GFP_ATOMIC);
 }
 
-struct hci_conn *hci_conn_add(struct hci_dev *hdev, int type, bdaddr_t *dst,
-			      u8 role)
+static struct hci_conn *__hci_conn_add(struct hci_dev *hdev, int type,
+				       bdaddr_t *dst, u8 dst_type,
+				       u8 role, u16 handle)
 {
 	struct hci_conn *conn;
+	struct smp_irk *irk = NULL;
 
-	BT_DBG("%s dst %pMR", hdev->name, dst);
+	switch (type) {
+	case ACL_LINK:
+		if (!hdev->acl_mtu)
+			return ERR_PTR(-ECONNREFUSED);
+		break;
+	case CIS_LINK:
+	case BIS_LINK:
+	case PA_LINK:
+		if (!hdev->iso_mtu)
+			return ERR_PTR(-ECONNREFUSED);
+		irk = hci_get_irk(hdev, dst, dst_type);
+		break;
+	case LE_LINK:
+		if (hdev->le_mtu && hdev->le_mtu < HCI_MIN_LE_MTU)
+			return ERR_PTR(-ECONNREFUSED);
+		if (!hdev->le_mtu && hdev->acl_mtu < HCI_MIN_LE_MTU)
+			return ERR_PTR(-ECONNREFUSED);
+		irk = hci_get_irk(hdev, dst, dst_type);
+		/* An identity address only reaches a peer advertising an RPA
+		 * if the controller translates it. Unless address resolution
+		 * is enabled and this peer is programmed into the resolving
+		 * list, keep the RPA the peer is on air with;
+		 * le_conn_complete_evt() resolves it back once the link is
+		 * up.
+		 */
+		if (irk &&
+		    (!hci_dev_test_flag(hdev, HCI_LL_RPA_RESOLUTION) ||
+		     !hci_bdaddr_list_lookup_with_irk(&hdev->le_resolv_list,
+						      &irk->bdaddr,
+						      irk->addr_type)))
+			irk = NULL;
+		break;
+	case SCO_LINK:
+	case ESCO_LINK:
+		if (!hdev->sco_pkts)
+			/* Controller does not support SCO or eSCO over HCI */
+			return ERR_PTR(-ECONNREFUSED);
+		break;
+	default:
+		return ERR_PTR(-ECONNREFUSED);
+	}
 
-	conn = kzalloc(sizeof(*conn), GFP_KERNEL);
+	bt_dev_dbg(hdev, "dst %pMR handle 0x%4.4x", dst, handle);
+
+	conn = kzalloc_obj(*conn);
 	if (!conn)
-		return NULL;
+		return ERR_PTR(-ENOMEM);
 
-	bacpy(&conn->dst, dst);
+	/* If and IRK exists use its identity address */
+	if (!irk) {
+		bacpy(&conn->dst, dst);
+		conn->dst_type = dst_type;
+	} else {
+		bacpy(&conn->dst, &irk->bdaddr);
+		conn->dst_type = irk->addr_type;
+	}
+
 	bacpy(&conn->src, &hdev->bdaddr);
-	conn->handle = hci_conn_hash_alloc_unset(hdev);
+	conn->handle = handle;
 	conn->hdev  = hdev;
 	conn->type  = type;
 	conn->role  = role;
@@ -973,6 +1084,8 @@ struct hci_conn *hci_conn_add(struct hci_dev *hdev, int type, bdaddr_t *dst,
 	conn->rssi = HCI_RSSI_INVALID;
 	conn->tx_power = HCI_TX_POWER_INVALID;
 	conn->max_tx_power = HCI_TX_POWER_INVALID;
+	conn->sync_handle = HCI_SYNC_HANDLE_INVALID;
+	conn->sid = HCI_SID_INVALID;
 
 	set_bit(HCI_CONN_POWER_SAVE, &conn->flags);
 	conn->disc_timeout = HCI_DISCONN_TIMEOUT;
@@ -986,21 +1099,34 @@ struct hci_conn *hci_conn_add(struct hci_dev *hdev, int type, bdaddr_t *dst,
 	switch (type) {
 	case ACL_LINK:
 		conn->pkt_type = hdev->pkt_type & ACL_PTYPE_MASK;
+		conn->link_policy = hdev->link_policy;
+		conn->mtu = hdev->acl_mtu;
 		break;
 	case LE_LINK:
 		/* conn->src should reflect the local identity address */
 		hci_copy_identity_address(hdev, &conn->src, &conn->src_type);
+		conn->mtu = hdev->le_mtu ? hdev->le_mtu : hdev->acl_mtu;
+		/* Use the controller supported PHYS as default until the
+		 * remote features are resolved.
+		 */
+		conn->le_tx_def_phys = hdev->le_tx_def_phys;
+		conn->le_rx_def_phys = hdev->le_tx_def_phys;
 		break;
-	case ISO_LINK:
+	case CIS_LINK:
 		/* conn->src should reflect the local identity address */
 		hci_copy_identity_address(hdev, &conn->src, &conn->src_type);
 
-		/* set proper cleanup function */
-		if (!bacmp(dst, BDADDR_ANY))
-			conn->cleanup = bis_cleanup;
-		else if (conn->role == HCI_ROLE_MASTER)
+		if (conn->role == HCI_ROLE_MASTER)
 			conn->cleanup = cis_cleanup;
 
+		conn->mtu = hdev->iso_mtu;
+		break;
+	case PA_LINK:
+	case BIS_LINK:
+		/* conn->src should reflect the local identity address */
+		hci_copy_identity_address(hdev, &conn->src, &conn->src_type);
+		conn->cleanup = bis_cleanup;
+		conn->mtu = hdev->iso_mtu;
 		break;
 	case SCO_LINK:
 		if (lmp_esco_capable(hdev))
@@ -1008,13 +1134,17 @@ struct hci_conn *hci_conn_add(struct hci_dev *hdev, int type, bdaddr_t *dst,
 					(hdev->esco_type & EDR_ESCO_MASK);
 		else
 			conn->pkt_type = hdev->pkt_type & SCO_PTYPE_MASK;
+
+		conn->mtu = hdev->sco_mtu;
 		break;
 	case ESCO_LINK:
 		conn->pkt_type = hdev->esco_type & ~EDR_ESCO_MASK;
+		conn->mtu = hdev->sco_mtu;
 		break;
 	}
 
 	skb_queue_head_init(&conn->data_q);
+	skb_queue_head_init(&conn->tx_q.queue);
 
 	INIT_LIST_HEAD(&conn->chan_list);
 	INIT_LIST_HEAD(&conn->link_list);
@@ -1023,6 +1153,8 @@ struct hci_conn *hci_conn_add(struct hci_dev *hdev, int type, bdaddr_t *dst,
 	INIT_DELAYED_WORK(&conn->auto_accept_work, hci_conn_auto_accept);
 	INIT_DELAYED_WORK(&conn->idle_work, hci_conn_idle);
 	INIT_DELAYED_WORK(&conn->le_conn_timeout, le_conn_timeout);
+
+	spin_lock_init(&conn->proto_lock);
 
 	atomic_set(&conn->refcnt, 0);
 
@@ -1040,8 +1172,30 @@ struct hci_conn *hci_conn_add(struct hci_dev *hdev, int type, bdaddr_t *dst,
 	}
 
 	hci_conn_init_sysfs(conn);
-
 	return conn;
+}
+
+struct hci_conn *hci_conn_add_unset(struct hci_dev *hdev, int type,
+				    bdaddr_t *dst, u8 dst_type, u8 role)
+{
+	int handle;
+
+	bt_dev_dbg(hdev, "dst %pMR", dst);
+
+	handle = hci_conn_hash_alloc_unset(hdev);
+	if (unlikely(handle < 0))
+		return ERR_PTR(-ECONNREFUSED);
+
+	return __hci_conn_add(hdev, type, dst, dst_type, role, handle);
+}
+
+struct hci_conn *hci_conn_add(struct hci_dev *hdev, int type, bdaddr_t *dst,
+			      u8 dst_type, u8 role, u16 handle)
+{
+	if (handle > HCI_CONN_HANDLE_MAX)
+		return ERR_PTR(-EINVAL);
+
+	return __hci_conn_add(hdev, type, dst, dst_type, role, handle);
 }
 
 static void hci_conn_cleanup_child(struct hci_conn *conn, u8 reason)
@@ -1059,9 +1213,12 @@ static void hci_conn_cleanup_child(struct hci_conn *conn, u8 reason)
 		if (HCI_CONN_HANDLE_UNSET(conn->handle))
 			hci_conn_failed(conn, reason);
 		break;
-	case ISO_LINK:
-		if (conn->state != BT_CONNECTED &&
-		    !test_bit(HCI_CONN_CREATE_CIS, &conn->flags))
+	case CIS_LINK:
+	case BIS_LINK:
+	case PA_LINK:
+		if ((conn->state != BT_CONNECTED &&
+		    !test_bit(HCI_CONN_CREATE_CIS, &conn->flags)) ||
+		    test_bit(HCI_CONN_BIG_CREATED, &conn->flags))
 			hci_conn_failed(conn, reason);
 		break;
 	}
@@ -1117,36 +1274,62 @@ void hci_conn_del(struct hci_conn *conn)
 
 	hci_conn_unlink(conn);
 
-	cancel_delayed_work_sync(&conn->disc_work);
-	cancel_delayed_work_sync(&conn->auto_accept_work);
-	cancel_delayed_work_sync(&conn->idle_work);
+	disable_delayed_work_sync(&conn->disc_work);
+	disable_delayed_work_sync(&conn->auto_accept_work);
+	disable_delayed_work_sync(&conn->idle_work);
 
-	if (conn->type == ACL_LINK) {
-		/* Unacked frames */
-		hdev->acl_cnt += conn->sent;
-	} else if (conn->type == LE_LINK) {
-		cancel_delayed_work(&conn->le_conn_timeout);
+	/* Remove the connection from the list so unacked logic can detect when
+	 * a certain pool is not being utilized.
+	 */
+	hci_conn_hash_del(hdev, conn);
 
-		if (hdev->le_pkts)
-			hdev->le_cnt += conn->sent;
+	/* Handle unacked frames:
+	 *
+	 * - In case there are no connection, or if restoring the buffers
+	 *   considered in transist would overflow, restore all buffers to the
+	 *   pool.
+	 * - Otherwise restore just the buffers considered in transit for the
+	 *   hci_conn
+	 */
+	switch (conn->type) {
+	case ACL_LINK:
+		if (!hci_conn_num(hdev, ACL_LINK) ||
+		    hdev->acl_cnt + conn->sent > hdev->acl_pkts)
+			hdev->acl_cnt = hdev->acl_pkts;
 		else
 			hdev->acl_cnt += conn->sent;
-	} else {
-		/* Unacked ISO frames */
-		if (conn->type == ISO_LINK) {
-			if (hdev->iso_pkts)
-				hdev->iso_cnt += conn->sent;
-			else if (hdev->le_pkts)
+		break;
+	case LE_LINK:
+		cancel_delayed_work(&conn->le_conn_timeout);
+
+		if (hdev->le_pkts) {
+			if (!hci_conn_num(hdev, LE_LINK) ||
+			    hdev->le_cnt + conn->sent > hdev->le_pkts)
+				hdev->le_cnt = hdev->le_pkts;
+			else
 				hdev->le_cnt += conn->sent;
+		} else {
+			if ((!hci_conn_num(hdev, LE_LINK) &&
+			     !hci_conn_num(hdev, ACL_LINK)) ||
+			    hdev->acl_cnt + conn->sent > hdev->acl_pkts)
+				hdev->acl_cnt = hdev->acl_pkts;
 			else
 				hdev->acl_cnt += conn->sent;
 		}
+		break;
+	case CIS_LINK:
+	case BIS_LINK:
+	case PA_LINK:
+		if (!hci_iso_count(hdev) ||
+		    hdev->iso_cnt + conn->sent > hdev->iso_pkts)
+			hdev->iso_cnt = hdev->iso_pkts;
+		else
+			hdev->iso_cnt += conn->sent;
+		break;
 	}
 
-	if (conn->amp_mgr)
-		amp_mgr_put(conn->amp_mgr);
-
 	skb_queue_purge(&conn->data_q);
+	skb_queue_purge(&conn->tx_q.queue);
 
 	/* Remove the connection from the list and cleanup its remaining
 	 * state. This is a separate function since for some cases like
@@ -1154,6 +1337,9 @@ void hci_conn_del(struct hci_conn *conn)
 	 * rest of hci_conn_del.
 	 */
 	hci_conn_cleanup(conn);
+
+	/* Dequeue callbacks using connection pointer as data */
+	hci_cmd_sync_dequeue(hdev, NULL, conn, NULL);
 }
 
 struct hci_dev *hci_get_route(bdaddr_t *dst, bdaddr_t *src, uint8_t src_type)
@@ -1167,8 +1353,7 @@ struct hci_dev *hci_get_route(bdaddr_t *dst, bdaddr_t *src, uint8_t src_type)
 
 	list_for_each_entry(d, &hci_dev_list, list) {
 		if (!test_bit(HCI_UP, &d->flags) ||
-		    hci_dev_test_flag(d, HCI_USER_CHANNEL) ||
-		    d->dev_type != HCI_PRIMARY)
+		    hci_dev_test_flag(d, HCI_USER_CHANNEL))
 			continue;
 
 		/* Simple routing:
@@ -1227,7 +1412,8 @@ static void hci_le_conn_failed(struct hci_conn *conn, u8 status)
 	/* Enable advertising in case this was a failed connection
 	 * attempt as a peripheral.
 	 */
-	hci_enable_advertising(hdev);
+	if (conn->role == HCI_ROLE_SLAVE)
+		hci_enable_advertising(hdev);
 }
 
 /* This function requires the caller holds hdev->lock */
@@ -1242,10 +1428,15 @@ void hci_conn_failed(struct hci_conn *conn, u8 status)
 		hci_le_conn_failed(conn, status);
 		break;
 	case ACL_LINK:
-		mgmt_connect_failed(hdev, &conn->dst, conn->type,
-				    conn->dst_type, status);
+		mgmt_connect_failed(hdev, conn, status);
 		break;
 	}
+
+	/* In case of BIG/PA sync failed, clear conn flags so that
+	 * the conns will be correctly cleaned up by ISO layer
+	 */
+	test_and_clear_bit(HCI_CONN_BIG_SYNC_FAILED, &conn->flags);
+	test_and_clear_bit(HCI_CONN_PA_SYNC_FAILED, &conn->flags);
 
 	conn->state = BT_CLOSED;
 	hci_connect_cfm(conn, status);
@@ -1274,61 +1465,17 @@ u8 hci_conn_set_handle(struct hci_conn *conn, u16 handle)
 	if (conn->abort_reason)
 		return conn->abort_reason;
 
+	if (HCI_CONN_HANDLE_UNSET(conn->handle))
+		ida_free(&hdev->unset_handle_ida, conn->handle);
+
 	conn->handle = handle;
 
 	return 0;
 }
 
-static void create_le_conn_complete(struct hci_dev *hdev, void *data, int err)
-{
-	struct hci_conn *conn;
-	u16 handle = PTR_UINT(data);
-
-	conn = hci_conn_hash_lookup_handle(hdev, handle);
-	if (!conn)
-		return;
-
-	bt_dev_dbg(hdev, "err %d", err);
-
-	hci_dev_lock(hdev);
-
-	if (!err) {
-		hci_connect_le_scan_cleanup(conn, 0x00);
-		goto done;
-	}
-
-	/* Check if connection is still pending */
-	if (conn != hci_lookup_le_connect(hdev))
-		goto done;
-
-	/* Flush to make sure we send create conn cancel command if needed */
-	flush_delayed_work(&conn->le_conn_timeout);
-	hci_conn_failed(conn, bt_status(err));
-
-done:
-	hci_dev_unlock(hdev);
-}
-
-static int hci_connect_le_sync(struct hci_dev *hdev, void *data)
-{
-	struct hci_conn *conn;
-	u16 handle = PTR_UINT(data);
-
-	conn = hci_conn_hash_lookup_handle(hdev, handle);
-	if (!conn)
-		return 0;
-
-	bt_dev_dbg(hdev, "conn %p", conn);
-
-	clear_bit(HCI_CONN_SCANNING, &conn->flags);
-	conn->state = BT_CONNECT;
-
-	return hci_le_create_conn_sync(hdev, conn);
-}
-
 struct hci_conn *hci_connect_le(struct hci_dev *hdev, bdaddr_t *dst,
 				u8 dst_type, bool dst_resolved, u8 sec_level,
-				u16 conn_timeout, u8 role)
+				u16 conn_timeout, u8 role, u8 phy, u8 sec_phy)
 {
 	struct hci_conn *conn;
 	struct smp_irk *irk;
@@ -1379,22 +1526,29 @@ struct hci_conn *hci_connect_le(struct hci_dev *hdev, bdaddr_t *dst,
 	}
 
 	if (conn) {
+		/* dst may just have been swapped for the peer's RPA above, and
+		 * dst_type describes dst -- it has to travel with it. Leaving
+		 * the identity type behind makes the pair describe a peer that
+		 * does not exist, and nothing downstream repairs it:
+		 * hci_bdaddr_is_rpa() tests the type before the address, so
+		 * the RPA is never treated as one.
+		 */
 		bacpy(&conn->dst, dst);
+		conn->dst_type = dst_type;
 	} else {
-		conn = hci_conn_add(hdev, LE_LINK, dst, role);
-		if (!conn)
-			return ERR_PTR(-ENOMEM);
+		conn = hci_conn_add_unset(hdev, LE_LINK, dst, dst_type, role);
+		if (IS_ERR(conn))
+			return conn;
 		hci_conn_hold(conn);
 		conn->pending_sec_level = sec_level;
 	}
 
-	conn->dst_type = dst_type;
 	conn->sec_level = BT_SECURITY_LOW;
 	conn->conn_timeout = conn_timeout;
+	conn->le_adv_phy = phy;
+	conn->le_adv_sec_phy = sec_phy;
 
-	err = hci_cmd_sync_queue(hdev, hci_connect_le_sync,
-				 UINT_PTR(conn->handle),
-				 create_le_conn_complete);
+	err = hci_connect_le_sync(hdev, conn);
 	if (err) {
 		hci_conn_del(conn);
 		return ERR_PTR(err);
@@ -1486,6 +1640,18 @@ static int qos_set_bis(struct hci_dev *hdev, struct bt_iso_qos *qos)
 
 	/* Allocate BIS if not set */
 	if (qos->bcast.bis == BT_ISO_QOS_BIS_UNSET) {
+		if (qos->bcast.big != BT_ISO_QOS_BIG_UNSET) {
+			conn = hci_conn_hash_lookup_big(hdev, qos->bcast.big);
+
+			if (conn) {
+				/* If the BIG handle is already matched to an advertising
+				 * handle, do not allocate a new one.
+				 */
+				qos->bcast.bis = conn->iso_qos.bcast.bis;
+				return 0;
+			}
+		}
+
 		/* Find an unused adv set to advertise BIS, skip instance 0x00
 		 * since it is reserved as general purpose set.
 		 */
@@ -1509,8 +1675,8 @@ static int qos_set_bis(struct hci_dev *hdev, struct bt_iso_qos *qos)
 
 /* This function requires the caller holds hdev->lock */
 static struct hci_conn *hci_add_bis(struct hci_dev *hdev, bdaddr_t *dst,
-				    struct bt_iso_qos *qos, __u8 base_len,
-				    __u8 *base)
+				    __u8 sid, struct bt_iso_qos *qos,
+				    __u8 base_len, __u8 *base, u16 timeout)
 {
 	struct hci_conn *conn;
 	int err;
@@ -1546,11 +1712,13 @@ static struct hci_conn *hci_add_bis(struct hci_dev *hdev, bdaddr_t *dst,
 		     memcmp(conn->le_per_adv_data, base, base_len)))
 		return ERR_PTR(-EADDRINUSE);
 
-	conn = hci_conn_add(hdev, ISO_LINK, dst, HCI_ROLE_MASTER);
-	if (!conn)
-		return ERR_PTR(-ENOMEM);
+	conn = hci_conn_add_unset(hdev, BIS_LINK, dst, 0, HCI_ROLE_MASTER);
+	if (IS_ERR(conn))
+		return conn;
 
 	conn->state = BT_CONNECT;
+	conn->sid = sid;
+	conn->conn_timeout = timeout;
 
 	hci_conn_hold(conn);
 	return conn;
@@ -1590,9 +1758,10 @@ struct hci_conn *hci_connect_le_scan(struct hci_dev *hdev, bdaddr_t *dst,
 
 	BT_DBG("requesting refresh of dst_addr");
 
-	conn = hci_conn_add(hdev, LE_LINK, dst, HCI_ROLE_MASTER);
-	if (!conn)
-		return ERR_PTR(-ENOMEM);
+	conn = hci_conn_add_unset(hdev, LE_LINK, dst, dst_type,
+				  HCI_ROLE_MASTER);
+	if (IS_ERR(conn))
+		return conn;
 
 	if (hci_explicit_conn_params_set(hdev, dst, dst_type) < 0) {
 		hci_conn_del(conn);
@@ -1601,7 +1770,6 @@ struct hci_conn *hci_connect_le_scan(struct hci_dev *hdev, bdaddr_t *dst,
 
 	conn->state = BT_CONNECT;
 	set_bit(HCI_CONN_SCANNING, &conn->flags);
-	conn->dst_type = dst_type;
 	conn->sec_level = BT_SECURITY_LOW;
 	conn->pending_sec_level = sec_level;
 	conn->conn_timeout = conn_timeout;
@@ -1616,7 +1784,7 @@ done:
 
 struct hci_conn *hci_connect_acl(struct hci_dev *hdev, bdaddr_t *dst,
 				 u8 sec_level, u8 auth_type,
-				 enum conn_reasons conn_reason)
+				 enum conn_reasons conn_reason, u16 timeout)
 {
 	struct hci_conn *acl;
 
@@ -1638,19 +1806,28 @@ struct hci_conn *hci_connect_acl(struct hci_dev *hdev, bdaddr_t *dst,
 
 	acl = hci_conn_hash_lookup_ba(hdev, ACL_LINK, dst);
 	if (!acl) {
-		acl = hci_conn_add(hdev, ACL_LINK, dst, HCI_ROLE_MASTER);
-		if (!acl)
-			return ERR_PTR(-ENOMEM);
+		acl = hci_conn_add_unset(hdev, ACL_LINK, dst, 0,
+					 HCI_ROLE_MASTER);
+		if (IS_ERR(acl))
+			return acl;
 	}
 
 	hci_conn_hold(acl);
 
 	acl->conn_reason = conn_reason;
 	if (acl->state == BT_OPEN || acl->state == BT_CLOSED) {
+		int err;
+
 		acl->sec_level = BT_SECURITY_LOW;
 		acl->pending_sec_level = sec_level;
 		acl->auth_type = auth_type;
-		hci_acl_create_connection(acl);
+		acl->conn_timeout = timeout;
+
+		err = hci_connect_acl_sync(hdev, acl);
+		if (err) {
+			hci_conn_del(acl);
+			return ERR_PTR(err);
+		}
 	}
 
 	return acl;
@@ -1670,7 +1847,7 @@ static struct hci_link *hci_conn_link(struct hci_conn *parent,
 	if (conn->parent)
 		return NULL;
 
-	link = kzalloc(sizeof(*link), GFP_KERNEL);
+	link = kzalloc_obj(*link);
 	if (!link)
 		return NULL;
 
@@ -1685,23 +1862,24 @@ static struct hci_link *hci_conn_link(struct hci_conn *parent,
 }
 
 struct hci_conn *hci_connect_sco(struct hci_dev *hdev, int type, bdaddr_t *dst,
-				 __u16 setting, struct bt_codec *codec)
+				 __u16 setting, struct bt_codec *codec,
+				 u16 timeout)
 {
 	struct hci_conn *acl;
 	struct hci_conn *sco;
 	struct hci_link *link;
 
 	acl = hci_connect_acl(hdev, dst, BT_SECURITY_LOW, HCI_AT_NO_BONDING,
-			      CONN_REASON_SCO_CONNECT);
+			      CONN_REASON_SCO_CONNECT, timeout);
 	if (IS_ERR(acl))
 		return acl;
 
 	sco = hci_conn_hash_lookup_ba(hdev, type, dst);
 	if (!sco) {
-		sco = hci_conn_add(hdev, type, dst, HCI_ROLE_MASTER);
-		if (!sco) {
+		sco = hci_conn_add_unset(hdev, type, dst, 0, HCI_ROLE_MASTER);
+		if (IS_ERR(sco)) {
 			hci_conn_drop(acl);
-			return ERR_PTR(-ENOMEM);
+			return sco;
 		}
 	}
 
@@ -1745,7 +1923,7 @@ static int hci_le_create_big(struct hci_conn *conn, struct bt_iso_qos *qos)
 	data.count = 0;
 
 	/* Create a BIS for each bound connection */
-	hci_conn_hash_list_state(hdev, bis_list, ISO_LINK,
+	hci_conn_hash_list_state(hdev, bis_list, BIS_LINK,
 				 BT_BOUND, &data);
 
 	cp.handle = qos->bcast.big;
@@ -1755,7 +1933,7 @@ static int hci_le_create_big(struct hci_conn *conn, struct bt_iso_qos *qos)
 	cp.bis.sdu = cpu_to_le16(qos->bcast.out.sdu);
 	cp.bis.latency =  cpu_to_le16(qos->bcast.out.latency);
 	cp.bis.rtn  = qos->bcast.out.rtn;
-	cp.bis.phy  = qos->bcast.out.phy;
+	cp.bis.phy  = qos->bcast.out.phys;
 	cp.bis.packing = qos->bcast.packing;
 	cp.bis.framing = qos->bcast.framing;
 	cp.bis.encryption = qos->bcast.encryption;
@@ -1766,34 +1944,37 @@ static int hci_le_create_big(struct hci_conn *conn, struct bt_iso_qos *qos)
 
 static int set_cig_params_sync(struct hci_dev *hdev, void *data)
 {
+	DEFINE_FLEX(struct hci_cp_le_set_cig_params, pdu, cis, num_cis, 0x1f);
 	u8 cig_id = PTR_UINT(data);
 	struct hci_conn *conn;
 	struct bt_iso_qos *qos;
-	struct iso_cig_params pdu;
+	u8 aux_num_cis = 0;
 	u8 cis_id;
 
-	conn = hci_conn_hash_lookup_cig(hdev, cig_id);
-	if (!conn)
-		return 0;
+	hci_dev_lock(hdev);
 
-	memset(&pdu, 0, sizeof(pdu));
+	conn = hci_conn_hash_lookup_cig(hdev, cig_id);
+	if (!conn) {
+		hci_dev_unlock(hdev);
+		return 0;
+	}
 
 	qos = &conn->iso_qos;
-	pdu.cp.cig_id = cig_id;
-	hci_cpu_to_le24(qos->ucast.out.interval, pdu.cp.c_interval);
-	hci_cpu_to_le24(qos->ucast.in.interval, pdu.cp.p_interval);
-	pdu.cp.sca = qos->ucast.sca;
-	pdu.cp.packing = qos->ucast.packing;
-	pdu.cp.framing = qos->ucast.framing;
-	pdu.cp.c_latency = cpu_to_le16(qos->ucast.out.latency);
-	pdu.cp.p_latency = cpu_to_le16(qos->ucast.in.latency);
+	pdu->cig_id = cig_id;
+	hci_cpu_to_le24(qos->ucast.out.interval, pdu->c_interval);
+	hci_cpu_to_le24(qos->ucast.in.interval, pdu->p_interval);
+	pdu->sca = qos->ucast.sca;
+	pdu->packing = qos->ucast.packing;
+	pdu->framing = qos->ucast.framing;
+	pdu->c_latency = cpu_to_le16(qos->ucast.out.latency);
+	pdu->p_latency = cpu_to_le16(qos->ucast.in.latency);
 
 	/* Reprogram all CIS(s) with the same CIG, valid range are:
 	 * num_cis: 0x00 to 0x1F
 	 * cis_id: 0x00 to 0xEF
 	 */
 	for (cis_id = 0x00; cis_id < 0xf0 &&
-	     pdu.cp.num_cis < ARRAY_SIZE(pdu.cis); cis_id++) {
+	     aux_num_cis < pdu->num_cis; cis_id++) {
 		struct hci_cis_params *cis;
 
 		conn = hci_conn_hash_lookup_cis(hdev, NULL, 0, cig_id, cis_id);
@@ -1802,25 +1983,27 @@ static int set_cig_params_sync(struct hci_dev *hdev, void *data)
 
 		qos = &conn->iso_qos;
 
-		cis = &pdu.cis[pdu.cp.num_cis++];
+		cis = &pdu->cis[aux_num_cis++];
 		cis->cis_id = cis_id;
 		cis->c_sdu  = cpu_to_le16(conn->iso_qos.ucast.out.sdu);
 		cis->p_sdu  = cpu_to_le16(conn->iso_qos.ucast.in.sdu);
-		cis->c_phy  = qos->ucast.out.phy ? qos->ucast.out.phy :
-			      qos->ucast.in.phy;
-		cis->p_phy  = qos->ucast.in.phy ? qos->ucast.in.phy :
-			      qos->ucast.out.phy;
+		cis->c_phys = qos->ucast.out.phys ? qos->ucast.out.phys :
+			      qos->ucast.in.phys;
+		cis->p_phys = qos->ucast.in.phys ? qos->ucast.in.phys :
+			      qos->ucast.out.phys;
 		cis->c_rtn  = qos->ucast.out.rtn;
 		cis->p_rtn  = qos->ucast.in.rtn;
 	}
+	pdu->num_cis = aux_num_cis;
 
-	if (!pdu.cp.num_cis)
+	hci_dev_unlock(hdev);
+
+	if (!pdu->num_cis)
 		return 0;
 
 	return __hci_cmd_sync_status(hdev, HCI_OP_LE_SET_CIG_PARAMS,
-				     sizeof(pdu.cp) +
-				     pdu.cp.num_cis * sizeof(pdu.cis[0]), &pdu,
-				     HCI_CMD_TIMEOUT);
+				     struct_size(pdu, cis, pdu->num_cis),
+				     pdu, HCI_CMD_TIMEOUT);
 }
 
 static bool hci_le_set_cig_params(struct hci_conn *conn, struct bt_iso_qos *qos)
@@ -1835,12 +2018,12 @@ static bool hci_le_set_cig_params(struct hci_conn *conn, struct bt_iso_qos *qos)
 		for (data.cig = 0x00; data.cig < 0xf0; data.cig++) {
 			data.count = 0;
 
-			hci_conn_hash_list_state(hdev, find_cis, ISO_LINK,
+			hci_conn_hash_list_state(hdev, find_cis, CIS_LINK,
 						 BT_CONNECT, &data);
 			if (data.count)
 				continue;
 
-			hci_conn_hash_list_state(hdev, find_cis, ISO_LINK,
+			hci_conn_hash_list_state(hdev, find_cis, CIS_LINK,
 						 BT_CONNECTED, &data);
 			if (!data.count)
 				break;
@@ -1875,6 +2058,8 @@ static bool hci_le_set_cig_params(struct hci_conn *conn, struct bt_iso_qos *qos)
 		return false;
 
 done:
+	conn->iso_qos = *qos;
+
 	if (hci_cmd_sync_queue(hdev, set_cig_params_sync,
 			       UINT_PTR(qos->ucast.cig), NULL) < 0)
 		return false;
@@ -1883,21 +2068,26 @@ done:
 }
 
 struct hci_conn *hci_bind_cis(struct hci_dev *hdev, bdaddr_t *dst,
-			      __u8 dst_type, struct bt_iso_qos *qos)
+			      __u8 dst_type, struct bt_iso_qos *qos,
+			      u16 timeout)
 {
 	struct hci_conn *cis;
 
 	cis = hci_conn_hash_lookup_cis(hdev, dst, dst_type, qos->ucast.cig,
 				       qos->ucast.cis);
 	if (!cis) {
-		cis = hci_conn_add(hdev, ISO_LINK, dst, HCI_ROLE_MASTER);
-		if (!cis)
-			return ERR_PTR(-ENOMEM);
+		cis = hci_conn_add_unset(hdev, CIS_LINK, dst, dst_type,
+					 HCI_ROLE_MASTER);
+		if (IS_ERR(cis))
+			return cis;
 		cis->cleanup = cis_cleanup;
 		cis->dst_type = dst_type;
 		cis->iso_qos.ucast.cig = BT_ISO_QOS_CIG_UNSET;
 		cis->iso_qos.ucast.cis = BT_ISO_QOS_CIS_UNSET;
+		cis->conn_timeout = timeout;
 	}
+
+	hci_conn_hold(cis);
 
 	if (cis->state == BT_CONNECTED)
 		return cis;
@@ -1908,8 +2098,8 @@ struct hci_conn *hci_bind_cis(struct hci_dev *hdev, bdaddr_t *dst,
 		return cis;
 
 	/* Update LINK PHYs according to QoS preference */
-	cis->le_tx_phy = qos->ucast.out.phy;
-	cis->le_rx_phy = qos->ucast.in.phy;
+	cis->le_tx_phy = qos->ucast.out.phys;
+	cis->le_rx_phy = qos->ucast.in.phys;
 
 	/* If output interval is not set use the input interval as it cannot be
 	 * 0x000000.
@@ -1940,9 +2130,6 @@ struct hci_conn *hci_bind_cis(struct hci_dev *hdev, bdaddr_t *dst,
 		return ERR_PTR(-EINVAL);
 	}
 
-	hci_conn_hold(cis);
-
-	cis->iso_qos = *qos;
 	cis->state = BT_BOUND;
 
 	return cis;
@@ -1982,7 +2169,7 @@ bool hci_iso_setup_path(struct hci_conn *conn)
 
 int hci_conn_check_create_cis(struct hci_conn *conn)
 {
-	if (conn->type != ISO_LINK || !bacmp(&conn->dst, BDADDR_ANY))
+	if (conn->type != CIS_LINK)
 		return -EINVAL;
 
 	if (!conn->parent || conn->parent->state != BT_CONNECTED ||
@@ -2024,21 +2211,15 @@ int hci_le_create_cis_pending(struct hci_dev *hdev)
 }
 
 static void hci_iso_qos_setup(struct hci_dev *hdev, struct hci_conn *conn,
-			      struct bt_iso_io_qos *qos, __u8 phy)
+			      struct bt_iso_io_qos *qos, __u8 phys)
 {
 	/* Only set MTU if PHY is enabled */
-	if (!qos->sdu && qos->phy) {
-		if (hdev->iso_mtu > 0)
-			qos->sdu = hdev->iso_mtu;
-		else if (hdev->le_mtu > 0)
-			qos->sdu = hdev->le_mtu;
-		else
-			qos->sdu = hdev->acl_mtu;
-	}
+	if (!qos->sdu && qos->phys)
+		qos->sdu = conn->mtu;
 
 	/* Use the same PHY as ACL if set to any */
-	if (qos->phy == BT_ISO_PHY_ANY)
-		qos->phy = phy;
+	if (qos->phys == BT_ISO_PHY_ANY)
+		qos->phys = phys;
 
 	/* Use LE ACL connection interval if not set */
 	if (!qos->interval)
@@ -2058,7 +2239,10 @@ static int create_big_sync(struct hci_dev *hdev, void *data)
 	u32 flags = 0;
 	int err;
 
-	if (qos->bcast.out.phy == 0x02)
+	if (!hci_conn_valid(hdev, conn))
+		return -ECANCELED;
+
+	if (qos->bcast.out.phys == BIT(1))
 		flags |= MGMT_ADV_FLAG_SEC_2M;
 
 	/* Align intervals */
@@ -2067,7 +2251,8 @@ static int create_big_sync(struct hci_dev *hdev, void *data)
 	if (qos->bcast.bis)
 		sync_interval = interval * 4;
 
-	err = hci_start_per_adv_sync(hdev, qos->bcast.bis, conn->le_per_adv_data_len,
+	err = hci_start_per_adv_sync(hdev, qos->bcast.bis, conn->sid,
+				     conn->le_per_adv_data_len,
 				     conn->le_per_adv_data, flags, interval,
 				     interval, sync_interval);
 	if (err)
@@ -2076,91 +2261,53 @@ static int create_big_sync(struct hci_dev *hdev, void *data)
 	return hci_le_create_big(conn, &conn->iso_qos);
 }
 
-static void create_pa_complete(struct hci_dev *hdev, void *data, int err)
+struct hci_conn *hci_pa_create_sync(struct hci_dev *hdev, bdaddr_t *dst,
+				    __u8 dst_type, __u8 sid,
+				    struct bt_iso_qos *qos)
 {
-	struct hci_cp_le_pa_create_sync *cp = data;
+	struct hci_conn *conn;
 
-	bt_dev_dbg(hdev, "");
+	bt_dev_dbg(hdev, "dst %pMR type %d sid %d", dst, dst_type, sid);
 
-	if (err)
-		bt_dev_err(hdev, "Unable to create PA: %d", err);
+	conn = hci_conn_add_unset(hdev, PA_LINK, dst, dst_type, HCI_ROLE_SLAVE);
+	if (IS_ERR(conn))
+		return conn;
 
-	kfree(cp);
+	conn->iso_qos = *qos;
+	conn->sid = sid;
+	conn->state = BT_LISTEN;
+	conn->conn_timeout = msecs_to_jiffies(qos->bcast.sync_timeout * 10);
+
+	hci_conn_hold(conn);
+
+	hci_connect_pa_sync(hdev, conn);
+
+	return conn;
 }
 
-static int create_pa_sync(struct hci_dev *hdev, void *data)
+int hci_conn_big_create_sync(struct hci_dev *hdev, struct hci_conn *hcon,
+			     struct bt_iso_qos *qos, __u16 sync_handle,
+			     __u8 num_bis, __u8 bis[])
 {
-	struct hci_cp_le_pa_create_sync *cp = data;
 	int err;
 
-	err = __hci_cmd_sync_status(hdev, HCI_OP_LE_PA_CREATE_SYNC,
-				    sizeof(*cp), cp, HCI_CMD_TIMEOUT);
-	if (err) {
-		hci_dev_clear_flag(hdev, HCI_PA_SYNC);
-		return err;
-	}
-
-	return hci_update_passive_scan_sync(hdev);
-}
-
-int hci_pa_create_sync(struct hci_dev *hdev, bdaddr_t *dst, __u8 dst_type,
-		       __u8 sid, struct bt_iso_qos *qos)
-{
-	struct hci_cp_le_pa_create_sync *cp;
-
-	if (hci_dev_test_and_set_flag(hdev, HCI_PA_SYNC))
-		return -EBUSY;
-
-	cp = kzalloc(sizeof(*cp), GFP_KERNEL);
-	if (!cp) {
-		hci_dev_clear_flag(hdev, HCI_PA_SYNC);
-		return -ENOMEM;
-	}
-
-	cp->options = qos->bcast.options;
-	cp->sid = sid;
-	cp->addr_type = dst_type;
-	bacpy(&cp->addr, dst);
-	cp->skip = cpu_to_le16(qos->bcast.skip);
-	cp->sync_timeout = cpu_to_le16(qos->bcast.sync_timeout);
-	cp->sync_cte_type = qos->bcast.sync_cte_type;
-
-	/* Queue start pa_create_sync and scan */
-	return hci_cmd_sync_queue(hdev, create_pa_sync, cp, create_pa_complete);
-}
-
-int hci_le_big_create_sync(struct hci_dev *hdev, struct hci_conn *hcon,
-			   struct bt_iso_qos *qos,
-			   __u16 sync_handle, __u8 num_bis, __u8 bis[])
-{
-	struct _packed {
-		struct hci_cp_le_big_create_sync cp;
-		__u8  bis[0x11];
-	} pdu;
-	int err;
-
-	if (num_bis > sizeof(pdu.bis))
+	if (num_bis < 0x01 || num_bis > ISO_MAX_NUM_BIS)
 		return -EINVAL;
 
 	err = qos_set_big(hdev, qos);
 	if (err)
 		return err;
 
-	if (hcon)
-		hcon->iso_qos.bcast.big = qos->bcast.big;
+	if (hcon) {
+		/* Update hcon QoS */
+		hcon->iso_qos = *qos;
 
-	memset(&pdu, 0, sizeof(pdu));
-	pdu.cp.handle = qos->bcast.big;
-	pdu.cp.sync_handle = cpu_to_le16(sync_handle);
-	pdu.cp.encryption = qos->bcast.encryption;
-	memcpy(pdu.cp.bcode, qos->bcast.bcode, sizeof(pdu.cp.bcode));
-	pdu.cp.mse = qos->bcast.mse;
-	pdu.cp.timeout = cpu_to_le16(qos->bcast.timeout);
-	pdu.cp.num_bis = num_bis;
-	memcpy(pdu.bis, bis, num_bis);
+		hcon->num_bis = num_bis;
+		memcpy(hcon->bis, bis, num_bis);
+		hcon->conn_timeout = msecs_to_jiffies(qos->bcast.timeout * 10);
+	}
 
-	return hci_send_cmd(hdev, HCI_OP_LE_BIG_CREATE_SYNC,
-			    sizeof(pdu.cp) + num_bis, &pdu);
+	return hci_connect_big_sync(hdev, hcon);
 }
 
 static void create_big_complete(struct hci_dev *hdev, void *data, int err)
@@ -2169,32 +2316,55 @@ static void create_big_complete(struct hci_dev *hdev, void *data, int err)
 
 	bt_dev_dbg(hdev, "conn %p", conn);
 
+	if (err == -ECANCELED)
+		goto done;
+
+	hci_dev_lock(hdev);
+
+	if (!hci_conn_valid(hdev, conn))
+		goto unlock;
+
 	if (err) {
 		bt_dev_err(hdev, "Unable to create BIG: %d", err);
 		hci_connect_cfm(conn, err);
 		hci_conn_del(conn);
 	}
+
+unlock:
+	hci_dev_unlock(hdev);
+done:
+	hci_conn_put(conn);
 }
 
-struct hci_conn *hci_bind_bis(struct hci_dev *hdev, bdaddr_t *dst,
+struct hci_conn *hci_bind_bis(struct hci_dev *hdev, bdaddr_t *dst, __u8 sid,
 			      struct bt_iso_qos *qos,
-			      __u8 base_len, __u8 *base)
+			      __u8 base_len, __u8 *base, u16 timeout)
 {
 	struct hci_conn *conn;
+	struct hci_conn *parent;
 	__u8 eir[HCI_MAX_PER_AD_LENGTH];
+	struct hci_link *link;
+
+	/* Look for any BIS that is open for rebinding */
+	conn = hci_conn_hash_lookup_big_state(hdev, qos->bcast.big, BT_OPEN,
+					      HCI_ROLE_MASTER);
+	if (conn) {
+		memcpy(qos, &conn->iso_qos, sizeof(*qos));
+		conn->state = BT_CONNECTED;
+		return conn;
+	}
 
 	if (base_len && base)
 		base_len = eir_append_service_data(eir, 0,  0x1851,
 						   base, base_len);
 
 	/* We need hci_conn object using the BDADDR_ANY as dst */
-	conn = hci_add_bis(hdev, dst, qos, base_len, eir);
+	conn = hci_add_bis(hdev, dst, sid, qos, base_len, eir, timeout);
 	if (IS_ERR(conn))
 		return conn;
 
 	/* Update LINK PHYs according to QoS preference */
-	conn->le_tx_phy = qos->bcast.out.phy;
-	conn->le_tx_phy = qos->bcast.out.phy;
+	conn->le_tx_def_phys = qos->bcast.out.phys;
 
 	/* Add Basic Announcement into Peridic Adv Data if BASE is set */
 	if (base_len && base) {
@@ -2203,13 +2373,38 @@ struct hci_conn *hci_bind_bis(struct hci_dev *hdev, bdaddr_t *dst,
 	}
 
 	hci_iso_qos_setup(hdev, conn, &qos->bcast.out,
-			  conn->le_tx_phy ? conn->le_tx_phy :
+			  conn->le_tx_def_phys ? conn->le_tx_def_phys :
 			  hdev->le_tx_def_phys);
 
 	conn->iso_qos = *qos;
 	conn->state = BT_BOUND;
 
+	/* Link BISes together */
+	parent = hci_conn_hash_lookup_big(hdev,
+					  conn->iso_qos.bcast.big);
+	if (parent && parent != conn) {
+		hci_conn_hold(parent);
+		link = hci_conn_link(parent, conn);
+		hci_conn_drop(conn);
+		if (!link) {
+			hci_conn_drop(parent);
+			return ERR_PTR(-ENOLINK);
+		}
+	}
+
 	return conn;
+}
+
+int hci_past_bis(struct hci_conn *conn, bdaddr_t *dst, __u8 dst_type)
+{
+	struct hci_conn *le;
+
+	/* Lookup existing LE connection to rebind to */
+	le = hci_conn_hash_lookup_le(conn->hdev, dst, dst_type);
+	if (!le)
+		return -EINVAL;
+
+	return hci_past_sync(conn, le);
 }
 
 static void bis_mark_per_adv(struct hci_conn *conn, void *data)
@@ -2229,16 +2424,34 @@ static void bis_mark_per_adv(struct hci_conn *conn, void *data)
 }
 
 struct hci_conn *hci_connect_bis(struct hci_dev *hdev, bdaddr_t *dst,
-				 __u8 dst_type, struct bt_iso_qos *qos,
-				 __u8 base_len, __u8 *base)
+				 __u8 dst_type, __u8 sid,
+				 struct bt_iso_qos *qos,
+				 __u8 base_len, __u8 *base, u16 timeout)
 {
 	struct hci_conn *conn;
 	int err;
 	struct iso_list_data data;
 
-	conn = hci_bind_bis(hdev, dst, qos, base_len, base);
+	conn = hci_bind_bis(hdev, dst, sid, qos, base_len, base, timeout);
 	if (IS_ERR(conn))
 		return conn;
+
+	if (conn->state == BT_CONNECTED)
+		return conn;
+
+	/* Check if SID needs to be allocated then search for the first
+	 * available.
+	 */
+	if (conn->sid == HCI_SID_INVALID) {
+		u8 sid;
+
+		for (sid = 0; sid <= 0x0f; sid++) {
+			if (!hci_find_adv_sid(hdev, sid)) {
+				conn->sid = sid;
+				break;
+			}
+		}
+	}
 
 	data.big = qos->bcast.big;
 	data.bis = qos->bcast.bis;
@@ -2247,14 +2460,15 @@ struct hci_conn *hci_connect_bis(struct hci_dev *hdev, bdaddr_t *dst,
 	 * the start periodic advertising and create BIG commands have
 	 * been queued
 	 */
-	hci_conn_hash_list_state(hdev, bis_mark_per_adv, ISO_LINK,
+	hci_conn_hash_list_state(hdev, bis_mark_per_adv, BIS_LINK,
 				 BT_BOUND, &data);
 
 	/* Queue start periodic advertising and create BIG */
-	err = hci_cmd_sync_queue(hdev, create_big_sync, conn,
+	err = hci_cmd_sync_queue(hdev, create_big_sync, hci_conn_get(conn),
 				 create_big_complete);
 	if (err < 0) {
 		hci_conn_drop(conn);
+		hci_conn_put(conn);
 		return ERR_PTR(err);
 	}
 
@@ -2262,7 +2476,8 @@ struct hci_conn *hci_connect_bis(struct hci_dev *hdev, bdaddr_t *dst,
 }
 
 struct hci_conn *hci_connect_cis(struct hci_dev *hdev, bdaddr_t *dst,
-				 __u8 dst_type, struct bt_iso_qos *qos)
+				 __u8 dst_type, struct bt_iso_qos *qos,
+				 u16 timeout)
 {
 	struct hci_conn *le;
 	struct hci_conn *cis;
@@ -2272,7 +2487,7 @@ struct hci_conn *hci_connect_cis(struct hci_dev *hdev, bdaddr_t *dst,
 		le = hci_connect_le(hdev, dst, dst_type, false,
 				    BT_SECURITY_LOW,
 				    HCI_LE_CONN_TIMEOUT,
-				    HCI_ROLE_SLAVE);
+				    HCI_ROLE_SLAVE, 0, 0);
 	else
 		le = hci_connect_le_scan(hdev, dst, dst_type,
 					 BT_SECURITY_LOW,
@@ -2282,25 +2497,30 @@ struct hci_conn *hci_connect_cis(struct hci_dev *hdev, bdaddr_t *dst,
 		return le;
 
 	hci_iso_qos_setup(hdev, le, &qos->ucast.out,
-			  le->le_tx_phy ? le->le_tx_phy : hdev->le_tx_def_phys);
+			  le->le_tx_def_phys ? le->le_tx_def_phys :
+			  hdev->le_tx_def_phys);
 	hci_iso_qos_setup(hdev, le, &qos->ucast.in,
-			  le->le_rx_phy ? le->le_rx_phy : hdev->le_rx_def_phys);
+			  le->le_rx_def_phys ? le->le_rx_def_phys :
+			  hdev->le_rx_def_phys);
 
-	cis = hci_bind_cis(hdev, dst, dst_type, qos);
+	cis = hci_bind_cis(hdev, dst, dst_type, qos, timeout);
 	if (IS_ERR(cis)) {
 		hci_conn_drop(le);
 		return cis;
 	}
 
-	link = hci_conn_link(le, cis);
-	if (!link) {
+	/* The existing link already owns the hold on its parent. */
+	if (cis->link) {
 		hci_conn_drop(le);
-		hci_conn_drop(cis);
-		return ERR_PTR(-ENOLINK);
+		return cis;
 	}
 
-	/* Link takes the refcount */
+	link = hci_conn_link(le, cis);
 	hci_conn_drop(cis);
+	if (!link) {
+		hci_conn_drop(le);
+		return ERR_PTR(-ENOLINK);
+	}
 
 	cis->state = BT_CONNECT;
 
@@ -2374,12 +2594,10 @@ static int hci_conn_auth(struct hci_conn *conn, __u8 sec_level, __u8 auth_type)
 		hci_send_cmd(conn->hdev, HCI_OP_AUTH_REQUESTED,
 			     sizeof(cp), &cp);
 
-		/* If we're already encrypted set the REAUTH_PEND flag,
-		 * otherwise set the ENCRYPT_PEND.
+		/* Set the ENCRYPT_PEND to trigger encryption after
+		 * authentication.
 		 */
-		if (test_bit(HCI_CONN_ENCRYPT, &conn->flags))
-			set_bit(HCI_CONN_REAUTH_PEND, &conn->flags);
-		else
+		if (!test_bit(HCI_CONN_ENCRYPT, &conn->flags))
 			set_bit(HCI_CONN_ENCRYPT_PEND, &conn->flags);
 	}
 
@@ -2544,8 +2762,8 @@ void hci_conn_enter_active_mode(struct hci_conn *conn, __u8 force_active)
 
 timer:
 	if (hdev->idle_timeout > 0)
-		queue_delayed_work(hdev->workqueue, &conn->idle_work,
-				   msecs_to_jiffies(hdev->idle_timeout));
+		mod_delayed_work(hdev->workqueue, &conn->idle_work,
+				 msecs_to_jiffies(hdev->idle_timeout));
 }
 
 /* Drop all connection on the device */
@@ -2567,22 +2785,6 @@ void hci_conn_hash_flush(struct hci_dev *hdev)
 		hci_disconn_cfm(conn, HCI_ERROR_LOCAL_HOST_TERM);
 		hci_conn_del(conn);
 	}
-}
-
-/* Check pending connect attempts */
-void hci_conn_check_pending(struct hci_dev *hdev)
-{
-	struct hci_conn *conn;
-
-	BT_DBG("hdev %s", hdev->name);
-
-	hci_dev_lock(hdev);
-
-	conn = hci_conn_hash_lookup_state(hdev, ACL_LINK, BT_CONNECT2);
-	if (conn)
-		hci_acl_create_connection(conn);
-
-	hci_dev_unlock(hdev);
 }
 
 static u32 get_link_mode(struct hci_conn *conn)
@@ -2720,7 +2922,7 @@ struct hci_chan *hci_chan_create(struct hci_conn *conn)
 		return NULL;
 	}
 
-	chan = kzalloc(sizeof(*chan), GFP_KERNEL);
+	chan = kzalloc_obj(*chan);
 	if (!chan)
 		return NULL;
 
@@ -2874,22 +3076,22 @@ u32 hci_conn_get_phy(struct hci_conn *conn)
 		break;
 
 	case LE_LINK:
-		if (conn->le_tx_phy & HCI_LE_SET_PHY_1M)
+		if (conn->le_tx_def_phys & HCI_LE_SET_PHY_1M)
 			phys |= BT_PHY_LE_1M_TX;
 
-		if (conn->le_rx_phy & HCI_LE_SET_PHY_1M)
+		if (conn->le_rx_def_phys & HCI_LE_SET_PHY_1M)
 			phys |= BT_PHY_LE_1M_RX;
 
-		if (conn->le_tx_phy & HCI_LE_SET_PHY_2M)
+		if (conn->le_tx_def_phys & HCI_LE_SET_PHY_2M)
 			phys |= BT_PHY_LE_2M_TX;
 
-		if (conn->le_rx_phy & HCI_LE_SET_PHY_2M)
+		if (conn->le_rx_def_phys & HCI_LE_SET_PHY_2M)
 			phys |= BT_PHY_LE_2M_RX;
 
-		if (conn->le_tx_phy & HCI_LE_SET_PHY_CODED)
+		if (conn->le_tx_def_phys & HCI_LE_SET_PHY_CODED)
 			phys |= BT_PHY_LE_CODED_TX;
 
-		if (conn->le_rx_phy & HCI_LE_SET_PHY_CODED)
+		if (conn->le_rx_def_phys & HCI_LE_SET_PHY_CODED)
 			phys |= BT_PHY_LE_CODED_RX;
 
 		break;
@@ -2898,21 +3100,132 @@ u32 hci_conn_get_phy(struct hci_conn *conn)
 	return phys;
 }
 
+static u16 bt_phy_pkt_type(struct hci_conn *conn, u32 phys)
+{
+	u16 pkt_type = conn->pkt_type;
+
+	if (phys & BT_PHY_BR_1M_3SLOT)
+		pkt_type |= HCI_DM3 | HCI_DH3;
+	else
+		pkt_type &= ~(HCI_DM3 | HCI_DH3);
+
+	if (phys & BT_PHY_BR_1M_5SLOT)
+		pkt_type |= HCI_DM5 | HCI_DH5;
+	else
+		pkt_type &= ~(HCI_DM5 | HCI_DH5);
+
+	if (phys & BT_PHY_EDR_2M_1SLOT)
+		pkt_type &= ~HCI_2DH1;
+	else
+		pkt_type |= HCI_2DH1;
+
+	if (phys & BT_PHY_EDR_2M_3SLOT)
+		pkt_type &= ~HCI_2DH3;
+	else
+		pkt_type |= HCI_2DH3;
+
+	if (phys & BT_PHY_EDR_2M_5SLOT)
+		pkt_type &= ~HCI_2DH5;
+	else
+		pkt_type |= HCI_2DH5;
+
+	if (phys & BT_PHY_EDR_3M_1SLOT)
+		pkt_type &= ~HCI_3DH1;
+	else
+		pkt_type |= HCI_3DH1;
+
+	if (phys & BT_PHY_EDR_3M_3SLOT)
+		pkt_type &= ~HCI_3DH3;
+	else
+		pkt_type |= HCI_3DH3;
+
+	if (phys & BT_PHY_EDR_3M_5SLOT)
+		pkt_type &= ~HCI_3DH5;
+	else
+		pkt_type |= HCI_3DH5;
+
+	return pkt_type;
+}
+
+static int bt_phy_le_phy(u32 phys, u8 *tx_phys, u8 *rx_phys)
+{
+	if (!tx_phys || !rx_phys)
+		return -EINVAL;
+
+	*tx_phys = 0;
+	*rx_phys = 0;
+
+	if (phys & BT_PHY_LE_1M_TX)
+		*tx_phys |= HCI_LE_SET_PHY_1M;
+
+	if (phys & BT_PHY_LE_1M_RX)
+		*rx_phys |= HCI_LE_SET_PHY_1M;
+
+	if (phys & BT_PHY_LE_2M_TX)
+		*tx_phys |= HCI_LE_SET_PHY_2M;
+
+	if (phys & BT_PHY_LE_2M_RX)
+		*rx_phys |= HCI_LE_SET_PHY_2M;
+
+	if (phys & BT_PHY_LE_CODED_TX)
+		*tx_phys |= HCI_LE_SET_PHY_CODED;
+
+	if (phys & BT_PHY_LE_CODED_RX)
+		*rx_phys |= HCI_LE_SET_PHY_CODED;
+
+	return 0;
+}
+
+int hci_conn_set_phy(struct hci_conn *conn, u32 phys)
+{
+	u8 tx_phys, rx_phys;
+
+	switch (conn->type) {
+	case SCO_LINK:
+	case ESCO_LINK:
+		return -EINVAL;
+	case ACL_LINK:
+		/* Only allow setting BR/EDR PHYs if link type is ACL */
+		if (phys & ~BT_PHY_BREDR_MASK)
+			return -EINVAL;
+
+		return hci_acl_change_pkt_type(conn,
+					       bt_phy_pkt_type(conn, phys));
+	case LE_LINK:
+		/* Only allow setting LE PHYs if link type is LE */
+		if (phys & ~BT_PHY_LE_MASK)
+			return -EINVAL;
+
+		if (bt_phy_le_phy(phys, &tx_phys, &rx_phys))
+			return -EINVAL;
+
+		return hci_le_set_phy(conn, tx_phys, rx_phys);
+	default:
+		return -EINVAL;
+	}
+}
+
 static int abort_conn_sync(struct hci_dev *hdev, void *data)
 {
-	struct hci_conn *conn;
-	u16 handle = PTR_UINT(data);
+	struct hci_conn *conn = data;
 
-	conn = hci_conn_hash_lookup_handle(hdev, handle);
-	if (!conn)
-		return 0;
+	if (!hci_conn_valid(hdev, conn))
+		return -ECANCELED;
 
 	return hci_abort_conn_sync(hdev, conn, conn->abort_reason);
+}
+
+static void abort_conn_destroy(struct hci_dev *hdev, void *data, int err)
+{
+	struct hci_conn *conn = data;
+
+	hci_conn_put(conn);
 }
 
 int hci_abort_conn(struct hci_conn *conn, u8 reason)
 {
 	struct hci_dev *hdev = conn->hdev;
+	int err;
 
 	/* If abort_reason has already been set it means the connection is
 	 * already being aborted so don't attempt to overwrite it.
@@ -2924,23 +3237,201 @@ int hci_abort_conn(struct hci_conn *conn, u8 reason)
 
 	conn->abort_reason = reason;
 
-	/* If the connection is pending check the command opcode since that
-	 * might be blocking on hci_cmd_sync_work while waiting its respective
-	 * event so we need to hci_cmd_sync_cancel to cancel it.
-	 *
-	 * hci_connect_le serializes the connection attempts so only one
-	 * connection can be in BT_CONNECT at time.
+	/* Cancel the connect attempt. A return of 0 means the create command
+	 * was still queued and got dequeued, so there is nothing to disconnect.
 	 */
-	if (conn->state == BT_CONNECT && hdev->req_status == HCI_REQ_PEND) {
-		switch (hci_skb_event(hdev->sent_cmd)) {
-		case HCI_EV_LE_CONN_COMPLETE:
-		case HCI_EV_LE_ENHANCED_CONN_COMPLETE:
-		case HCI_EVT_LE_CIS_ESTABLISHED:
-			hci_cmd_sync_cancel(hdev, -ECANCELED);
-			break;
+	if (!hci_cancel_connect_sync(hdev, conn))
+		return 0;
+
+	/* Run immediately if on cmd_sync_work since this may be called
+	 * as a result to MGMT_OP_DISCONNECT/MGMT_OP_UNPAIR which does
+	 * already queue its callback on cmd_sync_work.
+	 */
+	err = hci_cmd_sync_run_once(hdev, abort_conn_sync, hci_conn_get(conn),
+				    abort_conn_destroy);
+	if (err)
+		hci_conn_put(conn);
+	return (err == -EEXIST) ? 0 : err;
+}
+
+void hci_setup_tx_timestamp(struct sk_buff *skb, size_t key_offset,
+			    const struct sockcm_cookie *sockc)
+{
+	struct sock *sk = skb ? skb->sk : NULL;
+	int key;
+
+	/* This shall be called on a single skb of those generated by user
+	 * sendmsg(), and only when the sendmsg() does not return error to
+	 * user. This is required for keeping the tskey that increments here in
+	 * sync with possible sendmsg() counting by user.
+	 *
+	 * Stream sockets shall set key_offset to sendmsg() length in bytes
+	 * and call with the last fragment, others to 1 and first fragment.
+	 */
+
+	if (!skb || !sockc || !sk || !key_offset)
+		return;
+
+	sock_tx_timestamp(sk, sockc, &skb_shinfo(skb)->tx_flags);
+
+	if (sk->sk_type == SOCK_STREAM)
+		key = atomic_add_return(key_offset, &sk->sk_tskey);
+
+	if (sockc->tsflags & SOF_TIMESTAMPING_OPT_ID &&
+	    sockc->tsflags & SOF_TIMESTAMPING_TX_RECORD_MASK) {
+		if (sockc->tsflags & SOCKCM_FLAG_TS_OPT_ID) {
+			skb_shinfo(skb)->tskey = sockc->ts_opt_id;
+		} else {
+			if (sk->sk_type != SOCK_STREAM)
+				key = atomic_inc_return(&sk->sk_tskey);
+			skb_shinfo(skb)->tskey = key - 1;
 		}
 	}
+}
 
-	return hci_cmd_sync_queue(hdev, abort_conn_sync, UINT_PTR(conn->handle),
-				  NULL);
+void hci_conn_tx_queue(struct hci_conn *conn, struct sk_buff *skb)
+{
+	struct tx_queue *comp = &conn->tx_q;
+	bool track = false;
+
+	/* Emit SND now, ie. just before sending to driver */
+	if (skb_shinfo(skb)->tx_flags & SKBTX_SW_TSTAMP)
+		__skb_tstamp_tx(skb, NULL, NULL, skb->sk, SCM_TSTAMP_SND);
+
+	/* COMPLETION tstamp is emitted for tracked skb later in Number of
+	 * Completed Packets event. Available only for flow controlled cases.
+	 *
+	 * TODO: SCO support without flowctl (needs to be done in drivers)
+	 */
+	switch (conn->type) {
+	case CIS_LINK:
+	case BIS_LINK:
+	case PA_LINK:
+	case ACL_LINK:
+	case LE_LINK:
+		break;
+	case SCO_LINK:
+	case ESCO_LINK:
+		if (!hci_dev_test_flag(conn->hdev, HCI_SCO_FLOWCTL))
+			return;
+		break;
+	default:
+		return;
+	}
+
+	if (skb->sk && (skb_shinfo(skb)->tx_flags & SKBTX_COMPLETION_TSTAMP))
+		track = true;
+
+	/* If nothing is tracked, just count extra skbs at the queue head */
+	if (!track && !comp->tracked) {
+		comp->extra++;
+		return;
+	}
+
+	if (track) {
+		skb = skb_clone_sk(skb);
+		if (!skb)
+			goto count_only;
+
+		comp->tracked++;
+	} else {
+		skb = skb_clone(skb, GFP_KERNEL);
+		if (!skb)
+			goto count_only;
+	}
+
+	skb_queue_tail(&comp->queue, skb);
+	return;
+
+count_only:
+	/* Stop tracking skbs, and only count. This will not emit timestamps for
+	 * the packets, but if we get here something is more seriously wrong.
+	 */
+	comp->tracked = 0;
+	comp->extra += skb_queue_len(&comp->queue) + 1;
+	skb_queue_purge(&comp->queue);
+}
+
+void hci_conn_tx_dequeue(struct hci_conn *conn)
+{
+	struct tx_queue *comp = &conn->tx_q;
+	struct sk_buff *skb;
+
+	/* If there are tracked skbs, the counted extra go before dequeuing real
+	 * skbs, to keep ordering. When nothing is tracked, the ordering doesn't
+	 * matter so dequeue real skbs first to get rid of them ASAP.
+	 */
+	if (comp->extra && (comp->tracked || skb_queue_empty(&comp->queue))) {
+		comp->extra--;
+		return;
+	}
+
+	skb = skb_dequeue(&comp->queue);
+	if (!skb)
+		return;
+
+	if (skb->sk) {
+		comp->tracked--;
+		__skb_tstamp_tx(skb, NULL, NULL, skb->sk,
+				SCM_TSTAMP_COMPLETION);
+	}
+
+	kfree_skb(skb);
+}
+
+u8 *hci_conn_key_enc_size(struct hci_conn *conn)
+{
+	if (conn->type == ACL_LINK) {
+		struct link_key *key;
+
+		key = hci_find_link_key(conn->hdev, &conn->dst);
+		if (!key)
+			return NULL;
+
+		return &key->pin_len;
+	} else if (conn->type == LE_LINK) {
+		struct smp_ltk *ltk;
+
+		ltk = hci_find_ltk(conn->hdev, &conn->dst, conn->dst_type,
+				   conn->role);
+		if (!ltk)
+			return NULL;
+
+		return &ltk->enc_size;
+	}
+
+	return NULL;
+}
+
+int hci_ethtool_ts_info(unsigned int index, int sk_proto,
+			struct kernel_ethtool_ts_info *info)
+{
+	struct hci_dev *hdev;
+
+	hdev = hci_dev_get(index);
+	if (!hdev)
+		return -ENODEV;
+
+	info->so_timestamping =
+		SOF_TIMESTAMPING_RX_SOFTWARE |
+		SOF_TIMESTAMPING_SOFTWARE;
+	info->phc_index = -1;
+	info->tx_types = BIT(HWTSTAMP_TX_OFF);
+	info->rx_filters = BIT(HWTSTAMP_FILTER_NONE);
+
+	switch (sk_proto) {
+	case BTPROTO_ISO:
+	case BTPROTO_L2CAP:
+		info->so_timestamping |= SOF_TIMESTAMPING_TX_SOFTWARE;
+		info->so_timestamping |= SOF_TIMESTAMPING_TX_COMPLETION;
+		break;
+	case BTPROTO_SCO:
+		info->so_timestamping |= SOF_TIMESTAMPING_TX_SOFTWARE;
+		if (hci_dev_test_flag(hdev, HCI_SCO_FLOWCTL))
+			info->so_timestamping |= SOF_TIMESTAMPING_TX_COMPLETION;
+		break;
+	}
+
+	hci_dev_put(hdev);
+	return 0;
 }

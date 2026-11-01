@@ -81,7 +81,7 @@ static struct regmap_async *regmap_spi_async_alloc(void)
 {
 	struct regmap_async_spi *async_spi;
 
-	async_spi = kzalloc(sizeof(*async_spi), GFP_KERNEL);
+	async_spi = kzalloc_obj(*async_spi);
 	if (!async_spi)
 		return NULL;
 
@@ -122,8 +122,7 @@ static const struct regmap_bus *regmap_get_spi_bus(struct spi_device *spi,
 			return ERR_PTR(-ENOMEM);
 
 		max_msg_size = spi_max_message_size(spi);
-		reg_reserve_size = config->reg_bits / BITS_PER_BYTE
-				 + config->pad_bits / BITS_PER_BYTE;
+		reg_reserve_size = (config->reg_bits + config->pad_bits) / BITS_PER_BYTE;
 		if (max_size + reg_reserve_size > max_msg_size)
 			max_size -= reg_reserve_size;
 
@@ -165,4 +164,5 @@ struct regmap *__devm_regmap_init_spi(struct spi_device *spi,
 }
 EXPORT_SYMBOL_GPL(__devm_regmap_init_spi);
 
+MODULE_DESCRIPTION("regmap SPI Module");
 MODULE_LICENSE("GPL");

@@ -339,7 +339,7 @@ static irqreturn_t a3700_spi_interrupt(int irq, void *dev_id)
 static bool a3700_spi_wait_completion(struct spi_device *spi)
 {
 	struct a3700_spi *a3700_spi;
-	unsigned int timeout;
+	unsigned long time_left;
 	unsigned int ctrl_reg;
 	unsigned long timeout_jiffies;
 
@@ -361,12 +361,12 @@ static bool a3700_spi_wait_completion(struct spi_device *spi)
 		     a3700_spi->wait_mask);
 
 	timeout_jiffies = msecs_to_jiffies(A3700_SPI_TIMEOUT);
-	timeout = wait_for_completion_timeout(&a3700_spi->done,
-					      timeout_jiffies);
+	time_left = wait_for_completion_timeout(&a3700_spi->done,
+						timeout_jiffies);
 
 	a3700_spi->wait_mask = 0;
 
-	if (timeout)
+	if (time_left)
 		return true;
 
 	/* there might be the case that right after we checked the
@@ -813,27 +813,21 @@ MODULE_DEVICE_TABLE(of, a3700_spi_dt_ids);
 static int a3700_spi_probe(struct platform_device *pdev)
 {
 	struct device *dev = &pdev->dev;
-	struct device_node *of_node = dev->of_node;
 	struct spi_controller *host;
 	struct a3700_spi *spi;
 	u32 num_cs = 0;
 	int irq, ret = 0;
 
-	host = spi_alloc_host(dev, sizeof(*spi));
-	if (!host) {
-		dev_err(dev, "host allocation failed\n");
-		ret = -ENOMEM;
-		goto out;
-	}
+	host = devm_spi_alloc_host(dev, sizeof(*spi));
+	if (!host)
+		return -ENOMEM;
 
-	if (of_property_read_u32(of_node, "num-cs", &num_cs)) {
+	if (of_property_read_u32(dev->of_node, "num-cs", &num_cs)) {
 		dev_err(dev, "could not find num-cs\n");
-		ret = -ENXIO;
-		goto error;
+		return -ENXIO;
 	}
 
 	host->bus_num = pdev->id;
-	host->dev.of_node = of_node;
 	host->mode_bits = SPI_MODE_3;
 	host->num_chipselect = num_cs;
 	host->bits_per_word_mask = SPI_BPW_MASK(8) | SPI_BPW_MASK(32);
@@ -851,31 +845,20 @@ static int a3700_spi_probe(struct platform_device *pdev)
 	spi->host = host;
 
 	spi->base = devm_platform_ioremap_resource(pdev, 0);
-	if (IS_ERR(spi->base)) {
-		ret = PTR_ERR(spi->base);
-		goto error;
-	}
+	if (IS_ERR(spi->base))
+		return PTR_ERR(spi->base);
 
 	irq = platform_get_irq(pdev, 0);
-	if (irq < 0) {
-		ret = -ENXIO;
-		goto error;
-	}
+	if (irq < 0)
+		return -ENXIO;
+
 	spi->irq = irq;
 
 	init_completion(&spi->done);
 
-	spi->clk = devm_clk_get(dev, NULL);
-	if (IS_ERR(spi->clk)) {
-		dev_err(dev, "could not find clk: %ld\n", PTR_ERR(spi->clk));
-		goto error;
-	}
-
-	ret = clk_prepare(spi->clk);
-	if (ret) {
-		dev_err(dev, "could not prepare clk: %d\n", ret);
-		goto error;
-	}
+	spi->clk = devm_clk_get_prepared(dev, NULL);
+	if (IS_ERR(spi->clk))
+		return dev_err_probe(dev, PTR_ERR(spi->clk), "could not find clk\n");
 
 	host->max_speed_hz = min_t(unsigned long, A3700_SPI_MAX_SPEED_HZ,
 					clk_get_rate(spi->clk));
@@ -886,33 +869,16 @@ static int a3700_spi_probe(struct platform_device *pdev)
 
 	ret = devm_request_irq(dev, spi->irq, a3700_spi_interrupt, 0,
 			       dev_name(dev), host);
-	if (ret) {
-		dev_err(dev, "could not request IRQ: %d\n", ret);
-		goto error_clk;
-	}
+	if (ret)
+		return dev_err_probe(dev, ret, "could not request IRQ\n");
 
 	ret = devm_spi_register_controller(dev, host);
 	if (ret) {
 		dev_err(dev, "Failed to register host\n");
-		goto error_clk;
+		return ret;
 	}
 
 	return 0;
-
-error_clk:
-	clk_unprepare(spi->clk);
-error:
-	spi_controller_put(host);
-out:
-	return ret;
-}
-
-static void a3700_spi_remove(struct platform_device *pdev)
-{
-	struct spi_controller *host = platform_get_drvdata(pdev);
-	struct a3700_spi *spi = spi_controller_get_devdata(host);
-
-	clk_unprepare(spi->clk);
 }
 
 static struct platform_driver a3700_spi_driver = {
@@ -921,7 +887,6 @@ static struct platform_driver a3700_spi_driver = {
 		.of_match_table = of_match_ptr(a3700_spi_dt_ids),
 	},
 	.probe		= a3700_spi_probe,
-	.remove_new	= a3700_spi_remove,
 };
 
 module_platform_driver(a3700_spi_driver);

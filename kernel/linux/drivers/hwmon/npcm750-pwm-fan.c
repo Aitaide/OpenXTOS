@@ -4,7 +4,6 @@
 #include <linux/clk.h>
 #include <linux/device.h>
 #include <linux/hwmon.h>
-#include <linux/hwmon-sysfs.h>
 #include <linux/interrupt.h>
 #include <linux/kernel.h>
 #include <linux/module.h>
@@ -46,9 +45,9 @@
 #define NPCM7XX_PWM_CTRL_CH3_EN_BIT		BIT(16)
 
 /* Define the maximum PWM channel number */
-#define NPCM7XX_PWM_MAX_CHN_NUM			8
+#define NPCM7XX_PWM_MAX_CHN_NUM			12
 #define NPCM7XX_PWM_MAX_CHN_NUM_IN_A_MODULE	4
-#define NPCM7XX_PWM_MAX_MODULES                 2
+#define NPCM7XX_PWM_MAX_MODULES                 3
 
 /* Define the Counter Register, value = 100 for match 100% */
 #define NPCM7XX_PWM_COUNTER_DEFAULT_NUM		255
@@ -171,6 +170,10 @@
 #define FAN_PREPARE_TO_GET_FIRST_CAPTURE	0x01
 #define FAN_ENOUGH_SAMPLE			0x02
 
+struct npcm_hwmon_info {
+	u32 pwm_max_channel;
+};
+
 struct npcm7xx_fan_dev {
 	u8 fan_st_flg;
 	u8 fan_pls_per_rev;
@@ -191,11 +194,9 @@ struct npcm7xx_cooling_device {
 struct npcm7xx_pwm_fan_data {
 	void __iomem *pwm_base;
 	void __iomem *fan_base;
-	unsigned long pwm_clk_freq;
-	unsigned long fan_clk_freq;
+	int pwm_modules;
 	struct clk *pwm_clk;
 	struct clk *fan_clk;
-	struct mutex pwm_lock[NPCM7XX_PWM_MAX_MODULES];
 	spinlock_t fan_lock[NPCM7XX_FAN_MAX_MODULE];
 	int fan_irq[NPCM7XX_FAN_MAX_MODULE];
 	bool pwm_present[NPCM7XX_PWM_MAX_CHN_NUM];
@@ -204,6 +205,7 @@ struct npcm7xx_pwm_fan_data {
 	struct timer_list fan_timer;
 	struct npcm7xx_fan_dev fan_dev[NPCM7XX_FAN_MAX_CHN_NUM];
 	struct npcm7xx_cooling_device *cdev[NPCM7XX_PWM_MAX_CHN_NUM];
+	const struct npcm_hwmon_info *info;
 	u8 fan_select;
 };
 
@@ -217,7 +219,6 @@ static int npcm7xx_pwm_config_set(struct npcm7xx_pwm_fan_data *data,
 	/*
 	 * Config PWM Comparator register for setting duty cycle
 	 */
-	mutex_lock(&data->pwm_lock[module]);
 
 	/* write new CMR value  */
 	iowrite32(val, NPCM7XX_PWM_REG_CMRx(data->pwm_base, module, pwm_ch));
@@ -241,7 +242,6 @@ static int npcm7xx_pwm_config_set(struct npcm7xx_pwm_fan_data *data,
 		env_bit = NPCM7XX_PWM_CTRL_CH3_INV_BIT;
 		break;
 	default:
-		mutex_unlock(&data->pwm_lock[module]);
 		return -ENODEV;
 	}
 
@@ -256,8 +256,6 @@ static int npcm7xx_pwm_config_set(struct npcm7xx_pwm_fan_data *data,
 	}
 
 	iowrite32(tmp_buf, NPCM7XX_PWM_REG_CR(data->pwm_base, module));
-	mutex_unlock(&data->pwm_lock[module]);
-
 	return 0;
 }
 
@@ -327,7 +325,7 @@ static void npcm7xx_fan_polling(struct timer_list *t)
 	struct npcm7xx_pwm_fan_data *data;
 	int i;
 
-	data = from_timer(data, t, fan_timer);
+	data = timer_container_of(data, t, fan_timer);
 
 	/*
 	 * Polling two module per one round,
@@ -358,6 +356,11 @@ static void npcm7xx_fan_polling(struct timer_list *t)
 	data->fan_timer.expires = jiffies +
 		msecs_to_jiffies(NPCM7XX_FAN_POLL_TIMER_200MS);
 	add_timer(&data->fan_timer);
+}
+
+static void npcm7xx_fan_cleanup(void *timer)
+{
+	timer_shutdown_sync(timer);
 }
 
 static inline void npcm7xx_fan_compute(struct npcm7xx_pwm_fan_data *data,
@@ -542,7 +545,7 @@ static umode_t npcm7xx_pwm_is_visible(const void *_data, u32 attr, int channel)
 {
 	const struct npcm7xx_pwm_fan_data *data = _data;
 
-	if (!data->pwm_present[channel])
+	if (!data->pwm_present[channel] || channel >= data->info->pwm_max_channel)
 		return 0;
 
 	switch (attr) {
@@ -638,6 +641,10 @@ static const struct hwmon_channel_info * const npcm7xx_info[] = {
 			   HWMON_PWM_INPUT,
 			   HWMON_PWM_INPUT,
 			   HWMON_PWM_INPUT,
+			   HWMON_PWM_INPUT,
+			   HWMON_PWM_INPUT,
+			   HWMON_PWM_INPUT,
+			   HWMON_PWM_INPUT,
 			   HWMON_PWM_INPUT),
 	HWMON_CHANNEL_INFO(fan,
 			   HWMON_F_INPUT,
@@ -670,15 +677,24 @@ static const struct hwmon_chip_info npcm7xx_chip_info = {
 	.info = npcm7xx_info,
 };
 
+static const struct npcm_hwmon_info npxm7xx_hwmon_info = {
+	.pwm_max_channel = 8,
+};
+
+static const struct npcm_hwmon_info npxm8xx_hwmon_info = {
+	.pwm_max_channel = 12,
+};
+
 static u32 npcm7xx_pwm_init(struct npcm7xx_pwm_fan_data *data)
 {
 	int m, ch;
 	u32 prescale_val, output_freq;
+	unsigned long pwm_clk_freq;
 
-	data->pwm_clk_freq = clk_get_rate(data->pwm_clk);
+	pwm_clk_freq = clk_get_rate(data->pwm_clk);
 
 	/* Adjust NPCM7xx PWMs output frequency to ~25Khz */
-	output_freq = data->pwm_clk_freq / PWN_CNT_DEFAULT;
+	output_freq = pwm_clk_freq / PWN_CNT_DEFAULT;
 	prescale_val = DIV_ROUND_CLOSEST(output_freq, PWM_OUTPUT_FREQ_25KHZ);
 
 	/* If prescale_val = 0, then the prescale output clock is stopped */
@@ -693,7 +709,7 @@ static u32 npcm7xx_pwm_init(struct npcm7xx_pwm_fan_data *data)
 	/* Setting PWM Prescale Register value register to both modules */
 	prescale_val |= (prescale_val << NPCM7XX_PWM_PRESCALE_SHIFT_CH01);
 
-	for (m = 0; m < NPCM7XX_PWM_MAX_MODULES  ; m++) {
+	for (m = 0; m < data->pwm_modules; m++) {
 		iowrite32(prescale_val, NPCM7XX_PWM_REG_PR(data->pwm_base, m));
 		iowrite32(NPCM7XX_PWM_PRESCALE2_DEFAULT,
 			  NPCM7XX_PWM_REG_CSR(data->pwm_base, m));
@@ -846,8 +862,10 @@ static int npcm7xx_create_pwm_cooling(struct device *dev,
 	snprintf(cdev->name, THERMAL_NAME_LENGTH, "%pOFn%d", child,
 		 pwm_port);
 
-	cdev->tcdev = devm_thermal_of_cooling_device_register(dev, child,
-				cdev->name, cdev, &npcm7xx_pwm_cool_ops);
+	cdev->tcdev = devm_thermal_of_child_cooling_device_register(dev, child,
+								    cdev->name,
+								    cdev,
+								    &npcm7xx_pwm_cool_ops);
 	if (IS_ERR(cdev->tcdev))
 		return PTR_ERR(cdev->tcdev);
 
@@ -875,6 +893,8 @@ static int npcm7xx_en_pwm_fan(struct device *dev,
 	data->pwm_present[pwm_port] = true;
 	ret = npcm7xx_pwm_config_set(data, pwm_port,
 				     NPCM7XX_PWM_CMR_DEFAULT_NUM);
+	if (ret)
+		return ret;
 
 	ret = of_property_count_u8_elems(child, "cooling-levels");
 	if (ret > 0) {
@@ -908,13 +928,13 @@ static int npcm7xx_en_pwm_fan(struct device *dev,
 static int npcm7xx_pwm_fan_probe(struct platform_device *pdev)
 {
 	struct device *dev = &pdev->dev;
-	struct device_node *np, *child;
+	struct device_node *np;
 	struct npcm7xx_pwm_fan_data *data;
 	struct resource *res;
 	struct device *hwmon;
 	char name[20];
-	int ret, cnt;
 	u32 output_freq;
+	int ret;
 	u32 i;
 
 	np = dev->of_node;
@@ -922,6 +942,12 @@ static int npcm7xx_pwm_fan_probe(struct platform_device *pdev)
 	data = devm_kzalloc(dev, sizeof(*data), GFP_KERNEL);
 	if (!data)
 		return -ENOMEM;
+
+	data->info = device_get_match_data(dev);
+	if (!data->info)
+		return -EINVAL;
+
+	data->pwm_modules = data->info->pwm_max_channel / NPCM7XX_PWM_MAX_CHN_NUM_IN_A_MODULE;
 
 	res = platform_get_resource_byname(pdev, IORESOURCE_MEM, "pwm");
 	if (!res) {
@@ -960,9 +986,6 @@ static int npcm7xx_pwm_fan_probe(struct platform_device *pdev)
 	output_freq = npcm7xx_pwm_init(data);
 	npcm7xx_fan_init(data);
 
-	for (cnt = 0; cnt < NPCM7XX_PWM_MAX_MODULES  ; cnt++)
-		mutex_init(&data->pwm_lock[cnt]);
-
 	for (i = 0; i < NPCM7XX_FAN_MAX_MODULE; i++) {
 		spin_lock_init(&data->fan_lock[i]);
 
@@ -973,17 +996,14 @@ static int npcm7xx_pwm_fan_probe(struct platform_device *pdev)
 		sprintf(name, "NPCM7XX-FAN-MD%d", i);
 		ret = devm_request_irq(dev, data->fan_irq[i], npcm7xx_fan_isr,
 				       0, name, (void *)data);
-		if (ret) {
-			dev_err(dev, "register IRQ fan%d failed\n", i);
+		if (ret)
 			return ret;
-		}
 	}
 
-	for_each_child_of_node(np, child) {
+	for_each_child_of_node_scoped(np, child) {
 		ret = npcm7xx_en_pwm_fan(dev, child, data);
 		if (ret) {
 			dev_err(dev, "enable pwm and fan failed\n");
-			of_node_put(child);
 			return ret;
 		}
 	}
@@ -1003,6 +1023,12 @@ static int npcm7xx_pwm_fan_probe(struct platform_device *pdev)
 				msecs_to_jiffies(NPCM7XX_FAN_POLL_TIMER_200MS);
 			timer_setup(&data->fan_timer,
 				    npcm7xx_fan_polling, 0);
+			ret = devm_add_action_or_reset(dev,
+						       npcm7xx_fan_cleanup,
+						       &data->fan_timer);
+			if (ret)
+				return ret;
+
 			add_timer(&data->fan_timer);
 			break;
 		}
@@ -1015,7 +1041,8 @@ static int npcm7xx_pwm_fan_probe(struct platform_device *pdev)
 }
 
 static const struct of_device_id of_pwm_fan_match_table[] = {
-	{ .compatible = "nuvoton,npcm750-pwm-fan", },
+	{ .compatible = "nuvoton,npcm750-pwm-fan", .data = &npxm7xx_hwmon_info},
+	{ .compatible = "nuvoton,npcm845-pwm-fan", .data = &npxm8xx_hwmon_info},
 	{},
 };
 MODULE_DEVICE_TABLE(of, of_pwm_fan_match_table);

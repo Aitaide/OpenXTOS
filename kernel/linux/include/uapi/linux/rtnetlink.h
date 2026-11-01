@@ -93,10 +93,18 @@ enum {
 	RTM_NEWPREFIX	= 52,
 #define RTM_NEWPREFIX	RTM_NEWPREFIX
 
-	RTM_GETMULTICAST = 58,
+	RTM_NEWMULTICAST = 56,
+#define RTM_NEWMULTICAST RTM_NEWMULTICAST
+	RTM_DELMULTICAST,
+#define RTM_DELMULTICAST RTM_DELMULTICAST
+	RTM_GETMULTICAST,
 #define RTM_GETMULTICAST RTM_GETMULTICAST
 
-	RTM_GETANYCAST	= 62,
+	RTM_NEWANYCAST	= 60,
+#define RTM_NEWANYCAST RTM_NEWANYCAST
+	RTM_DELANYCAST,
+#define RTM_DELANYCAST RTM_DELANYCAST
+	RTM_GETANYCAST,
 #define RTM_GETANYCAST	RTM_GETANYCAST
 
 	RTM_NEWNEIGHTBL	= 64,
@@ -174,7 +182,7 @@ enum {
 #define RTM_GETLINKPROP	RTM_GETLINKPROP
 
 	RTM_NEWVLAN = 112,
-#define RTM_NEWNVLAN	RTM_NEWVLAN
+#define RTM_NEWVLAN	RTM_NEWVLAN
 	RTM_DELVLAN,
 #define RTM_DELVLAN	RTM_DELVLAN
 	RTM_GETVLAN,
@@ -299,6 +307,7 @@ enum {
 #define RTPROT_MROUTED		17	/* Multicast daemon */
 #define RTPROT_KEEPALIVED	18	/* Keepalived daemon */
 #define RTPROT_BABEL		42	/* Babel daemon */
+#define RTPROT_OVN		84	/* OVN daemon */
 #define RTPROT_OPENR		99	/* Open Routing (Open/R) Routes */
 #define RTPROT_BGP		186	/* BGP Routes */
 #define RTPROT_ISIS		187	/* ISIS Routes */
@@ -389,6 +398,8 @@ enum rtattr_type_t {
 	RTA_SPORT,
 	RTA_DPORT,
 	RTA_NH_ID,
+	RTA_FLOWLABEL,
+	RTA_DEL_REASON,
 	__RTA_MAX
 };
 
@@ -396,6 +407,30 @@ enum rtattr_type_t {
 
 #define RTM_RTA(r)  ((struct rtattr*)(((char*)(r)) + NLMSG_ALIGN(sizeof(struct rtmsg))))
 #define RTM_PAYLOAD(n) NLMSG_PAYLOAD(n,sizeof(struct rtmsg))
+
+/* RTA_DEL_REASON: why the kernel deleted the route. u32.
+ * Emitted only on RTM_DELROUTE notifications, and only when the deletion
+ * path records a cause. Absence means either an older kernel or a
+ * deletion path that does not (yet) record its cause - consumers must
+ * treat "absent" and "unspec" identically. New causes may be appended.
+ * Currently only IPv6 deletion paths record a cause.
+ *
+ * The attribute is notification-only: the kernel rejects it in
+ * requests, so a notification must not be echoed back verbatim.
+ *
+ * The value space is family-agnostic: a value must never be
+ * reinterpreted per address family. A cause that only one family can
+ * produce still gets its own value rather than reusing another
+ * family's.
+ */
+enum rt_del_reason {
+	RT_DEL_REASON_UNSPEC,		/* cause not recorded */
+	RT_DEL_REASON_EXPIRED,		/* RTF_EXPIRES lifetime ran out (GC) */
+	RT_DEL_REASON_RA_WITHDRAWN,	/* zero-lifetime RA / PIO / RIO */
+	__RT_DEL_REASON_MAX
+};
+
+#define RT_DEL_REASON_MAX (__RT_DEL_REASON_MAX - 1)
 
 /* RTM_MULTIPATH --- array of struct rtnexthop.
  *
@@ -502,13 +537,17 @@ enum {
 
 #define RTAX_MAX (__RTAX_MAX - 1)
 
-#define RTAX_FEATURE_ECN	(1 << 0)
-#define RTAX_FEATURE_SACK	(1 << 1)
-#define RTAX_FEATURE_TIMESTAMP	(1 << 2)
-#define RTAX_FEATURE_ALLFRAG	(1 << 3)
+#define RTAX_FEATURE_ECN		(1 << 0)
+#define RTAX_FEATURE_SACK		(1 << 1) /* unused */
+#define RTAX_FEATURE_TIMESTAMP		(1 << 2) /* unused */
+#define RTAX_FEATURE_ALLFRAG		(1 << 3) /* unused */
+#define RTAX_FEATURE_TCP_USEC_TS	(1 << 4)
 
-#define RTAX_FEATURE_MASK	(RTAX_FEATURE_ECN | RTAX_FEATURE_SACK | \
-				 RTAX_FEATURE_TIMESTAMP | RTAX_FEATURE_ALLFRAG)
+#define RTAX_FEATURE_MASK	(RTAX_FEATURE_ECN |		\
+				 RTAX_FEATURE_SACK |		\
+				 RTAX_FEATURE_TIMESTAMP |	\
+				 RTAX_FEATURE_ALLFRAG |		\
+				 RTAX_FEATURE_TCP_USEC_TS)
 
 struct rta_session {
 	__u8	proto;
@@ -770,6 +809,12 @@ enum rtnetlink_groups {
 #define RTNLGRP_TUNNEL		RTNLGRP_TUNNEL
 	RTNLGRP_STATS,
 #define RTNLGRP_STATS		RTNLGRP_STATS
+	RTNLGRP_IPV4_MCADDR,
+#define RTNLGRP_IPV4_MCADDR	RTNLGRP_IPV4_MCADDR
+	RTNLGRP_IPV6_MCADDR,
+#define RTNLGRP_IPV6_MCADDR	RTNLGRP_IPV6_MCADDR
+	RTNLGRP_IPV6_ACADDR,
+#define RTNLGRP_IPV6_ACADDR	RTNLGRP_IPV6_ACADDR
 	__RTNLGRP_MAX
 };
 #define RTNLGRP_MAX	(__RTNLGRP_MAX - 1)
@@ -820,6 +865,7 @@ enum {
 #define RTEXT_FILTER_CFM_CONFIG	(1 << 5)
 #define RTEXT_FILTER_CFM_STATUS	(1 << 6)
 #define RTEXT_FILTER_MST	(1 << 7)
+#define RTEXT_FILTER_NAME_ONLY	(1 << 8)
 
 /* End of information exported to user level */
 

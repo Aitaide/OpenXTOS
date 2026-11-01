@@ -29,7 +29,7 @@ struct modsig {
 	 * storing the signature.
 	 */
 	int raw_pkcs7_len;
-	u8 raw_pkcs7[];
+	u8 raw_pkcs7[] __counted_by(raw_pkcs7_len);
 };
 
 /*
@@ -40,7 +40,7 @@ struct modsig {
 int ima_read_modsig(enum ima_hooks func, const void *buf, loff_t buf_len,
 		    struct modsig **modsig)
 {
-	const size_t marker_len = strlen(MODULE_SIG_STRING);
+	const size_t marker_len = strlen(MODULE_SIGNATURE_MARKER);
 	const struct module_signature *sig;
 	struct modsig *hdr;
 	size_t sig_len;
@@ -51,7 +51,7 @@ int ima_read_modsig(enum ima_hooks func, const void *buf, loff_t buf_len,
 		return -ENOENT;
 
 	p = buf + buf_len - marker_len;
-	if (memcmp(p, MODULE_SIG_STRING, marker_len))
+	if (memcmp(p, MODULE_SIGNATURE_MARKER, marker_len))
 		return -ENOENT;
 
 	buf_len -= marker_len;
@@ -65,10 +65,11 @@ int ima_read_modsig(enum ima_hooks func, const void *buf, loff_t buf_len,
 	buf_len -= sig_len + sizeof(*sig);
 
 	/* Allocate sig_len additional bytes to hold the raw PKCS#7 data. */
-	hdr = kzalloc(sizeof(*hdr) + sig_len, GFP_KERNEL);
+	hdr = kzalloc_flex(*hdr, raw_pkcs7, sig_len);
 	if (!hdr)
 		return -ENOMEM;
 
+	hdr->raw_pkcs7_len = sig_len;
 	hdr->pkcs7_msg = pkcs7_parse_message(buf + buf_len, sig_len);
 	if (IS_ERR(hdr->pkcs7_msg)) {
 		rc = PTR_ERR(hdr->pkcs7_msg);
@@ -77,7 +78,6 @@ int ima_read_modsig(enum ima_hooks func, const void *buf, loff_t buf_len,
 	}
 
 	memcpy(hdr->raw_pkcs7, buf + buf_len, sig_len);
-	hdr->raw_pkcs7_len = sig_len;
 
 	/* We don't know the hash algorithm yet. */
 	hdr->hash_algo = HASH_ALGO__LAST;
@@ -105,7 +105,7 @@ void ima_collect_modsig(struct modsig *modsig, const void *buf, loff_t size)
 	 * Provide the file contents (minus the appended sig) so that the PKCS7
 	 * code can calculate the file hash.
 	 */
-	size -= modsig->raw_pkcs7_len + strlen(MODULE_SIG_STRING) +
+	size -= modsig->raw_pkcs7_len + strlen(MODULE_SIGNATURE_MARKER) +
 		sizeof(struct module_signature);
 	rc = pkcs7_supply_detached_data(modsig->pkcs7_msg, buf, size);
 	if (rc)

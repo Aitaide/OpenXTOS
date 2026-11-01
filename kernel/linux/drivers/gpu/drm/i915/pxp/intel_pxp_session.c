@@ -3,6 +3,8 @@
  * Copyright(c) 2020, Intel Corporation. All rights reserved.
  */
 
+#include <drm/drm_print.h>
+
 #include "i915_drv.h"
 
 #include "intel_pxp.h"
@@ -137,8 +139,10 @@ void intel_pxp_terminate(struct intel_pxp *pxp, bool post_invalidation_needs_res
 static void pxp_terminate_complete(struct intel_pxp *pxp)
 {
 	/* Re-create the arb session after teardown handle complete */
-	if (fetch_and_zero(&pxp->hw_state_invalidated))
+	if (fetch_and_zero(&pxp->hw_state_invalidated)) {
+		drm_dbg(&pxp->ctrl_gt->i915->drm, "PXP: creating arb_session after invalidation");
 		pxp_create_arb_session(pxp);
+	}
 
 	complete_all(&pxp->termination);
 }
@@ -156,6 +160,8 @@ static void pxp_session_work(struct work_struct *work)
 
 	if (!events)
 		return;
+
+	drm_dbg(&gt->i915->drm, "PXP: processing event-flags 0x%08x", events);
 
 	if (events & PXP_INVAL_REQUIRED)
 		intel_pxp_invalidate(pxp);

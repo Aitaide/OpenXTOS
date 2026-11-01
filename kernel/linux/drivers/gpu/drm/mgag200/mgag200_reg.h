@@ -102,10 +102,17 @@
 #define MGAREG_EXEC		0x0100
 
 #define	MGAREG_FIFOSTATUS	0x1e10
-#define	MGAREG_Status		0x1e14
+
+#define	MGAREG_STATUS		0x1e14
+#define MGAREG_STATUS_VLINEPEN	BIT(5)
+
 #define MGAREG_CACHEFLUSH       0x1fff
+
 #define	MGAREG_ICLEAR		0x1e18
+#define MGAREG_ICLEAR_VLINEICLR	BIT(5)
+
 #define	MGAREG_IEN		0x1e1c
+#define MGAREG_IEN_VLINEIEN	BIT(5)
 
 #define	MGAREG_VCOUNT		0x1e20
 
@@ -258,6 +265,7 @@
 #define MGAREG_CRTCEXT1_HRSTEN		BIT(3)
 
 #define MGAREG_CRTCEXT3_MGAMODE		BIT(7)
+#define MGAREG_CRTCEXT3_SCALE_MASK	GENMASK(2, 0)
 
 /* Cursor X and Y position */
 #define MGA_CURPOSXL 0x3c0c

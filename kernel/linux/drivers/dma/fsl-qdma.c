@@ -109,6 +109,7 @@
 #define FSL_QDMA_CMD_WTHROTL_OFFSET	20
 #define FSL_QDMA_CMD_DSEN_OFFSET	19
 #define FSL_QDMA_CMD_LWC_OFFSET		16
+#define FSL_QDMA_CMD_PF			BIT(17)
 
 /* Field definition for Descriptor status */
 #define QDMA_CCDF_STATUS_RTE		BIT(5)
@@ -147,6 +148,9 @@
  * @__reserved1:	    Reserved field.
  * @cfg8b_w1:		    Compound descriptor command queue origin produced
  *			    by qDMA and dynamic debug field.
+ * @__reserved2:	    Reserved field.
+ * @cmd:		    Command for QDMA (see FSL_QDMA_CMD_RWTTYPE and
+ *			     others).
  * @data:		    Pointer to the memory 40-bit address, describes DMA
  *			    source information and DMA destination information.
  */
@@ -159,6 +163,10 @@ struct fsl_qdma_format {
 			u8 addr_hi;
 			u8 __reserved1[2];
 			u8 cfg8b_w1;
+		} __packed;
+		struct {
+			__le32 __reserved2;
+			__le32 cmd;
 		} __packed;
 		__le64 data;
 	};
@@ -354,7 +362,6 @@ static void fsl_qdma_free_chan_resources(struct dma_chan *chan)
 static void fsl_qdma_comp_fill_memcpy(struct fsl_qdma_comp *fsl_comp,
 				      dma_addr_t dst, dma_addr_t src, u32 len)
 {
-	u32 cmd;
 	struct fsl_qdma_format *sdf, *ddf;
 	struct fsl_qdma_format *ccdf, *csgf_desc, *csgf_src, *csgf_dest;
 
@@ -383,14 +390,11 @@ static void fsl_qdma_comp_fill_memcpy(struct fsl_qdma_comp *fsl_comp,
 	/* This entry is the last entry. */
 	qdma_csgf_set_f(csgf_dest, len);
 	/* Descriptor Buffer */
-	cmd = cpu_to_le32(FSL_QDMA_CMD_RWTTYPE <<
-			  FSL_QDMA_CMD_RWTTYPE_OFFSET);
-	sdf->data = QDMA_SDDF_CMD(cmd);
+	sdf->cmd = cpu_to_le32((FSL_QDMA_CMD_RWTTYPE << FSL_QDMA_CMD_RWTTYPE_OFFSET) |
+			       FSL_QDMA_CMD_PF);
 
-	cmd = cpu_to_le32(FSL_QDMA_CMD_RWTTYPE <<
-			  FSL_QDMA_CMD_RWTTYPE_OFFSET);
-	cmd |= cpu_to_le32(FSL_QDMA_CMD_LWC << FSL_QDMA_CMD_LWC_OFFSET);
-	ddf->data = QDMA_SDDF_CMD(cmd);
+	ddf->cmd = cpu_to_le32((FSL_QDMA_CMD_RWTTYPE << FSL_QDMA_CMD_RWTTYPE_OFFSET) |
+			       (FSL_QDMA_CMD_LWC << FSL_QDMA_CMD_LWC_OFFSET));
 }
 
 /*
@@ -402,7 +406,7 @@ static int fsl_qdma_pre_request_enqueue_desc(struct fsl_qdma_queue *queue)
 	struct fsl_qdma_comp *comp_temp, *_comp_temp;
 
 	for (i = 0; i < queue->n_cq + FSL_COMMAND_QUEUE_OVERFLLOW; i++) {
-		comp_temp = kzalloc(sizeof(*comp_temp), GFP_KERNEL);
+		comp_temp = kzalloc_obj(*comp_temp);
 		if (!comp_temp)
 			goto err_alloc;
 		comp_temp->virt_addr =
@@ -514,11 +518,11 @@ static struct fsl_qdma_queue
 			queue_temp = queue_head + i + (j * queue_num);
 
 			queue_temp->cq =
-			dma_alloc_coherent(&pdev->dev,
-					   sizeof(struct fsl_qdma_format) *
-					   queue_size[i],
-					   &queue_temp->bus_addr,
-					   GFP_KERNEL);
+			dmam_alloc_coherent(&pdev->dev,
+					    sizeof(struct fsl_qdma_format) *
+					    queue_size[i],
+					    &queue_temp->bus_addr,
+					    GFP_KERNEL);
 			if (!queue_temp->cq)
 				return NULL;
 			queue_temp->block_base = fsl_qdma->block_base +
@@ -563,15 +567,14 @@ static struct fsl_qdma_queue
 	/*
 	 * Buffer for queue command
 	 */
-	status_head->cq = dma_alloc_coherent(&pdev->dev,
-					     sizeof(struct fsl_qdma_format) *
-					     status_size,
-					     &status_head->bus_addr,
-					     GFP_KERNEL);
-	if (!status_head->cq) {
-		devm_kfree(&pdev->dev, status_head);
+	status_head->cq = dmam_alloc_coherent(&pdev->dev,
+					      sizeof(struct fsl_qdma_format) *
+					      status_size,
+					      &status_head->bus_addr,
+					      GFP_KERNEL);
+	if (!status_head->cq)
 		return NULL;
-	}
+
 	status_head->n_cq = status_size;
 	status_head->virt_head = status_head->cq;
 	status_head->virt_tail = status_head->cq;
@@ -625,7 +628,7 @@ static int fsl_qdma_halt(struct fsl_qdma_engine *fsl_qdma)
 
 static int
 fsl_qdma_queue_transfer_complete(struct fsl_qdma_engine *fsl_qdma,
-				 void *block,
+				 __iomem void *block,
 				 int id)
 {
 	bool duplicate;
@@ -805,7 +808,7 @@ fsl_qdma_irq_init(struct platform_device *pdev,
 	int i;
 	int cpu;
 	int ret;
-	char irq_name[20];
+	char irq_name[32];
 
 	fsl_qdma->error_irq =
 		platform_get_irq_byname(pdev, "qdma-error");
@@ -1124,22 +1127,19 @@ static int fsl_qdma_probe(struct platform_device *pdev)
 	struct device_node *np = pdev->dev.of_node;
 
 	ret = of_property_read_u32(np, "dma-channels", &chans);
-	if (ret) {
-		dev_err(&pdev->dev, "Can't get dma-channels.\n");
-		return ret;
-	}
+	if (ret)
+		return dev_err_probe(&pdev->dev, ret,
+				     "Can't get dma-channels.\n");
 
 	ret = of_property_read_u32(np, "block-offset", &blk_off);
-	if (ret) {
-		dev_err(&pdev->dev, "Can't get block-offset.\n");
-		return ret;
-	}
+	if (ret)
+		return dev_err_probe(&pdev->dev, ret,
+				     "Can't get block-offset.\n");
 
 	ret = of_property_read_u32(np, "block-number", &blk_num);
-	if (ret) {
-		dev_err(&pdev->dev, "Can't get block-number.\n");
-		return ret;
-	}
+	if (ret)
+		return dev_err_probe(&pdev->dev, ret,
+				     "Can't get block-number.\n");
 
 	blk_num = min_t(int, blk_num, num_online_cpus());
 
@@ -1164,10 +1164,8 @@ static int fsl_qdma_probe(struct platform_device *pdev)
 		return -ENOMEM;
 
 	ret = of_property_read_u32(np, "fsl,dma-queues", &queues);
-	if (ret) {
-		dev_err(&pdev->dev, "Can't get queues.\n");
-		return ret;
-	}
+	if (ret)
+		return dev_err_probe(&pdev->dev, ret, "Can't get queues.\n");
 
 	fsl_qdma->desc_allocated = 0;
 	fsl_qdma->n_chans = chans;
@@ -1196,10 +1194,6 @@ static int fsl_qdma_probe(struct platform_device *pdev)
 	fsl_qdma->queue = fsl_qdma_alloc_queue_resources(pdev, fsl_qdma);
 	if (!fsl_qdma->queue)
 		return -ENOMEM;
-
-	ret = fsl_qdma_irq_init(pdev, fsl_qdma);
-	if (ret)
-		return ret;
 
 	fsl_qdma->irq_base = platform_get_irq_byname(pdev, "qdma-queue0");
 	if (fsl_qdma->irq_base < 0)
@@ -1232,25 +1226,24 @@ static int fsl_qdma_probe(struct platform_device *pdev)
 	fsl_qdma->dma_dev.device_terminate_all = fsl_qdma_terminate_all;
 
 	ret = dma_set_mask(&pdev->dev, DMA_BIT_MASK(40));
-	if (ret) {
-		dev_err(&pdev->dev, "dma_set_mask failure.\n");
-		return ret;
-	}
+	if (ret)
+		return dev_err_probe(&pdev->dev, ret, "dma_set_mask failure.\n");
 
 	platform_set_drvdata(pdev, fsl_qdma);
 
-	ret = dma_async_device_register(&fsl_qdma->dma_dev);
-	if (ret) {
-		dev_err(&pdev->dev,
-			"Can't register NXP Layerscape qDMA engine.\n");
-		return ret;
-	}
-
 	ret = fsl_qdma_reg_init(fsl_qdma);
-	if (ret) {
-		dev_err(&pdev->dev, "Can't Initialize the qDMA engine.\n");
+	if (ret)
+		return dev_err_probe(&pdev->dev, ret,
+				     "Can't Initialize the qDMA engine.\n");
+
+	ret = fsl_qdma_irq_init(pdev, fsl_qdma);
+	if (ret)
 		return ret;
-	}
+
+	ret = dma_async_device_register(&fsl_qdma->dma_dev);
+	if (ret)
+		return dev_err_probe(&pdev->dev, ret,
+				     "Can't register NXP Layerscape qDMA engine.\n");
 
 	return 0;
 }
@@ -1266,10 +1259,8 @@ static void fsl_qdma_cleanup_vchan(struct dma_device *dmadev)
 	}
 }
 
-static int fsl_qdma_remove(struct platform_device *pdev)
+static void fsl_qdma_remove(struct platform_device *pdev)
 {
-	int i;
-	struct fsl_qdma_queue *status;
 	struct device_node *np = pdev->dev.of_node;
 	struct fsl_qdma_engine *fsl_qdma = platform_get_drvdata(pdev);
 
@@ -1277,13 +1268,6 @@ static int fsl_qdma_remove(struct platform_device *pdev)
 	fsl_qdma_cleanup_vchan(&fsl_qdma->dma_dev);
 	of_dma_controller_free(np);
 	dma_async_device_unregister(&fsl_qdma->dma_dev);
-
-	for (i = 0; i < fsl_qdma->block_number; i++) {
-		status = fsl_qdma->status[i];
-		dma_free_coherent(&pdev->dev, sizeof(struct fsl_qdma_format) *
-				status->n_cq, status->cq, status->bus_addr);
-	}
-	return 0;
 }
 
 static const struct of_device_id fsl_qdma_dt_ids[] = {
@@ -1303,6 +1287,5 @@ static struct platform_driver fsl_qdma_driver = {
 
 module_platform_driver(fsl_qdma_driver);
 
-MODULE_ALIAS("platform:fsl-qdma");
 MODULE_LICENSE("GPL v2");
 MODULE_DESCRIPTION("NXP Layerscape qDMA engine driver");

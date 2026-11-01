@@ -1421,10 +1421,8 @@ static int s3c_fb_probe(struct platform_device *pdev)
 
 	ret = devm_request_irq(dev, sfb->irq_no, s3c_fb_irq,
 			  0, "s3c_fb", sfb);
-	if (ret) {
-		dev_err(dev, "irq request failed\n");
+	if (ret)
 		goto err_lcd_clk;
-	}
 
 	dev_dbg(dev, "got resources (regs %p), probing windows\n", sfb->regs);
 
@@ -1789,7 +1787,7 @@ static const struct dev_pm_ops s3cfb_pm_ops = {
 
 static struct platform_driver s3c_fb_driver = {
 	.probe		= s3c_fb_probe,
-	.remove_new	= s3c_fb_remove,
+	.remove		= s3c_fb_remove,
 	.id_table	= s3c_fb_driver_ids,
 	.driver		= {
 		.name	= "s3c-fb",

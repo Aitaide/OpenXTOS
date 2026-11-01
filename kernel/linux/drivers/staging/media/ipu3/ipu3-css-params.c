@@ -639,7 +639,7 @@ static int imgu_css_osys_calc_frame_and_stripe_params(
 				/*
 				 * FW workaround for a HW bug: if the first
 				 * chroma pixel is generated exactly at the end
-				 * of chunck scaler HW may not output the pixel
+				 * of chunk scaler HW may not output the pixel
 				 * for downscale factors smaller than 1.5
 				 * (timing issue).
 				 */
@@ -1416,7 +1416,7 @@ imgu_css_shd_ops_calc(struct imgu_abi_shd_intra_frame_operations_data *ops,
 }
 
 /*
- * The follow handshake procotol is the same for AF, AWB and AWB FR.
+ * The following handshake protocol is the same for AF, AWB and AWB FR.
  *
  * for n sets of meta-data, the flow is:
  * --> init
@@ -1770,6 +1770,8 @@ static int imgu_css_cfg_acc_stripe(struct imgu_css *css, unsigned int pipe,
 		acc->stripe.bds_out_stripes[0].width =
 			ALIGN(css_pipe->rect[IPU3_CSS_RECT_BDS].width, f);
 	} else {
+		u32 offset;
+
 		/* Image processing is divided into two stripes */
 		acc->stripe.bds_out_stripes[0].width =
 			acc->stripe.bds_out_stripes[1].width =
@@ -1788,8 +1790,10 @@ static int imgu_css_cfg_acc_stripe(struct imgu_css *css, unsigned int pipe,
 			acc->stripe.bds_out_stripes[1].width += f;
 		}
 		/* Overlap between stripes is IPU3_UAPI_ISP_VEC_ELEMS * 4 */
-		acc->stripe.bds_out_stripes[1].offset =
-			acc->stripe.bds_out_stripes[0].width - 2 * f;
+		offset = acc->stripe.bds_out_stripes[0].width - 2 * f;
+		if (offset > 65535)
+			return -EINVAL;
+		acc->stripe.bds_out_stripes[1].offset = offset;
 	}
 
 	acc->stripe.effective_stripes[0].height =
@@ -2425,15 +2429,15 @@ int imgu_css_cfg_acc(struct imgu_css *css, unsigned int pipe,
 					acc->awb_fr.stripes[1].grid_cfg.width,
 					b_w_log2);
 		acc->awb_fr.stripes[1].grid_cfg.x_end = end;
-
-		/*
-		 * To reduce complexity of debubbling and loading
-		 * statistics fix grid_height_per_slice to 1 for both
-		 * stripes.
-		 */
-		for (i = 0; i < stripes; i++)
-			acc->awb_fr.stripes[i].grid_cfg.height_per_slice = 1;
 	}
+
+	/*
+	 * To reduce complexity of debubbling and loading
+	 * statistics fix grid_height_per_slice to 1 for both
+	 * stripes.
+	 */
+	for (i = 0; i < stripes; i++)
+		acc->awb_fr.stripes[i].grid_cfg.height_per_slice = 1;
 
 	if (imgu_css_awb_fr_ops_calc(css, pipe, &acc->awb_fr))
 		return -EINVAL;
@@ -2597,14 +2601,14 @@ int imgu_css_cfg_acc(struct imgu_css *css, unsigned int pipe,
 			imgu_css_grid_end(acc->af.stripes[1].grid_cfg.x_start,
 					  acc->af.stripes[1].grid_cfg.width,
 					  b_w_log2);
-
-		/*
-		 * To reduce complexity of debubbling and loading statistics
-		 * fix grid_height_per_slice to 1 for both stripes
-		 */
-		for (i = 0; i < stripes; i++)
-			acc->af.stripes[i].grid_cfg.height_per_slice = 1;
 	}
+
+	/*
+	 * To reduce complexity of debubbling and loading statistics
+	 * fix grid_height_per_slice to 1 for both stripes
+	 */
+	for (i = 0; i < stripes; i++)
+		acc->af.stripes[i].grid_cfg.height_per_slice = 1;
 
 	if (imgu_css_af_ops_calc(css, pipe, &acc->af))
 		return -EINVAL;
@@ -2626,7 +2630,7 @@ int imgu_css_cfg_acc(struct imgu_css *css, unsigned int pipe,
 		return -EINVAL;
 
 	acc->awb.config.grid.height_per_slice =
-		IMGU_ABI_AWB_MAX_CELLS_PER_SET / acc->awb.config.grid.width,
+		IMGU_ABI_AWB_MAX_CELLS_PER_SET / acc->awb.config.grid.width;
 	imgu_css_grid_end_calc(&acc->awb.config.grid);
 
 	for (i = 0; i < stripes; i++)
@@ -2677,14 +2681,14 @@ int imgu_css_cfg_acc(struct imgu_css *css, unsigned int pipe,
 			imgu_css_grid_end(acc->awb.stripes[1].grid.x_start,
 					  acc->awb.stripes[1].grid.width,
 					  b_w_log2);
-
-		/*
-		 * To reduce complexity of debubbling and loading statistics
-		 * fix grid_height_per_slice to 1 for both stripes
-		 */
-		for (i = 0; i < stripes; i++)
-			acc->awb.stripes[i].grid.height_per_slice = 1;
 	}
+
+	/*
+	 * To reduce complexity of debubbling and loading statistics
+	 * fix grid_height_per_slice to 1 for both stripes
+	 */
+	for (i = 0; i < stripes; i++)
+		acc->awb.stripes[i].grid.height_per_slice = 1;
 
 	if (imgu_css_awb_ops_calc(css, pipe, &acc->awb))
 		return -EINVAL;

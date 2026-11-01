@@ -16,7 +16,6 @@
 #include <linux/led-class-multicolor.h>
 #include <linux/math.h>
 #include <linux/module.h>
-#include <linux/mod_devicetable.h>
 #include <linux/platform_device.h>
 #include <linux/property.h>
 
@@ -55,7 +54,7 @@ static void restore_sysfs_write_access(void *data)
 {
 	struct led_classdev *led_cdev = data;
 
-	/* Restore the write acccess to the LED */
+	/* Restore the write access to the LED */
 	mutex_lock(&led_cdev->led_access);
 	led_sysfs_enable(led_cdev);
 	mutex_unlock(&led_cdev->led_access);
@@ -69,7 +68,7 @@ static int leds_gmc_probe(struct platform_device *pdev)
 	struct mc_subled *subled;
 	struct leds_multicolor *priv;
 	unsigned int max_brightness = 0;
-	int i, ret, count = 0;
+	int i, ret, count = 0, common_flags = 0;
 
 	priv = devm_kzalloc(dev, sizeof(*priv), GFP_KERNEL);
 	if (!priv)
@@ -91,6 +90,7 @@ static int leds_gmc_probe(struct platform_device *pdev)
 		if (!priv->monochromatics)
 			return -ENOMEM;
 
+		common_flags |= led_cdev->flags;
 		priv->monochromatics[count] = led_cdev;
 
 		max_brightness = max(max_brightness, led_cdev->max_brightness);
@@ -114,11 +114,14 @@ static int leds_gmc_probe(struct platform_device *pdev)
 
 	/* Initialise the multicolor's LED class device */
 	cdev = &priv->mc_cdev.led_cdev;
-	cdev->flags = LED_CORE_SUSPENDRESUME;
 	cdev->brightness_set_blocking = leds_gmc_set;
 	cdev->max_brightness = max_brightness;
 	cdev->color = LED_COLOR_ID_MULTI;
 	priv->mc_cdev.num_colors = count;
+
+	/* we only need suspend/resume if a sub-led requests it */
+	if (common_flags & LED_CORE_SUSPENDRESUME)
+		cdev->flags = LED_CORE_SUSPENDRESUME;
 
 	init_data.fwnode = dev_fwnode(dev);
 	ret = devm_led_classdev_multicolor_register_ext(dev, &priv->mc_cdev, &init_data);

@@ -28,6 +28,7 @@
 #include <linux/debugfs.h>
 #include <linux/pm_runtime.h>
 #include <linux/of.h>
+#include <linux/of_graph.h>
 #include <linux/of_platform.h>
 #include <linux/component.h>
 
@@ -325,8 +326,6 @@ struct dsi_data {
 
 	spinlock_t irq_lock;
 	struct dsi_isr_tables isr_tables;
-	/* space for a copy used by the interrupt handler */
-	struct dsi_isr_tables isr_tables_copy;
 
 	int update_channel;
 #ifdef DSI_PERF_MEASURE
@@ -834,17 +833,12 @@ static irqreturn_t omap_dsi_irq_handler(int irq, void *arg)
 
 #ifdef DSI_CATCH_MISSING_TE
 	if (irqstatus & DSI_IRQ_TE_TRIGGER)
-		del_timer(&dsi->te_timer);
+		timer_delete(&dsi->te_timer);
 #endif
 
-	/* make a copy and unlock, so that isrs can unregister
-	 * themselves */
-	memcpy(&dsi->isr_tables_copy, &dsi->isr_tables,
-		sizeof(dsi->isr_tables));
 
+	dsi_handle_isrs(&dsi->isr_tables, irqstatus, vcstatus, ciostatus);
 	spin_unlock(&dsi->irq_lock);
-
-	dsi_handle_isrs(&dsi->isr_tables_copy, irqstatus, vcstatus, ciostatus);
 
 	dsi_handle_irq_errors(dsidev, irqstatus, vcstatus, ciostatus);
 
@@ -1538,7 +1532,7 @@ static void dsi_dump_dsidev_irqs(struct platform_device *dsidev,
 	unsigned long flags;
 	struct dsi_irq_stats *stats;
 
-	stats = kzalloc(sizeof(*stats), GFP_KERNEL);
+	stats = kzalloc_obj(*stats);
 	if (!stats) {
 		seq_printf(s, "out of memory\n");
 		return;
@@ -5079,7 +5073,7 @@ static int dsi_probe_of(struct platform_device *pdev)
 	struct device_node *ep;
 	struct omap_dsi_pin_config pin_cfg;
 
-	ep = omapdss_of_get_first_endpoint(node);
+	ep = of_graph_get_endpoint_by_regs(node, 0, -1);
 	if (!ep)
 		return 0;
 
@@ -5564,7 +5558,7 @@ static const struct of_device_id dsi_of_match[] = {
 
 static struct platform_driver omap_dsihw_driver = {
 	.probe		= dsi_probe,
-	.remove_new	= dsi_remove,
+	.remove		= dsi_remove,
 	.driver         = {
 		.name   = "omapdss_dsi",
 		.pm	= &dsi_pm_ops,

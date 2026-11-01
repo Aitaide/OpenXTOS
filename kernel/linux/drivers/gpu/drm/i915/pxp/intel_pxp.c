@@ -2,15 +2,17 @@
 /*
  * Copyright(c) 2020 Intel Corporation.
  */
+
 #include <linux/workqueue.h>
 
-#include "gem/i915_gem_context.h"
+#include <drm/drm_print.h>
 
+#include "gem/i915_gem_context.h"
 #include "gt/intel_context.h"
 #include "gt/intel_gt.h"
 
 #include "i915_drv.h"
-
+#include "i915_wait_util.h"
 #include "intel_pxp.h"
 #include "intel_pxp_gsccs.h"
 #include "intel_pxp_irq.h"
@@ -64,8 +66,8 @@ bool intel_pxp_is_active(const struct intel_pxp *pxp)
 
 static void kcr_pxp_set_status(const struct intel_pxp *pxp, bool enable)
 {
-	u32 val = enable ? _MASKED_BIT_ENABLE(KCR_INIT_ALLOW_DISPLAY_ME_WRITES) :
-		  _MASKED_BIT_DISABLE(KCR_INIT_ALLOW_DISPLAY_ME_WRITES);
+	u32 val = enable ? REG_MASKED_FIELD_ENABLE(KCR_INIT_ALLOW_DISPLAY_ME_WRITES) :
+		  REG_MASKED_FIELD_DISABLE(KCR_INIT_ALLOW_DISPLAY_ME_WRITES);
 
 	intel_uncore_write(pxp->ctrl_gt->uncore, KCR_INIT(pxp->kcr_base), val);
 }
@@ -170,7 +172,7 @@ static struct intel_gt *find_gt_for_required_teelink(struct drm_i915_private *i9
 
 static struct intel_gt *find_gt_for_required_protected_content(struct drm_i915_private *i915)
 {
-	if (!IS_ENABLED(CONFIG_DRM_I915_PXP) || !INTEL_INFO(i915)->has_pxp)
+	if (!HAS_PXP(i915))
 		return NULL;
 
 	/*
@@ -199,6 +201,9 @@ int intel_pxp_init(struct drm_i915_private *i915)
 	struct intel_gt *gt;
 	bool is_full_feature = false;
 
+	if (intel_gt_is_wedged(to_gt(i915)))
+		return -ENOTCONN;
+
 	/*
 	 * NOTE: Get the ctrl_gt before checking intel_pxp_is_supported since
 	 * we still need it if PXP's backend tee transport is needed.
@@ -217,7 +222,7 @@ int intel_pxp_init(struct drm_i915_private *i915)
 	 * including session and object management, or we will init the backend tee
 	 * channel for internal users such as HuC loading by GSC
 	 */
-	i915->pxp = kzalloc(sizeof(*i915->pxp), GFP_KERNEL);
+	i915->pxp = kzalloc_obj(*i915->pxp);
 	if (!i915->pxp)
 		return -ENOMEM;
 
@@ -273,7 +278,7 @@ static void pxp_queue_termination(struct intel_pxp *pxp)
 	spin_lock_irq(gt->irq_lock);
 	intel_pxp_mark_termination_in_progress(pxp);
 	pxp->session_events |= PXP_TERMINATION_REQUEST;
-	queue_work(system_unbound_wq, &pxp->session_work);
+	queue_work(system_dfl_wq, &pxp->session_work);
 	spin_unlock_irq(gt->irq_lock);
 }
 
@@ -303,6 +308,8 @@ static int __pxp_global_teardown_final(struct intel_pxp *pxp)
 
 	if (!pxp->arb_is_valid)
 		return 0;
+
+	drm_dbg(&pxp->ctrl_gt->i915->drm, "PXP: teardown for suspend/fini");
 	/*
 	 * To ensure synchronous and coherent session teardown completion
 	 * in response to suspend or shutdown triggers, don't use a worker.
@@ -324,6 +331,8 @@ static int __pxp_global_teardown_restart(struct intel_pxp *pxp)
 
 	if (pxp->arb_is_valid)
 		return 0;
+
+	drm_dbg(&pxp->ctrl_gt->i915->drm, "PXP: teardown for restart");
 	/*
 	 * The arb-session is currently inactive and we are doing a reset and restart
 	 * due to a runtime event. Use the worker that was designed for this.
@@ -332,8 +341,11 @@ static int __pxp_global_teardown_restart(struct intel_pxp *pxp)
 
 	timeout = intel_pxp_get_backend_timeout_ms(pxp);
 
-	if (!wait_for_completion_timeout(&pxp->termination, msecs_to_jiffies(timeout)))
+	if (!wait_for_completion_timeout(&pxp->termination, msecs_to_jiffies(timeout))) {
+		drm_dbg(&pxp->ctrl_gt->i915->drm, "PXP: restart backend timed out (%d ms)",
+			timeout);
 		return -ETIMEDOUT;
+	}
 
 	return 0;
 }
@@ -359,22 +371,46 @@ void intel_pxp_end(struct intel_pxp *pxp)
 	intel_runtime_pm_put(&i915->runtime_pm, wakeref);
 }
 
+static bool pxp_required_fw_failed(struct intel_pxp *pxp)
+{
+	if (__intel_uc_fw_status(&pxp->ctrl_gt->uc.huc.fw) == INTEL_UC_FIRMWARE_LOAD_FAIL)
+		return true;
+	if (HAS_ENGINE(pxp->ctrl_gt, GSC0) &&
+	    __intel_uc_fw_status(&pxp->ctrl_gt->uc.gsc.fw) == INTEL_UC_FIRMWARE_LOAD_FAIL)
+		return true;
+
+	return false;
+}
+
+static bool pxp_fw_dependencies_completed(struct intel_pxp *pxp)
+{
+	if (HAS_ENGINE(pxp->ctrl_gt, GSC0))
+		return intel_pxp_gsccs_is_ready_for_sessions(pxp);
+
+	return pxp_component_bound(pxp);
+}
+
 /*
  * this helper is used by both intel_pxp_start and by
  * the GET_PARAM IOCTL that user space calls. Thus, the
  * return values here should match the UAPI spec.
  */
-int intel_pxp_get_readiness_status(struct intel_pxp *pxp)
+int intel_pxp_get_readiness_status(struct intel_pxp *pxp, int timeout_ms)
 {
 	if (!intel_pxp_is_enabled(pxp))
 		return -ENODEV;
 
-	if (HAS_ENGINE(pxp->ctrl_gt, GSC0)) {
-		if (wait_for(intel_pxp_gsccs_is_ready_for_sessions(pxp), 250))
+	if (pxp_required_fw_failed(pxp))
+		return -ENODEV;
+
+	if (pxp->platform_cfg_is_bad)
+		return -ENODEV;
+
+	if (timeout_ms) {
+		if (wait_for(pxp_fw_dependencies_completed(pxp), timeout_ms))
 			return 2;
-	} else {
-		if (wait_for(pxp_component_bound(pxp), 250))
-			return 2;
+	} else if (!pxp_fw_dependencies_completed(pxp)) {
+		return 2;
 	}
 	return 1;
 }
@@ -383,15 +419,19 @@ int intel_pxp_get_readiness_status(struct intel_pxp *pxp)
  * the arb session is restarted from the irq work when we receive the
  * termination completion interrupt
  */
+#define PXP_READINESS_TIMEOUT 250
+
 int intel_pxp_start(struct intel_pxp *pxp)
 {
 	int ret = 0;
 
-	ret = intel_pxp_get_readiness_status(pxp);
-	if (ret < 0)
+	ret = intel_pxp_get_readiness_status(pxp, PXP_READINESS_TIMEOUT);
+	if (ret < 0) {
+		drm_dbg(&pxp->ctrl_gt->i915->drm, "PXP: tried but not-avail (%d)", ret);
 		return ret;
-	else if (ret > 1)
+	} else if (ret > 1) {
 		return -EIO; /* per UAPI spec, user may retry later */
+	}
 
 	mutex_lock(&pxp->arb_mutex);
 
@@ -422,10 +462,12 @@ void intel_pxp_fini_hw(struct intel_pxp *pxp)
 	intel_pxp_irq_disable(pxp);
 }
 
-int intel_pxp_key_check(struct intel_pxp *pxp,
-			struct drm_i915_gem_object *obj,
-			bool assign)
+int intel_pxp_key_check(struct drm_gem_object *_obj, bool assign)
 {
+	struct drm_i915_gem_object *obj = to_intel_bo(_obj);
+	struct drm_i915_private *i915 = to_i915(_obj->dev);
+	struct intel_pxp *pxp = i915->pxp;
+
 	if (!intel_pxp_is_active(pxp))
 		return -ENODEV;
 
@@ -491,7 +533,7 @@ void intel_pxp_invalidate(struct intel_pxp *pxp)
 		if (ctx->pxp_wakeref) {
 			intel_runtime_pm_put(&i915->runtime_pm,
 					     ctx->pxp_wakeref);
-			ctx->pxp_wakeref = 0;
+			ctx->pxp_wakeref = NULL;
 		}
 
 		spin_lock_irq(&i915->gem.contexts.lock);

@@ -338,6 +338,7 @@ static int lm3639_probe(struct i2c_client *client)
 	}
 
 	/* backlight */
+	memset(&props, 0, sizeof(struct backlight_properties));
 	props.type = BACKLIGHT_RAW;
 	props.brightness = pdata->init_brt_led;
 	props.max_brightness = pdata->max_brt_led;
@@ -402,8 +403,8 @@ static void lm3639_remove(struct i2c_client *client)
 }
 
 static const struct i2c_device_id lm3639_id[] = {
-	{LM3639_NAME, 0},
-	{}
+	{ .name = LM3639_NAME },
+	{ }
 };
 
 MODULE_DEVICE_TABLE(i2c, lm3639_id);

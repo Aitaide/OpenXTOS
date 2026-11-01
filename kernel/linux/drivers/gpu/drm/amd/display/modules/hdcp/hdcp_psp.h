@@ -84,6 +84,7 @@ struct ta_dtm_topology_update_input_v2 {
 	uint32_t dig_fe;
 	uint32_t dp_mst_vcid;
 	uint32_t is_assr;
+	/*uint32_t is_frl;*/ /*todo*/
 	uint32_t max_hdcp_supported_version;
 };
 
@@ -91,6 +92,7 @@ struct ta_dtm_topology_update_input_v2 {
 /* Security code will check real HW register values and these SW enum values */
 enum ta_dtm_encoder_type {
 	TA_DTM_ENCODER_TYPE__INVALID    = 0,
+	TA_DTM_ENCODER_TYPE__FRL        = 0x20,
 	TA_DTM_ENCODER_TYPE__DIG        = 0x10
 };
 
@@ -98,9 +100,9 @@ enum ta_dtm_encoder_type {
  * This enum defines software value for dio_output_type
  */
 typedef enum {
-    TA_DTM_DIO_OUTPUT_TYPE__INVALID,
-    TA_DTM_DIO_OUTPUT_TYPE__DIRECT,
-    TA_DTM_DIO_OUTPUT_TYPE__DPIA
+	TA_DTM_DIO_OUTPUT_TYPE__INVALID,
+	TA_DTM_DIO_OUTPUT_TYPE__DIRECT,
+	TA_DTM_DIO_OUTPUT_TYPE__DPIA
 } ta_dtm_dio_output_type;
 
 struct ta_dtm_topology_update_input_v3 {
@@ -237,11 +239,11 @@ enum ta_hdcp2_hdcp2_msg_id_max_size {
 #define TA_HDCP__HDCP1_KSV_LIST_MAX_ENTRIES 127
 #define TA_HDCP__HDCP1_V_PRIME_SIZE 20
 #define TA_HDCP__HDCP2_TX_BUF_MAX_SIZE                                                                                 \
-	TA_HDCP_HDCP2_MSG_ID_MAX_SIZE__AKE_NO_STORED_KM + TA_HDCP_HDCP2_MSG_ID_MAX_SIZE__AKE_STORED_KM + 6
+	(TA_HDCP_HDCP2_MSG_ID_MAX_SIZE__AKE_NO_STORED_KM + TA_HDCP_HDCP2_MSG_ID_MAX_SIZE__AKE_STORED_KM + 6)
 
 // 64 bits boundaries
 #define TA_HDCP__HDCP2_RX_BUF_MAX_SIZE                                                                                 \
-	TA_HDCP_HDCP2_MSG_ID_MAX_SIZE__AKE_SEND_CERT + TA_HDCP_HDCP2_MSG_ID_MAX_SIZE__AKE_RECEIVER_INFO + 4
+	(TA_HDCP_HDCP2_MSG_ID_MAX_SIZE__AKE_SEND_CERT + TA_HDCP_HDCP2_MSG_ID_MAX_SIZE__AKE_RECEIVER_INFO + 4)
 
 enum ta_hdcp_status {
 	TA_HDCP_STATUS__SUCCESS = 0x00,

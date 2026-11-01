@@ -2,15 +2,6 @@
 /*
  * Support for Intel Camera Imaging ISP subsystem.
  * Copyright (c) 2015, Intel Corporation.
- *
- * This program is free software; you can redistribute it and/or modify it
- * under the terms and conditions of the GNU General Public License,
- * version 2, as published by the Free Software Foundation.
- *
- * This program is distributed in the hope it will be useful, but WITHOUT
- * ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
- * FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License for
- * more details.
  */
 
 #ifndef __EVENT_FIFO_PRIVATE_H
@@ -35,9 +26,8 @@ STORAGE_CLASS_EVENT_C void event_wait_for(const event_ID_t ID)
 STORAGE_CLASS_EVENT_C void cnd_event_wait_for(const event_ID_t ID,
 	const bool cnd)
 {
-	if (cnd) {
+	if (cnd)
 		event_wait_for(ID);
-	}
 }
 
 STORAGE_CLASS_EVENT_C hrt_data event_receive_token(const event_ID_t ID)

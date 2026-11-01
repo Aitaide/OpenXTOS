@@ -1,4 +1,5 @@
 .. SPDX-License-Identifier: GFDL-1.1-no-invariants-or-later
+.. c:namespace:: V4L
 
 .. _image-process-controls:
 
@@ -23,7 +24,10 @@ Image Process Control IDs
 .. _v4l2-cid-link-freq:
 
 ``V4L2_CID_LINK_FREQ (integer menu)``
-    The frequency of the data bus (e.g. parallel or CSI-2).
+    The fundamental frequency of the operating symbol rate (serial interfaces
+    such as CSI-2) or the sampling rate (parallel interfaces such as DVP or
+    Bt.565) of the data interface. For CSI-2, the frequency is equal to
+    _1 / (2 * UI)_.
 
 .. _v4l2-cid-pixel-rate:
 
@@ -31,7 +35,7 @@ Image Process Control IDs
     Pixel sampling rate in the device's pixel array. This control is
     read-only and its unit is pixels / second.
 
-    Some devices use horizontal and vertical balanking to configure the frame
+    Some devices use horizontal and vertical blanking to configure the frame
     rate. The frame rate can be calculated from the pixel rate, analogue crop
     rectangle as well as horizontal and vertical blanking. The pixel rate
     control may be present in a different sub-device than the blanking controls

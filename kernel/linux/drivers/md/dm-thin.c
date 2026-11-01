@@ -395,13 +395,13 @@ static void begin_discard(struct discard_op *op, struct thin_c *tc, struct bio *
 	op->bio = NULL;
 }
 
-static int issue_discard(struct discard_op *op, dm_block_t data_b, dm_block_t data_e)
+static void issue_discard(struct discard_op *op, dm_block_t data_b, dm_block_t data_e)
 {
 	struct thin_c *tc = op->tc;
 	sector_t s = block_to_sectors(tc->pool, data_b);
 	sector_t len = block_to_sectors(tc->pool, data_e - data_b);
 
-	return __blkdev_issue_discard(tc->pool_dev->bdev, s, len, GFP_NOIO, &op->bio);
+	__blkdev_issue_discard(tc->pool_dev->bdev, s, len, GFP_NOIO, &op->bio);
 }
 
 static void end_discard(struct discard_op *op, int r)
@@ -453,12 +453,13 @@ static int bio_detain(struct pool *pool, struct dm_cell_key *key, struct bio *bi
 	cell_prealloc = dm_bio_prison_alloc_cell(pool->prison, GFP_NOIO);
 
 	r = dm_bio_detain(pool->prison, key, bio, cell_prealloc, cell_result);
-	if (r)
+	if (r) {
 		/*
 		 * We reused an old cell; we can get rid of
 		 * the new one.
 		 */
 		dm_bio_prison_free_cell(pool->prison, cell_prealloc);
+	}
 
 	return r;
 }
@@ -591,12 +592,6 @@ struct dm_thin_endio_hook {
 	struct dm_bio_prison_cell *cell;
 };
 
-static void __merge_bio_list(struct bio_list *bios, struct bio_list *master)
-{
-	bio_list_merge(bios, master);
-	bio_list_init(master);
-}
-
 static void error_bio_list(struct bio_list *bios, blk_status_t error)
 {
 	struct bio *bio;
@@ -615,7 +610,7 @@ static void error_thin_bio_list(struct thin_c *tc, struct bio_list *master,
 	bio_list_init(&bios);
 
 	spin_lock_irq(&tc->lock);
-	__merge_bio_list(&bios, master);
+	bio_list_merge_init(&bios, master);
 	spin_unlock_irq(&tc->lock);
 
 	error_bio_list(&bios, error);
@@ -644,8 +639,8 @@ static void requeue_io(struct thin_c *tc)
 	bio_list_init(&bios);
 
 	spin_lock_irq(&tc->lock);
-	__merge_bio_list(&bios, &tc->deferred_bio_list);
-	__merge_bio_list(&bios, &tc->retry_on_resume_list);
+	bio_list_merge_init(&bios, &tc->deferred_bio_list);
+	bio_list_merge_init(&bios, &tc->retry_on_resume_list);
 	spin_unlock_irq(&tc->lock);
 
 	error_bio_list(&bios, BLK_STS_DM_REQUEUE);
@@ -707,9 +702,10 @@ static void get_bio_block_range(struct thin_c *tc, struct bio *bio,
 		(void) sector_div(e, pool->sectors_per_block);
 	}
 
-	if (e < b)
+	if (e < b) {
 		/* Can happen if the bio is within a single block. */
 		e = b;
+	}
 
 	*begin = b;
 	*end = e;
@@ -721,13 +717,14 @@ static void remap(struct thin_c *tc, struct bio *bio, dm_block_t block)
 	sector_t bi_sector = bio->bi_iter.bi_sector;
 
 	bio_set_dev(bio, tc->pool_dev->bdev);
-	if (block_size_is_power_of_two(pool))
+	if (block_size_is_power_of_two(pool)) {
 		bio->bi_iter.bi_sector =
 			(block << pool->sectors_per_block_shift) |
 			(bi_sector & (pool->sectors_per_block - 1));
-	else
+	} else {
 		bio->bi_iter.bi_sector = (block * pool->sectors_per_block) +
 				 sector_div(bi_sector, pool->sectors_per_block);
+	}
 }
 
 static void remap_to_origin(struct thin_c *tc, struct bio *bio)
@@ -1116,9 +1113,7 @@ static void passdown_double_checking_shared_status(struct dm_thin_new_mapping *m
 				break;
 		}
 
-		r = issue_discard(&op, b, e);
-		if (r)
-			goto out;
+		issue_discard(&op, b, e);
 
 		b = e;
 	}
@@ -1191,8 +1186,8 @@ static void process_prepared_discard_passdown_pt1(struct dm_thin_new_mapping *m)
 		struct discard_op op;
 
 		begin_discard(&op, tc, discard_parent);
-		r = issue_discard(&op, m->data_block, data_end);
-		end_discard(&op, r);
+		issue_discard(&op, m->data_block, data_end);
+		end_discard(&op, 0);
 	}
 }
 
@@ -1401,9 +1396,10 @@ static void schedule_zero(struct thin_c *tc, dm_block_t virt_block,
 	if (pool->pf.zero_new_blocks) {
 		if (io_overwrites_block(pool, bio))
 			remap_and_issue_overwrite(tc, bio, data_block, m);
-		else
+		else {
 			ll_zero(tc, m, data_block * pool->sectors_per_block,
 				(data_block + 1) * pool->sectors_per_block);
+		}
 	} else
 		process_prepared_mapping(m);
 }
@@ -1416,17 +1412,17 @@ static void schedule_external_copy(struct thin_c *tc, dm_block_t virt_block,
 	sector_t virt_block_begin = virt_block * pool->sectors_per_block;
 	sector_t virt_block_end = (virt_block + 1) * pool->sectors_per_block;
 
-	if (virt_block_end <= tc->origin_size)
+	if (virt_block_end <= tc->origin_size) {
 		schedule_copy(tc, virt_block, tc->origin_dev,
 			      virt_block, data_dest, cell, bio,
 			      pool->sectors_per_block);
 
-	else if (virt_block_begin < tc->origin_size)
+	} else if (virt_block_begin < tc->origin_size) {
 		schedule_copy(tc, virt_block, tc->origin_dev,
 			      virt_block, data_dest, cell, bio,
 			      tc->origin_size - virt_block_begin);
 
-	else
+	} else
 		schedule_zero(tc, virt_block, data_dest, cell, bio);
 }
 
@@ -2334,10 +2330,9 @@ static struct thin_c *get_first_thin(struct pool *pool)
 	struct thin_c *tc = NULL;
 
 	rcu_read_lock();
-	if (!list_empty(&pool->active_thins)) {
-		tc = list_entry_rcu(pool->active_thins.next, struct thin_c, list);
+	tc = list_first_or_null_rcu(&pool->active_thins, struct thin_c, list);
+	if (tc)
 		thin_get(tc);
-	}
 	rcu_read_unlock();
 
 	return tc;
@@ -2486,6 +2481,7 @@ static void pool_work_wait(struct pool_work *pw, struct pool *pool,
 	init_completion(&pw->complete);
 	queue_work(pool->wq, &pw->worker);
 	wait_for_completion(&pw->complete);
+	destroy_work_on_stack(&pw->worker);
 }
 
 /*----------------------------------------------------------------*/
@@ -2844,7 +2840,7 @@ static void disable_discard_passdown_if_not_supported(struct pool_c *pt)
 {
 	struct pool *pool = pt->pool;
 	struct block_device *data_bdev = pt->data_dev->bdev;
-	struct queue_limits *data_limits = &bdev_get_queue(data_bdev)->limits;
+	struct queue_limits *data_limits = bdev_limits(data_bdev);
 	const char *reason = NULL;
 
 	if (!pt->adjusted_pf.discard_passdown)
@@ -2950,10 +2946,10 @@ static struct pool *pool_create(struct mapped_device *pool_md,
 	pmd = dm_pool_metadata_open(metadata_dev, block_size, format_device);
 	if (IS_ERR(pmd)) {
 		*error = "Error creating metadata object";
-		return (struct pool *)pmd;
+		return ERR_CAST(pmd);
 	}
 
-	pool = kzalloc(sizeof(*pool), GFP_KERNEL);
+	pool = kzalloc_obj(*pool);
 	if (!pool) {
 		*error = "Error allocating memory for pool";
 		err_p = ERR_PTR(-ENOMEM);
@@ -3033,8 +3029,8 @@ static struct pool *pool_create(struct mapped_device *pool_md,
 	}
 
 	pool->cell_sort_array =
-		vmalloc(array_size(CELL_SORT_ARRAY_SIZE,
-				   sizeof(*pool->cell_sort_array)));
+		vmalloc_array(CELL_SORT_ARRAY_SIZE,
+			      sizeof(*pool->cell_sort_array));
 	if (!pool->cell_sort_array) {
 		*error = "Error allocating cell sort array";
 		err_p = ERR_PTR(-ENOMEM);
@@ -3358,7 +3354,7 @@ static int pool_ctr(struct dm_target *ti, unsigned int argc, char **argv)
 		goto out;
 	}
 
-	pt = kzalloc(sizeof(*pt), GFP_KERNEL);
+	pt = kzalloc_obj(*pt);
 	if (!pt) {
 		r = -ENOMEM;
 		goto out;
@@ -4081,10 +4077,10 @@ static void pool_io_hints(struct dm_target *ti, struct queue_limits *limits)
 	if (io_opt_sectors < pool->sectors_per_block ||
 	    !is_factor(io_opt_sectors, pool->sectors_per_block)) {
 		if (is_factor(pool->sectors_per_block, limits->max_sectors))
-			blk_limits_io_min(limits, limits->max_sectors << SECTOR_SHIFT);
+			limits->io_min = limits->max_sectors << SECTOR_SHIFT;
 		else
-			blk_limits_io_min(limits, pool->sectors_per_block << SECTOR_SHIFT);
-		blk_limits_io_opt(limits, pool->sectors_per_block << SECTOR_SHIFT);
+			limits->io_min = pool->sectors_per_block << SECTOR_SHIFT;
+		limits->io_opt = pool->sectors_per_block << SECTOR_SHIFT;
 	}
 
 	/*
@@ -4096,7 +4092,7 @@ static void pool_io_hints(struct dm_target *ti, struct queue_limits *limits)
 	if (pt->adjusted_pf.discard_enabled) {
 		disable_discard_passdown_if_not_supported(pt);
 		if (!pt->adjusted_pf.discard_passdown)
-			limits->max_discard_sectors = 0;
+			limits->max_hw_discard_sectors = 0;
 		/*
 		 * The pool uses the same discard limits as the underlying data
 		 * device.  DM core has already set this up.
@@ -4113,8 +4109,8 @@ static void pool_io_hints(struct dm_target *ti, struct queue_limits *limits)
 static struct target_type pool_target = {
 	.name = "thin-pool",
 	.features = DM_TARGET_SINGLETON | DM_TARGET_ALWAYS_WRITEABLE |
-		    DM_TARGET_IMMUTABLE,
-	.version = {1, 23, 0},
+		    DM_TARGET_IMMUTABLE | DM_TARGET_PASSES_CRYPTO,
+	.version = {1, 24, 0},
 	.module = THIS_MODULE,
 	.ctr = pool_ctr,
 	.dtr = pool_dtr,
@@ -4197,7 +4193,7 @@ static int thin_ctr(struct dm_target *ti, unsigned int argc, char **argv)
 		goto out_unlock;
 	}
 
-	tc = ti->private = kzalloc(sizeof(*tc), GFP_KERNEL);
+	tc = ti->private = kzalloc_obj(*tc);
 	if (!tc) {
 		ti->error = "Out of memory";
 		r = -ENOMEM;
@@ -4385,11 +4381,8 @@ static void thin_postsuspend(struct dm_target *ti)
 {
 	struct thin_c *tc = ti->private;
 
-	/*
-	 * The dm_noflush_suspending flag has been cleared by now, so
-	 * unfortunately we must always run this.
-	 */
-	noflush_work(tc, do_noflush_stop);
+	if (dm_noflush_suspending(ti))
+		noflush_work(tc, do_noflush_stop);
 }
 
 static int thin_preresume(struct dm_target *ti)
@@ -4493,13 +4486,14 @@ static void thin_io_hints(struct dm_target *ti, struct queue_limits *limits)
 
 	if (pool->pf.discard_enabled) {
 		limits->discard_granularity = pool->sectors_per_block << SECTOR_SHIFT;
-		limits->max_discard_sectors = pool->sectors_per_block * BIO_PRISON_MAX_RANGE;
+		limits->max_hw_discard_sectors = pool->sectors_per_block * BIO_PRISON_MAX_RANGE;
 	}
 }
 
 static struct target_type thin_target = {
 	.name = "thin",
-	.version = {1, 23, 0},
+	.features = DM_TARGET_PASSES_CRYPTO,
+	.version = {1, 24, 0},
 	.module	= THIS_MODULE,
 	.ctr = thin_ctr,
 	.dtr = thin_dtr,
@@ -4560,5 +4554,5 @@ module_param_named(no_space_timeout, no_space_timeout_secs, uint, 0644);
 MODULE_PARM_DESC(no_space_timeout, "Out of data space queue IO timeout in seconds");
 
 MODULE_DESCRIPTION(DM_NAME " thin provisioning target");
-MODULE_AUTHOR("Joe Thornber <dm-devel@redhat.com>");
+MODULE_AUTHOR("Joe Thornber <dm-devel@lists.linux.dev>");
 MODULE_LICENSE("GPL");

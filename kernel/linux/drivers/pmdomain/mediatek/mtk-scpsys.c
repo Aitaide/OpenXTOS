@@ -425,7 +425,6 @@ static struct scp *init_scp(struct platform_device *pdev,
 			bool bus_prot_reg_update)
 {
 	struct genpd_onecell_data *pd_data;
-	struct resource *res;
 	int i, j;
 	struct scp *scp;
 	struct clk *clk[CLK_MAX];
@@ -441,8 +440,7 @@ static struct scp *init_scp(struct platform_device *pdev,
 
 	scp->dev = &pdev->dev;
 
-	res = platform_get_resource(pdev, IORESOURCE_MEM, 0);
-	scp->base = devm_ioremap_resource(&pdev->dev, res);
+	scp->base = devm_platform_ioremap_resource(pdev, 0);
 	if (IS_ERR(scp->base))
 		return ERR_CAST(scp->base);
 
@@ -869,6 +867,16 @@ static const struct scp_domain_data scp_domain_data_mt7622[] = {
 		.bus_prot_mask = MT7622_TOP_AXI_PROT_EN_WB,
 		.caps = MTK_SCPD_ACTIVE_WAKEUP | MTK_SCPD_FWAIT_SRAM,
 	},
+	[MT7622_POWER_DOMAIN_AUDIO] = {
+		.name = "audsys",
+		.sta_mask = PWR_STATUS_AUDIO,
+		.ctl_offs = SPM_AUDIO_PWR_CON,
+		.sram_pdn_bits = GENMASK(11, 8),
+		.sram_pdn_ack_bits = GENMASK(15, 12),
+		.clk_id = {CLK_NONE},
+		.bus_prot_mask = MT7622_TOP_AXI_PROT_EN_HIF1,
+		.caps = MTK_SCPD_ACTIVE_WAKEUP,
+	},
 };
 
 /*
@@ -1140,7 +1148,6 @@ static struct platform_driver scpsys_drv = {
 	.driver = {
 		.name = "mtk-scpsys",
 		.suppress_bind_attrs = true,
-		.owner = THIS_MODULE,
 		.of_match_table = of_scpsys_match_tbl,
 	},
 };

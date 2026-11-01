@@ -36,6 +36,7 @@
 #include <sound/core.h>
 #include <linux/dma-mapping.h>
 #include <linux/platform_device.h>
+#include <linux/string.h>
 #include <linux/timer.h>
 #include <linux/random.h>
 #include <linux/debugfs.h>
@@ -112,7 +113,7 @@ struct pcmtst_buf_iter {
 	struct timer_list timer_instance;
 };
 
-static struct snd_pcm_hardware snd_pcmtst_hw = {
+static struct snd_pcm_hardware snd_pcmtst_hw __ro_after_init = {
 	.info = (SNDRV_PCM_INFO_INTERLEAVED |
 		 SNDRV_PCM_INFO_BLOCK_TRANSFER |
 		 SNDRV_PCM_INFO_NONINTERLEAVED |
@@ -136,7 +137,7 @@ struct pattern_buf {
 	u32 len;
 };
 
-static int buf_allocated;
+static int buf_allocated __ro_after_init;
 static struct pattern_buf patt_bufs[MAX_CHANNELS_NUM];
 
 static inline void inc_buf_pos(struct pcmtst_buf_iter *v_iter, size_t by, size_t bytes)
@@ -345,7 +346,7 @@ static void timer_timeout(struct timer_list *data)
 	struct pcmtst_buf_iter *v_iter;
 	struct snd_pcm_substream *substream;
 
-	v_iter = from_timer(v_iter, data, timer_instance);
+	v_iter = timer_container_of(v_iter, data, timer_instance);
 	substream = v_iter->substream;
 
 	if (v_iter->suspend)
@@ -376,7 +377,7 @@ static int snd_pcmtst_pcm_open(struct snd_pcm_substream *substream)
 	if (inject_open_err)
 		return -EBUSY;
 
-	v_iter = kzalloc(sizeof(*v_iter), GFP_KERNEL);
+	v_iter = kzalloc_obj(*v_iter);
 	if (!v_iter)
 		return -ENOMEM;
 
@@ -397,7 +398,6 @@ static int snd_pcmtst_pcm_close(struct snd_pcm_substream *substream)
 	struct pcmtst_buf_iter *v_iter = substream->runtime->private_data;
 
 	timer_shutdown_sync(&v_iter->timer_instance);
-	v_iter->substream = NULL;
 	playback_capture_test = !v_iter->is_buf_corrupted;
 	kfree(v_iter);
 	return 0;
@@ -435,6 +435,7 @@ static int snd_pcmtst_pcm_trigger(struct snd_pcm_substream *substream, int cmd)
 	case SNDRV_PCM_TRIGGER_PAUSE_PUSH:
 		// We can't call timer_shutdown_sync here, as it is forbidden to sleep here
 		v_iter->suspend = true;
+		timer_delete(&v_iter->timer_instance);
 		break;
 	}
 
@@ -512,12 +513,22 @@ static int snd_pcmtst_ioctl(struct snd_pcm_substream *substream, unsigned int cm
 	return snd_pcm_lib_ioctl(substream, cmd, arg);
 }
 
+static int snd_pcmtst_sync_stop(struct snd_pcm_substream *substream)
+{
+	struct pcmtst_buf_iter *v_iter = substream->runtime->private_data;
+
+	timer_delete_sync(&v_iter->timer_instance);
+
+	return 0;
+}
+
 static const struct snd_pcm_ops snd_pcmtst_playback_ops = {
 	.open =		snd_pcmtst_pcm_open,
 	.close =	snd_pcmtst_pcm_close,
 	.trigger =	snd_pcmtst_pcm_trigger,
 	.hw_params =	snd_pcmtst_pcm_hw_params,
 	.ioctl =	snd_pcmtst_ioctl,
+	.sync_stop =	snd_pcmtst_sync_stop,
 	.hw_free =	snd_pcmtst_pcm_hw_free,
 	.prepare =	snd_pcmtst_pcm_prepare,
 	.pointer =	snd_pcmtst_pcm_pointer,
@@ -530,6 +541,7 @@ static const struct snd_pcm_ops snd_pcmtst_capture_ops = {
 	.hw_params =	snd_pcmtst_pcm_hw_params,
 	.hw_free =	snd_pcmtst_pcm_hw_free,
 	.ioctl =	snd_pcmtst_ioctl,
+	.sync_stop =	snd_pcmtst_sync_stop,
 	.prepare =	snd_pcmtst_pcm_prepare,
 	.pointer =	snd_pcmtst_pcm_pointer,
 };
@@ -544,7 +556,7 @@ static int snd_pcmtst_new_pcm(struct pcmtst *pcmtst)
 	if (err < 0)
 		return err;
 	pcm->private_data = pcmtst;
-	strcpy(pcm->name, "PCMTest");
+	strscpy(pcm->name, "PCMTest");
 	pcmtst->pcm = pcm;
 	snd_pcm_set_ops(pcm, SNDRV_PCM_STREAM_PLAYBACK, &snd_pcmtst_playback_ops);
 	snd_pcm_set_ops(pcm, SNDRV_PCM_STREAM_CAPTURE, &snd_pcmtst_capture_ops);
@@ -563,7 +575,7 @@ static int snd_pcmtst_create(struct snd_card *card, struct platform_device *pdev
 		.dev_free = snd_pcmtst_dev_free,
 	};
 
-	pcmtst = kzalloc(sizeof(*pcmtst), GFP_KERNEL);
+	pcmtst = kzalloc_obj(*pcmtst);
 	if (!pcmtst)
 		return -ENOMEM;
 	pcmtst->card = card;
@@ -602,9 +614,9 @@ static int pcmtst_probe(struct platform_device *pdev)
 	if (err < 0)
 		return err;
 
-	strcpy(card->driver, "PCM-TEST Driver");
-	strcpy(card->shortname, "PCM-Test");
-	strcpy(card->longname, "PCM-Test virtual driver");
+	strscpy(card->driver, "PCM-TEST Driver");
+	strscpy(card->shortname, "PCM-Test");
+	strscpy(card->longname, "PCM-Test virtual driver");
 
 	err = snd_card_register(card);
 	if (err < 0)
@@ -629,7 +641,7 @@ static struct platform_device pcmtst_pdev = {
 
 static struct platform_driver pcmtst_pdrv = {
 	.probe =	pcmtst_probe,
-	.remove_new =	pdev_remove,
+	.remove =	pdev_remove,
 	.driver =	{
 		.name = "pcmtest",
 	},
@@ -667,9 +679,9 @@ static ssize_t pattern_read(struct file *file, char __user *u_buff, size_t len, 
 		return 0;
 
 	if (copy_to_user(u_buff, patt_buf->buf + *off, to_read))
-		to_read = 0;
-	else
-		*off += to_read;
+		return -EFAULT;
+
+	*off += to_read;
 
 	return to_read;
 }
@@ -684,10 +696,10 @@ static int setup_patt_bufs(void)
 	size_t i;
 
 	for (i = 0; i < ARRAY_SIZE(patt_bufs); i++) {
-		patt_bufs[i].buf = kzalloc(MAX_PATTERN_LEN, GFP_KERNEL);
+		patt_bufs[i].buf = kmalloc(MAX_PATTERN_LEN, GFP_KERNEL);
 		if (!patt_bufs[i].buf)
 			break;
-		strcpy(patt_bufs[i].buf, DEFAULT_PATTERN);
+		strscpy_pad(patt_bufs[i].buf, DEFAULT_PATTERN, MAX_PATTERN_LEN);
 		patt_bufs[i].len = DEFAULT_PATTERN_LEN;
 	}
 
@@ -742,13 +754,22 @@ static int __init mod_init(void)
 
 	err = init_debug_files(buf_allocated);
 	if (err)
-		return err;
+		goto err_free_patterns;
 	err = platform_device_register(&pcmtst_pdev);
 	if (err)
-		return err;
+		goto err_clear_debug;
 	err = platform_driver_register(&pcmtst_pdrv);
-	if (err)
+	if (err) {
 		platform_device_unregister(&pcmtst_pdev);
+		goto err_clear_debug;
+	}
+
+	return 0;
+
+err_clear_debug:
+	clear_debug_files();
+err_free_patterns:
+	free_pattern_buffers();
 	return err;
 }
 
@@ -761,6 +782,7 @@ static void __exit mod_exit(void)
 	platform_device_unregister(&pcmtst_pdev);
 }
 
+MODULE_DESCRIPTION("Virtual ALSA driver for PCM testing/fuzzing");
 MODULE_LICENSE("GPL");
 MODULE_AUTHOR("Ivan Orlov");
 module_init(mod_init);

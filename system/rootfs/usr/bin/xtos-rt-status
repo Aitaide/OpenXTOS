@@ -1,0 +1,47 @@
+#!/bin/sh
+# SPDX-License-Identifier: Apache-2.0
+# Read-only diagnostic, not a latency test or production-readiness authority.
+# stdout: 1 (exit 0), 0 (exit 1), unknown (exit 2).
+PATH=/usr/sbin:/usr/bin:/sbin:/bin
+export PATH
+LC_ALL=C
+export LC_ALL
+root=
+version=
+if [ "$#" -ne 0 ]; then
+    if [ "$#" -ne 4 ] || [ "$1" != --fixture-root ] || [ "$3" != --uname-version ] || [ ! -d "$2" ]; then
+        printf 'usage: xtos-rt-status [--fixture-root DIR --uname-version VERSION]\n' >&2
+        printf 'unknown\n'
+        exit 2
+    fi
+    root=$2
+    version=$4
+    printf 'xtos-rt-status: fixture only; not live authority\n' >&2
+fi
+node=$root/sys/kernel/realtime
+if [ -e "$node" ] || [ -L "$node" ]; then
+    # Keep a sentinel so command substitution does not discard newlines.
+    # Byte count also rejects NULs discarded by some shells.
+    value=$(cat "$node" 2>/dev/null && printf '.') || { printf '0\n'; exit 1; }
+    size=$(wc -c <"$node" 2>/dev/null) || { printf '0\n'; exit 1; }
+    if { [ "$value" = '1.' ] && [ "$size" -eq 1 ]; } ||
+       { [ "$value" = '1
+.' ] && [ "$size" -eq 2 ]; }; then
+        printf '1\n'
+        exit 0
+    fi
+    printf '0\n'
+    exit 1
+fi
+# The config belongs to the running kernel, never /boot or a build tree.
+config=$(zcat "$root/proc/config.gz" 2>/dev/null) || { printf 'unknown\n'; exit 2; }
+if [ -z "$root" ]; then
+    version=$(uname -v) || { printf 'unknown\n'; exit 2; }
+fi
+if printf '%s\n' "$config" | grep -qx 'CONFIG_PREEMPT_RT=y' &&
+   printf '%s\n' "$version" | grep -Eq '(^|[[:space:]])PREEMPT_RT([[:space:]]|$)'; then
+    printf '1\n'
+    exit 0
+fi
+printf 'unknown\n'
+exit 2

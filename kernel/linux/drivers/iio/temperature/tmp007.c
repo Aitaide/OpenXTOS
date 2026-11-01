@@ -20,7 +20,6 @@
 #include <linux/module.h>
 #include <linux/pm.h>
 #include <linux/bitops.h>
-#include <linux/mod_devicetable.h>
 #include <linux/irq.h>
 #include <linux/interrupt.h>
 
@@ -216,7 +215,7 @@ static irqreturn_t tmp007_interrupt_handler(int irq, void *private)
 
 static int tmp007_write_event_config(struct iio_dev *indio_dev,
 		const struct iio_chan_spec *chan, enum iio_event_type type,
-		enum iio_event_direction dir, int state)
+		enum iio_event_direction dir, bool state)
 {
 	struct tmp007_data *data = iio_priv(indio_dev);
 	unsigned int status_mask;
@@ -528,10 +527,8 @@ static int tmp007_probe(struct i2c_client *client)
 				NULL, tmp007_interrupt_handler,
 				IRQF_TRIGGER_FALLING | IRQF_ONESHOT,
 				tmp007_id->name, indio_dev);
-		if (ret) {
-			dev_err(&client->dev, "irq request error %d\n", -ret);
+		if (ret)
 			return ret;
-		}
 	}
 
 	return devm_iio_device_register(&client->dev, indio_dev);
@@ -558,12 +555,12 @@ static DEFINE_SIMPLE_DEV_PM_OPS(tmp007_pm_ops, tmp007_suspend, tmp007_resume);
 
 static const struct of_device_id tmp007_of_match[] = {
 	{ .compatible = "ti,tmp007", },
-	{ },
+	{ }
 };
 MODULE_DEVICE_TABLE(of, tmp007_of_match);
 
 static const struct i2c_device_id tmp007_id[] = {
-	{ "tmp007", 0 },
+	{ .name = "tmp007" },
 	{ }
 };
 MODULE_DEVICE_TABLE(i2c, tmp007_id);

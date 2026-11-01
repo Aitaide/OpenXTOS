@@ -21,6 +21,7 @@
 #include <linux/ptp_clock_kernel.h>
 
 #include "dp83640_reg.h"
+#include "phylib.h"
 
 #define DP83640_PHY_ID	0x20005ce1
 #define PAGESEL		0x13
@@ -128,10 +129,6 @@ struct dp83640_private {
 };
 
 struct dp83640_clock {
-	/* keeps the instance in the 'phyter_clocks' list */
-	struct list_head list;
-	/* we create one clock instance per MII bus */
-	struct mii_bus *bus;
 	/* protects extended registers from concurrent access */
 	struct mutex extreg_lock;
 	/* remembers which page was last selected */
@@ -146,6 +143,8 @@ struct dp83640_clock {
 	struct list_head phylist;
 	/* reference to our PTP hardware clock */
 	struct ptp_clock *ptp_clock;
+	/* protected by the PTP core pin configuration lock */
+	struct ptp_pin_desc pin_config[DP83640_N_PINS];
 };
 
 /* globals */
@@ -205,10 +204,6 @@ static void dp83640_gpio_defaults(struct ptp_pin_desc *pd)
 		pd[index].chan = i - EXTTS0_GPIO;
 	}
 }
-
-/* a list of clocks and a mutex to protect it */
-static LIST_HEAD(phyter_clocks);
-static DEFINE_MUTEX(phyter_clocks_lock);
 
 static void rx_timestamp_work(struct work_struct *work);
 
@@ -478,13 +473,6 @@ static int ptp_dp83640_enable(struct ptp_clock_info *ptp,
 
 	switch (rq->type) {
 	case PTP_CLK_REQ_EXTTS:
-		/* Reject requests with unsupported flags */
-		if (rq->extts.flags & ~(PTP_ENABLE_FEATURE |
-					PTP_RISING_EDGE |
-					PTP_FALLING_EDGE |
-					PTP_STRICT_FLAGS))
-			return -EOPNOTSUPP;
-
 		/* Reject requests to enable time stamping on both edges. */
 		if ((rq->extts.flags & PTP_STRICT_FLAGS) &&
 		    (rq->extts.flags & PTP_ENABLE_FEATURE) &&
@@ -513,9 +501,6 @@ static int ptp_dp83640_enable(struct ptp_clock_info *ptp,
 		return 0;
 
 	case PTP_CLK_REQ_PEROUT:
-		/* Reject requests with unsupported flags */
-		if (rq->perout.flags)
-			return -EOPNOTSUPP;
 		if (rq->perout.index >= N_PER_OUT)
 			return -EINVAL;
 		return periodic_output(clock, rq, on, rq->perout.index);
@@ -963,37 +948,12 @@ static void decode_status_frame(struct dp83640_private *dp83640,
 	}
 }
 
-static void dp83640_free_clocks(void)
+static void dp83640_clock_init(struct dp83640_clock *clock)
 {
-	struct dp83640_clock *clock;
-	struct list_head *this, *next;
-
-	mutex_lock(&phyter_clocks_lock);
-
-	list_for_each_safe(this, next, &phyter_clocks) {
-		clock = list_entry(this, struct dp83640_clock, list);
-		if (!list_empty(&clock->phylist)) {
-			pr_warn("phy list non-empty while unloading\n");
-			BUG();
-		}
-		list_del(&clock->list);
-		mutex_destroy(&clock->extreg_lock);
-		mutex_destroy(&clock->clock_lock);
-		put_device(&clock->bus->dev);
-		kfree(clock->caps.pin_config);
-		kfree(clock);
-	}
-
-	mutex_unlock(&phyter_clocks_lock);
-}
-
-static void dp83640_clock_init(struct dp83640_clock *clock, struct mii_bus *bus)
-{
-	INIT_LIST_HEAD(&clock->list);
-	clock->bus = bus;
 	mutex_init(&clock->extreg_lock);
 	mutex_init(&clock->clock_lock);
 	INIT_LIST_HEAD(&clock->phylist);
+	clock->caps.pin_config = clock->pin_config;
 	clock->caps.owner = THIS_MODULE;
 	sprintf(clock->caps.name, "dp83640 timer");
 	clock->caps.max_adj	= 1953124;
@@ -1002,20 +962,17 @@ static void dp83640_clock_init(struct dp83640_clock *clock, struct mii_bus *bus)
 	clock->caps.n_per_out	= N_PER_OUT;
 	clock->caps.n_pins	= DP83640_N_PINS;
 	clock->caps.pps		= 0;
+	clock->caps.supported_extts_flags = PTP_RISING_EDGE |
+					    PTP_FALLING_EDGE |
+					    PTP_STRICT_FLAGS;
 	clock->caps.adjfine	= ptp_dp83640_adjfine;
 	clock->caps.adjtime	= ptp_dp83640_adjtime;
 	clock->caps.gettime64	= ptp_dp83640_gettime;
 	clock->caps.settime64	= ptp_dp83640_settime;
 	clock->caps.enable	= ptp_dp83640_enable;
 	clock->caps.verify	= ptp_dp83640_verify;
-	/*
-	 * Convert the module param defaults into a dynamic pin configuration.
-	 */
+	/* Initialize the runtime pin configuration from gpio_tab. */
 	dp83640_gpio_defaults(clock->caps.pin_config);
-	/*
-	 * Get a reference to this bus instance.
-	 */
-	get_device(&bus->dev);
 }
 
 static int choose_this_phy(struct dp83640_clock *clock,
@@ -1028,59 +985,6 @@ static int choose_this_phy(struct dp83640_clock *clock,
 		return 1;
 
 	return 0;
-}
-
-static struct dp83640_clock *dp83640_clock_get(struct dp83640_clock *clock)
-{
-	if (clock)
-		mutex_lock(&clock->clock_lock);
-	return clock;
-}
-
-/*
- * Look up and lock a clock by bus instance.
- * If there is no clock for this bus, then create it first.
- */
-static struct dp83640_clock *dp83640_clock_get_bus(struct mii_bus *bus)
-{
-	struct dp83640_clock *clock = NULL, *tmp;
-	struct list_head *this;
-
-	mutex_lock(&phyter_clocks_lock);
-
-	list_for_each(this, &phyter_clocks) {
-		tmp = list_entry(this, struct dp83640_clock, list);
-		if (tmp->bus == bus) {
-			clock = tmp;
-			break;
-		}
-	}
-	if (clock)
-		goto out;
-
-	clock = kzalloc(sizeof(struct dp83640_clock), GFP_KERNEL);
-	if (!clock)
-		goto out;
-
-	clock->caps.pin_config = kcalloc(DP83640_N_PINS,
-					 sizeof(struct ptp_pin_desc),
-					 GFP_KERNEL);
-	if (!clock->caps.pin_config) {
-		kfree(clock);
-		clock = NULL;
-		goto out;
-	}
-	dp83640_clock_init(clock, bus);
-	list_add_tail(&clock->list, &phyter_clocks);
-out:
-	mutex_unlock(&phyter_clocks_lock);
-
-	return dp83640_clock_get(clock);
-}
-
-static void dp83640_clock_put(struct dp83640_clock *clock)
-{
-	mutex_unlock(&clock->clock_lock);
 }
 
 static int dp83640_soft_reset(struct phy_device *phydev)
@@ -1207,22 +1111,32 @@ static irqreturn_t dp83640_handle_interrupt(struct phy_device *phydev)
 	return IRQ_HANDLED;
 }
 
-static int dp83640_hwtstamp(struct mii_timestamper *mii_ts, struct ifreq *ifr)
+static int dp83640_hwtstamp_get(struct mii_timestamper *mii_ts,
+				struct kernel_hwtstamp_config *cfg)
 {
 	struct dp83640_private *dp83640 =
 		container_of(mii_ts, struct dp83640_private, mii_ts);
-	struct hwtstamp_config cfg;
+
+	cfg->rx_filter = dp83640->hwts_rx_en;
+	cfg->tx_type = dp83640->hwts_tx_en;
+
+	return 0;
+}
+
+static int dp83640_hwtstamp_set(struct mii_timestamper *mii_ts,
+				struct kernel_hwtstamp_config *cfg,
+				struct netlink_ext_ack *extack)
+{
+	struct dp83640_private *dp83640 =
+		container_of(mii_ts, struct dp83640_private, mii_ts);
 	u16 txcfg0, rxcfg0;
 
-	if (copy_from_user(&cfg, ifr->ifr_data, sizeof(cfg)))
-		return -EFAULT;
-
-	if (cfg.tx_type < 0 || cfg.tx_type > HWTSTAMP_TX_ONESTEP_SYNC)
+	if (cfg->tx_type < 0 || cfg->tx_type > HWTSTAMP_TX_ONESTEP_SYNC)
 		return -ERANGE;
 
-	dp83640->hwts_tx_en = cfg.tx_type;
+	dp83640->hwts_tx_en = cfg->tx_type;
 
-	switch (cfg.rx_filter) {
+	switch (cfg->rx_filter) {
 	case HWTSTAMP_FILTER_NONE:
 		dp83640->hwts_rx_en = 0;
 		dp83640->layer = 0;
@@ -1231,34 +1145,34 @@ static int dp83640_hwtstamp(struct mii_timestamper *mii_ts, struct ifreq *ifr)
 	case HWTSTAMP_FILTER_PTP_V1_L4_EVENT:
 	case HWTSTAMP_FILTER_PTP_V1_L4_SYNC:
 	case HWTSTAMP_FILTER_PTP_V1_L4_DELAY_REQ:
-		dp83640->hwts_rx_en = 1;
+		dp83640->hwts_rx_en = HWTSTAMP_FILTER_PTP_V1_L4_EVENT;
 		dp83640->layer = PTP_CLASS_L4;
 		dp83640->version = PTP_CLASS_V1;
-		cfg.rx_filter = HWTSTAMP_FILTER_PTP_V1_L4_EVENT;
+		cfg->rx_filter = HWTSTAMP_FILTER_PTP_V1_L4_EVENT;
 		break;
 	case HWTSTAMP_FILTER_PTP_V2_L4_EVENT:
 	case HWTSTAMP_FILTER_PTP_V2_L4_SYNC:
 	case HWTSTAMP_FILTER_PTP_V2_L4_DELAY_REQ:
-		dp83640->hwts_rx_en = 1;
+		dp83640->hwts_rx_en = HWTSTAMP_FILTER_PTP_V2_L4_EVENT;
 		dp83640->layer = PTP_CLASS_L4;
 		dp83640->version = PTP_CLASS_V2;
-		cfg.rx_filter = HWTSTAMP_FILTER_PTP_V2_L4_EVENT;
+		cfg->rx_filter = HWTSTAMP_FILTER_PTP_V2_L4_EVENT;
 		break;
 	case HWTSTAMP_FILTER_PTP_V2_L2_EVENT:
 	case HWTSTAMP_FILTER_PTP_V2_L2_SYNC:
 	case HWTSTAMP_FILTER_PTP_V2_L2_DELAY_REQ:
-		dp83640->hwts_rx_en = 1;
+		dp83640->hwts_rx_en = HWTSTAMP_FILTER_PTP_V2_L2_EVENT;
 		dp83640->layer = PTP_CLASS_L2;
 		dp83640->version = PTP_CLASS_V2;
-		cfg.rx_filter = HWTSTAMP_FILTER_PTP_V2_L2_EVENT;
+		cfg->rx_filter = HWTSTAMP_FILTER_PTP_V2_L2_EVENT;
 		break;
 	case HWTSTAMP_FILTER_PTP_V2_EVENT:
 	case HWTSTAMP_FILTER_PTP_V2_SYNC:
 	case HWTSTAMP_FILTER_PTP_V2_DELAY_REQ:
-		dp83640->hwts_rx_en = 1;
+		dp83640->hwts_rx_en = HWTSTAMP_FILTER_PTP_V2_EVENT;
 		dp83640->layer = PTP_CLASS_L4 | PTP_CLASS_L2;
 		dp83640->version = PTP_CLASS_V2;
-		cfg.rx_filter = HWTSTAMP_FILTER_PTP_V2_EVENT;
+		cfg->rx_filter = HWTSTAMP_FILTER_PTP_V2_EVENT;
 		break;
 	default:
 		return -ERANGE;
@@ -1292,7 +1206,7 @@ static int dp83640_hwtstamp(struct mii_timestamper *mii_ts, struct ifreq *ifr)
 
 	mutex_unlock(&dp83640->clock->extreg_lock);
 
-	return copy_to_user(ifr->ifr_data, &cfg, sizeof(cfg)) ? -EFAULT : 0;
+	return 0;
 }
 
 static void rx_timestamp_work(struct work_struct *work)
@@ -1397,7 +1311,7 @@ static void dp83640_txtstamp(struct mii_timestamper *mii_ts,
 }
 
 static int dp83640_ts_info(struct mii_timestamper *mii_ts,
-			   struct ethtool_ts_info *info)
+			   struct kernel_ethtool_ts_info *info)
 {
 	struct dp83640_private *dp83640 =
 		container_of(mii_ts, struct dp83640_private, mii_ts);
@@ -1422,25 +1336,37 @@ static int dp83640_ts_info(struct mii_timestamper *mii_ts,
 
 static int dp83640_probe(struct phy_device *phydev)
 {
-	struct dp83640_clock *clock;
 	struct dp83640_private *dp83640;
-	int err = -ENOMEM, i;
+	struct dp83640_clock *clock;
+	int err, i;
 
 	if (phydev->mdio.addr == BROADCAST_ADDR)
 		return 0;
 
-	clock = dp83640_clock_get_bus(phydev->mdio.bus);
-	if (!clock)
-		goto no_clock;
+	err = phy_package_join(phydev, BROADCAST_ADDR, sizeof(*clock));
+	if (err)
+		return err;
 
-	dp83640 = kzalloc(sizeof(struct dp83640_private), GFP_KERNEL);
-	if (!dp83640)
+	clock = phy_package_get_priv(phydev);
+	/* Ensure other PHY probes wait for shared clock initialization. */
+	phy_package_lock(phydev);
+	if (phy_package_probe_once(phydev))
+		dp83640_clock_init(clock);
+	phy_package_unlock(phydev);
+
+	mutex_lock(&clock->clock_lock);
+
+	dp83640 = kzalloc_obj(struct dp83640_private);
+	if (!dp83640) {
+		err = -ENOMEM;
 		goto no_memory;
+	}
 
 	dp83640->phydev = phydev;
 	dp83640->mii_ts.rxtstamp = dp83640_rxtstamp;
 	dp83640->mii_ts.txtstamp = dp83640_txtstamp;
-	dp83640->mii_ts.hwtstamp = dp83640_hwtstamp;
+	dp83640->mii_ts.hwtstamp_set = dp83640_hwtstamp_set;
+	dp83640->mii_ts.hwtstamp_get = dp83640_hwtstamp_get;
 	dp83640->mii_ts.ts_info  = dp83640_ts_info;
 
 	INIT_DELAYED_WORK(&dp83640->ts_work, rx_timestamp_work);
@@ -1449,6 +1375,8 @@ static int dp83640_probe(struct phy_device *phydev)
 	for (i = 0; i < MAX_RXTS; i++)
 		list_add(&dp83640->rx_pool_data[i].list, &dp83640->rxpool);
 
+	/* Timestamp selected by default to keep legacy API */
+	phydev->default_timestamp = true;
 	phydev->mii_ts = &dp83640->mii_ts;
 	phydev->priv = dp83640;
 
@@ -1469,15 +1397,20 @@ static int dp83640_probe(struct phy_device *phydev)
 	} else
 		list_add_tail(&dp83640->list, &clock->phylist);
 
-	dp83640_clock_put(clock);
+	mutex_unlock(&clock->clock_lock);
+
 	return 0;
 
 no_register:
 	clock->chosen = NULL;
+	clock->ptp_clock = NULL;
+	phydev->default_timestamp = false;
+	phydev->mii_ts = NULL;
+	phydev->priv = NULL;
 	kfree(dp83640);
 no_memory:
-	dp83640_clock_put(clock);
-no_clock:
+	mutex_unlock(&clock->clock_lock);
+	phy_package_leave(phydev);
 	return err;
 }
 
@@ -1498,7 +1431,8 @@ static void dp83640_remove(struct phy_device *phydev)
 	skb_queue_purge(&dp83640->rx_queue);
 	skb_queue_purge(&dp83640->tx_queue);
 
-	clock = dp83640_clock_get(dp83640->clock);
+	clock = dp83640->clock;
+	mutex_lock(&clock->clock_lock);
 
 	if (dp83640 == clock->chosen) {
 		ptp_clock_unregister(clock->ptp_clock);
@@ -1513,11 +1447,14 @@ static void dp83640_remove(struct phy_device *phydev)
 		}
 	}
 
-	dp83640_clock_put(clock);
+	mutex_unlock(&clock->clock_lock);
 	kfree(dp83640);
+
+	phy_package_leave(phydev);
 }
 
-static struct phy_driver dp83640_driver = {
+static struct phy_driver dp83640_driver[] = {
+{
 	.phy_id		= DP83640_PHY_ID,
 	.phy_id_mask	= 0xfffffff0,
 	.name		= "NatSemi DP83640",
@@ -1528,27 +1465,16 @@ static struct phy_driver dp83640_driver = {
 	.config_init	= dp83640_config_init,
 	.config_intr    = dp83640_config_intr,
 	.handle_interrupt = dp83640_handle_interrupt,
+},
 };
 
-static int __init dp83640_init(void)
-{
-	return phy_driver_register(&dp83640_driver, THIS_MODULE);
-}
-
-static void __exit dp83640_exit(void)
-{
-	dp83640_free_clocks();
-	phy_driver_unregister(&dp83640_driver);
-}
+module_phy_driver(dp83640_driver);
 
 MODULE_DESCRIPTION("National Semiconductor DP83640 PHY driver");
 MODULE_AUTHOR("Richard Cochran <richardcochran@gmail.com>");
 MODULE_LICENSE("GPL");
 
-module_init(dp83640_init);
-module_exit(dp83640_exit);
-
-static struct mdio_device_id __maybe_unused dp83640_tbl[] = {
+static const struct mdio_device_id __maybe_unused dp83640_tbl[] = {
 	{ DP83640_PHY_ID, 0xfffffff0 },
 	{ }
 };

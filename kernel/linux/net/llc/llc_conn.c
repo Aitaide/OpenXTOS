@@ -1,15 +1,9 @@
+// SPDX-License-Identifier: GPL-2.0
 /*
  * llc_conn.c - Driver routines for connection component.
  *
  * Copyright (c) 1997 by Procom Technology, Inc.
  *		 2001-2003 by Arnaldo Carvalho de Melo <acme@conectiva.com.br>
- *
- * This program can be redistributed or modified under the terms of the
- * GNU General Public License as published by the Free Software Foundation.
- * This program is distributed without any warranty or implied warranty
- * of merchantability or fitness for a particular purpose.
- *
- * See the GNU General Public License for more details.
  */
 
 #include <linux/init.h>
@@ -34,10 +28,10 @@ static int llc_find_offset(int state, int ev_type);
 static void llc_conn_send_pdus(struct sock *sk);
 static int llc_conn_service(struct sock *sk, struct sk_buff *skb);
 static int llc_exec_conn_trans_actions(struct sock *sk,
-				       struct llc_conn_state_trans *trans,
+				       const struct llc_conn_state_trans *trans,
 				       struct sk_buff *ev);
-static struct llc_conn_state_trans *llc_qualify_conn_ev(struct sock *sk,
-							struct sk_buff *skb);
+static const struct llc_conn_state_trans *llc_qualify_conn_ev(struct sock *sk,
+							      struct sk_buff *skb);
 
 /* Offset table on connection states transition diagram */
 static int llc_offset_table[NBR_CONN_STATES][NBR_CONN_EV];
@@ -356,9 +350,9 @@ static void llc_conn_send_pdus(struct sock *sk)
  */
 static int llc_conn_service(struct sock *sk, struct sk_buff *skb)
 {
-	int rc = 1;
+	const struct llc_conn_state_trans *trans;
 	struct llc_sock *llc = llc_sk(sk);
-	struct llc_conn_state_trans *trans;
+	int rc = 1;
 
 	if (llc->state > NBR_CONN_STATES)
 		goto out;
@@ -384,10 +378,10 @@ out:
  *	This function finds transition that matches with happened event.
  *	Returns pointer to found transition on success, %NULL otherwise.
  */
-static struct llc_conn_state_trans *llc_qualify_conn_ev(struct sock *sk,
-							struct sk_buff *skb)
+static const struct llc_conn_state_trans *llc_qualify_conn_ev(struct sock *sk,
+							      struct sk_buff *skb)
 {
-	struct llc_conn_state_trans **next_trans;
+	const struct llc_conn_state_trans **next_trans;
 	const llc_conn_ev_qfyr_t *next_qualifier;
 	struct llc_conn_state_ev *ev = llc_conn_ev(skb);
 	struct llc_sock *llc = llc_sk(sk);
@@ -432,7 +426,7 @@ static struct llc_conn_state_trans *llc_qualify_conn_ev(struct sock *sk,
  *	success, 1 to indicate failure of at least one action.
  */
 static int llc_exec_conn_trans_actions(struct sock *sk,
-				       struct llc_conn_state_trans *trans,
+				       const struct llc_conn_state_trans *trans,
 				       struct sk_buff *skb)
 {
 	int rc = 0;
@@ -635,8 +629,8 @@ u8 llc_data_accept_state(u8 state)
  */
 static u16 __init llc_find_next_offset(struct llc_conn_state *state, u16 offset)
 {
+	const struct llc_conn_state_trans **next_trans;
 	u16 cnt = 0;
-	struct llc_conn_state_trans **next_trans;
 
 	for (next_trans = state->transitions + offset;
 	     (*next_trans)->ev; next_trans++)
@@ -773,7 +767,6 @@ static struct sock *llc_create_incoming_sock(struct sock *sk,
 	newllc->dev = dev;
 	dev_hold(dev);
 	llc_sap_add_socket(llc->sap, newsk);
-	llc_sap_hold(llc->sap);
 out:
 	return newsk;
 }
@@ -949,15 +942,15 @@ void llc_sk_stop_all_timers(struct sock *sk, bool sync)
 	struct llc_sock *llc = llc_sk(sk);
 
 	if (sync) {
-		del_timer_sync(&llc->pf_cycle_timer.timer);
-		del_timer_sync(&llc->ack_timer.timer);
-		del_timer_sync(&llc->rej_sent_timer.timer);
-		del_timer_sync(&llc->busy_state_timer.timer);
+		timer_delete_sync(&llc->pf_cycle_timer.timer);
+		timer_delete_sync(&llc->ack_timer.timer);
+		timer_delete_sync(&llc->rej_sent_timer.timer);
+		timer_delete_sync(&llc->busy_state_timer.timer);
 	} else {
-		del_timer(&llc->pf_cycle_timer.timer);
-		del_timer(&llc->ack_timer.timer);
-		del_timer(&llc->rej_sent_timer.timer);
-		del_timer(&llc->busy_state_timer.timer);
+		timer_delete(&llc->pf_cycle_timer.timer);
+		timer_delete(&llc->ack_timer.timer);
+		timer_delete(&llc->rej_sent_timer.timer);
+		timer_delete(&llc->busy_state_timer.timer);
 	}
 
 	llc->ack_must_be_send = 0;

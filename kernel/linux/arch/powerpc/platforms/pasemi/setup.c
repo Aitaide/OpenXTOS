@@ -64,7 +64,7 @@ static void __noreturn pas_restart(char *cmd)
 }
 
 #ifdef CONFIG_PPC_PASEMI_NEMO
-void pas_shutdown(void)
+static void pas_shutdown(void)
 {
 	/* Set the PLD bit that makes the SB600 think the power button is being pressed */
 	void __iomem *pld_map = ioremap(0xf5000000,4096);
@@ -165,6 +165,8 @@ static int __init pas_setup_mce_regs(void)
 	while (dev && reg < MAX_MCE_REGS) {
 		mce_regs[reg].name = kasprintf(GFP_KERNEL,
 						"mc%d_mcdebug_errsta", reg);
+		if (!mce_regs[reg].name)
+			return -ENOMEM;
 		mce_regs[reg].addr = pasemi_pci_getcfgaddr(dev, 0x730);
 		dev = pci_get_device(PCI_VENDOR_ID_PASEMI, 0xa00a, dev);
 		reg++;
@@ -228,7 +230,7 @@ static void __init nemo_init_IRQ(struct mpic *mpic)
 	irq_set_chained_handler(gpio_virq, sb600_8259_cascade);
 	mpic_unmask_irq(irq_get_irq_data(gpio_virq));
 
-	irq_set_default_host(mpic->irqhost);
+	irq_set_default_domain(mpic->irqhost);
 }
 
 #else

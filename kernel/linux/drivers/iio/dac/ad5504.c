@@ -5,21 +5,21 @@
  * Copyright 2011 Analog Devices Inc.
  */
 
-#include <linux/interrupt.h>
-#include <linux/fs.h>
-#include <linux/device.h>
-#include <linux/kernel.h>
-#include <linux/spi/spi.h>
-#include <linux/slab.h>
-#include <linux/sysfs.h>
-#include <linux/regulator/consumer.h>
-#include <linux/module.h>
 #include <linux/bitops.h>
+#include <linux/device.h>
+#include <linux/fs.h>
+#include <linux/interrupt.h>
+#include <linux/kernel.h>
+#include <linux/module.h>
+#include <linux/regulator/consumer.h>
+#include <linux/slab.h>
+#include <linux/spi/spi.h>
+#include <linux/sysfs.h>
 
+#include <linux/iio/dac/ad5504.h>
+#include <linux/iio/events.h>
 #include <linux/iio/iio.h>
 #include <linux/iio/sysfs.h>
-#include <linux/iio/events.h>
-#include <linux/iio/dac/ad5504.h>
 
 #define AD5504_RES_MASK			GENMASK(11, 0)
 #define AD5504_CMD_READ			BIT(15)
@@ -242,7 +242,7 @@ static const struct iio_chan_spec_ext_info ad5504_ext_info[] = {
 	IIO_ENUM("powerdown_mode", IIO_SHARED_BY_TYPE,
 		 &ad5504_powerdown_mode_enum),
 	IIO_ENUM_AVAILABLE("powerdown_mode", IIO_SHARED_BY_TYPE, &ad5504_powerdown_mode_enum),
-	{ },
+	{ }
 };
 
 #define AD5504_CHANNEL(_chan) { \
@@ -270,38 +270,30 @@ static const struct iio_chan_spec ad5504_channels[] = {
 
 static int ad5504_probe(struct spi_device *spi)
 {
-	struct ad5504_platform_data *pdata = spi->dev.platform_data;
+	struct device *dev = &spi->dev;
+	const struct ad5504_platform_data *pdata = dev_get_platdata(dev);
 	struct iio_dev *indio_dev;
 	struct ad5504_state *st;
-	struct regulator *reg;
-	int ret, voltage_uv = 0;
+	int ret;
 
-	indio_dev = devm_iio_device_alloc(&spi->dev, sizeof(*st));
+	indio_dev = devm_iio_device_alloc(dev, sizeof(*st));
 	if (!indio_dev)
 		return -ENOMEM;
-	reg = devm_regulator_get(&spi->dev, "vcc");
-	if (!IS_ERR(reg)) {
-		ret = regulator_enable(reg);
-		if (ret)
-			return ret;
 
-		ret = regulator_get_voltage(reg);
-		if (ret < 0)
-			goto error_disable_reg;
+	st = iio_priv(indio_dev);
 
-		voltage_uv = ret;
+	ret = devm_regulator_get_enable_read_voltage(dev, "vcc");
+	if (ret < 0 && ret != -ENODEV)
+		return ret;
+	if (ret == -ENODEV) {
+		if (pdata->vref_mv)
+			st->vref_mv = pdata->vref_mv;
+		else
+			dev_warn(dev, "reference voltage unspecified\n");
+	} else {
+		st->vref_mv = ret / 1000;
 	}
 
-	spi_set_drvdata(spi, indio_dev);
-	st = iio_priv(indio_dev);
-	if (voltage_uv)
-		st->vref_mv = voltage_uv / 1000;
-	else if (pdata)
-		st->vref_mv = pdata->vref_mv;
-	else
-		dev_warn(&spi->dev, "reference voltage unspecified\n");
-
-	st->reg = reg;
 	st->spi = spi;
 	indio_dev->name = spi_get_device_id(st->spi)->name;
 	indio_dev->info = &ad5504_info;
@@ -313,44 +305,23 @@ static int ad5504_probe(struct spi_device *spi)
 	indio_dev->modes = INDIO_DIRECT_MODE;
 
 	if (spi->irq) {
-		ret = devm_request_threaded_irq(&spi->dev, spi->irq,
-					   NULL,
-					   &ad5504_event_handler,
-					   IRQF_TRIGGER_FALLING | IRQF_ONESHOT,
-					   spi_get_device_id(st->spi)->name,
-					   indio_dev);
+		ret = devm_request_threaded_irq(dev, spi->irq,
+						NULL,
+						&ad5504_event_handler,
+						IRQF_TRIGGER_FALLING | IRQF_ONESHOT,
+						spi_get_device_id(st->spi)->name,
+						indio_dev);
 		if (ret)
-			goto error_disable_reg;
+			return ret;
 	}
 
-	ret = iio_device_register(indio_dev);
-	if (ret)
-		goto error_disable_reg;
-
-	return 0;
-
-error_disable_reg:
-	if (!IS_ERR(reg))
-		regulator_disable(reg);
-
-	return ret;
-}
-
-static void ad5504_remove(struct spi_device *spi)
-{
-	struct iio_dev *indio_dev = spi_get_drvdata(spi);
-	struct ad5504_state *st = iio_priv(indio_dev);
-
-	iio_device_unregister(indio_dev);
-
-	if (!IS_ERR(st->reg))
-		regulator_disable(st->reg);
+	return devm_iio_device_register(dev, indio_dev);
 }
 
 static const struct spi_device_id ad5504_id[] = {
-	{"ad5504", ID_AD5504},
-	{"ad5501", ID_AD5501},
-	{}
+	{ .name = "ad5504", .driver_data = ID_AD5504 },
+	{ .name = "ad5501", .driver_data = ID_AD5501 },
+	{ }
 };
 MODULE_DEVICE_TABLE(spi, ad5504_id);
 
@@ -359,7 +330,6 @@ static struct spi_driver ad5504_driver = {
 		   .name = "ad5504",
 		   },
 	.probe = ad5504_probe,
-	.remove = ad5504_remove,
 	.id_table = ad5504_id,
 };
 module_spi_driver(ad5504_driver);

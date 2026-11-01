@@ -95,7 +95,7 @@ static union axis_conversion lis3lv02d_axis_map =
 #ifdef CONFIG_OF
 static const struct of_device_id lis3lv02d_i2c_dt_ids[] = {
 	{ .compatible = "st,lis3lv02d" },
-	{}
+	{ }
 };
 MODULE_DEVICE_TABLE(of, lis3lv02d_i2c_dt_ids);
 #endif
@@ -150,6 +150,7 @@ static int lis3lv02d_i2c_probe(struct i2c_client *client)
 	lis3_dev.init	  = lis3_i2c_init;
 	lis3_dev.read	  = lis3_i2c_read;
 	lis3_dev.write	  = lis3_i2c_write;
+	lis3_dev.reg_ctrl = lis3_reg_ctrl;
 	lis3_dev.irq	  = client->irq;
 	lis3_dev.ac	  = lis3lv02d_axis_map;
 	lis3_dev.pm_dev	  = &client->dev;
@@ -197,8 +198,14 @@ static int lis3lv02d_i2c_suspend(struct device *dev)
 	struct i2c_client *client = to_i2c_client(dev);
 	struct lis3lv02d *lis3 = i2c_get_clientdata(client);
 
-	if (!lis3->pdata || !lis3->pdata->wakeup_flags)
+	/* Turn on for wakeup if turned off by runtime suspend */
+	if (lis3->pdata && lis3->pdata->wakeup_flags) {
+		if (pm_runtime_suspended(dev))
+			lis3lv02d_poweron(lis3);
+	/* For non wakeup turn off if not already turned off by runtime suspend */
+	} else if (!pm_runtime_suspended(dev))
 		lis3lv02d_poweroff(lis3);
+
 	return 0;
 }
 
@@ -207,13 +214,12 @@ static int lis3lv02d_i2c_resume(struct device *dev)
 	struct i2c_client *client = to_i2c_client(dev);
 	struct lis3lv02d *lis3 = i2c_get_clientdata(client);
 
-	/*
-	 * pm_runtime documentation says that devices should always
-	 * be powered on at resume. Pm_runtime turns them off after system
-	 * wide resume is complete.
-	 */
-	if (!lis3->pdata || !lis3->pdata->wakeup_flags ||
-		pm_runtime_suspended(dev))
+	/* Turn back off if turned on for wakeup and runtime suspended*/
+	if (lis3->pdata && lis3->pdata->wakeup_flags) {
+		if (pm_runtime_suspended(dev))
+			lis3lv02d_poweroff(lis3);
+	/* For non wakeup turn back on if not runtime suspended */
+	} else if (!pm_runtime_suspended(dev))
 		lis3lv02d_poweron(lis3);
 
 	return 0;
@@ -241,9 +247,9 @@ static int lis3_i2c_runtime_resume(struct device *dev)
 #endif /* CONFIG_PM */
 
 static const struct i2c_device_id lis3lv02d_id[] = {
-	{"lis3lv02d", LIS3LV02D},
-	{"lis331dlh", LIS331DLH},
-	{}
+	{ .name = "lis3lv02d", .driver_data = LIS3LV02D },
+	{ .name = "lis331dlh", .driver_data = LIS331DLH },
+	{ }
 };
 
 MODULE_DEVICE_TABLE(i2c, lis3lv02d_id);

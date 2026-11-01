@@ -40,7 +40,6 @@ static void register_algs(struct caam_drv_private_jr *jrpriv,
 	caam_algapi_hash_init(dev);
 	caam_pkc_init(dev);
 	jrpriv->hwrng = !caam_rng_init(dev);
-	caam_prng_register(dev);
 	caam_qi_algapi_init(dev);
 
 algs_unlock:
@@ -55,7 +54,6 @@ static void unregister_algs(void)
 		goto algs_unlock;
 
 	caam_qi_algapi_exit();
-	caam_prng_unregister(NULL);
 	caam_pkc_exit();
 	caam_algapi_hash_exit();
 	caam_algapi_exit();
@@ -180,7 +178,7 @@ static int caam_jr_shutdown(struct device *dev)
 	return ret;
 }
 
-static int caam_jr_remove(struct platform_device *pdev)
+static void caam_jr_remove(struct platform_device *pdev)
 {
 	int ret;
 	struct device *jrdev;
@@ -193,11 +191,14 @@ static int caam_jr_remove(struct platform_device *pdev)
 		caam_rng_exit(jrdev->parent);
 
 	/*
-	 * Return EBUSY if job ring already allocated.
+	 * If a job ring is still allocated there is trouble ahead. Once
+	 * caam_jr_remove() returned, jrpriv will be freed and the registers
+	 * will get unmapped. So any user of such a job ring will probably
+	 * crash.
 	 */
 	if (atomic_read(&jrpriv->tfm_count)) {
-		dev_err(jrdev, "Device is busy\n");
-		return -EBUSY;
+		dev_alert(jrdev, "Device is busy; consumers might start to crash\n");
+		return;
 	}
 
 	/* Unregister JR-based RNG & crypto algorithms */
@@ -212,13 +213,6 @@ static int caam_jr_remove(struct platform_device *pdev)
 	ret = caam_jr_shutdown(jrdev);
 	if (ret)
 		dev_err(jrdev, "Failed to shut down job ring\n");
-
-	return ret;
-}
-
-static void caam_jr_platform_shutdown(struct platform_device *pdev)
-{
-	caam_jr_remove(pdev);
 }
 
 /* Main per-ring interrupt handler */
@@ -580,23 +574,42 @@ static int caam_jr_init(struct device *dev)
 	return error;
 }
 
-static void caam_jr_irq_dispose_mapping(void *data)
-{
-	irq_dispose_mapping((unsigned long)data);
-}
-
 /*
  * Probe routine for each detected JobR subsystem.
  */
 static int caam_jr_probe(struct platform_device *pdev)
 {
 	struct device *jrdev;
-	struct device_node *nprop;
-	struct caam_job_ring __iomem *ctrl;
 	struct caam_drv_private_jr *jrpriv;
 	static int total_jobrs;
+	void __iomem *ctrl;
 	struct resource *r;
 	int error;
+	int irq;
+
+	/*
+	 * The job rings live inside the register window of their parent
+	 * fsl,sec-v4.0 node, which caam_probe() already reserves (and maps)
+	 * via devm_of_iomap().  A requested region that overlaps that
+	 * reservation, e.g. from devm_platform_ioremap_resource(), would
+	 * therefore fail with -EBUSY, so map the registers without claiming
+	 * the region here.
+	 */
+	r = platform_get_resource(pdev, IORESOURCE_MEM, 0);
+	if (!r) {
+		dev_err(&pdev->dev, "platform_get_resource() failed\n");
+		return -EINVAL;
+	}
+
+	ctrl = devm_ioremap(&pdev->dev, r->start, resource_size(r));
+	if (!ctrl) {
+		dev_err(&pdev->dev, "devm_ioremap() failed\n");
+		return -ENOMEM;
+	}
+
+	irq = platform_get_irq(pdev, 0);
+	if (irq < 0)
+		return irq;
 
 	jrdev = &pdev->dev;
 	jrpriv = devm_kzalloc(jrdev, sizeof(*jrpriv), GFP_KERNEL);
@@ -608,22 +621,7 @@ static int caam_jr_probe(struct platform_device *pdev)
 	/* save ring identity relative to detection */
 	jrpriv->ridx = total_jobrs++;
 
-	nprop = pdev->dev.of_node;
-	/* Get configuration properties from device tree */
-	/* First, get register page */
-	r = platform_get_resource(pdev, IORESOURCE_MEM, 0);
-	if (!r) {
-		dev_err(jrdev, "platform_get_resource() failed\n");
-		return -ENOMEM;
-	}
-
-	ctrl = devm_ioremap(jrdev, r->start, resource_size(r));
-	if (!ctrl) {
-		dev_err(jrdev, "devm_ioremap() failed\n");
-		return -ENOMEM;
-	}
-
-	jrpriv->rregs = (struct caam_job_ring __iomem __force *)ctrl;
+	jrpriv->rregs = ctrl;
 
 	error = dma_set_mask_and_coherent(jrdev, caam_get_dma_mask(jrdev));
 	if (error) {
@@ -633,8 +631,7 @@ static int caam_jr_probe(struct platform_device *pdev)
 	}
 
 	/* Initialize crypto engine */
-	jrpriv->engine = crypto_engine_alloc_init_and_set(jrdev, true, NULL,
-							  false,
+	jrpriv->engine = crypto_engine_alloc_init_and_set(jrdev, true, false,
 							  CRYPTO_ENGINE_MAX_QLEN);
 	if (!jrpriv->engine) {
 		dev_err(jrdev, "Could not init crypto-engine\n");
@@ -654,16 +651,7 @@ static int caam_jr_probe(struct platform_device *pdev)
 	}
 
 	/* Identify the interrupt */
-	jrpriv->irq = irq_of_parse_and_map(nprop, 0);
-	if (!jrpriv->irq) {
-		dev_err(jrdev, "irq_of_parse_and_map failed\n");
-		return -EINVAL;
-	}
-
-	error = devm_add_action_or_reset(jrdev, caam_jr_irq_dispose_mapping,
-					 (void *)(unsigned long)jrpriv->irq);
-	if (error)
-		return error;
+	jrpriv->irq = irq;
 
 	/* Now do the platform independent part */
 	error = caam_jr_init(jrdev); /* now turn on hardware */
@@ -824,7 +812,7 @@ static struct platform_driver caam_jr_driver = {
 	},
 	.probe       = caam_jr_probe,
 	.remove      = caam_jr_remove,
-	.shutdown    = caam_jr_platform_shutdown,
+	.shutdown    = caam_jr_remove,
 };
 
 static int __init jr_driver_init(void)

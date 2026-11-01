@@ -7,6 +7,7 @@
 #include <linux/of_graph.h>
 
 #include <drm/drm_bridge.h>
+#include <drm/drm_connector.h>
 #include <drm/drm_crtc.h>
 #include <drm/drm_device.h>
 #include <drm/drm_encoder.h>
@@ -55,7 +56,8 @@ EXPORT_SYMBOL(drm_of_crtc_port_mask);
  * and generate the DRM mask of CRTCs which may be attached to this
  * encoder.
  *
- * See Documentation/devicetree/bindings/graph.txt for the bindings.
+ * See https://github.com/devicetree-org/dt-schema/blob/main/dtschema/schemas/graph.yaml
+ * for the bindings.
  */
 uint32_t drm_of_find_possible_crtcs(struct drm_device *dev,
 				    struct device_node *port)
@@ -106,7 +108,9 @@ EXPORT_SYMBOL_GPL(drm_of_component_match_add);
  * Parse the platform device OF node and bind all the components associated
  * with the master. Interface ports are added before the encoders in order to
  * satisfy their .bind requirements
- * See Documentation/devicetree/bindings/graph.txt for the bindings.
+ *
+ * See https://github.com/devicetree-org/dt-schema/blob/main/dtschema/schemas/graph.yaml
+ * for the bindings.
  *
  * Returns zero if successful, or one of the standard error codes if it fails.
  */
@@ -218,19 +222,63 @@ int drm_of_encoder_active_endpoint(struct device_node *node,
 EXPORT_SYMBOL_GPL(drm_of_encoder_active_endpoint);
 
 /**
+ * drm_of_get_panel_orientation - look up the orientation of the panel through
+ * the "rotation" binding from a device tree node
+ * @np: device tree node of the panel
+ * @orientation: orientation enum to be filled in
+ *
+ * Looks up the rotation of a panel in the device tree. The orientation of the
+ * panel is expressed as a property name "rotation" in the device tree. The
+ * rotation in the device tree is counter clockwise.
+ *
+ * Return: 0 when a valid rotation value (0, 90, 180, or 270) is read or the
+ * rotation property doesn't exist. Return a negative error code on failure.
+ */
+int drm_of_get_panel_orientation(const struct device_node *np,
+				 enum drm_panel_orientation *orientation)
+{
+	int rotation, ret;
+
+	ret = of_property_read_u32(np, "rotation", &rotation);
+	if (ret == -EINVAL) {
+		/* Don't return an error if there's no rotation property. */
+		*orientation = DRM_MODE_PANEL_ORIENTATION_UNKNOWN;
+		return 0;
+	}
+
+	if (ret < 0)
+		return ret;
+
+	if (rotation == 0)
+		*orientation = DRM_MODE_PANEL_ORIENTATION_NORMAL;
+	else if (rotation == 90)
+		*orientation = DRM_MODE_PANEL_ORIENTATION_RIGHT_UP;
+	else if (rotation == 180)
+		*orientation = DRM_MODE_PANEL_ORIENTATION_BOTTOM_UP;
+	else if (rotation == 270)
+		*orientation = DRM_MODE_PANEL_ORIENTATION_LEFT_UP;
+	else
+		return -EINVAL;
+
+	return 0;
+}
+EXPORT_SYMBOL_GPL(drm_of_get_panel_orientation);
+
+/**
  * drm_of_find_panel_or_bridge - return connected panel or bridge device
  * @np: device tree node containing encoder output ports
  * @port: port in the device tree node
  * @endpoint: endpoint in the device tree node
- * @panel: pointer to hold returned drm_panel
+ * @panel: pointer to hold returned drm_panel, must not be NULL. On success
+ *         the caller must call drm_panel_put() when done with the panel
  * @bridge: pointer to hold returned drm_bridge
  *
  * Given a DT node's port and endpoint number, find the connected node and
- * return either the associated struct drm_panel or drm_bridge device. Either
- * @panel or @bridge must not be NULL.
+ * return either the associated struct drm_panel or drm_bridge device.
  *
  * This function is deprecated and should not be used in new drivers. Use
- * devm_drm_of_get_bridge() instead.
+ * of_drm_get_bridge_by_endpoint() instead when not looking for a panel, or
+ * devm_drm_of_get_bridge() otherwise.
  *
  * Returns zero if successful, or one of the standard error codes if it fails.
  */
@@ -242,15 +290,15 @@ int drm_of_find_panel_or_bridge(const struct device_node *np,
 	int ret = -EPROBE_DEFER;
 	struct device_node *remote;
 
-	if (!panel && !bridge)
+	if (WARN_ON(!panel))
 		return -EINVAL;
-	if (panel)
-		*panel = NULL;
+
+	*panel = NULL;
 
 	/*
 	 * of_graph_get_remote_node() produces a noisy error message if port
 	 * node isn't found and the absence of the port is a legit case here,
-	 * so at first we silently check whether graph presents in the
+	 * so at first we silently check whether a graph is present in the
 	 * device-tree node.
 	 */
 	if (!of_graph_is_present(np))
@@ -260,17 +308,15 @@ int drm_of_find_panel_or_bridge(const struct device_node *np,
 	if (!remote)
 		return -ENODEV;
 
-	if (panel) {
-		*panel = of_drm_find_panel(remote);
-		if (!IS_ERR(*panel))
-			ret = 0;
-		else
-			*panel = NULL;
-	}
+	*panel = of_drm_find_panel(remote);
+	if (!IS_ERR(*panel))
+		ret = 0;
+	else
+		*panel = NULL;
 
-	/* No panel found yet, check for a bridge next. */
 	if (bridge) {
 		if (ret) {
+			/* No panel found yet, check for a bridge next. */
 			*bridge = of_drm_find_bridge(remote);
 			if (*bridge)
 				ret = 0;
@@ -341,8 +387,23 @@ static int drm_of_lvds_get_remote_pixels_type(
 	return pixels_type;
 }
 
+static int __drm_of_lvds_get_dual_link_pixel_order(int p1_pt, int p2_pt)
+{
+	/*
+	 * A valid dual-lVDS bus is found when one port is marked with
+	 * "dual-lvds-even-pixels", and the other port is marked with
+	 * "dual-lvds-odd-pixels", bail out if the markers are not right.
+	 */
+	if (p1_pt + p2_pt != DRM_OF_LVDS_EVEN + DRM_OF_LVDS_ODD)
+		return -EINVAL;
+
+	return p1_pt == DRM_OF_LVDS_EVEN ?
+		DRM_LVDS_DUAL_LINK_EVEN_ODD_PIXELS :
+		DRM_LVDS_DUAL_LINK_ODD_EVEN_PIXELS;
+}
+
 /**
- * drm_of_lvds_get_dual_link_pixel_order - Get LVDS dual-link pixel order
+ * drm_of_lvds_get_dual_link_pixel_order - Get LVDS dual-link source pixel order
  * @port1: First DT port node of the Dual-link LVDS source
  * @port2: Second DT port node of the Dual-link LVDS source
  *
@@ -387,19 +448,58 @@ int drm_of_lvds_get_dual_link_pixel_order(const struct device_node *port1,
 	if (remote_p2_pt < 0)
 		return remote_p2_pt;
 
-	/*
-	 * A valid dual-lVDS bus is found when one remote port is marked with
-	 * "dual-lvds-even-pixels", and the other remote port is marked with
-	 * "dual-lvds-odd-pixels", bail out if the markers are not right.
-	 */
-	if (remote_p1_pt + remote_p2_pt != DRM_OF_LVDS_EVEN + DRM_OF_LVDS_ODD)
-		return -EINVAL;
-
-	return remote_p1_pt == DRM_OF_LVDS_EVEN ?
-		DRM_LVDS_DUAL_LINK_EVEN_ODD_PIXELS :
-		DRM_LVDS_DUAL_LINK_ODD_EVEN_PIXELS;
+	return __drm_of_lvds_get_dual_link_pixel_order(remote_p1_pt, remote_p2_pt);
 }
 EXPORT_SYMBOL_GPL(drm_of_lvds_get_dual_link_pixel_order);
+
+/**
+ * drm_of_lvds_get_dual_link_pixel_order_sink - Get LVDS dual-link sink pixel order
+ * @port1: First DT port node of the Dual-link LVDS sink
+ * @port2: Second DT port node of the Dual-link LVDS sink
+ *
+ * An LVDS dual-link connection is made of two links, with even pixels
+ * transitting on one link, and odd pixels on the other link. This function
+ * returns, for two ports of an LVDS dual-link sink, which port shall transmit
+ * the even and odd pixels, based on the requirements of the sink.
+ *
+ * The pixel order is determined from the dual-lvds-even-pixels and
+ * dual-lvds-odd-pixels properties in the sink's DT port nodes. If those
+ * properties are not present, or if their usage is not valid, this function
+ * returns -EINVAL.
+ *
+ * If either port is not connected, this function returns -EPIPE.
+ *
+ * @port1 and @port2 are typically DT sibling nodes, but may have different
+ * parents when, for instance, two separate LVDS decoders receive the even and
+ * odd pixels.
+ *
+ * Return:
+ * * DRM_LVDS_DUAL_LINK_EVEN_ODD_PIXELS - @port1 receives even pixels and @port2
+ *   receives odd pixels
+ * * DRM_LVDS_DUAL_LINK_ODD_EVEN_PIXELS - @port1 receives odd pixels and @port2
+ *   receives even pixels
+ * * -EINVAL - @port1 or @port2 are NULL
+ * * -EPIPE - when @port1 or @port2 are not connected
+ */
+int drm_of_lvds_get_dual_link_pixel_order_sink(struct device_node *port1,
+					       struct device_node *port2)
+{
+	int sink_p1_pt, sink_p2_pt;
+
+	if (!port1 || !port2)
+		return -EINVAL;
+
+	sink_p1_pt = drm_of_lvds_get_port_pixels_type(port1);
+	if (!sink_p1_pt)
+		return -EPIPE;
+
+	sink_p2_pt = drm_of_lvds_get_port_pixels_type(port2);
+	if (!sink_p2_pt)
+		return -EPIPE;
+
+	return __drm_of_lvds_get_dual_link_pixel_order(sink_p1_pt, sink_p2_pt);
+}
+EXPORT_SYMBOL_GPL(drm_of_lvds_get_dual_link_pixel_order_sink);
 
 /**
  * drm_of_lvds_get_data_mapping - Get LVDS data mapping
@@ -410,7 +510,9 @@ EXPORT_SYMBOL_GPL(drm_of_lvds_get_dual_link_pixel_order);
  * Return:
  * * MEDIA_BUS_FMT_RGB666_1X7X3_SPWG - data-mapping is "jeida-18"
  * * MEDIA_BUS_FMT_RGB888_1X7X4_JEIDA - data-mapping is "jeida-24"
+ * * MEDIA_BUS_FMT_RGB101010_1X7X5_JEIDA - data-mapping is "jeida-30"
  * * MEDIA_BUS_FMT_RGB888_1X7X4_SPWG - data-mapping is "vesa-24"
+ * * MEDIA_BUS_FMT_RGB101010_1X7X5_SPWG - data-mapping is "vesa-30"
  * * -EINVAL - the "data-mapping" property is unsupported
  * * -ENODEV - the "data-mapping" property is missing
  */
@@ -427,8 +529,12 @@ int drm_of_lvds_get_data_mapping(const struct device_node *port)
 		return MEDIA_BUS_FMT_RGB666_1X7X3_SPWG;
 	if (!strcmp(mapping, "jeida-24"))
 		return MEDIA_BUS_FMT_RGB888_1X7X4_JEIDA;
+	if (!strcmp(mapping, "jeida-30"))
+		return MEDIA_BUS_FMT_RGB101010_1X7X5_JEIDA;
 	if (!strcmp(mapping, "vesa-24"))
 		return MEDIA_BUS_FMT_RGB888_1X7X4_SPWG;
+	if (!strcmp(mapping, "vesa-30"))
+		return MEDIA_BUS_FMT_RGB101010_1X7X5_SPWG;
 
 	return -EINVAL;
 }
@@ -495,6 +601,40 @@ int drm_of_get_data_lanes_count_ep(const struct device_node *port,
 }
 EXPORT_SYMBOL_GPL(drm_of_get_data_lanes_count_ep);
 
+/**
+ * drm_of_get_data_lanes_count_remote - Get DSI/(e)DP data lane count by endpoint
+ * @port: DT port node of the DSI/(e)DP source or sink
+ * @port_reg: identifier (value of reg property) of the parent port node
+ * @reg: identifier (value of reg property) of the endpoint node
+ * @min: minimum supported number of data lanes
+ * @max: maximum supported number of data lanes
+ *
+ * Count DT "data-lanes" property elements in the remote endpoint and check for
+ * validity.  This variant uses endpoint specifier.
+ *
+ * Return:
+ * * min..max - positive integer count of "data-lanes" elements
+ * * -EINVAL - the "data-lanes" property is unsupported
+ * * -ENODEV - the "data-lanes" property is missing
+ */
+int drm_of_get_data_lanes_count_remote(const struct device_node *port,
+				       int port_reg, int reg,
+				       const unsigned int min,
+				       const unsigned int max)
+{
+	struct device_node *endpoint, *remote;
+	int ret;
+
+	endpoint = of_graph_get_endpoint_by_regs(port, port_reg, reg);
+	remote = of_graph_get_remote_endpoint(endpoint);
+	of_node_put(endpoint);
+	ret = drm_of_get_data_lanes_count(remote, min, max);
+	of_node_put(remote);
+
+	return ret;
+}
+EXPORT_SYMBOL_GPL(drm_of_get_data_lanes_count_remote);
+
 #if IS_ENABLED(CONFIG_DRM_MIPI_DSI)
 
 /**
@@ -503,6 +643,8 @@ EXPORT_SYMBOL_GPL(drm_of_get_data_lanes_count_ep);
  *
  * Gets parent DSI bus for a DSI device controlled through a bus other
  * than MIPI-DCS (SPI, I2C, etc.) using the Device Tree.
+ *
+ * This function assumes that the device's port@0 is the DSI input.
  *
  * Returns pointer to mipi_dsi_host if successful, -EINVAL if the
  * request is unsupported, -EPROBE_DEFER if the DSI host is found but
@@ -516,7 +658,7 @@ struct mipi_dsi_host *drm_of_get_dsi_bus(struct device *dev)
 	/*
 	 * Get first endpoint child from device.
 	 */
-	endpoint = of_graph_get_next_endpoint(dev->of_node, NULL);
+	endpoint = of_graph_get_endpoint_by_regs(dev->of_node, 0, -1);
 	if (!endpoint)
 		return ERR_PTR(-ENODEV);
 

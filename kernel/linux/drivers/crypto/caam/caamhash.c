@@ -393,7 +393,7 @@ static int hash_digest_key(struct caam_hash_ctx *ctx, u32 *keylen, u8 *key,
 	append_seq_store(desc, digestsize, LDST_CLASS_2_CCB |
 			 LDST_SRCDST_BYTE_CONTEXT);
 
-	print_hex_dump_debug("key_in@"__stringify(__LINE__)": ",
+	print_hex_dump_devel("key_in@"__stringify(__LINE__)": ",
 			     DUMP_PREFIX_ADDRESS, 16, 4, key, *keylen, 1);
 	print_hex_dump_debug("jobdesc@"__stringify(__LINE__)": ",
 			     DUMP_PREFIX_ADDRESS, 16, 4, desc, desc_bytes(desc),
@@ -408,7 +408,7 @@ static int hash_digest_key(struct caam_hash_ctx *ctx, u32 *keylen, u8 *key,
 		wait_for_completion(&result.completion);
 		ret = result.err;
 
-		print_hex_dump_debug("digested key@"__stringify(__LINE__)": ",
+		print_hex_dump_devel("digested key@"__stringify(__LINE__)": ",
 				     DUMP_PREFIX_ADDRESS, 16, 4, key,
 				     digestsize, 1);
 	}
@@ -441,9 +441,10 @@ static int ahash_setkey(struct crypto_ahash *ahash,
 		if (aligned_len < keylen)
 			return -EOVERFLOW;
 
-		hashed_key = kmemdup(key, keylen, GFP_KERNEL);
+		hashed_key = kmalloc(aligned_len, GFP_KERNEL);
 		if (!hashed_key)
 			return -ENOMEM;
+		memcpy(hashed_key, key, keylen);
 		ret = hash_digest_key(ctx, &keylen, hashed_key, digestsize);
 		if (ret)
 			goto bad_free_key;
@@ -504,7 +505,7 @@ static int axcbc_setkey(struct crypto_ahash *ahash, const u8 *key,
 				   DMA_TO_DEVICE);
 	ctx->adata.keylen = keylen;
 
-	print_hex_dump_debug("axcbc ctx.key@" __stringify(__LINE__)" : ",
+	print_hex_dump_devel("axcbc ctx.key@" __stringify(__LINE__)" : ",
 			     DUMP_PREFIX_ADDRESS, 16, 4, ctx->key, keylen, 1);
 
 	return axcbc_set_sh_desc(ahash);
@@ -524,7 +525,7 @@ static int acmac_setkey(struct crypto_ahash *ahash, const u8 *key,
 	ctx->adata.key_virt = key;
 	ctx->adata.keylen = keylen;
 
-	print_hex_dump_debug("acmac ctx.key@" __stringify(__LINE__)" : ",
+	print_hex_dump_devel("acmac ctx.key@" __stringify(__LINE__)" : ",
 			     DUMP_PREFIX_ADDRESS, 16, 4, key, keylen, 1);
 
 	return acmac_set_sh_desc(ahash);
@@ -708,7 +709,8 @@ static struct ahash_edesc *ahash_edesc_alloc(struct ahash_request *req,
 		       GFP_KERNEL : GFP_ATOMIC;
 	struct ahash_edesc *edesc;
 
-	edesc = kzalloc(struct_size(edesc, sec4_sg, sg_num), flags);
+	sg_num = pad_sg_nents(sg_num);
+	edesc = kzalloc_flex(*edesc, sec4_sg, sg_num, flags);
 	if (!edesc)
 		return NULL;
 
@@ -1753,6 +1755,7 @@ static struct caam_hash_template driver_hash[] = {
 struct caam_hash_alg {
 	struct list_head entry;
 	int alg_type;
+	bool is_hmac;
 	struct ahash_engine_alg ahash_alg;
 };
 
@@ -1804,7 +1807,7 @@ static int caam_hash_cra_init(struct crypto_tfm *tfm)
 	} else {
 		if (priv->era >= 6) {
 			ctx->dir = DMA_BIDIRECTIONAL;
-			ctx->key_dir = alg->setkey ? DMA_TO_DEVICE : DMA_NONE;
+			ctx->key_dir = caam_hash->is_hmac ? DMA_TO_DEVICE : DMA_NONE;
 		} else {
 			ctx->dir = DMA_TO_DEVICE;
 			ctx->key_dir = DMA_NONE;
@@ -1862,7 +1865,7 @@ static int caam_hash_cra_init(struct crypto_tfm *tfm)
 	 * For keyed hash algorithms shared descriptors
 	 * will be created later in setkey() callback
 	 */
-	return alg->setkey ? 0 : ahash_set_sh_desc(ahash);
+	return caam_hash->is_hmac ? 0 : ahash_set_sh_desc(ahash);
 }
 
 static void caam_hash_cra_exit(struct crypto_tfm *tfm)
@@ -1902,7 +1905,7 @@ caam_hash_alloc(struct caam_hash_template *template,
 	struct ahash_alg *halg;
 	struct crypto_alg *alg;
 
-	t_alg = kzalloc(sizeof(*t_alg), GFP_KERNEL);
+	t_alg = kzalloc_obj(*t_alg);
 	if (!t_alg)
 		return ERR_PTR(-ENOMEM);
 
@@ -1911,16 +1914,14 @@ caam_hash_alloc(struct caam_hash_template *template,
 	alg = &halg->halg.base;
 
 	if (keyed) {
-		snprintf(alg->cra_name, CRYPTO_MAX_ALG_NAME, "%s",
-			 template->hmac_name);
-		snprintf(alg->cra_driver_name, CRYPTO_MAX_ALG_NAME, "%s",
-			 template->hmac_driver_name);
+		strscpy(alg->cra_name, template->hmac_name);
+		strscpy(alg->cra_driver_name, template->hmac_driver_name);
+		t_alg->is_hmac = true;
 	} else {
-		snprintf(alg->cra_name, CRYPTO_MAX_ALG_NAME, "%s",
-			 template->name);
-		snprintf(alg->cra_driver_name, CRYPTO_MAX_ALG_NAME, "%s",
-			 template->driver_name);
+		strscpy(alg->cra_name, template->name);
+		strscpy(alg->cra_driver_name, template->driver_name);
 		halg->setkey = NULL;
+		t_alg->is_hmac = false;
 	}
 	alg->cra_module = THIS_MODULE;
 	alg->cra_init = caam_hash_cra_init;

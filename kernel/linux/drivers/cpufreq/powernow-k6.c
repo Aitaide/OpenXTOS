@@ -83,15 +83,15 @@ static const struct {
 static int powernow_k6_get_cpu_multiplier(void)
 {
 	unsigned long invalue = 0;
-	u32 msrval;
+	u64 msrval;
 
 	local_irq_disable();
 
 	msrval = POWERNOW_IOPORT + 0x1;
-	wrmsr(MSR_K6_EPMR, msrval, 0); /* enable the PowerNow port */
+	wrmsrq(MSR_K6_EPMR, msrval); /* enable the PowerNow port */
 	invalue = inl(POWERNOW_IOPORT + 0x8);
 	msrval = POWERNOW_IOPORT + 0x0;
-	wrmsr(MSR_K6_EPMR, msrval, 0); /* disable it again */
+	wrmsrq(MSR_K6_EPMR, msrval); /* disable it again */
 
 	local_irq_enable();
 
@@ -101,8 +101,8 @@ static int powernow_k6_get_cpu_multiplier(void)
 static void powernow_k6_set_cpu_multiplier(unsigned int best_i)
 {
 	unsigned long outvalue, invalue;
-	unsigned long msrval;
 	unsigned long cr0;
+	u64 msrval;
 
 	/* we now need to transform best_i to the BVC format, see AMD#23446 */
 
@@ -118,13 +118,13 @@ static void powernow_k6_set_cpu_multiplier(unsigned int best_i)
 	outvalue = (1<<12) | (1<<10) | (1<<9) | (index_to_register[best_i]<<5);
 
 	msrval = POWERNOW_IOPORT + 0x1;
-	wrmsr(MSR_K6_EPMR, msrval, 0); /* enable the PowerNow port */
+	wrmsrq(MSR_K6_EPMR, msrval); /* enable the PowerNow port */
 	invalue = inl(POWERNOW_IOPORT + 0x8);
 	invalue = invalue & 0x1f;
 	outvalue = outvalue | invalue;
 	outl(outvalue, (POWERNOW_IOPORT + 0x8));
 	msrval = POWERNOW_IOPORT + 0x0;
-	wrmsr(MSR_K6_EPMR, msrval, 0); /* disable it again */
+	wrmsrq(MSR_K6_EPMR, msrval); /* disable it again */
 
 	write_cr0(cr0);
 	local_irq_enable();
@@ -219,7 +219,7 @@ have_busfreq:
 }
 
 
-static int powernow_k6_cpu_exit(struct cpufreq_policy *policy)
+static void powernow_k6_cpu_exit(struct cpufreq_policy *policy)
 {
 	unsigned int i;
 
@@ -234,10 +234,9 @@ static int powernow_k6_cpu_exit(struct cpufreq_policy *policy)
 			cpufreq_freq_transition_begin(policy, &freqs);
 			powernow_k6_target(policy, i);
 			cpufreq_freq_transition_end(policy, &freqs, 0);
-			break;
+			return;
 		}
 	}
-	return 0;
 }
 
 static unsigned int powernow_k6_get(unsigned int cpu)
@@ -254,7 +253,6 @@ static struct cpufreq_driver powernow_k6_driver = {
 	.exit		= powernow_k6_cpu_exit,
 	.get		= powernow_k6_get,
 	.name		= "powernow-k6",
-	.attr		= cpufreq_generic_attr,
 };
 
 static const struct x86_cpu_id powernow_k6_ids[] = {

@@ -21,6 +21,7 @@
 #include <linux/pinctrl/pinctrl.h>
 #include <linux/platform_device.h>
 #include <linux/slab.h>
+#include <linux/string_choices.h>
 
 #include "../pinctrl-utils.h"
 
@@ -158,7 +159,7 @@ static void nsp_gpio_irq_ack(struct irq_data *d)
 	u32 trigger_type;
 
 	trigger_type = irq_get_trigger_type(d->irq);
-	if (trigger_type & (IRQ_TYPE_EDGE_FALLING | IRQ_TYPE_EDGE_RISING))
+	if (trigger_type & IRQ_TYPE_EDGE_BOTH)
 		writel(val, chip->base + NSP_GPIO_EVENT);
 }
 
@@ -176,7 +177,7 @@ static void nsp_gpio_irq_set_mask(struct irq_data *d, bool unmask)
 	u32 trigger_type;
 
 	trigger_type = irq_get_trigger_type(d->irq);
-	if (trigger_type & (IRQ_TYPE_EDGE_FALLING | IRQ_TYPE_EDGE_RISING))
+	if (trigger_type & IRQ_TYPE_EDGE_BOTH)
 		nsp_set_bit(chip, REG, NSP_GPIO_EVENT_INT_MASK, gpio, unmask);
 	else
 		nsp_set_bit(chip, REG, NSP_GPIO_INT_MASK, gpio, unmask);
@@ -254,7 +255,7 @@ static int nsp_gpio_irq_set_type(struct irq_data *d, unsigned int type)
 	raw_spin_unlock_irqrestore(&chip->lock, flags);
 
 	dev_dbg(chip->dev, "gpio:%u level_low:%s falling:%s\n", gpio,
-		level_low ? "true" : "false", falling ? "true" : "false");
+		str_true_false(level_low), str_true_false(falling));
 	return 0;
 }
 
@@ -309,7 +310,7 @@ static int nsp_gpio_get_direction(struct gpio_chip *gc, unsigned gpio)
 	return !val;
 }
 
-static void nsp_gpio_set(struct gpio_chip *gc, unsigned gpio, int val)
+static int nsp_gpio_set(struct gpio_chip *gc, unsigned int gpio, int val)
 {
 	struct nsp_gpio *chip = gpiochip_get_data(gc);
 	unsigned long flags;
@@ -319,6 +320,8 @@ static void nsp_gpio_set(struct gpio_chip *gc, unsigned gpio, int val)
 	raw_spin_unlock_irqrestore(&chip->lock, flags);
 
 	dev_dbg(chip->dev, "gpio:%u set, value:%d\n", gpio, val);
+
+	return 0;
 }
 
 static int nsp_gpio_get(struct gpio_chip *gc, unsigned gpio)
@@ -668,11 +671,8 @@ static int nsp_gpio_probe(struct platform_device *pdev)
 		/* Install ISR for this GPIO controller. */
 		ret = devm_request_irq(dev, irq, nsp_gpio_irq_handler,
 				       IRQF_SHARED, "gpio-a", &chip->gc);
-		if (ret) {
-			dev_err(&pdev->dev, "Unable to request IRQ%d: %d\n",
-				irq, ret);
+		if (ret)
 			return ret;
-		}
 
 		girq = &chip->gc.irq;
 		gpio_irq_chip_set_chip(girq, &nsp_gpio_irq_chip);

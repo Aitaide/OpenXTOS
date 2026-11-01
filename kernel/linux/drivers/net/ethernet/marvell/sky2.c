@@ -34,6 +34,7 @@
 #include <linux/mii.h>
 #include <linux/of_net.h>
 #include <linux/dmi.h>
+#include <linux/skbuff_ref.h>
 
 #include <asm/irq.h>
 
@@ -129,6 +130,7 @@ static const struct pci_device_id sky2_id_table[] = {
 	{ PCI_DEVICE(PCI_VENDOR_ID_MARVELL, 0x436C) }, /* 88E8072 */
 	{ PCI_DEVICE(PCI_VENDOR_ID_MARVELL, 0x436D) }, /* 88E8055 */
 	{ PCI_DEVICE(PCI_VENDOR_ID_MARVELL, 0x4370) }, /* 88E8075 */
+	{ PCI_DEVICE(PCI_VENDOR_ID_MARVELL, 0x4373) }, /* 88E8075 */
 	{ PCI_DEVICE(PCI_VENDOR_ID_MARVELL, 0x4380) }, /* 88E8057 */
 	{ PCI_DEVICE(PCI_VENDOR_ID_MARVELL, 0x4381) }, /* 88E8059 */
 	{ PCI_DEVICE(PCI_VENDOR_ID_MARVELL, 0x4382) }, /* 88E8079 */
@@ -1599,8 +1601,7 @@ static int sky2_alloc_buffers(struct sky2_port *sky2)
 	if (!sky2->tx_le)
 		goto nomem;
 
-	sky2->tx_ring = kcalloc(sky2->tx_ring_size, sizeof(struct tx_ring_info),
-				GFP_KERNEL);
+	sky2->tx_ring = kzalloc_objs(struct tx_ring_info, sky2->tx_ring_size);
 	if (!sky2->tx_ring)
 		goto nomem;
 
@@ -1609,8 +1610,7 @@ static int sky2_alloc_buffers(struct sky2_port *sky2)
 	if (!sky2->rx_le)
 		goto nomem;
 
-	sky2->rx_ring = kcalloc(sky2->rx_pending, sizeof(struct rx_ring_info),
-				GFP_KERNEL);
+	sky2->rx_ring = kzalloc_objs(struct rx_ring_info, sky2->rx_pending);
 	if (!sky2->rx_ring)
 		goto nomem;
 
@@ -2383,7 +2383,7 @@ static int sky2_change_mtu(struct net_device *dev, int new_mtu)
 	u32 imask;
 
 	if (!netif_running(dev)) {
-		dev->mtu = new_mtu;
+		WRITE_ONCE(dev->mtu, new_mtu);
 		netdev_update_features(dev);
 		return 0;
 	}
@@ -2406,7 +2406,7 @@ static int sky2_change_mtu(struct net_device *dev, int new_mtu)
 	sky2_rx_stop(sky2);
 	sky2_rx_clean(sky2);
 
-	dev->mtu = new_mtu;
+	WRITE_ONCE(dev->mtu, new_mtu);
 	netdev_update_features(dev);
 
 	mode = DATA_BLIND_VAL(DATA_BLIND_DEF) |	GM_SMOD_VLAN_ENA;
@@ -2959,7 +2959,7 @@ static int sky2_rx_hung(struct net_device *dev)
 
 static void sky2_watchdog(struct timer_list *t)
 {
-	struct sky2_hw *hw = from_timer(hw, t, watchdog_timer);
+	struct sky2_hw *hw = timer_container_of(hw, t, watchdog_timer);
 
 	/* Check for lost IRQ once a second */
 	if (sky2_read32(hw, B0_ISRC)) {
@@ -3799,8 +3799,7 @@ static void sky2_get_strings(struct net_device *dev, u32 stringset, u8 * data)
 	switch (stringset) {
 	case ETH_SS_STATS:
 		for (i = 0; i < ARRAY_SIZE(sky2_stats); i++)
-			memcpy(data + i * ETH_GSTRING_LEN,
-			       sky2_stats[i].name, ETH_GSTRING_LEN);
+			ethtool_puts(&data, sky2_stats[i].name);
 		break;
 	}
 }
@@ -4493,10 +4492,7 @@ static int sky2_device_event(struct notifier_block *unused,
 
 	switch (event) {
 	case NETDEV_CHANGENAME:
-		if (sky2->debugfs) {
-			sky2->debugfs = debugfs_rename(sky2_debug, sky2->debugfs,
-						       sky2_debug, dev->name);
-		}
+		debugfs_change_name(sky2->debugfs, "%s", dev->name);
 		break;
 
 	case NETDEV_GOING_DOWN:
@@ -5054,7 +5050,7 @@ static int sky2_suspend(struct device *dev)
 	if (!hw)
 		return 0;
 
-	del_timer_sync(&hw->watchdog_timer);
+	timer_delete_sync(&hw->watchdog_timer);
 	cancel_work_sync(&hw->restart_work);
 
 	rtnl_lock();

@@ -462,15 +462,9 @@ static int pmic8xxx_kp_enable(struct pmic8xxx_kp *kp)
 
 static int pmic8xxx_kp_disable(struct pmic8xxx_kp *kp)
 {
-	int rc;
-
 	kp->ctrl_reg &= ~KEYP_CTRL_KEYP_EN;
 
-	rc = regmap_write(kp->regmap, KEYP_CTRL, kp->ctrl_reg);
-	if (rc < 0)
-		return rc;
-
-	return rc;
+	return regmap_write(kp->regmap, KEYP_CTRL, kp->ctrl_reg);
 }
 
 static int pmic8xxx_kp_open(struct input_dev *dev)
@@ -630,12 +624,10 @@ static int pmic8xxx_kp_suspend(struct device *dev)
 	if (device_may_wakeup(dev)) {
 		enable_irq_wake(kp->key_sense_irq);
 	} else {
-		mutex_lock(&input_dev->mutex);
+		guard(mutex)(&input_dev->mutex);
 
 		if (input_device_enabled(input_dev))
 			pmic8xxx_kp_disable(kp);
-
-		mutex_unlock(&input_dev->mutex);
 	}
 
 	return 0;
@@ -650,12 +642,10 @@ static int pmic8xxx_kp_resume(struct device *dev)
 	if (device_may_wakeup(dev)) {
 		disable_irq_wake(kp->key_sense_irq);
 	} else {
-		mutex_lock(&input_dev->mutex);
+		guard(mutex)(&input_dev->mutex);
 
 		if (input_device_enabled(input_dev))
 			pmic8xxx_kp_enable(kp);
-
-		mutex_unlock(&input_dev->mutex);
 	}
 
 	return 0;

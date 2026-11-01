@@ -15,7 +15,7 @@
 
 #define XMITBUF_ALIGN_SZ 512
 
-/*  xmit extension buff defination */
+/*  xmit extension buff definition */
 #define MAX_XMIT_EXTBUF_SZ	(1536)
 #define NR_XMIT_EXTBUFF	(32)
 
@@ -35,7 +35,6 @@
 #define BCN_QUEUE_INX		4
 #define MGT_QUEUE_INX		5
 #define HIGH_QUEUE_INX		6
-#define TXCMD_QUEUE_INX	7
 
 #define HW_QUEUE_ENTRY	8
 
@@ -95,23 +94,9 @@ struct tx_desc {
 	__le32 txdw6;
 	__le32 txdw7;
 
-#if defined(TXDESC_40_BYTES) || defined(TXDESC_64_BYTES)
+#ifdef TXDESC_40_BYTES
 	__le32 txdw8;
 	__le32 txdw9;
-#endif /*  TXDESC_40_BYTES */
-
-#ifdef TXDESC_64_BYTES
-	__le32 txdw10;
-	__le32 txdw11;
-
-	/*  2008/05/15 MH Because PCIE HW memory R/W 4K limit. And now,  our descriptor */
-	/*  size is 40 bytes. If you use more than 102 descriptor(103*40>4096), HW will execute */
-	/*  memoryR/W CRC error. And then all DMA fetch will fail. We must decrease descriptor */
-	/*  number or enlarge descriptor size as 64 bytes. */
-	__le32 txdw12;
-	__le32 txdw13;
-	__le32 txdw14;
-	__le32 txdw15;
 #endif
 };
 
@@ -192,16 +177,7 @@ struct pkt_attrib {
 
 #define NULL_FRAMETAG		(0x0)
 #define DATA_FRAMETAG		0x01
-#define L2_FRAMETAG		0x02
 #define MGNT_FRAMETAG		0x03
-#define AMSDU_FRAMETAG	0x04
-
-#define EII_FRAMETAG		0x05
-#define IEEE8023_FRAMETAG  0x06
-
-#define MP_FRAMETAG		0x07
-
-#define TXAGG_FRAMETAG	0x08
 
 enum {
 	XMITBUF_DATA = 0,
@@ -264,11 +240,6 @@ struct xmit_buf {
 	u32 ff_hwaddr;
 	u8 pg_num;
 	u8 agg_num;
-
-#if defined(DBG_XMIT_BUF) || defined(DBG_XMIT_BUF_EXT)
-	u8 no;
-#endif
-
 };
 
 
@@ -439,7 +410,7 @@ extern s32 rtw_free_xmitbuf(struct xmit_priv *pxmitpriv, struct xmit_buf *pxmitb
 
 void rtw_count_tx_stats(struct adapter *padapter, struct xmit_frame *pxmitframe, int sz);
 extern void rtw_update_protection(struct adapter *padapter, u8 *ie, uint ie_len);
-extern s32 rtw_make_wlanhdr(struct adapter *padapter, u8 *hdr, struct pkt_attrib *pattrib);
+extern int rtw_make_wlanhdr(struct adapter *padapter, u8 *hdr, struct pkt_attrib *pattrib);
 extern s32 rtw_put_snap(u8 *data, u16 h_proto);
 
 extern struct xmit_frame *rtw_alloc_xmitframe(struct xmit_priv *pxmitpriv);
@@ -448,12 +419,11 @@ struct xmit_frame *rtw_alloc_xmitframe_once(struct xmit_priv *pxmitpriv);
 extern s32 rtw_free_xmitframe(struct xmit_priv *pxmitpriv, struct xmit_frame *pxmitframe);
 extern void rtw_free_xmitframe_queue(struct xmit_priv *pxmitpriv, struct __queue *pframequeue);
 struct tx_servq *rtw_get_sta_pending(struct adapter *padapter, struct sta_info *psta, signed int up, u8 *ac);
-extern s32 rtw_xmitframe_enqueue(struct adapter *padapter, struct xmit_frame *pxmitframe);
+int rtw_xmitframe_enqueue(struct adapter *padapter, struct xmit_frame *pxmitframe);
 
-extern s32 rtw_xmit_classifier(struct adapter *padapter, struct xmit_frame *pxmitframe);
 extern u32 rtw_calculate_wlan_pkt_size_by_attribue(struct pkt_attrib *pattrib);
 #define rtw_wlan_pkt_size(f) rtw_calculate_wlan_pkt_size_by_attribue(&f->attrib)
-extern s32 rtw_xmitframe_coalesce(struct adapter *padapter, struct sk_buff *pkt, struct xmit_frame *pxmitframe);
+extern int rtw_xmitframe_coalesce(struct adapter *padapter, struct sk_buff *pkt, struct xmit_frame *pxmitframe);
 extern s32 rtw_mgmt_xmitframe_coalesce(struct adapter *padapter, struct sk_buff *pkt, struct xmit_frame *pxmitframe);
 s32 _rtw_init_hw_txqueue(struct hw_txqueue *phw_txqueue, u8 ac_tag);
 void _rtw_init_sta_xmit_priv(struct sta_xmit_priv *psta_xmitpriv);
@@ -467,7 +437,6 @@ s32 _rtw_init_xmit_priv(struct xmit_priv *pxmitpriv, struct adapter *padapter);
 void _rtw_free_xmit_priv(struct xmit_priv *pxmitpriv);
 
 
-s32 rtw_alloc_hwxmits(struct adapter *padapter);
 void rtw_free_hwxmits(struct adapter *padapter);
 
 

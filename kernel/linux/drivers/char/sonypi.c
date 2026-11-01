@@ -37,6 +37,8 @@
 #include <linux/kfifo.h>
 #include <linux/platform_device.h>
 #include <linux/gfp.h>
+#include <linux/string.h>
+#include <linux/string_choices.h>
 
 #include <linux/uaccess.h>
 #include <asm/io.h>
@@ -920,7 +922,7 @@ static ssize_t sonypi_misc_read(struct file *file, char __user *buf,
 
 	if (ret > 0) {
 		struct inode *inode = file_inode(file);
-		inode->i_atime = current_time(inode);
+		inode_set_atime_to_ts(inode, current_time(inode));
 	}
 
 	return ret;
@@ -1054,7 +1056,6 @@ static const struct file_operations sonypi_misc_fops = {
 	.release	= sonypi_misc_release,
 	.fasync		= sonypi_misc_fasync,
 	.unlocked_ioctl	= sonypi_misc_ioctl,
-	.llseek		= no_llseek,
 };
 
 static struct miscdevice sonypi_misc_device = {
@@ -1115,15 +1116,19 @@ static int sonypi_disable(void)
 }
 
 #ifdef CONFIG_ACPI
-static int sonypi_acpi_add(struct acpi_device *device)
+static int sonypi_acpi_probe(struct platform_device *pdev)
 {
+	struct acpi_device *device;
+
+	device = ACPI_COMPANION(&pdev->dev);
+	if (!device)
+		return -ENODEV;
+
 	sonypi_acpi_device = device;
-	strcpy(acpi_device_name(device), "Sony laptop hotkeys");
-	strcpy(acpi_device_class(device), "sony/hotkey");
 	return 0;
 }
 
-static void sonypi_acpi_remove(struct acpi_device *device)
+static void sonypi_acpi_remove(struct platform_device *pdev)
 {
 	sonypi_acpi_device = NULL;
 }
@@ -1133,13 +1138,12 @@ static const struct acpi_device_id sonypi_device_ids[] = {
 	{"", 0},
 };
 
-static struct acpi_driver sonypi_acpi_driver = {
-	.name           = "sonypi",
-	.class          = "hkey",
-	.ids            = sonypi_device_ids,
-	.ops            = {
-		           .add = sonypi_acpi_add,
-			   .remove = sonypi_acpi_remove,
+static struct platform_driver sonypi_acpi_driver = {
+	.probe = sonypi_acpi_probe,
+	.remove = sonypi_acpi_remove,
+	.driver = {
+		.name = "sonypi_acpi",
+		.acpi_match_table = sonypi_device_ids,
 	},
 };
 #endif
@@ -1269,12 +1273,12 @@ static void sonypi_display_info(void)
 	       "compat = %s, mask = 0x%08lx, useinput = %s, acpi = %s\n",
 	       sonypi_device.model,
 	       verbose,
-	       fnkeyinit ? "on" : "off",
-	       camera ? "on" : "off",
-	       compat ? "on" : "off",
+	       str_on_off(fnkeyinit),
+	       str_on_off(camera),
+	       str_on_off(compat),
 	       mask,
-	       useinput ? "on" : "off",
-	       SONYPI_ACPI_ACTIVE ? "on" : "off");
+	       str_on_off(useinput),
+	       str_on_off(SONYPI_ACPI_ACTIVE));
 	printk(KERN_INFO "sonypi: enabled at irq=%d, port1=0x%x, port2=0x%x\n",
 	       sonypi_device.irq,
 	       sonypi_device.ioport1, sonypi_device.ioport2);
@@ -1408,7 +1412,7 @@ static int sonypi_probe(struct platform_device *dev)
 	return error;
 }
 
-static int sonypi_remove(struct platform_device *dev)
+static void sonypi_remove(struct platform_device *dev)
 {
 	sonypi_disable();
 
@@ -1432,8 +1436,6 @@ static int sonypi_remove(struct platform_device *dev)
 	}
 
 	kfifo_free(&sonypi_device.fifo);
-
-	return 0;
 }
 
 #ifdef CONFIG_PM_SLEEP
@@ -1520,8 +1522,8 @@ static int __init sonypi_init(void)
 		goto err_free_device;
 
 #ifdef CONFIG_ACPI
-	if (acpi_bus_register_driver(&sonypi_acpi_driver) >= 0)
-		acpi_driver_registered = 1;
+	error = platform_driver_register(&sonypi_acpi_driver);
+	acpi_driver_registered = !error;
 #endif
 
 	return 0;
@@ -1537,7 +1539,7 @@ static void __exit sonypi_exit(void)
 {
 #ifdef CONFIG_ACPI
 	if (acpi_driver_registered)
-		acpi_bus_unregister_driver(&sonypi_acpi_driver);
+		platform_driver_unregister(&sonypi_acpi_driver);
 #endif
 	platform_device_unregister(sonypi_platform_device);
 	platform_driver_unregister(&sonypi_driver);

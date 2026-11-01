@@ -23,45 +23,53 @@ Requisiti minimi correnti
 
 Prima di pensare d'avere trovato un baco, aggiornate i seguenti programmi
 **almeno** alla versione indicata!  Se non siete certi della versione che state
-usando, il comando indicato dovrebbe dirvelo.
+usando, il comando indicato dovrebbe dirvelo. Per avere una lista dei programmi
+sul vostro sistema, incluse le rispettive versioni, eseguite
+./scripts/ver_linux.
 
 Questa lista presume che abbiate già un kernel Linux funzionante.  In aggiunta,
 non tutti gli strumenti sono necessari ovunque; ovviamente, se non avete una
 PC Card, per esempio, probabilmente non dovreste preoccuparvi di pcmciautils.
 
-====================== =================  ========================================
-        Programma       Versione minima       Comando per verificare la versione
-====================== =================  ========================================
-GNU C                  5.1                gcc --version
-Clang/LLVM (optional)  11.0.0             clang --version
-GNU make               3.81               make --version
-bash                   4.2                bash --version
-binutils               2.25               ld -v
-flex                   2.5.35             flex --version
-bison                  2.0                bison --version
-pahole                 1.16               pahole --version
-util-linux             2.10o              fdformat --version
-kmod                   13                 depmod -V
-e2fsprogs              1.41.4             e2fsck -V
-jfsutils               1.1.3              fsck.jfs -V
-reiserfsprogs          3.6.3              reiserfsck -V
-xfsprogs               2.6.0              xfs_db -V
-squashfs-tools         4.0                mksquashfs -version
-btrfs-progs            0.18               btrfsck
-pcmciautils            004                pccardctl -V
-quota-tools            3.09               quota -V
-PPP                    2.4.0              pppd --version
-nfs-utils              1.0.5              showmount --version
-procps                 3.2.0              ps --version
-udev                   081                udevd --version
-grub                   0.93               grub --version || grub-install --version
-mcelog                 0.6                mcelog --version
-iptables               1.4.2              iptables -V
-openssl & libcrypto    1.0.0              openssl version
-bc                     1.06.95            bc --version
-Sphinx\ [#f1]_         1.7                sphinx-build --version
-cpio                   any                cpio --version
-====================== =================  ========================================
+====================== ===============  ========================================
+        Programma      Versione minima        Comando per verificare la versione
+====================== ===============  ========================================
+bash                   4.2              bash --version
+bc                     1.06.95          bc --version
+bindgen (opzionale)    0.71.1           bindgen --version
+binutils               2.30             ld -v
+bison                  2.0              bison --version
+btrfs-progs            0.18             btrfs --version
+Clang/LLVM (opzionale) 17.0.1           clang --version
+e2fsprogs              1.41.4           e2fsck -V
+flex                   2.5.35           flex --version
+gdb                    7.2              gdb --version
+GNU awk (opzionale)    5.1.0            gawk --version
+GNU C                  8.1              gcc --version
+GNU make               4.0              make --version
+GNU tar                1.28             tar --version
+GRUB                   0.93             grub --version || grub-install --version
+gtags (opzionale)      6.6.5            gtags --version
+iptables               1.4.2            iptables -V
+jfsutils               1.1.3            fsck.jfs -V
+kmod                   13               kmod -V
+mcelog                 0.6              mcelog --version
+mkimage (opzionale)    2017.01          mkimage --version
+nfs-utils              1.0.5            showmount --version
+openssl & libcrypto    1.0.0            openssl version
+pahole                 1.26             pahole --version
+pcmciautils            004              pccardctl -V
+PPP                    2.4.0            pppd --version
+procps                 3.2.0            ps --version
+Python                 3.9.x            python3 --version
+quota-tools            3.09             quota -V
+Rust (opzionale)       1.85.0           rustc --version
+Sphinx\ [#f1]_         3.4.3            sphinx-build --version
+squashfs-tools         4.0              mksquashfs -version
+udev                   081              udevadm --version
+util-linux             2.10o            mount --version
+xfsprogs               2.6.0            xfs_db -V
+====================== ===============  ========================================
 
 .. [#f1] Sphinx è necessario solo per produrre la documentazione del Kernel
 
@@ -84,10 +92,25 @@ potremmo rimuovere gli espedienti che abbiamo implementato per farli
 funzionare. Per maggiori informazioni
 :ref:`Building Linux with Clang/LLVM <kbuild_llvm>`.
 
+Rust (opzionale)
+----------------
+
+È necessaria una versione recente del compilatore Rust.
+
+Verificate le istruzioni Documentation/rust/quick-start.rst su come soddisfare i
+requisiti per compilare code Rust. In particolare, la regola ``rustavailable``
+nel ``Makefile`` è utile per verificare perché gli strumenti di compilazione non
+vengono trovati.
+
+bindgen (opzionale)
+-------------------
+
+``bindgen`` viene usato per generare il collegamento (binding) da Rust al lato C del kernel. Dipende da ``libclang``.
+
 Make
 ----
 
-Per compilare il kernel vi servirà GNU make 3.81 o successivo.
+Per compilare il kernel vi servirà GNU make 4.0 o successivo.
 
 Bash
 ----
@@ -97,7 +120,7 @@ Questo richiede bash 4.2 o successivo.
 Binutils
 --------
 
-Per generare il kernel è necessario avere Binutils 2.25 o superiore.
+Per generare il kernel è necessario avere Binutils 2.30 o superiore.
 
 pkg-config
 ----------
@@ -124,7 +147,13 @@ pahole
 
 Dalla versione 5.2, quando viene impostato CONFIG_DEBUG_INFO_BTF, il sistema di
 compilazione genera BTF (BPF Type Format) a partire da DWARF per vmlinux. Più
-tardi anche per i moduli. Questo richiede pahole v1.16 o successivo.
+tardi anche per i moduli. Questo richiede pahole v1.22 o successivo.
+
+Dalla versione 7.0, le kfunc annotate con KF_IMPLICIT_ARGS richiedono pahole
+v1.26 o successivo. Senza questa versione, tali kfunc avranno prototipi BTF
+errati in vmlinux, causando il fallimento del caricamento dei programmi BPF con
+l'errore "func_proto incompatible with vmlinux". Molte kfunc in sched_ext sono
+interessate da questo problema.
 
 A seconda della distribuzione, lo si può trovare nei pacchetti 'dwarves' o
 'pahole'. Oppure lo si può trovare qui: https://fedorapeople.org/~acme/dwarves/.
@@ -134,6 +163,14 @@ Perl
 
 Per compilare il kernel vi servirà perl 5 e i seguenti moduli ``Getopt::Long``,
 ``Getopt::Std``, ``File::Basename``, e ``File::Find``.
+
+Python
+------
+
+Diverse opzioni di configurazione lo richiedono: è necessario per le
+configurazioni predefinite di arm/arm64, CONFIG_LTO_CLANG, alcune opzioni
+configurabili del DRM, lo strumento kernel-doc e la generazione della
+documentazione (Sphinx), e altro ancora.
 
 BC
 --
@@ -151,6 +188,34 @@ Se la firma dei moduli è abilitata, allora vi servirà openssl per compilare il
 kernel 3.7 e successivi.  Vi serviranno anche i pacchetti di sviluppo di
 openssl per compilare il kernel 4.3 o successivi.
 
+Tar
+---
+
+GNU Tar è necessario per accedere ai file d'intestazione del kernel usando sysfs
+(CONFIG_IKHEADERS)
+
+gtags / GNU GLOBAL (opzionale)
+------------------------------
+
+Il programma GNU GLOBAL versione 6.6.5, o successiva, è necessario quando si
+vuole eseguire ``make gtags`` e generare i relativi indici. Internamente si fa
+uso del parametro gtags ``-C (--directory)`` che compare in questa versione.
+
+mkimage
+-------
+
+Questo strumento viene usato per produrre un *Flat Image Tree* (FIT),
+tipicamente usato su sistemi ARM. Questo strumento è disponibile tramite il
+pacchetto ``u-boot-tools`` oppure può essere compilato dal codice sorgente di
+U-Boot. Consultate le istruzioni
+https://docs.u-boot.org/en/latest/build/tools.html#building-tools-for-linux
+
+GNU AWK
+-------
+
+GNU AWK è necessario se si vuole che la compilazione del kernel generi dati
+sugli intervalli di indirizzi per i moduli integrati
+(CONFIG_BUILTIN_MODULE_RANGES).
 
 Strumenti di sistema
 ********************
@@ -216,14 +281,6 @@ Sono disponibili i seguenti strumenti:
 - ``mkfs.jfs`` - crea una partizione formattata secondo JFS
 
 - sono disponibili altri strumenti per il file-system.
-
-Reiserfsprogs
--------------
-
-Il pacchetto reiserfsprogs dovrebbe essere usato con reiserfs-3.6.x (Linux
-kernel 2.4.x).  Questo è un pacchetto combinato che contiene versioni
-funzionanti di ``mkreiserfs``, ``resize_reiserfs``, ``debugreiserfs`` e
-``reiserfsck``.  Questi programmi funzionano sulle piattaforme i386 e alpha.
 
 Xfsprogs
 --------
@@ -371,6 +428,16 @@ Clang/LLVM
 
 - :ref:`Getting LLVM <getting_llvm>`.
 
+Rust
+----
+
+- Documentation/rust/quick-start.rst.
+
+bindgen
+-------
+
+- Documentation/rust/quick-start.rst.
+
 Make
 ----
 
@@ -434,12 +501,7 @@ E2fsprogs
 JFSutils
 --------
 
-- <http://jfs.sourceforge.net/>
-
-Reiserfsprogs
--------------
-
-- <https://git.kernel.org/pub/scm/linux/kernel/git/jeffm/reiserfsprogs.git/>
+- <https://jfs.sourceforge.net/>
 
 Xfsprogs
 --------
@@ -455,7 +517,7 @@ Pcmciautils
 Quota-tools
 -----------
 
-- <http://sourceforge.net/projects/linuxquota/>
+- <https://sourceforge.net/projects/linuxquota/>
 
 
 Microcodice Intel P6
@@ -476,12 +538,7 @@ FUSE
 mcelog
 ------
 
-- <http://www.mcelog.org/>
-
-cpio
-----
-
-- <https://www.gnu.org/software/cpio/>
+- <https://www.mcelog.org/>
 
 Rete
 ****
@@ -497,7 +554,8 @@ PPP
 NFS-utils
 ---------
 
-- <http://sourceforge.net/project/showfiles.php?group_id=14>
+- <https://sourceforge.net/project/showfiles.php?group_id=14>
+- <https://nfs.sourceforge.net/>
 
 Iptables
 --------
@@ -512,12 +570,7 @@ Ip-route2
 OProfile
 --------
 
-- <http://oprofile.sf.net/download/>
-
-NFS-Utils
----------
-
-- <http://nfs.sourceforge.net/>
+- <https://oprofile.sf.net/download/>
 
 Documentazione del kernel
 *************************

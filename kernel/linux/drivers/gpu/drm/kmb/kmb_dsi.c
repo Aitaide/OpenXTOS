@@ -220,14 +220,14 @@ int kmb_dsi_host_bridge_init(struct device *dev)
 
 	/* Create and register MIPI DSI host */
 	if (!dsi_host) {
-		dsi_host = kzalloc(sizeof(*dsi_host), GFP_KERNEL);
+		dsi_host = kzalloc_obj(*dsi_host);
 		if (!dsi_host)
 			return -ENOMEM;
 
 		dsi_host->ops = &kmb_dsi_host_ops;
 
 		if (!dsi_device) {
-			dsi_device = kzalloc(sizeof(*dsi_device), GFP_KERNEL);
+			dsi_device = kzalloc_obj(*dsi_device);
 			if (!dsi_device) {
 				kfree(dsi_host);
 				return -ENOMEM;
@@ -251,7 +251,7 @@ int kmb_dsi_host_bridge_init(struct device *dev)
 		return -EINVAL;
 	}
 	/* Locate drm bridge from the hdmi encoder DT node */
-	adv_bridge = of_drm_find_bridge(encoder_node);
+	adv_bridge = of_drm_find_and_get_bridge(encoder_node);
 	of_node_put(dsi_out);
 	of_node_put(encoder_node);
 	if (!adv_bridge) {
@@ -818,7 +818,7 @@ static void test_mode_send(struct kmb_dsi *kmb_dsi, u32 dphy_no,
 	}
 }
 
-static inline void
+static inline __maybe_unused void
 	set_test_mode_src_osc_freq_target_low_bits(struct kmb_dsi *kmb_dsi,
 						   u32 dphy_no,
 						   u32 freq)
@@ -830,7 +830,7 @@ static inline void
 		       (freq & 0x7f));
 }
 
-static inline void
+static inline __maybe_unused void
 	set_test_mode_src_osc_freq_target_hi_bits(struct kmb_dsi *kmb_dsi,
 						  u32 dphy_no,
 						  u32 freq)
@@ -1333,7 +1333,7 @@ static u32 mipi_tx_init_dphy(struct kmb_dsi *kmb_dsi,
 }
 
 static void connect_lcd_to_mipi(struct kmb_dsi *kmb_dsi,
-				struct drm_atomic_state *old_state)
+				struct drm_atomic_commit *old_state)
 {
 	struct regmap *msscam;
 
@@ -1353,7 +1353,7 @@ static void connect_lcd_to_mipi(struct kmb_dsi *kmb_dsi,
 }
 
 int kmb_dsi_mode_set(struct kmb_dsi *kmb_dsi, struct drm_display_mode *mode,
-		     int sys_clk_mhz, struct drm_atomic_state *old_state)
+		     int sys_clk_mhz, struct drm_atomic_commit *old_state)
 {
 	u64 data_rate;
 
@@ -1457,7 +1457,7 @@ int kmb_dsi_encoder_init(struct drm_device *dev, struct kmb_dsi *kmb_dsi)
 		drm_encoder_cleanup(encoder);
 		return PTR_ERR(connector);
 	}
-	drm_connector_attach_encoder(connector, encoder);
+
 	return 0;
 }
 

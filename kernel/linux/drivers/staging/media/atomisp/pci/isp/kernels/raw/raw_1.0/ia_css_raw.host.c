@@ -2,15 +2,6 @@
 /*
  * Support for Intel Camera Imaging ISP subsystem.
  * Copyright (c) 2015, Intel Corporation.
- *
- * This program is free software; you can redistribute it and/or modify it
- * under the terms and conditions of the GNU General Public License,
- * version 2, as published by the Free Software Foundation.
- *
- * This program is distributed in the hope it will be useful, but WITHOUT
- * ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
- * FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License for
- * more details.
  */
 
 #include "ia_css_frame.h"
@@ -30,10 +21,9 @@ static const struct ia_css_raw_configuration default_config = {
 };
 
 /* MW: These areMIPI / ISYS properties, not camera function properties */
-static enum sh_stream_format
-css2isp_stream_format(enum atomisp_input_format from) {
-	switch (from)
-	{
+static enum sh_stream_format css2isp_stream_format(enum atomisp_input_format from)
+{
+	switch (from) {
 	case ATOMISP_INPUT_FORMAT_YUV420_8_LEGACY:
 				return sh_stream_format_yuv420_legacy;
 	case ATOMISP_INPUT_FORMAT_YUV420_8:
@@ -73,17 +63,9 @@ int ia_css_raw_config(struct sh_css_isp_raw_isp_config *to,
 	const struct ia_css_frame_info *internal_info = from->internal_info;
 	int ret;
 
-#if !defined(ISP2401)
-	/* 2401 input system uses input width width */
-	in_info = internal_info;
-#else
-	/*in some cases, in_info is NULL*/
-	if (in_info)
-		(void)internal_info;
-	else
+	if (!IS_ISP2401 || !in_info)
 		in_info = internal_info;
 
-#endif
 	ret = ia_css_dma_configure_from_info(&to->port_b, in_info);
 	if (ret)
 		return ret;
@@ -99,11 +81,12 @@ int ia_css_raw_config(struct sh_css_isp_raw_isp_config *to,
 	to->two_ppc             = from->two_ppc;
 	to->stream_format       = css2isp_stream_format(from->stream_format);
 	to->deinterleaved       = from->deinterleaved;
-#if defined(ISP2401)
-	to->start_column        = in_info->crop_info.start_column;
-	to->start_line          = in_info->crop_info.start_line;
-	to->enable_left_padding = from->enable_left_padding;
-#endif
+
+	if (IS_ISP2401) {
+		to->start_column        = in_info->crop_info.start_column;
+		to->start_line          = in_info->crop_info.start_line;
+		to->enable_left_padding = from->enable_left_padding;
+	}
 
 	return 0;
 }

@@ -647,10 +647,10 @@ static int pci9111_auto_attach(struct comedi_device *dev,
 			dev->irq = pcidev->irq;
 	}
 
-	dev->pacer = comedi_8254_init(dev->iobase + PCI9111_8254_BASE_REG,
-				      I8254_OSC_BASE_2MHZ, I8254_IO16, 0);
-	if (!dev->pacer)
-		return -ENOMEM;
+	dev->pacer = comedi_8254_io_alloc(dev->iobase + PCI9111_8254_BASE_REG,
+					  I8254_OSC_BASE_2MHZ, I8254_IO16, 0);
+	if (IS_ERR(dev->pacer))
+		return PTR_ERR(dev->pacer);
 
 	ret = comedi_alloc_subdevices(dev, 4);
 	if (ret)
@@ -727,9 +727,9 @@ static int pci9111_pci_probe(struct pci_dev *dev,
 }
 
 static const struct pci_device_id pci9111_pci_table[] = {
-	{ PCI_DEVICE(PCI_VENDOR_ID_ADLINK, 0x9111) },
-	/* { PCI_DEVICE(PCI_VENDOR_ID_ADLINK, PCI9111_HG_DEVICE_ID) }, */
-	{ 0 }
+	{ PCI_VDEVICE(ADLINK, 0x9111) },
+	/* { PCI_VDEVICE(ADLINK, PCI9111_HG_DEVICE_ID) }, */
+	{ }
 };
 MODULE_DEVICE_TABLE(pci, pci9111_pci_table);
 

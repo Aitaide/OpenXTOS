@@ -87,7 +87,7 @@ nouveau_vma_new(struct nouveau_bo *nvbo, struct nouveau_vmm *vmm,
 		return 0;
 	}
 
-	if (!(vma = *pvma = kmalloc(sizeof(*vma), GFP_KERNEL)))
+	if (!(vma = *pvma = kmalloc_obj(*vma)))
 		return -ENOMEM;
 	vma->vmm = vmm;
 	vma->refs = 1;
@@ -108,6 +108,9 @@ nouveau_vma_new(struct nouveau_bo *nvbo, struct nouveau_vmm *vmm,
 	} else {
 		ret = nvif_vmm_get(&vmm->vmm, PTES, false, mem->mem.page, 0,
 				   mem->mem.size, &tmp);
+		if (ret)
+			goto done;
+
 		vma->addr = tmp.addr;
 	}
 

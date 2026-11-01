@@ -8,6 +8,7 @@ s390 Architecture
     cds
     3270
     driver-model
+    mm
     monreader
     qeth
     s390dbf
@@ -21,10 +22,3 @@ s390 Architecture
     text_files
 
     features
-
-.. only::  subproject and html
-
-   Indices
-   =======
-
-   * :ref:`genindex`

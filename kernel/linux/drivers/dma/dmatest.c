@@ -21,6 +21,10 @@
 #include <linux/slab.h>
 #include <linux/wait.h>
 
+static bool nobounce;
+module_param(nobounce, bool, 0644);
+MODULE_PARM_DESC(nobounce, "Prevent using swiotlb buffer (default: use swiotlb buffer)");
+
 static unsigned int test_buf_size = 16384;
 module_param(test_buf_size, uint, 0644);
 MODULE_PARM_DESC(test_buf_size, "Size of the memcpy test buffer");
@@ -90,6 +94,7 @@ MODULE_PARM_DESC(polled, "Use polling for completion instead of interrupts");
 
 /**
  * struct dmatest_params - test parameters.
+ * @nobounce:		prevent using swiotlb buffer
  * @buf_size:		size of the memcpy test buffer
  * @channel:		bus ID of the channel to test
  * @device:		bus ID of the DMA Engine to test
@@ -106,6 +111,7 @@ MODULE_PARM_DESC(polled, "Use polling for completion instead of interrupts");
  * @polled:		use polling for completion instead of interrupts
  */
 struct dmatest_params {
+	bool		nobounce;
 	unsigned int	buf_size;
 	char		channel[20];
 	char		device[32];
@@ -131,7 +137,7 @@ struct dmatest_params {
  * @did_init:		module has been initialized completely
  * @last_error:		test has faced configuration issues
  */
-static struct dmatest_info {
+struct dmatest_info {
 	/* Test parameters */
 	struct dmatest_params	params;
 
@@ -141,7 +147,9 @@ static struct dmatest_info {
 	int			last_error;
 	struct mutex		lock;
 	bool			did_init;
-} test_info = {
+};
+
+static struct dmatest_info test_info = {
 	.channels = LIST_HEAD_INIT(test_info.channels),
 	.lock = __MUTEX_INITIALIZER(test_info.lock),
 };
@@ -215,6 +223,7 @@ struct dmatest_done {
 struct dmatest_data {
 	u8		**raw;
 	u8		**aligned;
+	gfp_t		gfp_flags;
 	unsigned int	cnt;
 	unsigned int	off;
 };
@@ -493,7 +502,7 @@ static unsigned long long dmatest_persec(s64 runtime, unsigned int val)
 
 	per_sec *= val;
 	per_sec = INT_TO_FIXPT(per_sec);
-	do_div(per_sec, runtime);
+	do_div(per_sec, (u32)runtime);
 
 	return per_sec;
 }
@@ -533,7 +542,7 @@ static int dmatest_alloc_test_data(struct dmatest_data *d,
 		goto err;
 
 	for (i = 0; i < d->cnt; i++) {
-		d->raw[i] = kmalloc(buf_size + align, GFP_KERNEL);
+		d->raw[i] = kmalloc(buf_size + align, d->gfp_flags);
 		if (!d->raw[i])
 			goto err;
 
@@ -655,6 +664,13 @@ static int dmatest_func(void *data)
 		goto err_free_coefs;
 	}
 
+	src->gfp_flags = GFP_KERNEL;
+	dst->gfp_flags = GFP_KERNEL;
+	if (params->nobounce) {
+		src->gfp_flags = GFP_DMA;
+		dst->gfp_flags = GFP_DMA;
+	}
+
 	if (dmatest_alloc_test_data(src, buf_size, align) < 0)
 		goto err_free_coefs;
 
@@ -663,11 +679,11 @@ static int dmatest_func(void *data)
 
 	set_user_nice(current, 10);
 
-	srcs = kcalloc(src->cnt, sizeof(dma_addr_t), GFP_KERNEL);
+	srcs = kzalloc_objs(dma_addr_t, src->cnt);
 	if (!srcs)
 		goto err_dst;
 
-	dma_pq = kcalloc(dst->cnt, sizeof(dma_addr_t), GFP_KERNEL);
+	dma_pq = kzalloc_objs(dma_addr_t, dst->cnt);
 	if (!dma_pq)
 		goto err_srcs_array;
 
@@ -973,7 +989,7 @@ static int dmatest_add_threads(struct dmatest_info *info,
 		return -EINVAL;
 
 	for (i = 0; i < params->threads_per_chan; i++) {
-		thread = kzalloc(sizeof(struct dmatest_thread), GFP_KERNEL);
+		thread = kzalloc_obj(struct dmatest_thread);
 		if (!thread) {
 			pr_warn("No memory for %s-%s%u\n",
 				dma_chan_name(chan), op, i);
@@ -1011,7 +1027,7 @@ static int dmatest_add_channel(struct dmatest_info *info,
 	unsigned int		thread_count = 0;
 	int cnt;
 
-	dtc = kmalloc(sizeof(struct dmatest_chan), GFP_KERNEL);
+	dtc = kmalloc_obj(struct dmatest_chan);
 	if (!dtc) {
 		pr_warn("No memory for %s\n", dma_chan_name(chan));
 		return -ENOMEM;
@@ -1093,6 +1109,7 @@ static void add_threaded_test(struct dmatest_info *info)
 	struct dmatest_params *params = &info->params;
 
 	/* Copy test parameters */
+	params->nobounce = nobounce;
 	params->buf_size = test_buf_size;
 	strscpy(params->channel, strim(test_channel), sizeof(params->channel));
 	strscpy(params->device, strim(test_device), sizeof(params->device));
@@ -1357,4 +1374,5 @@ static void __exit dmatest_exit(void)
 module_exit(dmatest_exit);
 
 MODULE_AUTHOR("Haavard Skinnemoen (Atmel)");
+MODULE_DESCRIPTION("DMA Engine test module");
 MODULE_LICENSE("GPL v2");

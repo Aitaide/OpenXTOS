@@ -23,14 +23,12 @@
  *
  */
 
-#include <linux/slab.h>
-
 #include "dm_services.h"
 #include "dm_helpers.h"
 #include "include/hdcp_msg_types.h"
 #include "include/signal_types.h"
 #include "core_types.h"
-#include "link.h"
+#include "link_service.h"
 #include "link_hwss.h"
 #include "link/protocols/link_dpcd.h"
 
@@ -72,7 +70,7 @@ static const bool hdcp_cmd_is_read[HDCP_MESSAGE_ID_MAX] = {
 	[HDCP_MESSAGE_ID_WRITE_REPEATER_AUTH_STREAM_MANAGE] = false,
 	[HDCP_MESSAGE_ID_READ_REPEATER_AUTH_STREAM_READY] = true,
 	[HDCP_MESSAGE_ID_READ_RXSTATUS] = true,
-	[HDCP_MESSAGE_ID_WRITE_CONTENT_STREAM_TYPE] = false
+	[HDCP_MESSAGE_ID_WRITE_CONTENT_STREAM_TYPE] = false,
 };
 
 static const uint8_t hdcp_i2c_offsets[HDCP_MESSAGE_ID_MAX] = {
@@ -130,12 +128,20 @@ static bool hdmi_14_process_transaction(
 	const uint8_t hdcp_i2c_addr_link_primary = 0x3a; /* 0x74 >> 1*/
 	const uint8_t hdcp_i2c_addr_link_secondary = 0x3b; /* 0x76 >> 1*/
 	struct i2c_command i2c_command;
-	uint8_t offset = hdcp_i2c_offsets[message_info->msg_id];
+	uint8_t offset;
 	struct i2c_payload i2c_payloads[] = {
-		{ true, 0, 1, &offset },
+		{ true, 0, 1, 0 },
 		/* actual hdcp payload, will be filled later, zeroed for now*/
 		{ 0 }
 	};
+
+	if (message_info->msg_id == HDCP_MESSAGE_ID_INVALID) {
+		DC_LOG_ERROR("%s: Invalid message_info msg_id - %d\n", __func__, message_info->msg_id);
+		return false;
+	}
+
+	offset = hdcp_i2c_offsets[message_info->msg_id];
+	i2c_payloads[0].data = &offset;
 
 	switch (message_info->link) {
 	case HDCP_LINK_SECONDARY:
@@ -171,6 +177,15 @@ static bool hdmi_14_process_transaction(
 	i2c_command.engine = I2C_COMMAND_ENGINE_HW;//only HW
 	i2c_command.speed = link->ddc->ctx->dc->caps.i2c_speed_in_khz;
 
+	if (link->force_to_use_aux)
+		result = dm_helpers_submit_i2c_over_aux(
+			link->ddc,
+			hdcp_i2c_addr_link_primary,
+			offset,
+			message_info->data,
+			message_info->length,
+			hdcp_cmd_is_read[message_info->msg_id]);
+	else
 	result = dm_helpers_submit_i2c(
 			link->ctx,
 			link,
@@ -310,6 +325,11 @@ static bool dp_11_process_transaction(
 	struct dc_link *link,
 	struct hdcp_protection_message *message_info)
 {
+	if (message_info->msg_id == HDCP_MESSAGE_ID_INVALID) {
+		DC_LOG_ERROR("%s: Invalid message_info msg_id - %d\n", __func__, message_info->msg_id);
+		return false;
+	}
+
 	return dpcd_access_helper(
 		link,
 		message_info->length,
@@ -354,6 +374,7 @@ static const struct protection_properties *get_protection_properties_by_signal(
 		case SIGNAL_TYPE_DVI_SINGLE_LINK:
 		case SIGNAL_TYPE_DVI_DUAL_LINK:
 		case SIGNAL_TYPE_HDMI_TYPE_A:
+		case SIGNAL_TYPE_HDMI_FRL:
 			return &hdmi_14_protection; //todo version2.2
 		case SIGNAL_TYPE_DISPLAY_PORT:
 		case SIGNAL_TYPE_DISPLAY_PORT_MST:

@@ -48,7 +48,14 @@ l'invio delle patch alla comunità di sviluppo.  Queste cose includono:
  - Verificare il codice fino al massimo che vi è consentito. Usate gli
    strumenti di debug del kernel, assicuratevi che il kernel compili con
    tutte le più ragionevoli combinazioni d'opzioni, usate cross-compilatori
-   per compilare il codice per differenti architetture, eccetera.
+   per compilare il codice per differenti architetture, eccetera. Aggiungete
+   dei test, preferibilmente usando un framework di test già esistente come
+   KUnit, e includeteli come un elemento separato della vostra serie (per
+   maggiori informazioni sulle serie di patch, vedere la sezione successiva).
+   Da notare che questo può essere obbligatorio quando si toccano alcuni
+   sottosistemi. Per esempio, le funzioni di libreria (che risiedono in
+   lib/) sono usate estensivamente quasi ovunque, e ci si aspetta che siano
+   testate adeguatamente.
 
  - Assicuratevi che il vostro codice sia conforme alla linee guida del
    kernel sullo stile del codice.
@@ -208,11 +215,6 @@ di commit in un sistema di controllo di versione.  Sarà seguito da:
    l'opzione "-p" assocerà alla modifica il nome della funzione alla quale
    si riferisce, rendendo il risultato più facile da leggere per gli altri.
 
-Dovreste evitare di includere nelle patch delle modifiche per file
-irrilevanti (quelli generati dal processo di generazione, per esempio, o i file
-di backup del vostro editor).  Il file "dontdiff" nella cartella Documentation
-potrà esservi d'aiuto su questo punto; passatelo a diff con l'opzione "-X".
-
 Le etichette sopracitate danno un'idea di come una patch prende vita e sono
 descritte nel dettaglio nel documento
 :ref:`Documentation/translations/it_IT/process/submitting-patches.rst <it_submittingpatches>`.
@@ -223,17 +225,29 @@ Un'etichetta ci può dire quale commit ha introdotto il problema che viene corre
        Fixes: 1f2e3d4c5b6a ("The first line of the commit specified by the first 12 characters of its SHA-1 ID")
 
 Un'altra etichetta viene usata per fornire collegamenti a pagine web contenenti
-maggiori informazioni, per esempio un rapporto circa il baco risolto dalla
-patch, oppure un documento con le specifiche implementate dalla patch::
+maggiori informazioni, per esempio una discussione avvenuta precedentemente
+circa il baco risolto dalla patch, oppure un documento con le specifiche
+implementate dalla patch::
 
        Link: https://example.com/somewhere.html  optional-other-stuff
 
-Alcuni manutentori aggiungono quest'etichetta alla patch per fare riferimento
-alla più recente discussione pubblica. A volte questo è fatto automaticamente da
-alcuni strumenti come b4 or un *hook* git come quello descritto qui
-'Documentation/translations/it_IT/maintainer/configure-git.rst'
+Come indicato dal "Chief Penguin" (soprannome di Linus Torvalds), un'etichetta
+Link: dovrebbe essere aggiunta ad un commit solo se conduce a informazioni
+utili che non si trovano già nel commit stesso.
 
-Un terzo tipo di etichetta viene usato per indicare chi ha contribuito allo
+
+Se il collegamento indirizza verso un rapporto su un baco risolto dalla patch,
+allora usate l'etichetta "Closes:"::
+
+       Closes: https://example.com/issues/1234  optional-other-stuff
+
+Alcune piattaforme di tracciamento di bachi hanno la capacità di chiudere
+automaticamente il problema se l'etichetta è presente nel messaggio. Alcuni
+automatismi che monitorano la liste di discussione possono anche tracciare
+queste etichette e intraprendere azioni. Piattaforme private e URL invalidi sono
+proibiti.
+
+Un altro tipo di etichetta viene usato per indicare chi ha contribuito allo
 sviluppo della patch. Tutte queste etichette seguono il formato::
 
 	tag: Full Name <email address>  optional-other-stuff
@@ -267,16 +281,32 @@ Le etichette in uso più comuni sono:
  - Reported-by: menziona l'utente che ha riportato il problema corretto da
    questa patch; quest'etichetta viene usata per dare credito alle persone che
    hanno verificato il codice e ci hanno fatto sapere quando le cose non
-   funzionavano correttamente. Se esiste un rapporto disponibile sul web, allora
+   funzionavano correttamente. Questa etichetta dovrebbe essere seguita da
+   quella Closes: con un indirizzo al rapporto, a meno che questo non sia
+   disponibile sul web. L'etichetta Link: può essere usata in alternativa a
+   Closes: se la patch corregge solo in parte il problema riportato nel
+   rapporto.
+
+   Se esiste un rapporto disponibile sul web, allora
    L'etichetta dovrebbe essere seguita da un collegamento al suddetto rapporto.
+
+ - Suggested-by: indica che l'idea della patch è stata suggerita dalla persona
+   menzionata, ed assicura che le venga dato credito per l'idea.  Questo, si
+   spera, la inviterà ad aiutarci ancora in futuro.
 
  - Cc: la persona menzionata ha ricevuto una copia della patch ed ha avuto
    l'opportunità di commentarla.
 
-State attenti ad aggiungere queste etichette alla vostra patch: solo "Cc:" può
-essere aggiunta senza il permesso esplicito della persona menzionata. Il più
-delle volte anche Reported-by: va bene, ma è sempre meglio chiedere specialmente
-se il baco è stato riportato in una comunicazione privata.
+State attenti ad aggiungere le suddette etichette alla vostra patch: tutte,
+tranne Cc:, Reported-by: e Suggested-by:, richiedono il permesso esplicito
+della persona menzionata.  Per queste tre è sufficiente un permesso implicito,
+se la persona ha contribuito al kernel Linux usando quel nome e quell'indirizzo
+email secondo gli archivi di lore o la cronologia dei commit -- e, nel caso di
+Reported-by: e Suggested-by:, se la segnalazione o il suggerimento sono
+avvenuti pubblicamente.  Da notare che bugzilla.kernel.org è, in questo senso,
+un luogo pubblico, ma gli indirizzi email usati lì sono privati; quindi non
+esponeteli nelle etichette, a meno che la persona non li abbia già usati in
+contributi precedenti.
 
 Inviare la modifica
 -------------------

@@ -21,19 +21,16 @@ properties:
       - jasonic,jt240mhqs-hwt-ek-e3
       - sitronix,st7789v
 
-  reg: true
-  reset-gpios: true
-  power-supply: true
-  backlight: true
-  port: true
-  rotation: true
+  reg:
+    maxItems: 1
 
   spi-cpha: true
   spi-cpol: true
 
   spi-rx-bus-width:
-    minimum: 0
-    maximum: 1
+    items:
+      minimum: 0
+      maximum: 1
 
   dc-gpios:
     maxItems: 1

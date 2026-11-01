@@ -10,6 +10,7 @@
 #include <linux/clk.h>
 #include <linux/device.h>
 #include <linux/dmaengine.h>
+#include <linux/minmax.h>
 #include <linux/module.h>
 #include <linux/of_irq.h>
 #include <linux/of_platform.h>
@@ -187,16 +188,8 @@ static int jh7110_tdm_syncdiv(struct jh7110_tdm_dev *tdm)
 {
 	u32 sl, sscale, syncdiv;
 
-	if (tdm->rx.sl >= tdm->tx.sl)
-		sl = tdm->rx.sl;
-	else
-		sl = tdm->tx.sl;
-
-	if (tdm->rx.sscale >= tdm->tx.sscale)
-		sscale = tdm->rx.sscale;
-	else
-		sscale = tdm->tx.sscale;
-
+	sl = max(tdm->rx.sl, tdm->tx.sl);
+	sscale = max(tdm->rx.sscale, tdm->tx.sscale);
 	syncdiv = tdm->pcmclk / tdm->samplerate - 1;
 
 	if ((syncdiv + 1) < (sl * sscale)) {
@@ -325,7 +318,7 @@ static const struct snd_soc_component_driver jh7110_tdm_component = {
 static int jh7110_tdm_startup(struct snd_pcm_substream *substream,
 			      struct snd_soc_dai *cpu_dai)
 {
-	struct snd_soc_pcm_runtime *rtd = asoc_substream_to_rtd(substream);
+	struct snd_soc_pcm_runtime *rtd = snd_soc_substream_to_rtd(substream);
 	struct snd_soc_dai_link *dai_link = rtd->dai_link;
 
 	dai_link->trigger_stop = SND_SOC_TRIGGER_ORDER_LDC;
@@ -566,10 +559,8 @@ static int jh7110_tdm_clk_reset_get(struct platform_device *pdev,
 	tdm->clks[5].id = "tdm";
 
 	ret = devm_clk_bulk_get(&pdev->dev, ARRAY_SIZE(tdm->clks), tdm->clks);
-	if (ret) {
-		dev_err(&pdev->dev, "Failed to get tdm clocks\n");
+	if (ret)
 		return ret;
-	}
 
 	tdm->resets = devm_reset_control_array_get_exclusive(&pdev->dev);
 	if (IS_ERR(tdm->resets)) {
@@ -596,42 +587,33 @@ static int jh7110_tdm_probe(struct platform_device *pdev)
 	tdm->dev = &pdev->dev;
 
 	ret = jh7110_tdm_clk_reset_get(pdev, tdm);
-	if (ret) {
-		dev_err(&pdev->dev, "Failed to enable audio-tdm clock\n");
+	if (ret)
 		return ret;
-	}
 
 	jh7110_tdm_init_params(tdm);
 
 	dev_set_drvdata(&pdev->dev, tdm);
 	ret = devm_snd_soc_register_component(&pdev->dev, &jh7110_tdm_component,
 					      &jh7110_tdm_dai, 1);
-	if (ret) {
-		dev_err(&pdev->dev, "Failed to register dai\n");
+	if (ret)
 		return ret;
-	}
 
 	ret = devm_snd_dmaengine_pcm_register(&pdev->dev,
 					      &jh7110_dmaengine_pcm_config,
 					      SND_DMAENGINE_PCM_FLAG_COMPAT);
-	if (ret) {
-		dev_err(&pdev->dev, "Could not register pcm: %d\n", ret);
+	if (ret)
 		return ret;
-	}
 
 	pm_runtime_enable(&pdev->dev);
 	if (!pm_runtime_enabled(&pdev->dev)) {
 		ret = jh7110_tdm_runtime_resume(&pdev->dev);
-		if (ret)
-			goto err_pm_disable;
+		if (ret) {
+			pm_runtime_disable(&pdev->dev);
+			return ret;
+		}
 	}
 
 	return 0;
-
-err_pm_disable:
-	pm_runtime_disable(&pdev->dev);
-
-	return ret;
 }
 
 static void jh7110_tdm_dev_remove(struct platform_device *pdev)
@@ -660,7 +642,7 @@ static struct platform_driver jh7110_tdm_driver = {
 		.pm = pm_ptr(&jh7110_tdm_pm_ops),
 	},
 	.probe = jh7110_tdm_probe,
-	.remove_new = jh7110_tdm_dev_remove,
+	.remove = jh7110_tdm_dev_remove,
 };
 module_platform_driver(jh7110_tdm_driver);
 

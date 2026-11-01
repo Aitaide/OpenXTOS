@@ -4,7 +4,11 @@
 /**
  * DOC: Broadcom V3D Graphics Driver
  *
- * This driver supports the Broadcom V3D 3.3 and 4.1 OpenGL ES GPUs.
+ * This driver supports the Broadcom V3D 4.2 and 7.1 GPUs.
+ *
+ * Support for V3D 3.3 and 4.1 GPUs is deprecated and it will be removed
+ * in the next kernel release.
+ *
  * For V3D 2.x support, see the VC4 driver.
  *
  * The V3D GPU includes a tiled render (composed of a bin and render
@@ -17,12 +21,15 @@
 #include <linux/dma-mapping.h>
 #include <linux/io.h>
 #include <linux/module.h>
+#include <linux/of.h>
 #include <linux/of_platform.h>
 #include <linux/platform_device.h>
+#include <linux/sched/clock.h>
 #include <linux/reset.h>
 
 #include <drm/drm_drv.h>
 #include <drm/drm_managed.h>
+#include <drm/drm_print.h>
 #include <uapi/drm/v3d_drm.h>
 
 #include "v3d_drv.h"
@@ -30,14 +37,21 @@
 
 #define DRIVER_NAME "v3d"
 #define DRIVER_DESC "Broadcom V3D graphics"
-#define DRIVER_DATE "20180419"
 #define DRIVER_MAJOR 1
 #define DRIVER_MINOR 0
 #define DRIVER_PATCHLEVEL 0
 
+/* Only expose the `super_pages` modparam if THP is enabled. */
+#ifdef CONFIG_TRANSPARENT_HUGEPAGE
+bool super_pages = true;
+module_param_named(super_pages, super_pages, bool, 0400);
+MODULE_PARM_DESC(super_pages, "Enable/Disable Super Pages support.");
+#endif
+
 static int v3d_get_param_ioctl(struct drm_device *dev, void *data,
 			       struct drm_file *file_priv)
 {
+	struct v3d_file_priv *v3d_priv = file_priv->driver_priv;
 	struct v3d_dev *v3d = to_v3d_dev(dev);
 	struct drm_v3d_get_param *args = data;
 	static const u32 reg_map[] = {
@@ -49,6 +63,7 @@ static int v3d_get_param_ioctl(struct drm_device *dev, void *data,
 		[DRM_V3D_PARAM_V3D_CORE0_IDENT1] = V3D_CTL_IDENT1,
 		[DRM_V3D_PARAM_V3D_CORE0_IDENT2] = V3D_CTL_IDENT2,
 	};
+	int ret;
 
 	if (args->pad != 0)
 		return -EINVAL;
@@ -65,12 +80,19 @@ static int v3d_get_param_ioctl(struct drm_device *dev, void *data,
 		if (args->value != 0)
 			return -EINVAL;
 
+		ret = v3d_pm_runtime_get(v3d);
+		if (ret)
+			return ret;
+
 		if (args->param >= DRM_V3D_PARAM_V3D_CORE0_IDENT0 &&
 		    args->param <= DRM_V3D_PARAM_V3D_CORE0_IDENT2) {
 			args->value = V3D_CORE_READ(0, offset);
 		} else {
 			args->value = V3D_READ(offset);
 		}
+
+		v3d_pm_runtime_put(v3d);
+
 		return 0;
 	}
 
@@ -85,13 +107,30 @@ static int v3d_get_param_ioctl(struct drm_device *dev, void *data,
 		args->value = 1;
 		return 0;
 	case DRM_V3D_PARAM_SUPPORTS_PERFMON:
-		args->value = (v3d->ver >= 40);
+		args->value = (v3d->ver >= V3D_GEN_41);
 		return 0;
 	case DRM_V3D_PARAM_SUPPORTS_MULTISYNC_EXT:
 		args->value = 1;
 		return 0;
+	case DRM_V3D_PARAM_SUPPORTS_CPU_QUEUE:
+		args->value = 1;
+		return 0;
+	case DRM_V3D_PARAM_MAX_PERF_COUNTERS:
+		args->value = v3d->perfmon_info.max_counters;
+		return 0;
+	case DRM_V3D_PARAM_SUPPORTS_SUPER_PAGES:
+		args->value = !!drm_gem_get_huge_mnt(dev);
+		return 0;
+	case DRM_V3D_PARAM_GLOBAL_RESET_COUNTER:
+		args->value = atomic_read(&v3d->reset_counter);
+		return 0;
+	case DRM_V3D_PARAM_CONTEXT_RESET_COUNTER:
+		args->value = 0;
+		for (enum v3d_queue q = 0; q < V3D_MAX_QUEUES; q++)
+			args->value += atomic_read(&v3d_priv->stats[q]->reset_counter);
+		return 0;
 	default:
-		DRM_DEBUG("Unknown parameter %d\n", args->param);
+		drm_dbg(dev, "Unknown parameter %d\n", args->param);
 		return -EINVAL;
 	}
 }
@@ -102,25 +141,43 @@ v3d_open(struct drm_device *dev, struct drm_file *file)
 	struct v3d_dev *v3d = to_v3d_dev(dev);
 	struct v3d_file_priv *v3d_priv;
 	struct drm_gpu_scheduler *sched;
-	int i;
+	int i, ret;
 
-	v3d_priv = kzalloc(sizeof(*v3d_priv), GFP_KERNEL);
+	v3d_priv = kzalloc_obj(*v3d_priv);
 	if (!v3d_priv)
 		return -ENOMEM;
 
 	v3d_priv->v3d = v3d;
 
 	for (i = 0; i < V3D_MAX_QUEUES; i++) {
+		v3d_priv->stats[i] = v3d_stats_alloc();
+		if (!v3d_priv->stats[i]) {
+			ret = -ENOMEM;
+			goto err_stats;
+		}
+
 		sched = &v3d->queue[i].sched;
-		drm_sched_entity_init(&v3d_priv->sched_entity[i],
-				      DRM_SCHED_PRIORITY_NORMAL, &sched,
-				      1, NULL);
+		ret = drm_sched_entity_init(&v3d_priv->sched_entity[i],
+					    DRM_SCHED_PRIORITY_NORMAL, &sched,
+					    1, NULL);
+		if (ret)
+			goto err_sched;
 	}
 
 	v3d_perfmon_open_file(v3d_priv);
 	file->driver_priv = v3d_priv;
 
 	return 0;
+
+err_sched:
+	v3d_stats_put(v3d_priv->stats[i]);
+err_stats:
+	for (i--; i >= 0; i--) {
+		drm_sched_entity_destroy(&v3d_priv->sched_entity[i]);
+		v3d_stats_put(v3d_priv->stats[i]);
+	}
+	kfree(v3d_priv);
+	return ret;
 }
 
 static void
@@ -129,14 +186,62 @@ v3d_postclose(struct drm_device *dev, struct drm_file *file)
 	struct v3d_file_priv *v3d_priv = file->driver_priv;
 	enum v3d_queue q;
 
-	for (q = 0; q < V3D_MAX_QUEUES; q++)
+	for (q = 0; q < V3D_MAX_QUEUES; q++) {
 		drm_sched_entity_destroy(&v3d_priv->sched_entity[q]);
+		v3d_stats_put(v3d_priv->stats[q]);
+	}
 
 	v3d_perfmon_close_file(v3d_priv);
 	kfree(v3d_priv);
 }
 
-DEFINE_DRM_GEM_FOPS(v3d_drm_fops);
+void v3d_get_stats(const struct v3d_stats *stats, u64 timestamp,
+		   u64 *active_runtime, u64 *jobs_completed)
+{
+	unsigned int seq;
+
+	do {
+		seq = raw_read_seqcount_begin(&stats->lock);
+		*active_runtime = stats->enabled_ns;
+		if (stats->start_ns)
+			*active_runtime += timestamp - stats->start_ns;
+		*jobs_completed = stats->jobs_completed;
+	} while (read_seqcount_retry(&stats->lock, seq));
+}
+
+static void v3d_show_fdinfo(struct drm_printer *p, struct drm_file *file)
+{
+	struct v3d_file_priv *file_priv = file->driver_priv;
+	u64 timestamp = local_clock();
+	enum v3d_queue queue;
+
+	for (queue = 0; queue < V3D_MAX_QUEUES; queue++) {
+		struct v3d_stats *stats = file_priv->stats[queue];
+		u64 active_runtime, jobs_completed;
+
+		v3d_get_stats(stats, timestamp, &active_runtime, &jobs_completed);
+
+		/* Note that, in case of a GPU reset, the time spent during an
+		 * attempt of executing the job is not computed in the runtime.
+		 */
+		drm_printf(p, "drm-engine-%s: \t%llu ns\n",
+			   v3d_queue_to_string(queue), active_runtime);
+
+		/* Note that we only count jobs that completed. Therefore, jobs
+		 * that were resubmitted due to a GPU reset are not computed.
+		 */
+		drm_printf(p, "v3d-jobs-%s: \t%llu jobs\n",
+			   v3d_queue_to_string(queue), jobs_completed);
+	}
+
+	drm_show_memory_stats(p, file);
+}
+
+static const struct file_operations v3d_drm_fops = {
+	.owner = THIS_MODULE,
+	DRM_GEM_FOPS,
+	.show_fdinfo = drm_show_fdinfo,
+};
 
 /* DRM_AUTH is required on SUBMIT_CL for now, while we don't have GMP
  * protection between clients.  Note that render nodes would be
@@ -156,6 +261,9 @@ static const struct drm_ioctl_desc v3d_drm_ioctls[] = {
 	DRM_IOCTL_DEF_DRV(V3D_PERFMON_CREATE, v3d_perfmon_create_ioctl, DRM_RENDER_ALLOW),
 	DRM_IOCTL_DEF_DRV(V3D_PERFMON_DESTROY, v3d_perfmon_destroy_ioctl, DRM_RENDER_ALLOW),
 	DRM_IOCTL_DEF_DRV(V3D_PERFMON_GET_VALUES, v3d_perfmon_get_values_ioctl, DRM_RENDER_ALLOW),
+	DRM_IOCTL_DEF_DRV(V3D_SUBMIT_CPU, v3d_submit_cpu_ioctl, DRM_RENDER_ALLOW | DRM_AUTH),
+	DRM_IOCTL_DEF_DRV(V3D_PERFMON_GET_COUNTER, v3d_perfmon_get_counter_ioctl, DRM_RENDER_ALLOW),
+	DRM_IOCTL_DEF_DRV(V3D_PERFMON_SET_GLOBAL, v3d_perfmon_set_global_ioctl, DRM_RENDER_ALLOW),
 };
 
 static const struct drm_driver v3d_drm_driver = {
@@ -176,19 +284,20 @@ static const struct drm_driver v3d_drm_driver = {
 	.ioctls = v3d_drm_ioctls,
 	.num_ioctls = ARRAY_SIZE(v3d_drm_ioctls),
 	.fops = &v3d_drm_fops,
+	.show_fdinfo = v3d_show_fdinfo,
 
 	.name = DRIVER_NAME,
 	.desc = DRIVER_DESC,
-	.date = DRIVER_DATE,
 	.major = DRIVER_MAJOR,
 	.minor = DRIVER_MINOR,
 	.patchlevel = DRIVER_PATCHLEVEL,
 };
 
 static const struct of_device_id v3d_of_match[] = {
-	{ .compatible = "brcm,2711-v3d" },
-	{ .compatible = "brcm,7268-v3d" },
-	{ .compatible = "brcm,7278-v3d" },
+	{ .compatible = "brcm,2711-v3d", .data = (void *)V3D_GEN_42 },
+	{ .compatible = "brcm,2712-v3d", .data = (void *)V3D_GEN_71 },
+	{ .compatible = "brcm,7268-v3d", .data = (void *)V3D_GEN_33 },
+	{ .compatible = "brcm,7278-v3d", .data = (void *)V3D_GEN_41 },
 	{},
 };
 MODULE_DEVICE_TABLE(of, v3d_of_match);
@@ -205,9 +314,10 @@ static int v3d_platform_drm_probe(struct platform_device *pdev)
 	struct device *dev = &pdev->dev;
 	struct drm_device *drm;
 	struct v3d_dev *v3d;
+	enum v3d_gen gen;
 	int ret;
 	u32 mmu_debug;
-	u32 ident1;
+	u32 ident1, ident3;
 	u64 mask;
 
 	v3d = devm_drm_dev_alloc(dev, &v3d_drm_driver, struct v3d_dev, drm);
@@ -218,6 +328,9 @@ static int v3d_platform_drm_probe(struct platform_device *pdev)
 
 	platform_set_drvdata(pdev, drm);
 
+	gen = (uintptr_t)of_device_get_match_data(dev);
+	v3d->ver = gen;
+
 	ret = map_regs(v3d, &v3d->hub_regs, "hub");
 	if (ret)
 		return ret;
@@ -226,41 +339,40 @@ static int v3d_platform_drm_probe(struct platform_device *pdev)
 	if (ret)
 		return ret;
 
-	mmu_debug = V3D_READ(V3D_MMU_DEBUG_INFO);
-	mask = DMA_BIT_MASK(30 + V3D_GET_FIELD(mmu_debug, V3D_MMU_PA_WIDTH));
-	ret = dma_set_mask_and_coherent(dev, mask);
-	if (ret)
-		return ret;
-
-	v3d->va_width = 30 + V3D_GET_FIELD(mmu_debug, V3D_MMU_VA_WIDTH);
-
-	ident1 = V3D_READ(V3D_HUB_IDENT1);
-	v3d->ver = (V3D_GET_FIELD(ident1, V3D_HUB_IDENT1_TVER) * 10 +
-		    V3D_GET_FIELD(ident1, V3D_HUB_IDENT1_REV));
-	v3d->cores = V3D_GET_FIELD(ident1, V3D_HUB_IDENT1_NCORES);
-	WARN_ON(v3d->cores > 1); /* multicore not yet implemented */
-
-	v3d->reset = devm_reset_control_get_exclusive(dev, NULL);
-	if (IS_ERR(v3d->reset)) {
-		ret = PTR_ERR(v3d->reset);
-
-		if (ret == -EPROBE_DEFER)
+	if (v3d->ver >= V3D_GEN_71) {
+		ret = map_regs(v3d, &v3d->sms_regs, "sms");
+		if (ret)
 			return ret;
-
-		v3d->reset = NULL;
-		ret = map_regs(v3d, &v3d->bridge_regs, "bridge");
-		if (ret) {
-			dev_err(dev,
-				"Failed to get reset control or bridge regs\n");
-			return ret;
-		}
 	}
 
-	if (v3d->ver < 41) {
+	if (v3d->ver < V3D_GEN_41) {
 		ret = map_regs(v3d, &v3d->gca_regs, "gca");
 		if (ret)
 			return ret;
 	}
+
+	v3d->reset = devm_reset_control_get_optional_exclusive(dev, NULL);
+	if (IS_ERR(v3d->reset))
+		return dev_err_probe(dev, PTR_ERR(v3d->reset),
+				     "Failed to get reset control\n");
+
+	if (!v3d->reset) {
+		ret = map_regs(v3d, &v3d->bridge_regs, "bridge");
+		if (ret) {
+			dev_err(dev, "Failed to get bridge registers\n");
+			return ret;
+		}
+	}
+
+	v3d->clk = devm_clk_get_optional(dev, NULL);
+	if (IS_ERR(v3d->clk))
+		return dev_err_probe(dev, PTR_ERR(v3d->clk), "Failed to get V3D clock\n");
+
+	ret = v3d_irq_init(v3d);
+	if (ret)
+		return ret;
+
+	v3d_perfmon_init(v3d);
 
 	v3d->mmu_scratch = dma_alloc_wc(dev, 4096, &v3d->mmu_scratch_paddr,
 					GFP_KERNEL | __GFP_NOWARN | __GFP_ZERO);
@@ -273,18 +385,77 @@ static int v3d_platform_drm_probe(struct platform_device *pdev)
 	if (ret)
 		goto dma_free;
 
-	ret = v3d_irq_init(v3d);
+	ret = devm_pm_runtime_enable(dev);
 	if (ret)
 		goto gem_destroy;
 
+	ret = pm_runtime_resume_and_get(dev);
+	if (ret)
+		goto gem_destroy;
+
+	/* If PM is disabled, we need to call v3d_power_resume() manually. */
+	if (!IS_ENABLED(CONFIG_PM)) {
+		ret = v3d_power_resume(dev);
+		if (ret)
+			goto gem_destroy;
+	}
+
+	mmu_debug = V3D_READ(V3D_MMU_DEBUG_INFO);
+	mask = DMA_BIT_MASK(30 + V3D_GET_FIELD(mmu_debug, V3D_MMU_PA_WIDTH));
+	ret = dma_set_mask_and_coherent(dev, mask);
+	if (ret)
+		goto runtime_pm_put;
+
+	dma_set_max_seg_size(&pdev->dev, UINT_MAX);
+
+	v3d->va_width = 30 + V3D_GET_FIELD(mmu_debug, V3D_MMU_VA_WIDTH);
+
+	ident1 = V3D_READ(V3D_HUB_IDENT1);
+	v3d->ver = (V3D_GET_FIELD(ident1, V3D_HUB_IDENT1_TVER) * 10 +
+		    V3D_GET_FIELD(ident1, V3D_HUB_IDENT1_REV));
+	/* Make sure that the V3D tech version retrieved from the HW is equal
+	 * to the one advertised by the device tree.
+	 */
+	WARN_ON(v3d->ver != gen);
+
+	/* V3D 3.3 and V3D 4.1 has had no in-tree userspace since Mesa
+	 * dropped support in 2024 (MR#25851) and they have no known users.
+	 * Due to that, support is scheduled for removal in the next release.
+	 */
+	if (v3d->ver <= V3D_GEN_41) {
+		dev_warn(dev,
+			 "V3D %u.%u support is deprecated and will be removed "
+			 "in the next kernel release. If you rely on this hardware, "
+			 "please report it to dri-devel@lists.freedesktop.org.\n",
+			 v3d->ver / 10, v3d->ver % 10);
+	}
+
+	v3d->cores = V3D_GET_FIELD(ident1, V3D_HUB_IDENT1_NCORES);
+	WARN_ON(v3d->cores > 1); /* multicore not yet implemented */
+
+	ident3 = V3D_READ(V3D_HUB_IDENT3);
+	v3d->rev = V3D_GET_FIELD(ident3, V3D_HUB_IDENT3_IPREV);
+
+	pm_runtime_set_autosuspend_delay(dev, 50);
+	pm_runtime_use_autosuspend(dev);
+
 	ret = drm_dev_register(drm, 0);
 	if (ret)
-		goto irq_disable;
+		goto runtime_pm_put;
+
+	ret = v3d_sysfs_init(dev);
+	if (ret)
+		goto drm_unregister;
+
+	pm_runtime_mark_last_busy(dev);
+	pm_runtime_put_autosuspend(dev);
 
 	return 0;
 
-irq_disable:
-	v3d_irq_disable(v3d);
+drm_unregister:
+	drm_dev_unregister(drm);
+runtime_pm_put:
+	pm_runtime_put_sync_suspend(dev);
 gem_destroy:
 	v3d_gem_destroy(drm);
 dma_free:
@@ -296,21 +467,33 @@ static void v3d_platform_drm_remove(struct platform_device *pdev)
 {
 	struct drm_device *drm = platform_get_drvdata(pdev);
 	struct v3d_dev *v3d = to_v3d_dev(drm);
+	struct device *dev = &pdev->dev;
+
+	v3d_sysfs_destroy(dev);
 
 	drm_dev_unregister(drm);
 
+	pm_runtime_suspend(dev);
+
+	/* If PM is disabled, we need to call v3d_power_suspend() manually. */
+	if (!IS_ENABLED(CONFIG_PM))
+		v3d_power_suspend(dev);
+
 	v3d_gem_destroy(drm);
 
-	dma_free_wc(v3d->drm.dev, 4096, v3d->mmu_scratch,
-		    v3d->mmu_scratch_paddr);
+	dma_free_wc(dev, 4096, v3d->mmu_scratch, v3d->mmu_scratch_paddr);
 }
+
+static DEFINE_RUNTIME_DEV_PM_OPS(v3d_pm_ops, v3d_power_suspend,
+				 v3d_power_resume, NULL);
 
 static struct platform_driver v3d_platform_driver = {
 	.probe		= v3d_platform_drm_probe,
-	.remove_new	= v3d_platform_drm_remove,
+	.remove		= v3d_platform_drm_remove,
 	.driver		= {
 		.name	= "v3d",
 		.of_match_table = v3d_of_match,
+		.pm = pm_ptr(&v3d_pm_ops),
 	},
 };
 

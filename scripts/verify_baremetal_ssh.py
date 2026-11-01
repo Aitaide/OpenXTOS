@@ -43,7 +43,7 @@ def main():
                 raise RuntimeError('maintenance login is not root')
             (E / (name + '.login.log')).write_text(ready.stdout + ready.stderr)
             command = 'grep -qw xtos.installer=1 /proc/cmdline' if iso else 'grep -q xtos.root= /proc/cmdline && grep -qx XTOS_PERSISTENT_TEST /root/persistence-test'
-            command += ' && [ "$(cat /sys/kernel/realtime)" = 1 ] && xtos-selftest'
+            command += ' && [ "$(/usr/bin/xtos-rt-status)" = 1 ] && xtos-selftest'
             result = subprocess.run(key + [command], capture_output=True, text=True, timeout=120)
             (E / (name + '.ssh.log')).write_text(result.stdout + result.stderr)
             if result.returncode or 'guest_userspace=pass' not in result.stdout:

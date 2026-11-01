@@ -115,8 +115,8 @@ static inline void atl1e_irq_reset(struct atl1e_adapter *adapter)
  */
 static void atl1e_phy_config(struct timer_list *t)
 {
-	struct atl1e_adapter *adapter = from_timer(adapter, t,
-						   phy_config_timer);
+	struct atl1e_adapter *adapter = timer_container_of(adapter, t,
+							   phy_config_timer);
 	struct atl1e_hw *hw = &adapter->hw;
 	unsigned long flags;
 
@@ -232,7 +232,7 @@ static void atl1e_link_chg_event(struct atl1e_adapter *adapter)
 
 static void atl1e_del_timer(struct atl1e_adapter *adapter)
 {
-	del_timer_sync(&adapter->phy_config_timer);
+	timer_delete_sync(&adapter->phy_config_timer);
 }
 
 static void atl1e_cancel_work(struct atl1e_adapter *adapter)
@@ -428,7 +428,7 @@ static int atl1e_change_mtu(struct net_device *netdev, int new_mtu)
 	if (netif_running(netdev)) {
 		while (test_and_set_bit(__AT_RESETTING, &adapter->flags))
 			msleep(1);
-		netdev->mtu = new_mtu;
+		WRITE_ONCE(netdev->mtu, new_mtu);
 		adapter->hw.max_frame_size = new_mtu;
 		adapter->hw.rx_jumbo_th = (max_frame + 7) >> 3;
 		atl1e_down(adapter);
@@ -866,10 +866,13 @@ static int atl1e_setup_ring_resources(struct atl1e_adapter *adapter)
 		netdev_err(adapter->netdev, "offset(%d) > ring size(%d) !!\n",
 			   offset, adapter->ring_size);
 		err = -1;
-		goto failed;
+		goto free_buffer;
 	}
 
 	return 0;
+free_buffer:
+	kfree(tx_ring->tx_buffer);
+	tx_ring->tx_buffer = NULL;
 failed:
 	if (adapter->ring_vir_addr != NULL) {
 		dma_free_coherent(&pdev->dev, adapter->ring_size,
@@ -1230,6 +1233,9 @@ static bool atl1e_clean_tx_irq(struct atl1e_adapter *adapter)
 	struct atl1e_tx_buffer *tx_buffer = NULL;
 	u16 hw_next_to_clean = AT_READ_REGW(&adapter->hw, REG_TPD_CONS_IDX);
 	u16 next_to_clean = atomic_read(&tx_ring->next_to_clean);
+
+	if (unlikely(hw_next_to_clean >= tx_ring->count))
+		hw_next_to_clean = next_to_clean;
 
 	while (next_to_clean != hw_next_to_clean) {
 		tx_buffer = &tx_ring->tx_buffer[next_to_clean];

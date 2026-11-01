@@ -1,15 +1,9 @@
+// SPDX-License-Identifier: GPL-2.0
 /*
  * llc_core.c - Minimum needed routines for sap handling and module init/exit
  *
  * Copyright (c) 1997 by Procom Technology, Inc.
  * 		 2001-2003 by Arnaldo Carvalho de Melo <acme@conectiva.com.br>
- *
- * This program can be redistributed or modified under the terms of the
- * GNU General Public License as published by the Free Software Foundation.
- * This program is distributed without any warranty or implied warranty
- * of merchantability or fitness for a particular purpose.
- *
- * See the GNU General Public License for more details.
  */
 
 #include <linux/module.h>
@@ -32,7 +26,7 @@ static DEFINE_SPINLOCK(llc_sap_list_lock);
  */
 static struct llc_sap *llc_sap_alloc(void)
 {
-	struct llc_sap *sap = kzalloc(sizeof(*sap), GFP_ATOMIC);
+	struct llc_sap *sap = kzalloc_obj(*sap, GFP_ATOMIC);
 	int i;
 
 	if (sap) {
@@ -135,22 +129,15 @@ static struct packet_type llc_packet_type __read_mostly = {
 	.func = llc_rcv,
 };
 
-static struct packet_type llc_tr_packet_type __read_mostly = {
-	.type = cpu_to_be16(ETH_P_TR_802_2),
-	.func = llc_rcv,
-};
-
 static int __init llc_init(void)
 {
 	dev_add_pack(&llc_packet_type);
-	dev_add_pack(&llc_tr_packet_type);
 	return 0;
 }
 
 static void __exit llc_exit(void)
 {
 	dev_remove_pack(&llc_packet_type);
-	dev_remove_pack(&llc_tr_packet_type);
 }
 
 module_init(llc_init);

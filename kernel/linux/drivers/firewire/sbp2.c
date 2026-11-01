@@ -28,7 +28,6 @@
 #include <linux/kernel.h>
 #include <linux/kref.h>
 #include <linux/list.h>
-#include <linux/mod_devicetable.h>
 #include <linux/module.h>
 #include <linux/moduleparam.h>
 #include <linux/scatterlist.h>
@@ -558,7 +557,7 @@ static int sbp2_send_management_orb(struct sbp2_logical_unit *lu, int node_id,
 	if (function == SBP2_LOGOUT_REQUEST && fw_device_is_shutdown(device))
 		return 0;
 
-	orb = kzalloc(sizeof(*orb), GFP_NOIO);
+	orb = kzalloc_obj(*orb, GFP_NOIO);
 	if (orb == NULL)
 		return -ENOMEM;
 
@@ -667,7 +666,7 @@ static void sbp2_agent_reset_no_wait(struct sbp2_logical_unit *lu)
 	struct fw_transaction *t;
 	static __be32 d;
 
-	t = kmalloc(sizeof(*t), GFP_ATOMIC);
+	t = kmalloc_obj(*t, GFP_ATOMIC);
 	if (t == NULL)
 		return;
 
@@ -966,7 +965,7 @@ static int sbp2_add_logical_unit(struct sbp2_target *tgt, int lun_entry)
 {
 	struct sbp2_logical_unit *lu;
 
-	lu = kmalloc(sizeof(*lu), GFP_KERNEL);
+	lu = kmalloc_obj(*lu);
 	if (!lu)
 		return -ENOMEM;
 
@@ -1440,15 +1439,16 @@ static int sbp2_map_scatterlist(struct sbp2_command_orb *orb,
 
 /* SCSI stack integration */
 
-static int sbp2_scsi_queuecommand(struct Scsi_Host *shost,
-				  struct scsi_cmnd *cmd)
+static enum scsi_qc_status sbp2_scsi_queuecommand(struct Scsi_Host *shost,
+						  struct scsi_cmnd *cmd)
 {
 	struct sbp2_logical_unit *lu = cmd->device->hostdata;
 	struct fw_device *device = target_parent_device(lu->tgt);
+	enum scsi_qc_status retval = SCSI_MLQUEUE_HOST_BUSY;
 	struct sbp2_command_orb *orb;
-	int generation, retval = SCSI_MLQUEUE_HOST_BUSY;
+	int generation;
 
-	orb = kzalloc(sizeof(*orb), GFP_ATOMIC);
+	orb = kzalloc_obj(*orb, GFP_ATOMIC);
 	if (orb == NULL)
 		return SCSI_MLQUEUE_HOST_BUSY;
 
@@ -1490,7 +1490,7 @@ static int sbp2_scsi_queuecommand(struct Scsi_Host *shost,
 	return retval;
 }
 
-static int sbp2_scsi_slave_alloc(struct scsi_device *sdev)
+static int sbp2_scsi_sdev_init(struct scsi_device *sdev)
 {
 	struct sbp2_logical_unit *lu = sdev->hostdata;
 
@@ -1500,28 +1500,23 @@ static int sbp2_scsi_slave_alloc(struct scsi_device *sdev)
 
 	sdev->allow_restart = 1;
 
-	/*
-	 * SBP-2 does not require any alignment, but we set it anyway
-	 * for compatibility with earlier versions of this driver.
-	 */
-	blk_queue_update_dma_alignment(sdev->request_queue, 4 - 1);
-
 	if (lu->tgt->workarounds & SBP2_WORKAROUND_INQUIRY_36)
 		sdev->inquiry_len = 36;
 
 	return 0;
 }
 
-static int sbp2_scsi_slave_configure(struct scsi_device *sdev)
+static int sbp2_scsi_sdev_configure(struct scsi_device *sdev,
+				    struct queue_limits *lim)
 {
 	struct sbp2_logical_unit *lu = sdev->hostdata;
 
 	sdev->use_10_for_rw = 1;
 
 	if (sbp2_param_exclusive_login) {
-		sdev->manage_system_start_stop = true;
-		sdev->manage_runtime_start_stop = true;
-		sdev->manage_shutdown = true;
+		sdev->manage_system_start_stop = 1;
+		sdev->manage_runtime_start_stop = 1;
+		sdev->manage_shutdown = 1;
 	}
 
 	if (sdev->type == TYPE_ROM)
@@ -1538,7 +1533,7 @@ static int sbp2_scsi_slave_configure(struct scsi_device *sdev)
 		sdev->start_stop_pwr_cond = 1;
 
 	if (lu->tgt->workarounds & SBP2_WORKAROUND_128K_MAX_TRANS)
-		blk_queue_max_hw_sectors(sdev->request_queue, 128 * 1024 / 512);
+		lim->max_hw_sectors = 128 * 1024 / 512;
 
 	return 0;
 }
@@ -1595,8 +1590,8 @@ static const struct scsi_host_template scsi_driver_template = {
 	.name			= "SBP-2 IEEE-1394",
 	.proc_name		= "sbp2",
 	.queuecommand		= sbp2_scsi_queuecommand,
-	.slave_alloc		= sbp2_scsi_slave_alloc,
-	.slave_configure	= sbp2_scsi_slave_configure,
+	.sdev_init		= sbp2_scsi_sdev_init,
+	.sdev_configure		= sbp2_scsi_sdev_configure,
 	.eh_abort_handler	= sbp2_scsi_abort,
 	.this_id		= -1,
 	.sg_tablesize		= SG_ALL,

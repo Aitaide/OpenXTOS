@@ -2,9 +2,7 @@
 /*
  * FXOS8700 - NXP IMU, SPI bits
  */
-#include <linux/acpi.h>
 #include <linux/module.h>
-#include <linux/mod_devicetable.h>
 #include <linux/regmap.h>
 #include <linux/spi/spi.h>
 
@@ -25,7 +23,7 @@ static int fxos8700_spi_probe(struct spi_device *spi)
 }
 
 static const struct spi_device_id fxos8700_spi_id[] = {
-	{"fxos8700", 0},
+	{ .name = "fxos8700" },
 	{ }
 };
 MODULE_DEVICE_TABLE(spi, fxos8700_spi_id);
@@ -46,7 +44,7 @@ static struct spi_driver fxos8700_spi_driver = {
 	.probe          = fxos8700_spi_probe,
 	.id_table       = fxos8700_spi_id,
 	.driver = {
-		.acpi_match_table       = ACPI_PTR(fxos8700_acpi_match),
+		.acpi_match_table       = fxos8700_acpi_match,
 		.of_match_table         = fxos8700_of_match,
 		.name                   = "fxos8700_spi",
 	},

@@ -9,7 +9,7 @@
 
 #include <linux/bits.h>
 #include <linux/serial_8250.h>
-#include <linux/serial_reg.h>
+#include <linux/serial_core.h>
 #include <linux/dmaengine.h>
 
 #include "../serial_mctrl_gpio.h"
@@ -93,12 +93,10 @@ struct serial8250_config {
 #define UART_BUG_THRE	BIT(3)	/* UART has buggy THRE reassertion */
 #define UART_BUG_TXRACE	BIT(5)	/* UART Tx fails to set remote DR */
 
+/* Module parameters */
+#define UART_NR	CONFIG_SERIAL_8250_NR_UARTS
 
-#ifdef CONFIG_SERIAL_8250_SHARE_IRQ
-#define SERIAL8250_SHARE_IRQS 1
-#else
-#define SERIAL8250_SHARE_IRQS 0
-#endif
+extern unsigned int nr_uarts;
 
 #define SERIAL8250_PORT_FLAGS(_base, _irq, _flags)		\
 	{							\
@@ -111,6 +109,19 @@ struct serial8250_config {
 
 #define SERIAL8250_PORT(_base, _irq) SERIAL8250_PORT_FLAGS(_base, _irq, 0)
 
+extern struct uart_driver serial8250_reg;
+void serial8250_register_ports(struct uart_driver *drv, struct device *dev);
+
+/* Legacy ISA bus related APIs */
+typedef void (*serial8250_isa_config_fn)(int, struct uart_port *, u32 *);
+extern serial8250_isa_config_fn serial8250_isa_config;
+
+void serial8250_isa_init_ports(void);
+
+extern struct platform_device *serial8250_isa_devs;
+
+extern const struct uart_ops *univ8250_port_base_ops;
+extern struct uart_ops univ8250_port_ops;
 
 static inline int serial_in(struct uart_8250_port *up, int offset)
 {
@@ -164,7 +175,16 @@ static unsigned int __maybe_unused serial_icr_read(struct uart_8250_port *up,
 	return value;
 }
 
+void serial8250_clear_fifos(struct uart_8250_port *p);
 void serial8250_clear_and_reinit_fifos(struct uart_8250_port *p);
+void serial8250_fifo_wait_for_lsr_thre(struct uart_8250_port *up,
+				       struct nbcon_write_context *wctxt,
+				       unsigned int count);
+
+void serial8250_rpm_get(struct uart_8250_port *p);
+void serial8250_rpm_put(struct uart_8250_port *p);
+DEFINE_GUARD(serial8250_rpm, struct uart_8250_port *,
+	     serial8250_rpm_get(_T), serial8250_rpm_put(_T));
 
 static inline u32 serial_dl_read(struct uart_8250_port *up)
 {
@@ -200,18 +220,13 @@ static inline bool serial8250_clear_THRI(struct uart_8250_port *up)
 	return true;
 }
 
+struct uart_8250_port *serial8250_setup_port(int index);
 struct uart_8250_port *serial8250_get_port(int line);
-
-void serial8250_rpm_get(struct uart_8250_port *p);
-void serial8250_rpm_put(struct uart_8250_port *p);
-
-void serial8250_rpm_get_tx(struct uart_8250_port *p);
-void serial8250_rpm_put_tx(struct uart_8250_port *p);
 
 int serial8250_em485_config(struct uart_port *port, struct ktermios *termios,
 			    struct serial_rs485 *rs485);
-void serial8250_em485_start_tx(struct uart_8250_port *p);
-void serial8250_em485_stop_tx(struct uart_8250_port *p);
+void serial8250_em485_start_tx(struct uart_8250_port *p, bool toggle_ier);
+void serial8250_em485_stop_tx(struct uart_8250_port *p, bool toggle_ier);
 void serial8250_em485_destroy(struct uart_8250_port *p);
 extern struct serial_rs485 serial8250_em485_supported;
 
@@ -293,9 +308,6 @@ static inline int serial8250_in_MCR(struct uart_8250_port *up)
 	return mctrl;
 }
 
-bool alpha_jensen(void);
-void alpha_jensen_set_mctrl(struct uart_port *port, unsigned int mctrl);
-
 #ifdef CONFIG_SERIAL_8250_PNP
 int serial8250_pnp_init(void);
 void serial8250_pnp_exit(void);
@@ -304,10 +316,31 @@ static inline int serial8250_pnp_init(void) { return 0; }
 static inline void serial8250_pnp_exit(void) { }
 #endif
 
+#ifdef CONFIG_SERIAL_8250_RSA
+void univ8250_rsa_support(struct uart_ops *ops, const struct uart_ops *core_ops);
+void rsa_enable(struct uart_8250_port *up);
+void rsa_disable(struct uart_8250_port *up);
+void rsa_autoconfig(struct uart_8250_port *up);
+void rsa_reset(struct uart_8250_port *up);
+#else
+static inline void univ8250_rsa_support(struct uart_ops *ops, const struct uart_ops *core_ops) { }
+static inline void rsa_enable(struct uart_8250_port *up) {}
+static inline void rsa_disable(struct uart_8250_port *up) {}
+static inline void rsa_autoconfig(struct uart_8250_port *up) {}
+static inline void rsa_reset(struct uart_8250_port *up) {}
+#endif
+
 #ifdef CONFIG_SERIAL_8250_FINTEK
 int fintek_8250_probe(struct uart_8250_port *uart);
 #else
 static inline int fintek_8250_probe(struct uart_8250_port *uart) { return 0; }
+#endif
+
+#if IS_REACHABLE(CONFIG_SERIAL_8250_HUB6)
+bool hub6_match_port(const struct uart_port *port1, const struct uart_port *port2);
+#else
+static inline bool hub6_match_port(const struct uart_port *port1, const struct uart_port *port2)
+{ return false; }
 #endif
 
 #ifdef CONFIG_ARCH_OMAP1
@@ -350,6 +383,7 @@ static inline int is_omap1510_8250(struct uart_8250_port *pt)
 
 #ifdef CONFIG_SERIAL_8250_DMA
 extern int serial8250_tx_dma(struct uart_8250_port *);
+extern void serial8250_tx_dma_flush(struct uart_8250_port *);
 extern int serial8250_rx_dma(struct uart_8250_port *);
 extern void serial8250_rx_dma_flush(struct uart_8250_port *);
 extern int serial8250_request_dma(struct uart_8250_port *);
@@ -377,11 +411,32 @@ static inline bool serial8250_tx_dma_running(struct uart_8250_port *p)
 
 	return dma && dma->tx_running;
 }
+
+static inline void serial8250_tx_dma_pause(struct uart_8250_port *p)
+{
+	struct uart_8250_dma *dma = p->dma;
+
+	if (!dma->tx_running)
+		return;
+
+	dmaengine_pause(dma->txchan);
+}
+
+static inline void serial8250_tx_dma_resume(struct uart_8250_port *p)
+{
+	struct uart_8250_dma *dma = p->dma;
+
+	if (!dma->tx_running)
+		return;
+
+	dmaengine_resume(dma->txchan);
+}
 #else
 static inline int serial8250_tx_dma(struct uart_8250_port *p)
 {
 	return -1;
 }
+static inline void serial8250_tx_dma_flush(struct uart_8250_port *p) { }
 static inline int serial8250_rx_dma(struct uart_8250_port *p)
 {
 	return -1;
@@ -397,6 +452,9 @@ static inline bool serial8250_tx_dma_running(struct uart_8250_port *p)
 {
 	return false;
 }
+
+static inline void serial8250_tx_dma_pause(struct uart_8250_port *p) { }
+static inline void serial8250_tx_dma_resume(struct uart_8250_port *p) { }
 #endif
 
 static inline int ns16550a_goto_highspeed(struct uart_8250_port *up)

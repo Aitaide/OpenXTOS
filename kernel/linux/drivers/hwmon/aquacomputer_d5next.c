@@ -1,11 +1,12 @@
 // SPDX-License-Identifier: GPL-2.0+
 /*
  * hwmon driver for Aquacomputer devices (D5 Next, Farbwerk, Farbwerk 360, Octo,
- * Quadro, High Flow Next, Aquaero, Aquastream Ultimate, Leakshield)
+ * Quadro, High Flow Next, Aquaero, Aquastream Ultimate, Leakshield,
+ * High Flow USB/MPS Flow family)
  *
  * Aquacomputer devices send HID reports (with ID 0x01) every second to report
  * sensor values, except for devices that communicate through the
- * legacy way (currently, Poweradjust 3).
+ * legacy way (currently, Poweradjust 3 and High Flow USB/MPS Flow family).
  *
  * Copyright 2021 Aleksa Savic <savicaleksa83@gmail.com>
  * Copyright 2022 Jack Doan <me@jackdoan.com>
@@ -19,9 +20,8 @@
 #include <linux/jiffies.h>
 #include <linux/ktime.h>
 #include <linux/module.h>
-#include <linux/mutex.h>
 #include <linux/seq_file.h>
-#include <asm/unaligned.h>
+#include <linux/unaligned.h>
 
 #define USB_VENDOR_ID_AQUACOMPUTER	0x0c70
 #define USB_PRODUCT_ID_AQUAERO		0xf001
@@ -35,11 +35,12 @@
 #define USB_PRODUCT_ID_AQUASTREAMXT	0xf0b6
 #define USB_PRODUCT_ID_AQUASTREAMULT	0xf00b
 #define USB_PRODUCT_ID_POWERADJUST3	0xf0bd
+#define USB_PRODUCT_ID_HIGHFLOW		0xf003
 
 enum kinds {
 	d5next, farbwerk, farbwerk360, octo, quadro,
 	highflownext, aquaero, poweradjust3, aquastreamult,
-	aquastreamxt, leakshield
+	aquastreamxt, leakshield, highflow
 };
 
 static const char *const aqc_device_names[] = {
@@ -53,7 +54,8 @@ static const char *const aqc_device_names[] = {
 	[aquastreamxt] = "aquastreamxt",
 	[aquaero] = "aquaero",
 	[aquastreamult] = "aquastreamultimate",
-	[poweradjust3] = "poweradjust3"
+	[poweradjust3] = "poweradjust3",
+	[highflow] = "highflow" /* Covers MPS Flow devices */
 };
 
 #define DRIVER_NAME			"aquacomputer_d5next"
@@ -89,6 +91,8 @@ static u8 aquaero_secondary_ctrl_report[] = {
 #define AQUASTREAMXT_STATUS_REPORT_ID	0x04
 
 #define POWERADJUST3_STATUS_REPORT_ID	0x03
+
+#define HIGHFLOW_STATUS_REPORT_ID	0x02
 
 /* Data types for reading and writing control reports */
 #define AQC_8		0
@@ -197,16 +201,19 @@ static u16 aquastreamult_sensor_fan_offsets[] = { AQUASTREAMULT_FAN_OFFSET };
 #define OCTO_NUM_FANS			8
 #define OCTO_NUM_SENSORS		4
 #define OCTO_NUM_VIRTUAL_SENSORS	16
+#define OCTO_NUM_FLOW_SENSORS		1
 #define OCTO_CTRL_REPORT_SIZE		0x65F
 
 /* Sensor report offsets for the Octo */
 #define OCTO_POWER_CYCLES		0x18
 #define OCTO_SENSOR_START		0x3D
 #define OCTO_VIRTUAL_SENSORS_START	0x45
+#define OCTO_FLOW_SENSOR_OFFSET		0x7B
 static u16 octo_sensor_fan_offsets[] = { 0x7D, 0x8A, 0x97, 0xA4, 0xB1, 0xBE, 0xCB, 0xD8 };
 
 /* Control report offsets for the Octo */
 #define OCTO_TEMP_CTRL_OFFSET		0xA
+#define OCTO_FLOW_PULSES_CTRL_OFFSET	0x6
 /* Fan speed offsets (0-100%) */
 static u16 octo_ctrl_fan_offsets[] = { 0x5B, 0xB0, 0x105, 0x15A, 0x1AF, 0x204, 0x259, 0x2AE };
 
@@ -282,6 +289,17 @@ static u16 aquastreamxt_sensor_fan_offsets[] = { 0x13, 0x1b };
 /* Sensor report offsets for the Poweradjust 3 */
 #define POWERADJUST3_SENSOR_START	0x03
 
+/* Specs of the High Flow USB */
+#define HIGHFLOW_NUM_SENSORS		2
+#define HIGHFLOW_NUM_FLOW_SENSORS	1
+#define HIGHFLOW_SENSOR_REPORT_SIZE	0x76
+
+/* Sensor report offsets for the High Flow USB */
+#define HIGHFLOW_FIRMWARE_VERSION	0x3
+#define HIGHFLOW_SERIAL_START		0x9
+#define HIGHFLOW_FLOW_SENSOR_OFFSET	0x23
+#define HIGHFLOW_SENSOR_START		0x2b
+
 /* Labels for D5 Next */
 static const char *const label_d5next_temp[] = {
 	"Coolant temp"
@@ -347,18 +365,6 @@ static const char *const label_aquaero_calc_temp_sensors[] = {
 	"Calc. virtual sensor 4"
 };
 
-/* Labels for Octo and Quadro (except speed) */
-static const char *const label_fan_speed[] = {
-	"Fan 1 speed",
-	"Fan 2 speed",
-	"Fan 3 speed",
-	"Fan 4 speed",
-	"Fan 5 speed",
-	"Fan 6 speed",
-	"Fan 7 speed",
-	"Fan 8 speed"
-};
-
 static const char *const label_fan_power[] = {
 	"Fan 1 power",
 	"Fan 2 power",
@@ -390,6 +396,19 @@ static const char *const label_fan_current[] = {
 	"Fan 6 current",
 	"Fan 7 current",
 	"Fan 8 current"
+};
+
+/* Labels for Octo fan speeds */
+static const char *const label_octo_speeds[] = {
+	"Fan 1 speed",
+	"Fan 2 speed",
+	"Fan 3 speed",
+	"Fan 4 speed",
+	"Fan 5 speed",
+	"Fan 6 speed",
+	"Fan 7 speed",
+	"Fan 8 speed",
+	"Flow speed [dL/h]",
 };
 
 /* Labels for Quadro fan speeds */
@@ -486,6 +505,16 @@ static const char *const label_poweradjust3_temp_sensors[] = {
 	"External sensor"
 };
 
+/* Labels for Highflow */
+static const char *const label_highflow_temp[] = {
+	"External temp",
+	"Internal temp"
+};
+
+static const char *const label_highflow_speeds[] = {
+	"Flow speed [dL/h]"
+};
+
 struct aqc_fan_structure_offsets {
 	u8 voltage;
 	u8 curr;
@@ -521,7 +550,6 @@ struct aqc_data {
 	struct hid_device *hdev;
 	struct device *hwmon_dev;
 	struct dentry *debugfs;
-	struct mutex mutex;	/* Used for locking access when reading and writing PWM values */
 	enum kinds kind;
 	const char *name;
 
@@ -567,7 +595,7 @@ struct aqc_data {
 
 	/* Sensor values */
 	s32 temp_input[20];	/* Max 4 physical and 16 virtual or 8 physical and 12 virtual */
-	s32 speed_input[8];
+	s32 speed_input[9];
 	u32 speed_input_min[1];
 	u32 speed_input_target[1];
 	u32 speed_input_max[1];
@@ -632,7 +660,6 @@ static void aqc_delay_ctrl_report(struct aqc_data *priv)
 	}
 }
 
-/* Expects the mutex to be locked */
 static int aqc_get_ctrl_data(struct aqc_data *priv)
 {
 	int ret;
@@ -650,7 +677,6 @@ static int aqc_get_ctrl_data(struct aqc_data *priv)
 	return ret;
 }
 
-/* Expects the mutex to be locked */
 static int aqc_send_ctrl_data(struct aqc_data *priv)
 {
 	int ret;
@@ -691,11 +717,9 @@ static int aqc_get_ctrl_val(struct aqc_data *priv, int offset, long *val, int ty
 {
 	int ret;
 
-	mutex_lock(&priv->mutex);
-
 	ret = aqc_get_ctrl_data(priv);
 	if (ret < 0)
-		goto unlock_and_return;
+		return ret;
 
 	switch (type) {
 	case AQC_BE16:
@@ -707,9 +731,6 @@ static int aqc_get_ctrl_val(struct aqc_data *priv, int offset, long *val, int ty
 	default:
 		ret = -EINVAL;
 	}
-
-unlock_and_return:
-	mutex_unlock(&priv->mutex);
 	return ret;
 }
 
@@ -717,11 +738,9 @@ static int aqc_set_ctrl_vals(struct aqc_data *priv, int *offsets, long *vals, in
 {
 	int ret, i;
 
-	mutex_lock(&priv->mutex);
-
 	ret = aqc_get_ctrl_data(priv);
 	if (ret < 0)
-		goto unlock_and_return;
+		return ret;
 
 	for (i = 0; i < len; i++) {
 		switch (types[i]) {
@@ -732,18 +751,11 @@ static int aqc_set_ctrl_vals(struct aqc_data *priv, int *offsets, long *vals, in
 			priv->buffer[offsets[i]] = (u8)vals[i];
 			break;
 		default:
-			ret = -EINVAL;
+			return -EINVAL;
 		}
 	}
 
-	if (ret < 0)
-		goto unlock_and_return;
-
-	ret = aqc_send_ctrl_data(priv);
-
-unlock_and_return:
-	mutex_unlock(&priv->mutex);
-	return ret;
+	return aqc_send_ctrl_data(priv);
 }
 
 static int aqc_set_ctrl_val(struct aqc_data *priv, int offset, long val, int type)
@@ -818,7 +830,9 @@ static umode_t aqc_is_visible(const void *data, enum hwmon_sensor_types type, u3
 					return 0444;
 				break;
 			case aquaero:
+			case octo:
 			case quadro:
+			case highflow:
 				/* Special case to support flow sensors */
 				if (channel < priv->num_fans + priv->num_flow_sensors)
 					return 0444;
@@ -830,9 +844,16 @@ static umode_t aqc_is_visible(const void *data, enum hwmon_sensor_types type, u3
 			}
 			break;
 		case hwmon_fan_pulses:
-			/* Special case for Quadro flow sensor */
-			if (priv->kind == quadro && channel == priv->num_fans)
-				return 0644;
+			/* Special case for Quadro/Octo flow sensor */
+			if (channel == priv->num_fans) {
+				switch (priv->kind) {
+				case quadro:
+				case octo:
+					return 0644;
+				default:
+					break;
+				}
+			}
 			break;
 		case hwmon_fan_min:
 		case hwmon_fan_max:
@@ -914,19 +935,20 @@ static int aqc_legacy_read(struct aqc_data *priv)
 {
 	int ret, i, sensor_value;
 
-	mutex_lock(&priv->mutex);
-
 	memset(priv->buffer, 0x00, priv->buffer_size);
 	ret = hid_hw_raw_request(priv->hdev, priv->status_report_id, priv->buffer,
 				 priv->buffer_size, HID_FEATURE_REPORT, HID_REQ_GET_REPORT);
 	if (ret < 0)
-		goto unlock_and_return;
+		return ret;
 
 	/* Temperature sensor readings */
 	for (i = 0; i < priv->num_temp_sensors; i++) {
 		sensor_value = get_unaligned_le16(priv->buffer + priv->temp_sensor_start_offset +
 						  i * AQC_SENSOR_SIZE);
-		priv->temp_input[i] = sensor_value * 10;
+		if (sensor_value == AQC_SENSOR_NA)
+			priv->temp_input[i] = -ENODATA;
+		else
+			priv->temp_input[i] = sensor_value * 10;
 	}
 
 	/* Special-case sensor readings */
@@ -962,15 +984,23 @@ static int aqc_legacy_read(struct aqc_data *priv)
 		sensor_value = get_unaligned_le16(priv->buffer + AQUASTREAMXT_FAN_VOLTAGE_OFFSET);
 		priv->voltage_input[1] = DIV_ROUND_CLOSEST(sensor_value * 1000, 63);
 		break;
+	case highflow:
+		/* Info provided with every report */
+		priv->serial_number[0] = get_unaligned_le16(priv->buffer +
+							    priv->serial_number_start_offset);
+		priv->firmware_version =
+		    get_unaligned_le16(priv->buffer + priv->firmware_version_offset);
+
+		/* Read flow speed */
+		priv->speed_input[0] = get_unaligned_le16(priv->buffer +
+							  priv->flow_sensors_start_offset);
+		break;
 	default:
 		break;
 	}
 
 	priv->updated = jiffies;
-
-unlock_and_return:
-	mutex_unlock(&priv->mutex);
-	return ret;
+	return 0;
 }
 
 static int aqc_read(struct device *dev, enum hwmon_sensor_types type, u32 attr,
@@ -1248,7 +1278,8 @@ static const struct hwmon_channel_info * const aqc_info[] = {
 			   HWMON_F_INPUT | HWMON_F_LABEL | HWMON_F_PULSES,
 			   HWMON_F_INPUT | HWMON_F_LABEL,
 			   HWMON_F_INPUT | HWMON_F_LABEL,
-			   HWMON_F_INPUT | HWMON_F_LABEL),
+			   HWMON_F_INPUT | HWMON_F_LABEL,
+			   HWMON_F_INPUT | HWMON_F_LABEL | HWMON_F_PULSES),
 	HWMON_CHANNEL_INFO(power,
 			   HWMON_P_INPUT | HWMON_P_LABEL,
 			   HWMON_P_INPUT | HWMON_P_LABEL,
@@ -1435,8 +1466,6 @@ static int aqc_raw_event(struct hid_device *hdev, struct hid_report *report, u8 
 	return 0;
 }
 
-#ifdef CONFIG_DEBUG_FS
-
 static int serial_number_show(struct seq_file *seqf, void *unused)
 {
 	struct aqc_data *priv = seqf->private;
@@ -1485,14 +1514,6 @@ static void aqc_debugfs_init(struct aqc_data *priv)
 	if (priv->power_cycle_count_offset != 0)
 		debugfs_create_file("power_cycles", 0444, priv->debugfs, priv, &power_cycles_fops);
 }
-
-#else
-
-static void aqc_debugfs_init(struct aqc_data *priv)
-{
-}
-
-#endif
 
 static int aqc_probe(struct hid_device *hdev, const struct hid_device_id *id)
 {
@@ -1627,16 +1648,20 @@ static int aqc_probe(struct hid_device *hdev, const struct hid_device_id *id)
 		priv->temp_sensor_start_offset = OCTO_SENSOR_START;
 		priv->num_virtual_temp_sensors = OCTO_NUM_VIRTUAL_SENSORS;
 		priv->virtual_temp_sensor_start_offset = OCTO_VIRTUAL_SENSORS_START;
+		priv->num_flow_sensors = OCTO_NUM_FLOW_SENSORS;
+		priv->flow_sensors_start_offset = OCTO_FLOW_SENSOR_OFFSET;
+
 		priv->temp_ctrl_offset = OCTO_TEMP_CTRL_OFFSET;
 
 		priv->buffer_size = OCTO_CTRL_REPORT_SIZE;
 		priv->ctrl_report_delay = CTRL_REPORT_DELAY;
 
+		priv->flow_pulses_ctrl_offset = OCTO_FLOW_PULSES_CTRL_OFFSET;
 		priv->power_cycle_count_offset = OCTO_POWER_CYCLES;
 
 		priv->temp_label = label_temp_sensors;
 		priv->virtual_temp_label = label_virtual_temp_sensors;
-		priv->speed_label = label_fan_speed;
+		priv->speed_label = label_octo_speeds;
 		priv->power_label = label_fan_power;
 		priv->voltage_label = label_fan_voltage;
 		priv->current_label = label_fan_current;
@@ -1747,6 +1772,20 @@ static int aqc_probe(struct hid_device *hdev, const struct hid_device_id *id)
 
 		priv->temp_label = label_poweradjust3_temp_sensors;
 		break;
+	case USB_PRODUCT_ID_HIGHFLOW:
+		priv->kind = highflow;
+
+		priv->num_fans = 0;
+
+		priv->num_temp_sensors = HIGHFLOW_NUM_SENSORS;
+		priv->temp_sensor_start_offset = HIGHFLOW_SENSOR_START;
+		priv->num_flow_sensors = HIGHFLOW_NUM_FLOW_SENSORS;
+		priv->flow_sensors_start_offset = HIGHFLOW_FLOW_SENSOR_OFFSET;
+		priv->buffer_size = HIGHFLOW_SENSOR_REPORT_SIZE;
+
+		priv->temp_label = label_highflow_temp;
+		priv->speed_label = label_highflow_speeds;
+		break;
 	default:
 		break;
 	}
@@ -1771,6 +1810,12 @@ static int aqc_probe(struct hid_device *hdev, const struct hid_device_id *id)
 		priv->firmware_version_offset = AQUASTREAMXT_FIRMWARE_VERSION;
 
 		priv->status_report_id = AQUASTREAMXT_STATUS_REPORT_ID;
+		break;
+	case highflow:
+		priv->serial_number_start_offset = HIGHFLOW_SERIAL_START;
+		priv->firmware_version_offset = HIGHFLOW_FIRMWARE_VERSION;
+
+		priv->status_report_id = HIGHFLOW_STATUS_REPORT_ID;
 		break;
 	default:
 		priv->serial_number_start_offset = AQC_SERIAL_START;
@@ -1801,8 +1846,6 @@ static int aqc_probe(struct hid_device *hdev, const struct hid_device_id *id)
 		ret = -ENOMEM;
 		goto fail_and_close;
 	}
-
-	mutex_init(&priv->mutex);
 
 	priv->hwmon_dev = hwmon_device_register_with_info(&hdev->dev, priv->name, priv,
 							  &aqc_chip_info, NULL);
@@ -1846,6 +1889,7 @@ static const struct hid_device_id aqc_table[] = {
 	{ HID_USB_DEVICE(USB_VENDOR_ID_AQUACOMPUTER, USB_PRODUCT_ID_AQUASTREAMXT) },
 	{ HID_USB_DEVICE(USB_VENDOR_ID_AQUACOMPUTER, USB_PRODUCT_ID_AQUASTREAMULT) },
 	{ HID_USB_DEVICE(USB_VENDOR_ID_AQUACOMPUTER, USB_PRODUCT_ID_POWERADJUST3) },
+	{ HID_USB_DEVICE(USB_VENDOR_ID_AQUACOMPUTER, USB_PRODUCT_ID_HIGHFLOW) },
 	{ }
 };
 

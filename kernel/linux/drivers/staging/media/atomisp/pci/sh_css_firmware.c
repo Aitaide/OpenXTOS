@@ -2,15 +2,6 @@
 /*
  * Support for Intel Camera Imaging ISP subsystem.
  * Copyright (c) 2015, Intel Corporation.
- *
- * This program is free software; you can redistribute it and/or modify it
- * under the terms and conditions of the GNU General Public License,
- * version 2, as published by the Free Software Foundation.
- *
- * This program is distributed in the hope it will be useful, but WITHOUT
- * ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
- * FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License for
- * more details.
  */
 
 #include <linux/string.h> /* for memcpy() */
@@ -262,17 +253,16 @@ sh_css_load_firmware(struct device *dev, const char *fw_data,
 	sh_css_num_binaries = file_header->binary_nr;
 	/* Only allocate memory for ISP blob info */
 	if (sh_css_num_binaries > NUM_OF_SPS) {
-		sh_css_blob_info = kmalloc(
-		    (sh_css_num_binaries - NUM_OF_SPS) *
-		    sizeof(*sh_css_blob_info), GFP_KERNEL);
+		sh_css_blob_info =
+			kmalloc_objs(*sh_css_blob_info,
+				     sh_css_num_binaries - NUM_OF_SPS);
 		if (!sh_css_blob_info)
 			return -ENOMEM;
 	} else {
 		sh_css_blob_info = NULL;
 	}
 
-	fw_minibuffer = kcalloc(sh_css_num_binaries, sizeof(struct fw_param),
-				GFP_KERNEL);
+	fw_minibuffer = kzalloc_objs(struct fw_param, sh_css_num_binaries);
 	if (!fw_minibuffer)
 		return -ENOMEM;
 

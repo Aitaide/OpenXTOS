@@ -8,7 +8,6 @@
  */
 
 #include <linux/clk-provider.h>
-#include <linux/mod_devicetable.h>
 #include <linux/platform_device.h>
 
 #include "clk-gate.h"
@@ -76,7 +75,7 @@ static int clk_mt7981_apmixed_probe(struct platform_device *pdev)
 	if (!clk_data)
 		return -ENOMEM;
 
-	mtk_clk_register_plls(node, plls, ARRAY_SIZE(plls), clk_data);
+	mtk_clk_register_plls(&pdev->dev, plls, ARRAY_SIZE(plls), clk_data);
 
 	r = of_clk_add_hw_provider(node, of_clk_hw_onecell_get, clk_data);
 	if (r) {
@@ -99,4 +98,6 @@ static struct platform_driver clk_mt7981_apmixed_drv = {
 	},
 };
 builtin_platform_driver(clk_mt7981_apmixed_drv);
+
+MODULE_DESCRIPTION("MediaTek MT7981 apmixedsys clocks driver");
 MODULE_LICENSE("GPL");

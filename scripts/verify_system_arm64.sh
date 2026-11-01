@@ -51,6 +51,7 @@ log "Output: $OUTPUT"
 
 # QEMU command
 # Using virt machine with virtio devices
+set +e
 timeout "$QEMU_TIMEOUT" qemu-system-aarch64 \
     -machine virt \
     -cpu cortex-a57 \
@@ -62,7 +63,13 @@ timeout "$QEMU_TIMEOUT" qemu-system-aarch64 \
     -nographic \
     -no-reboot \
     -serial mon:stdio \
-    2>&1 | tee "$OUTPUT" || true
+    2>&1 | tee "$OUTPUT"
+PIPE_RESULTS=("${PIPESTATUS[@]}")
+set -e
+if { [ "${PIPE_RESULTS[0]}" -ne 0 ] && [ "${PIPE_RESULTS[0]}" -ne 124 ]; } || [ "${PIPE_RESULTS[1]}" -ne 0 ]; then
+    error "QEMU/capture failed: ${PIPE_RESULTS[*]}"
+    exit 1
+fi
 
 # Wait for output to flush
 sleep 1
@@ -96,20 +103,7 @@ FAIL=0
 # Essential checks
 check_pattern "Linux version" "Kernel boot" && PASS=$((PASS+1)) || FAIL=$((FAIL+1))
 check_pattern "Booting Linux on physical CPU" "ARM64 architecture" && PASS=$((PASS+1)) || FAIL=$((FAIL+1))
-# PREEMPT_RT detection: modern RT kernels (6.6-rt15+) print "-rtN" in the version
-# string instead of the literal "PREEMPT_RT" boot banner.
-if grep -qE "Linux version [0-9.]+-rt[0-9]+" "$OUTPUT" 2>/dev/null; then
-    log "[✓] PREEMPT_RT enabled (rt kernel release)"
-    PASS=$((PASS+1))
-else
-    if grep -q "PREEMPT_RT" "$OUTPUT" 2>/dev/null; then
-        log "[✓] PREEMPT_RT enabled (boot banner)"
-        PASS=$((PASS+1))
-    else
-        error "[✗] PREEMPT_RT enabled"
-        FAIL=$((FAIL+1))
-    fi
-fi
+# RT is verified from the running validation guest below, never from a suffix/banner.
 check_pattern "Run /init as init process" "Init started" && PASS=$((PASS+1)) || FAIL=$((FAIL+1))
 
 # XTOS kernel components: build_system_arm64.sh merges kernel/xtos_defconfig,
@@ -147,14 +141,14 @@ log "=== Summary ==="
 log "Passed: $PASS"
 log "Failed: $FAIL"
 
-if [ "$FAIL" -gt 2 ]; then
+if [ "$FAIL" -gt 0 ]; then
     error "ARM64 verification FAILED (critical errors: $FAIL)"
     error "Check $OUTPUT for details"
     exit 1
 else
-    log "ARM64 verification PASSED"
-    if [ "$FAIL" -gt 0 ]; then
-        warn "Note: $FAIL non-critical checks failed"
-    fi
+    # The normal BusyBox init does not emit RT ground truth. Boot the same
+    # kernel with the existing validation initramfs before claiming system PASS.
+    "$ROOT/scripts/verify_guest_arm64.sh"
+    log "ARM64 verification PASSED (boot + in-guest validation)"
     exit 0
 fi

@@ -141,7 +141,7 @@ static int kgd_gfx_v9_4_3_hqd_sdma_dump(struct amdgpu_device *adev,
 		(*dump)[i++][1] = RREG32(addr);         \
 	} while (0)
 
-	*dump = kmalloc_array(HQD_N_REGS * 2, sizeof(uint32_t), GFP_KERNEL);
+	*dump = kmalloc_objs(**dump, HQD_N_REGS);
 	if (*dump == NULL)
 		return -ENOMEM;
 
@@ -300,14 +300,13 @@ static int kgd_gfx_v9_4_3_hqd_load(struct amdgpu_device *adev, void *mqd,
 	hqd_end = SOC15_REG_OFFSET(GC, GET_INST(GC, inst), regCP_HQD_AQL_DISPATCH_ID_HI);
 
 	for (reg = hqd_base; reg <= hqd_end; reg++)
-		WREG32_RLC(reg, mqd_hqd[reg - hqd_base]);
+		WREG32_XCC(reg, mqd_hqd[reg - hqd_base], inst);
 
 
 	/* Activate doorbell logic before triggering WPTR poll. */
 	data = REG_SET_FIELD(m->cp_hqd_pq_doorbell_control,
 			     CP_HQD_PQ_DOORBELL_CONTROL, DOORBELL_EN, 1);
-	WREG32_RLC(SOC15_REG_OFFSET(GC, GET_INST(GC, inst), regCP_HQD_PQ_DOORBELL_CONTROL),
-				data);
+	WREG32_SOC15_RLC(GC, GET_INST(GC, inst), regCP_HQD_PQ_DOORBELL_CONTROL, data);
 
 	if (wptr) {
 		/* Don't read wptr with get_user because the user
@@ -336,27 +335,24 @@ static int kgd_gfx_v9_4_3_hqd_load(struct amdgpu_device *adev, void *mqd,
 		guessed_wptr += m->cp_hqd_pq_wptr_lo & ~(queue_size - 1);
 		guessed_wptr += (uint64_t)m->cp_hqd_pq_wptr_hi << 32;
 
-		WREG32_RLC(SOC15_REG_OFFSET(GC, GET_INST(GC, inst), regCP_HQD_PQ_WPTR_LO),
-		       lower_32_bits(guessed_wptr));
-		WREG32_RLC(SOC15_REG_OFFSET(GC, GET_INST(GC, inst), regCP_HQD_PQ_WPTR_HI),
-		       upper_32_bits(guessed_wptr));
-		WREG32_RLC(SOC15_REG_OFFSET(GC, GET_INST(GC, inst), regCP_HQD_PQ_WPTR_POLL_ADDR),
-		       lower_32_bits((uintptr_t)wptr));
-		WREG32_RLC(SOC15_REG_OFFSET(GC, GET_INST(GC, inst),
-			regCP_HQD_PQ_WPTR_POLL_ADDR_HI),
+		WREG32_SOC15_RLC(GC, GET_INST(GC, inst), regCP_HQD_PQ_WPTR_LO,
+			lower_32_bits(guessed_wptr));
+		WREG32_SOC15_RLC(GC, GET_INST(GC, inst), regCP_HQD_PQ_WPTR_HI,
+			upper_32_bits(guessed_wptr));
+		WREG32_SOC15_RLC(GC, GET_INST(GC, inst), regCP_HQD_PQ_WPTR_POLL_ADDR,
+			lower_32_bits((uintptr_t)wptr));
+		WREG32_SOC15_RLC(GC, GET_INST(GC, inst), regCP_HQD_PQ_WPTR_POLL_ADDR_HI,
 			upper_32_bits((uintptr_t)wptr));
-		WREG32(SOC15_REG_OFFSET(GC, GET_INST(GC, inst), regCP_PQ_WPTR_POLL_CNTL1),
-		       (uint32_t)kgd_gfx_v9_get_queue_mask(adev, pipe_id,
-			       queue_id));
+		WREG32_SOC15_RLC(GC, GET_INST(GC, inst), regCP_PQ_WPTR_POLL_CNTL1,
+			(uint32_t)kgd_gfx_v9_get_queue_mask(adev, pipe_id, queue_id));
 	}
 
 	/* Start the EOP fetcher */
-	WREG32_RLC(SOC15_REG_OFFSET(GC, GET_INST(GC, inst), regCP_HQD_EOP_RPTR),
-	       REG_SET_FIELD(m->cp_hqd_eop_rptr,
-			     CP_HQD_EOP_RPTR, INIT_FETCHER, 1));
+	WREG32_SOC15_RLC(GC, GET_INST(GC, inst), regCP_HQD_EOP_RPTR,
+	       REG_SET_FIELD(m->cp_hqd_eop_rptr, CP_HQD_EOP_RPTR, INIT_FETCHER, 1));
 
 	data = REG_SET_FIELD(m->cp_hqd_active, CP_HQD_ACTIVE, ACTIVE, 1);
-	WREG32_RLC(SOC15_REG_OFFSET(GC, GET_INST(GC, inst), regCP_HQD_ACTIVE), data);
+	WREG32_SOC15_RLC(GC, GET_INST(GC, inst), regCP_HQD_ACTIVE, data);
 
 	kgd_gfx_v9_release_queue(adev, inst);
 
@@ -494,15 +490,15 @@ static uint32_t kgd_gfx_v9_4_3_set_address_watch(
 			VALID,
 			1);
 
-	WREG32_RLC((SOC15_REG_OFFSET(GC, GET_INST(GC, inst),
+	WREG32_XCC((SOC15_REG_OFFSET(GC, GET_INST(GC, inst),
 			regTCP_WATCH0_ADDR_H) +
 			(watch_id * TCP_WATCH_STRIDE)),
-			watch_address_high);
+			watch_address_high, inst);
 
-	WREG32_RLC((SOC15_REG_OFFSET(GC, GET_INST(GC, inst),
+	WREG32_XCC((SOC15_REG_OFFSET(GC, GET_INST(GC, inst),
 			regTCP_WATCH0_ADDR_L) +
 			(watch_id * TCP_WATCH_STRIDE)),
-			watch_address_low);
+			watch_address_low, inst);
 
 	return watch_address_cntl;
 }
@@ -510,6 +506,87 @@ static uint32_t kgd_gfx_v9_4_3_set_address_watch(
 static uint32_t kgd_gfx_v9_4_3_clear_address_watch(struct amdgpu_device *adev,
 				uint32_t watch_id)
 {
+	return 0;
+}
+
+static uint32_t kgd_gfx_v9_4_3_hqd_sdma_get_doorbell(struct amdgpu_device *adev,
+						     int engine, int queue)
+{
+	uint32_t reg_offset = get_sdma_rlc_reg_offset(adev, engine, queue);
+	uint32_t status = RREG32(regSDMA_RLC0_CONTEXT_STATUS + reg_offset);
+	uint32_t doorbell_off = RREG32(regSDMA_RLC0_DOORBELL_OFFSET + reg_offset);
+	bool is_active = !!REG_GET_FIELD(status, SDMA_RLC0_CONTEXT_STATUS, SELECTED);
+
+	return is_active ? doorbell_off >> 2 : 0;
+}
+
+static uint32_t kgd_v9_4_3_ptl_ctrl(struct amdgpu_device *adev,
+				uint32_t cmd,
+				uint32_t *ptl_state,
+				enum amdgpu_ptl_fmt *fmt1,
+				enum amdgpu_ptl_fmt *fmt2)
+{
+	return amdgpu_ptl_perf_monitor_ctrl(adev, cmd,
+			ptl_state, fmt1, fmt2);
+}
+
+static int kgd_gfx_v9_4_3_hqd_sdma_get_counter(struct amdgpu_device *adev,
+					void *mqd, uint32_t num_sdma_queues_per_eng,
+					uint64_t *val)
+{
+	struct v9_sdma_mqd *m = get_sdma_mqd(mqd);
+	uint32_t sdma_rlc_reg_offset = 0;
+	uint32_t sdma_rlc_rb_cntl;
+	uint32_t engine_id, queue_id;
+	uint32_t engines = adev->sdma.num_instances;
+	uint32_t sdma_rlcx_rb_base, sdma_rlcx_rb_base_hi;
+	bool found = false;
+
+	if (!m)
+		return -EINVAL;
+
+	if (((amdgpu_ip_version(adev, GC_HWIP, 0) == IP_VERSION(9, 4, 3) ||
+	     amdgpu_ip_version(adev, GC_HWIP, 0) == IP_VERSION(9, 4, 4)) &&
+	    adev->gfx.mec_fw_version < 194) ||
+	    (amdgpu_ip_version(adev, GC_HWIP, 0) == IP_VERSION(9, 5, 0) &&
+	    adev->gfx.mec_fw_version < 44)) {
+		pr_warn_once("MEC FW doesn't support SDMA counter!\n");
+		return -EOPNOTSUPP;
+	}
+
+	/* SDMA doesn't support over-subscription, there must be
+	 * a HQD associated with a MQD, so found must be true in
+	 * the finding loop.
+	 */
+	for (engine_id = 0; engine_id < engines && !found; engine_id++) {
+		for (queue_id = 0; queue_id < num_sdma_queues_per_eng; queue_id++) {
+			sdma_rlc_reg_offset = get_sdma_rlc_reg_offset(adev,
+						engine_id, queue_id);
+			sdma_rlcx_rb_base = RREG32(sdma_rlc_reg_offset +
+						regSDMA_RLC0_RB_BASE);
+			sdma_rlcx_rb_base_hi = RREG32(sdma_rlc_reg_offset +
+						regSDMA_RLC0_RB_BASE_HI);
+
+			if (m->sdmax_rlcx_rb_base == sdma_rlcx_rb_base &&
+			    m->sdmax_rlcx_rb_base_hi == sdma_rlcx_rb_base_hi) {
+				found = true;
+				break;
+			}
+		}
+	}
+
+	sdma_rlc_rb_cntl = RREG32(sdma_rlc_reg_offset + regSDMA_RLC0_RB_CNTL);
+
+	/* Read sdma activity counter from utilization register
+	 * if hw queue is enabled, otherwise read from MQD.
+	 */
+	if (sdma_rlc_rb_cntl & SDMA_RLC0_RB_CNTL__RB_ENABLE_MASK)
+		*val = (uint64_t)RREG32(sdma_rlc_reg_offset + regSDMA_RLC0_UTILIZATION_HI) << 32 |
+			RREG32(sdma_rlc_reg_offset + regSDMA_RLC0_UTILIZATION_LO);
+	else
+		*val = (uint64_t)m->sdmax_rlcx_utilization_hi << 32 |
+			m->sdmax_rlcx_utilization_lo;
+
 	return 0;
 }
 
@@ -534,8 +611,8 @@ const struct kfd2kgd_calls gc_9_4_3_kfd2kgd = {
 	.get_cu_occupancy = kgd_gfx_v9_get_cu_occupancy,
 	.program_trap_handler_settings =
 				kgd_gfx_v9_program_trap_handler_settings,
-	.build_grace_period_packet_info =
-				kgd_gfx_v9_build_grace_period_packet_info,
+	.build_dequeue_wait_counts_packet_info =
+				kgd_gfx_v9_build_dequeue_wait_counts_packet_info,
 	.get_iq_wait_times = kgd_gfx_v9_get_iq_wait_times,
 	.enable_debug_trap = kgd_aldebaran_enable_debug_trap,
 	.disable_debug_trap = kgd_gfx_v9_4_3_disable_debug_trap,
@@ -545,5 +622,10 @@ const struct kfd2kgd_calls gc_9_4_3_kfd2kgd = {
 			kgd_gfx_v9_4_3_set_wave_launch_trap_override,
 	.set_wave_launch_mode = kgd_aldebaran_set_wave_launch_mode,
 	.set_address_watch = kgd_gfx_v9_4_3_set_address_watch,
-	.clear_address_watch = kgd_gfx_v9_4_3_clear_address_watch
+	.clear_address_watch = kgd_gfx_v9_4_3_clear_address_watch,
+	.hqd_get_pq_addr = kgd_gfx_v9_hqd_get_pq_addr,
+	.hqd_reset = kgd_gfx_v9_hqd_reset,
+	.hqd_sdma_get_doorbell = kgd_gfx_v9_4_3_hqd_sdma_get_doorbell,
+	.ptl_ctrl = kgd_v9_4_3_ptl_ctrl,
+	.hqd_sdma_get_counter = kgd_gfx_v9_4_3_hqd_sdma_get_counter
 };

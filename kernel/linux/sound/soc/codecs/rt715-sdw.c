@@ -9,7 +9,6 @@
  */
 #include <linux/delay.h>
 #include <linux/device.h>
-#include <linux/mod_devicetable.h>
 #include <linux/soundwire/sdw.h>
 #include <linux/soundwire/sdw_type.h>
 #include <linux/soundwire/sdw_registers.h>
@@ -111,6 +110,7 @@ static bool rt715_readable_register(struct device *dev, unsigned int reg)
 	case 0x839d:
 	case 0x83a7:
 	case 0x83a9:
+	case 0x752001:
 	case 0x752039:
 		return true;
 	default:
@@ -371,47 +371,6 @@ static const struct regmap_config rt715_sdw_regmap = {
 	.use_single_write = true,
 };
 
-int hda_to_sdw(unsigned int nid, unsigned int verb, unsigned int payload,
-	       unsigned int *sdw_addr_h, unsigned int *sdw_data_h,
-	       unsigned int *sdw_addr_l, unsigned int *sdw_data_l)
-{
-	unsigned int offset_h, offset_l, e_verb;
-
-	if (((verb & 0xff) != 0) || verb == 0xf00) { /* 12 bits command */
-		if (verb == 0x7ff) /* special case */
-			offset_h = 0;
-		else
-			offset_h = 0x3000;
-
-		if (verb & 0x800) /* get command */
-			e_verb = (verb - 0xf00) | 0x80;
-		else /* set command */
-			e_verb = (verb - 0x700);
-
-		*sdw_data_h = payload; /* 7 bits payload */
-		*sdw_addr_l = *sdw_data_l = 0;
-	} else { /* 4 bits command */
-		if ((verb & 0x800) == 0x800) { /* read */
-			offset_h = 0x9000;
-			offset_l = 0xa000;
-		} else { /* write */
-			offset_h = 0x7000;
-			offset_l = 0x8000;
-		}
-		e_verb = verb >> 8;
-		*sdw_data_h = (payload >> 8); /* 16 bits payload [15:8] */
-		*sdw_addr_l = (e_verb << 8) | nid | 0x80; /* 0x80: valid bit */
-		*sdw_addr_l += offset_l;
-		*sdw_data_l = payload & 0xff;
-	}
-
-	*sdw_addr_h = (e_verb << 8) | nid;
-	*sdw_addr_h += offset_h;
-
-	return 0;
-}
-EXPORT_SYMBOL(hda_to_sdw);
-
 static int rt715_update_status(struct sdw_slave *slave,
 				enum sdw_slave_status status)
 {
@@ -482,7 +441,7 @@ static int rt715_bus_config(struct sdw_slave *slave,
 
 	ret = rt715_clock_config(&slave->dev);
 	if (ret < 0)
-		dev_err(&slave->dev, "Invalid clk config");
+		dev_err(&slave->dev, "%s: Invalid clk config", __func__);
 
 	return 0;
 }
@@ -511,11 +470,9 @@ static int rt715_sdw_probe(struct sdw_slave *slave,
 	return rt715_init(&slave->dev, sdw_regmap, regmap, slave);
 }
 
-static int rt715_sdw_remove(struct sdw_slave *slave)
+static void rt715_sdw_remove(struct sdw_slave *slave)
 {
 	pm_runtime_disable(&slave->dev);
-
-	return 0;
 }
 
 static const struct sdw_device_id rt715_id[] = {
@@ -525,7 +482,7 @@ static const struct sdw_device_id rt715_id[] = {
 };
 MODULE_DEVICE_TABLE(sdw, rt715_id);
 
-static int __maybe_unused rt715_dev_suspend(struct device *dev)
+static int rt715_dev_suspend(struct device *dev)
 {
 	struct rt715_priv *rt715 = dev_get_drvdata(dev);
 
@@ -539,29 +496,21 @@ static int __maybe_unused rt715_dev_suspend(struct device *dev)
 
 #define RT715_PROBE_TIMEOUT 5000
 
-static int __maybe_unused rt715_dev_resume(struct device *dev)
+static int rt715_dev_resume(struct device *dev)
 {
 	struct sdw_slave *slave = dev_to_sdw_dev(dev);
 	struct rt715_priv *rt715 = dev_get_drvdata(dev);
-	unsigned long time;
+	int ret;
 
 	if (!rt715->first_hw_init)
 		return 0;
 
-	if (!slave->unattach_request)
-		goto regmap_sync;
-
-	time = wait_for_completion_timeout(&slave->initialization_complete,
-					   msecs_to_jiffies(RT715_PROBE_TIMEOUT));
-	if (!time) {
-		dev_err(&slave->dev, "Initialization not complete, timed out\n");
+	ret = sdw_slave_wait_for_init(slave, RT715_PROBE_TIMEOUT);
+	if (ret) {
 		sdw_show_ping_status(slave->bus, true);
-
-		return -ETIMEDOUT;
+		return ret;
 	}
 
-regmap_sync:
-	slave->unattach_request = 0;
 	regcache_cache_only(rt715->regmap, false);
 	regcache_sync_region(rt715->regmap, 0x3000, 0x8fff);
 	regcache_sync_region(rt715->regmap, 0x752039, 0x752039);
@@ -570,15 +519,14 @@ regmap_sync:
 }
 
 static const struct dev_pm_ops rt715_pm = {
-	SET_SYSTEM_SLEEP_PM_OPS(rt715_dev_suspend, rt715_dev_resume)
-	SET_RUNTIME_PM_OPS(rt715_dev_suspend, rt715_dev_resume, NULL)
+	SYSTEM_SLEEP_PM_OPS(rt715_dev_suspend, rt715_dev_resume)
+	RUNTIME_PM_OPS(rt715_dev_suspend, rt715_dev_resume, NULL)
 };
 
 static struct sdw_driver rt715_sdw_driver = {
 	.driver = {
 		   .name = "rt715",
-		   .owner = THIS_MODULE,
-		   .pm = &rt715_pm,
+		   .pm = pm_ptr(&rt715_pm),
 		   },
 	.probe = rt715_sdw_probe,
 	.remove = rt715_sdw_remove,

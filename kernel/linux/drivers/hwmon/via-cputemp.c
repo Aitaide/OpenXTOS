@@ -65,28 +65,28 @@ static ssize_t temp_show(struct device *dev, struct device_attribute *devattr,
 			 char *buf)
 {
 	struct via_cputemp_data *data = dev_get_drvdata(dev);
-	u32 eax, edx;
+	u64 val;
 	int err;
 
-	err = rdmsr_safe_on_cpu(data->id, data->msr_temp, &eax, &edx);
+	err = rdmsrq_safe_on_cpu(data->id, data->msr_temp, &val);
 	if (err)
 		return -EAGAIN;
 
-	return sprintf(buf, "%lu\n", ((unsigned long)eax & 0xffffff) * 1000);
+	return sprintf(buf, "%lu\n", ((unsigned long)val & 0xffffff) * 1000);
 }
 
 static ssize_t cpu0_vid_show(struct device *dev,
 			     struct device_attribute *devattr, char *buf)
 {
 	struct via_cputemp_data *data = dev_get_drvdata(dev);
-	u32 eax, edx;
+	u64 val;
 	int err;
 
-	err = rdmsr_safe_on_cpu(data->id, data->msr_vid, &eax, &edx);
+	err = rdmsrq_safe_on_cpu(data->id, data->msr_vid, &val);
 	if (err)
 		return -EAGAIN;
 
-	return sprintf(buf, "%d\n", vid_from_reg(~edx & 0x7f, data->vrm));
+	return sprintf(buf, "%d\n", vid_from_reg(~(val >> 32) & 0x7f, data->vrm));
 }
 
 static SENSOR_DEVICE_ATTR_RO(temp1_input, temp, SHOW_TEMP);
@@ -112,7 +112,7 @@ static int via_cputemp_probe(struct platform_device *pdev)
 	struct via_cputemp_data *data;
 	struct cpuinfo_x86 *c = &cpu_data(pdev->id);
 	int err;
-	u32 eax, edx;
+	u64 val;
 
 	data = devm_kzalloc(&pdev->dev, sizeof(struct via_cputemp_data),
 			    GFP_KERNEL);
@@ -143,7 +143,7 @@ static int via_cputemp_probe(struct platform_device *pdev)
 	}
 
 	/* test if we can access the TEMPERATURE MSR */
-	err = rdmsr_safe_on_cpu(data->id, data->msr_temp, &eax, &edx);
+	err = rdmsrq_safe_on_cpu(data->id, data->msr_temp, &val);
 	if (err) {
 		dev_err(&pdev->dev,
 			"Unable to access TEMPERATURE MSR, giving up\n");
@@ -182,7 +182,7 @@ exit_remove:
 	return err;
 }
 
-static int via_cputemp_remove(struct platform_device *pdev)
+static void via_cputemp_remove(struct platform_device *pdev)
 {
 	struct via_cputemp_data *data = platform_get_drvdata(pdev);
 
@@ -190,7 +190,6 @@ static int via_cputemp_remove(struct platform_device *pdev)
 	if (data->vrm)
 		device_remove_file(&pdev->dev, &dev_attr_cpu0_vid);
 	sysfs_remove_group(&pdev->dev.kobj, &via_cputemp_group);
-	return 0;
 }
 
 static struct platform_driver via_cputemp_driver = {
@@ -223,7 +222,7 @@ static int via_cputemp_online(unsigned int cpu)
 		goto exit;
 	}
 
-	pdev_entry = kzalloc(sizeof(struct pdev_entry), GFP_KERNEL);
+	pdev_entry = kzalloc_obj(struct pdev_entry);
 	if (!pdev_entry) {
 		err = -ENOMEM;
 		goto exit_device_put;

@@ -20,7 +20,6 @@
 #include <linux/spi/spi.h>
 #include <linux/usb/musb.h>
 #include <linux/mmc/host.h>
-#include <linux/platform_data/spi-omap2-mcspi.h>
 #include <linux/platform_data/mmc-omap.h>
 #include <linux/mfd/menelaus.h>
 
@@ -79,10 +78,8 @@ static struct musb_hdrc_platform_data tusb_data = {
 static struct gpiod_lookup_table tusb_gpio_table = {
 	.dev_id = "musb-tusb",
 	.table = {
-		GPIO_LOOKUP("gpio-0-15", 0, "enable",
-			    GPIO_ACTIVE_HIGH),
-		GPIO_LOOKUP("gpio-48-63", 10, "int",
-			    GPIO_ACTIVE_HIGH),
+		GPIO_LOOKUP("gpio-0-31", 0, "enable", GPIO_ACTIVE_HIGH),
+		GPIO_LOOKUP("gpio-32-63", 26, "int", GPIO_ACTIVE_HIGH),
 		{ }
 	},
 };
@@ -108,21 +105,6 @@ static void __init n8x0_usb_init(void) {}
 
 #endif /*CONFIG_USB_MUSB_TUSB6010 */
 
-
-static struct omap2_mcspi_device_config p54spi_mcspi_config = {
-	.turbo_mode	= 0,
-};
-
-static struct spi_board_info n800_spi_board_info[] __initdata = {
-	{
-		.modalias	= "p54spi",
-		.bus_num	= 2,
-		.chip_select	= 0,
-		.max_speed_hz   = 48000000,
-		.controller_data = &p54spi_mcspi_config,
-	},
-};
-
 #if defined(CONFIG_MENELAUS) && IS_ENABLED(CONFIG_MMC_OMAP)
 
 /*
@@ -140,12 +122,11 @@ static int slot1_cover_open;
 static int slot2_cover_open;
 static struct device *mmc_device;
 
-static struct gpiod_lookup_table nokia8xx_mmc_gpio_table = {
+static struct gpiod_lookup_table nokia800_mmc_gpio_table = {
 	.dev_id = "mmci-omap.0",
 	.table = {
 		/* Slot switch, GPIO 96 */
-		GPIO_LOOKUP("gpio-80-111", 16,
-			    "switch", GPIO_ACTIVE_HIGH),
+		GPIO_LOOKUP("gpio-96-127", 0, "switch", GPIO_ACTIVE_HIGH),
 		{ }
 	},
 };
@@ -153,12 +134,12 @@ static struct gpiod_lookup_table nokia8xx_mmc_gpio_table = {
 static struct gpiod_lookup_table nokia810_mmc_gpio_table = {
 	.dev_id = "mmci-omap.0",
 	.table = {
+		/* Slot switch, GPIO 96 */
+		GPIO_LOOKUP("gpio-96-127", 0, "switch", GPIO_ACTIVE_HIGH),
 		/* Slot index 1, VSD power, GPIO 23 */
-		GPIO_LOOKUP_IDX("gpio-16-31", 7,
-				"vsd", 1, GPIO_ACTIVE_HIGH),
+		GPIO_LOOKUP_IDX("gpio-0-31", 23, "vsd", 1, GPIO_ACTIVE_HIGH),
 		/* Slot index 1, VIO power, GPIO 9 */
-		GPIO_LOOKUP_IDX("gpio-0-15", 9,
-				"vio", 1, GPIO_ACTIVE_HIGH),
+		GPIO_LOOKUP_IDX("gpio-0-31", 9, "vio", 1, GPIO_ACTIVE_HIGH),
 		{ }
 	},
 };
@@ -170,7 +151,7 @@ static int n8x0_mmc_set_power_menelaus(struct device *dev, int slot,
 
 #ifdef CONFIG_MMC_DEBUG
 	dev_dbg(dev, "Set slot %d power: %s (vdd %d)\n", slot + 1,
-		power_on ? "on" : "off", vdd);
+		str_on_off(power_on), vdd);
 #endif
 	if (slot == 0) {
 		if (!power_on)
@@ -415,8 +396,6 @@ static struct omap_mmc_platform_data *mmc_data[OMAP24XX_NR_MMC];
 
 static void __init n8x0_mmc_init(void)
 {
-	gpiod_add_lookup_table(&nokia8xx_mmc_gpio_table);
-
 	if (board_is_n810()) {
 		mmc1_data.slots[0].name = "external";
 
@@ -429,6 +408,8 @@ static void __init n8x0_mmc_init(void)
 		mmc1_data.slots[1].name = "internal";
 		mmc1_data.slots[1].ban_openended = 1;
 		gpiod_add_lookup_table(&nokia810_mmc_gpio_table);
+	} else {
+		gpiod_add_lookup_table(&nokia800_mmc_gpio_table);
 	}
 
 	mmc1_data.nr_slots = 2;
@@ -498,6 +479,15 @@ struct menelaus_platform_data n8x0_menelaus_platform_data = {
 	.late_init = n8x0_menelaus_late_init,
 };
 
+static struct gpiod_lookup_table nokia810_asoc_gpio_table = {
+	.dev_id = "soc-audio",
+	.table = {
+		GPIO_LOOKUP("gpio-0-15", 10, "headset", GPIO_ACTIVE_HIGH),
+		GPIO_LOOKUP("gpio-80-111", 21, "speaker", GPIO_ACTIVE_HIGH),
+		{ }
+	},
+};
+
 static int __init n8x0_late_initcall(void)
 {
 	if (!board_caps)
@@ -505,6 +495,7 @@ static int __init n8x0_late_initcall(void)
 
 	n8x0_mmc_init();
 	n8x0_usb_init();
+	gpiod_add_lookup_table(&nokia810_asoc_gpio_table);
 
 	return 0;
 }
@@ -517,7 +508,5 @@ omap_late_initcall(n8x0_late_initcall);
 void * __init n8x0_legacy_init(void)
 {
 	board_check_revision();
-	spi_register_board_info(n800_spi_board_info,
-				ARRAY_SIZE(n800_spi_board_info));
 	return &mmc1_data;
 }

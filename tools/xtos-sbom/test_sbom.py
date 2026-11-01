@@ -20,13 +20,67 @@ ROOT = HERE.parents[1]
 
 def generate(out: Path) -> dict:
     result = subprocess.run(
-        [sys.executable, str(HERE / "gen_sbom.py"), "--out", str(out)],
+        [sys.executable, *(['-O'] if sys.flags.optimize else []),
+         str(HERE / "gen_sbom.py"), "--out", str(out)],
         capture_output=True, text=True, check=True)
     assert "sbom written" in result.stdout
     return json.loads(out.read_text())
 
 
 class SbomTests(unittest.TestCase):
+    def test_kernel_version_matches_verified_source_pin(self):
+        pin = json.loads((ROOT / 'kernel/source-pin.json').read_text())
+        kernel = next(c for c in self.bom['components'] if c['name'] == 'linux')
+        self.assertEqual(kernel['version'], pin['version'])
+        values = dict(line.split(' = ', 1) for line in
+                      (ROOT / 'kernel/linux/Makefile').read_text().splitlines()
+                      if line.startswith(('VERSION = ', 'PATCHLEVEL = ', 'SUBLEVEL = ')))
+        self.assertEqual(kernel['version'], '.'.join(values[key] for key in
+                                                   ('VERSION', 'PATCHLEVEL', 'SUBLEVEL')))
+        self.assertEqual(kernel['externalReferences'][0]['url'], pin['upstream'])
+        props = {p['name']: p['value'] for p in self.bom['metadata']['properties']}
+        self.assertEqual(props['xtos:kernel-release'], pin['version'])
+
+    def test_kernel_archive_and_source_pin_are_hash_bound(self):
+        pin_path = ROOT / 'kernel/source-pin.json'
+        pin = json.loads(pin_path.read_text())
+        kernel = next(c for c in self.bom['components'] if c['name'] == 'linux')
+        props = {p['name']: p['value'] for p in kernel['properties']}
+        self.assertEqual(props.get('xtos:upstream-archive-sha256'), pin['archive_sha256'])
+        self.assertEqual(props.get('xtos:upstream-archive-bytes'), str(pin['archive_bytes']))
+        self.assertEqual(props.get('xtos:source-pin-sha256'), hashlib.sha256(pin_path.read_bytes()).hexdigest())
+        for name in ('Makefile', 'COPYING'):
+            self.assertIn(hashlib.sha256((ROOT / 'kernel/linux' / name).read_bytes()).hexdigest(),
+                          {h['content'] for h in kernel['hashes']})
+
+    def test_current_integration_patch_matches_source_pin(self):
+        pin = json.loads((ROOT / 'kernel/source-pin.json').read_text())
+        kernel = next(c for c in self.bom['components'] if c['name'] == 'xtos-linux-integration')
+        props = {p['name']: p['value'] for p in kernel['properties']}
+        self.assertEqual(props['xtos:source-path'], pin['xtos_patch'])
+        digest = hashlib.sha256((ROOT / pin['xtos_patch']).read_bytes()).hexdigest()
+        self.assertEqual(digest, pin['xtos_patch_sha256'])
+        self.assertIn(digest, {h['content'] for h in kernel['hashes']})
+
+    def test_mainline_rt_has_no_external_patch_dependency(self):
+        components = {c['name']: c for c in self.bom['components']}
+        historical = components['preempt-rt']
+        self.assertEqual(historical['scope'], 'excluded')
+        self.assertEqual(historical['version'], '6.6-rt15')
+        self.assertEqual(historical['licenses'][0]['license']['id'], 'GPL-2.0-only')
+        old_patch = ROOT / 'kernel/patches/preempt-rt-6.6-rt15.patch'
+        self.assertIn(hashlib.sha256(old_patch.read_bytes()).hexdigest(),
+                      {h['content'] for h in historical['hashes']})
+        props = {p['name']: p['value'] for p in components['linux']['properties']}
+        self.assertEqual(props.get('xtos:rt-mode'), 'mainline')
+        self.assertEqual(props.get('xtos:rt-config'), 'CONFIG_PREEMPT_RT=y')
+        self.assertEqual(props.get('xtos:rt-runtime-evidence'), 'not-validated')
+        deps = {row['ref']: row['dependsOn'] for row in self.bom['dependencies']}
+        for component in components.values():
+            if component['scope'] == 'required':
+                self.assertNotIn(historical['bom-ref'], deps[component['bom-ref']])
+        self.assertIn(components['linux']['bom-ref'], deps[components['xtos-linux-integration']['bom-ref']])
+
     def test_optional_ble_source_is_declared_in_runtime_hash_inventory(self):
         import importlib.util
         spec = importlib.util.spec_from_file_location('sbom_ble_inventory', HERE / 'gen_sbom.py')
@@ -78,7 +132,7 @@ class SbomTests(unittest.TestCase):
             (ROOT / 'kernel/linux/drivers/xtos/bci/xtos_cyton_packet.h').read_bytes()).hexdigest())
         required_comps = [c for c in self.bom["components"]
                           if c.get("scope") == "required"]
-        self.assertEqual(len(required_comps), 19)  # system + 18 shipped, including XR application/headers
+        self.assertEqual(len(required_comps), 19)  # system + RT diagnostics; mainline RT belongs to Linux
 
     def test_runtime_build_inputs_are_completely_bound(self):
         inventories = {}
@@ -97,6 +151,23 @@ class SbomTests(unittest.TestCase):
                 for source in sources:
                     self.assertIn(hashlib.sha256(source.read_bytes()).hexdigest(), hashes,
                                   f'{source.relative_to(ROOT)} missing from runtime inventory')
+
+    def test_kernel_compiled_runtime_inputs_are_completely_bound(self):
+        kernel = next(c for c in self.bom['components'] if c['name'] == 'xtos-linux-integration')
+        props = {p['name']: p['value'] for p in kernel['properties']}
+        base = ROOT / 'kernel/linux'
+        sources = [p for directory in ('drivers/xtos', 'kernel/sched/xtos')
+                   for p in (base / directory).rglob('*') if p.is_file()
+                   and not p.name.startswith('test_')]
+        for pattern in ('include/linux/xtos*.h', 'include/uapi/linux/xtos*.h',
+                        'kernel/sched/xtos*.c', 'kernel/sched/xtos*.h'):
+            sources.extend(base.glob(pattern))
+        sources.extend(base / p for p in ('drivers/Kconfig', 'drivers/Makefile',
+                                          'init/Kconfig', 'kernel/sched/Makefile'))
+        for source in sources:
+            with self.subTest(source=source.relative_to(base)):
+                self.assertEqual(props.get('xtos:source:' + source.relative_to(base).as_posix()),
+                                 hashlib.sha256(source.read_bytes()).hexdigest())
 
     def test_every_runtime_input_mutation_invalidates_component(self):
         import importlib.util
@@ -131,6 +202,53 @@ class SbomTests(unittest.TestCase):
                                                     source.name + ' mutation escaped binding')
                             finally:
                                 target.write_bytes(original)
+
+    def test_kernel_source_pin_patch_and_runtime_mutations_in_replica(self):
+        import importlib.util
+        from unittest.mock import patch
+        spec = importlib.util.spec_from_file_location('sbom_kernel_mutation', HERE / 'gen_sbom.py')
+        if spec is None or spec.loader is None:
+            self.fail('SBOM generator loader unavailable')
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        entries = {e['name']: e for e in module.COMPONENTS}
+        integration = next(c for c in self.bom['components'] if c['name'] == 'xtos-linux-integration')
+        sources = ['kernel/linux/' + p['name'].removeprefix('xtos:source:')
+                   for p in integration['properties'] if p['name'].startswith('xtos:source:')]
+        pin = json.loads((ROOT / 'kernel/source-pin.json').read_text())
+        paths = ['kernel/source-pin.json', pin['xtos_patch'],
+                 'kernel/linux/Makefile', 'kernel/linux/COPYING', *sources]
+        with tempfile.TemporaryDirectory() as temporary:
+            replica = Path(temporary)
+            for name in paths:
+                target = replica / name
+                target.parent.mkdir(parents=True, exist_ok=True)
+                target.write_bytes((ROOT / name).read_bytes())
+            with patch.object(module, 'ROOT', replica):
+                for name in paths:
+                    component = 'linux' if name in paths[:1] + paths[2:4] else 'xtos-linux-integration'
+                    before = module.build_component(entries[component])
+                    target = replica / name
+                    original = target.read_bytes()
+                    with self.subTest(source=name):
+                        target.write_bytes(original + b'\n')
+                        try:
+                            self.assertNotEqual(before, module.build_component(entries[component]))
+                        finally:
+                            target.write_bytes(original)
+
+    def test_mainline_rt_diagnostic_inputs_are_hash_bound(self):
+        component = next(c for c in self.bom['components']
+                         if c['name'] == 'xtos-rt-diagnostics')
+        self.assertEqual(component['scope'], 'required')
+        contents = {row['content'] for row in component['hashes']}
+        for name in ('tools/xtos-native/info/info.c', 'tools/xtos-native/rt/rt.c',
+                     'tools/xtos-native/common/xtos_rt_state.h',
+                     'tools/xtos-native/common/xtos_ui.h',
+                     'tools/xtos-native/rt/rt_irq.h',
+                     'system/rootfs/usr/bin/xtos-rt-status'):
+            with self.subTest(source=name):
+                self.assertIn(hashlib.sha256((ROOT/name).read_bytes()).hexdigest(), contents)
 
     def test_native_bci_component_declares_source_hashes(self):
         native = next((c for c in self.bom['components'] if c['name'] == 'bci'), None)

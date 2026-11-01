@@ -11,7 +11,6 @@
 #include <linux/i2c.h>
 #include <linux/delay.h>
 #include <linux/pm.h>
-#include <linux/mod_devicetable.h>
 #include <linux/power_supply.h>
 #include <linux/platform_device.h>
 #include <linux/of.h>
@@ -590,7 +589,7 @@ static int adp5061_get_property(struct power_supply *psy,
 	case POWER_SUPPLY_PROP_VOLTAGE_AVG:
 		/*
 		 * This property is used to set the VWEAK threshold
-		 * bellow this value, weak charge mode is entered
+		 * below this value, weak charge mode is entered
 		 * above this value, fast chargerge mode is entered
 		 */
 		return adp5061_get_vweak_th(st, val);
@@ -727,7 +726,7 @@ static int adp5061_probe(struct i2c_client *client)
 }
 
 static const struct i2c_device_id adp5061_id[] = {
-	{ "adp5061", 0},
+	{ .name = "adp5061" },
 	{ }
 };
 MODULE_DEVICE_TABLE(i2c, adp5061_id);

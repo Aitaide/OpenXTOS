@@ -65,11 +65,11 @@ mlx5_esw_bridge_mdb_flow_create(u16 esw_owner_vhca_id, struct mlx5_esw_bridge_md
 	u8 *dmac_v, *dmac_c;
 	unsigned long idx;
 
-	rule_spec = kvzalloc(sizeof(*rule_spec), GFP_KERNEL);
+	rule_spec = kvzalloc_obj(*rule_spec);
 	if (!rule_spec)
 		return ERR_PTR(-ENOMEM);
 
-	dests = kvcalloc(num_dests, sizeof(*dests), GFP_KERNEL);
+	dests = kvzalloc_objs(*dests, num_dests);
 	if (!dests) {
 		kvfree(rule_spec);
 		return ERR_PTR(-ENOMEM);
@@ -78,9 +78,12 @@ mlx5_esw_bridge_mdb_flow_create(u16 esw_owner_vhca_id, struct mlx5_esw_bridge_md
 	xa_for_each(&entry->ports, idx, port) {
 		dests[i].type = MLX5_FLOW_DESTINATION_TYPE_FLOW_TABLE;
 		dests[i].ft = port->mcast.ft;
+		if (port->vport_num == MLX5_VPORT_UPLINK)
+			dests[i].ft->flags |= MLX5_FLOW_TABLE_UPLINK_VPORT;
 		i++;
 	}
 
+	rule_spec->flow_context.flags |= FLOW_CONTEXT_UPLINK_HAIRPIN_EN;
 	rule_spec->match_criteria_enable = MLX5_MATCH_OUTER_HEADERS;
 	dmac_v = MLX5_ADDR_OF(fte_match_param, rule_spec->match_value, outer_headers.dmac_47_16);
 	ether_addr_copy(dmac_v, entry->key.addr);
@@ -149,7 +152,7 @@ mlx5_esw_bridge_port_mdb_entry_init(struct mlx5_esw_bridge_port *port,
 	struct mlx5_esw_bridge_mdb_entry *entry;
 	int err;
 
-	entry = kvzalloc(sizeof(*entry), GFP_KERNEL);
+	entry = kvzalloc_obj(*entry);
 	if (!entry)
 		return ERR_PTR(-ENOMEM);
 
@@ -513,7 +516,7 @@ mlx5_esw_bridge_mcast_flow_with_esw_create(struct mlx5_esw_bridge_port *port,
 	struct mlx5_flow_spec *rule_spec;
 	struct mlx5_flow_handle *handle;
 
-	rule_spec = kvzalloc(sizeof(*rule_spec), GFP_KERNEL);
+	rule_spec = kvzalloc_obj(*rule_spec);
 	if (!rule_spec)
 		return ERR_PTR(-ENOMEM);
 
@@ -581,14 +584,11 @@ mlx5_esw_bridge_mcast_vlan_flow_create(u16 vlan_proto, struct mlx5_esw_bridge_po
 	struct mlx5_flow_spec *rule_spec;
 	struct mlx5_flow_handle *handle;
 
-	rule_spec = kvzalloc(sizeof(*rule_spec), GFP_KERNEL);
+	rule_spec = kvzalloc_obj(*rule_spec);
 	if (!rule_spec)
 		return ERR_PTR(-ENOMEM);
 
-	if (MLX5_CAP_ESW_FLOWTABLE(bridge->br_offloads->esw->dev, flow_source) &&
-	    port->vport_num == MLX5_VPORT_UPLINK)
-		rule_spec->flow_context.flow_source =
-			MLX5_FLOW_CONTEXT_FLOW_SOURCE_LOCAL_VPORT;
+	rule_spec->flow_context.flags |= FLOW_CONTEXT_UPLINK_HAIRPIN_EN;
 	rule_spec->match_criteria_enable = MLX5_MATCH_OUTER_HEADERS;
 
 	flow_act.action |= MLX5_FLOW_CONTEXT_ACTION_PACKET_REFORMAT;
@@ -656,19 +656,15 @@ mlx5_esw_bridge_mcast_fwd_flow_create(struct mlx5_esw_bridge_port *port)
 	struct mlx5_flow_spec *rule_spec;
 	struct mlx5_flow_handle *handle;
 
-	rule_spec = kvzalloc(sizeof(*rule_spec), GFP_KERNEL);
+	rule_spec = kvzalloc_obj(*rule_spec);
 	if (!rule_spec)
 		return ERR_PTR(-ENOMEM);
-
-	if (MLX5_CAP_ESW_FLOWTABLE(bridge->br_offloads->esw->dev, flow_source) &&
-	    port->vport_num == MLX5_VPORT_UPLINK)
-		rule_spec->flow_context.flow_source =
-			MLX5_FLOW_CONTEXT_FLOW_SOURCE_LOCAL_VPORT;
 
 	if (MLX5_CAP_ESW(bridge->br_offloads->esw->dev, merged_eswitch)) {
 		dest.vport.flags = MLX5_FLOW_DEST_VPORT_VHCA_ID;
 		dest.vport.vhca_id = port->esw_owner_vhca_id;
 	}
+	rule_spec->flow_context.flags |= FLOW_CONTEXT_UPLINK_HAIRPIN_EN;
 	handle = mlx5_add_flow_rules(port->mcast.ft, rule_spec, &flow_act, &dest, 1);
 
 	kvfree(rule_spec);
@@ -894,7 +890,7 @@ mlx5_esw_bridge_ingress_igmp_fh_create(struct mlx5_flow_table *ingress_ft,
 	struct mlx5_flow_spec *rule_spec;
 	struct mlx5_flow_handle *handle;
 
-	rule_spec = kvzalloc(sizeof(*rule_spec), GFP_KERNEL);
+	rule_spec = kvzalloc_obj(*rule_spec);
 	if (!rule_spec)
 		return ERR_PTR(-ENOMEM);
 
@@ -926,7 +922,7 @@ mlx5_esw_bridge_ingress_mld_fh_create(u8 type, struct mlx5_flow_table *ingress_f
 	struct mlx5_flow_spec *rule_spec;
 	struct mlx5_flow_handle *handle;
 
-	rule_spec = kvzalloc(sizeof(*rule_spec), GFP_KERNEL);
+	rule_spec = kvzalloc_obj(*rule_spec);
 	if (!rule_spec)
 		return ERR_PTR(-ENOMEM);
 

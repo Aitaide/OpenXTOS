@@ -100,7 +100,8 @@ struct rfkill * __must_check rfkill_alloc(const char *name,
 int __must_check rfkill_register(struct rfkill *rfkill);
 
 /**
- * rfkill_pause_polling(struct rfkill *rfkill)
+ * rfkill_pause_polling - Pause polling
+ * @rfkill: rfkill struct
  *
  * Pause polling -- say transmitter is off for other reasons.
  * NOTE: not necessary for suspend/resume -- in that case the
@@ -110,9 +111,9 @@ int __must_check rfkill_register(struct rfkill *rfkill);
 void rfkill_pause_polling(struct rfkill *rfkill);
 
 /**
- * rfkill_resume_polling(struct rfkill *rfkill)
+ * rfkill_resume_polling - Resume polling
+ * @rfkill: rfkill struct
  *
- * Resume polling
  * NOTE: not necessary for suspend/resume -- in that case the
  * core stops polling anyway
  */
@@ -147,7 +148,8 @@ void rfkill_destroy(struct rfkill *rfkill);
  * Prefer to use rfkill_set_hw_state if you don't need any special reason.
  */
 bool rfkill_set_hw_state_reason(struct rfkill *rfkill,
-				bool blocked, unsigned long reason);
+				bool blocked,
+				enum rfkill_hard_block_reasons reason);
 /**
  * rfkill_set_hw_state - Set the internal rfkill hardware block state
  * @rfkill: pointer to the rfkill class to modify.
@@ -240,7 +242,7 @@ bool rfkill_soft_blocked(struct rfkill *rfkill);
  * rfkill_find_type - Helper for finding rfkill type by name
  * @name: the name of the type
  *
- * Returns enum rfkill_type that corresponds to the name.
+ * Returns: enum rfkill_type that corresponds to the name.
  */
 enum rfkill_type rfkill_find_type(const char *name);
 
@@ -280,7 +282,7 @@ static inline void rfkill_destroy(struct rfkill *rfkill)
 
 static inline bool rfkill_set_hw_state_reason(struct rfkill *rfkill,
 					      bool blocked,
-					      unsigned long reason)
+					      enum rfkill_hard_block_reasons reason)
 {
 	return blocked;
 }
@@ -324,6 +326,8 @@ static inline enum rfkill_type rfkill_find_type(const char *name)
 #ifdef CONFIG_RFKILL_LEDS
 /**
  * rfkill_get_led_trigger_name - Get the LED trigger name for the button's LED.
+ * @rfkill: rfkill struct
+ *
  * This function might return a NULL pointer if registering of the
  * LED trigger failed. Use this as "default_trigger" for the LED.
  */

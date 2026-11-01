@@ -911,7 +911,7 @@ static u32 mxl111sf_i2c_func(struct i2c_adapter *adapter)
 	return I2C_FUNC_I2C;
 }
 
-static struct i2c_algorithm mxl111sf_i2c_algo = {
+static const struct i2c_algorithm mxl111sf_i2c_algo = {
 	.master_xfer   = mxl111sf_i2c_xfer,
 	.functionality = mxl111sf_i2c_func,
 #ifdef NEED_ALGO_CONTROL
@@ -987,11 +987,7 @@ static int mxl111sf_frontend_attach_atsc_mh(struct dvb_usb_adapter *adap)
 	if (ret < 0)
 		return ret;
 
-	ret = mxl111sf_lg2160_frontend_attach(adap, 2);
-	if (ret < 0)
-		return ret;
-
-	return ret;
+	return mxl111sf_lg2160_frontend_attach(adap, 2);
 }
 
 static int mxl111sf_frontend_attach_mercury(struct dvb_usb_adapter *adap)
@@ -1007,11 +1003,7 @@ static int mxl111sf_frontend_attach_mercury(struct dvb_usb_adapter *adap)
 	if (ret < 0)
 		return ret;
 
-	ret = mxl111sf_lg2161_ep6_frontend_attach(adap, 2);
-	if (ret < 0)
-		return ret;
-
-	return ret;
+	return mxl111sf_lg2161_ep6_frontend_attach(adap, 2);
 }
 
 static int mxl111sf_frontend_attach_mercury_mh(struct dvb_usb_adapter *adap)

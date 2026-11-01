@@ -23,7 +23,9 @@
 #define MTE_CTRL_TCF_ASYNC		(1UL << 17)
 #define MTE_CTRL_TCF_ASYMM		(1UL << 18)
 
-#ifndef __ASSEMBLY__
+#define MTE_CTRL_STORE_ONLY		(1UL << 19)
+
+#ifndef __ASSEMBLER__
 
 #include <linux/build_bug.h>
 #include <linux/cache.h>
@@ -128,6 +130,9 @@ enum fp_type {
 	FP_STATE_SVE,
 };
 
+struct arm64_sve_state;		/* Opaque type */
+struct arm64_sme_state;		/* Opaque type */
+
 struct cpu_context {
 	unsigned long x19;
 	unsigned long x20;
@@ -155,18 +160,28 @@ struct thread_struct {
 	struct {
 		unsigned long	tp_value;	/* TLS register */
 		unsigned long	tp2_value;
+		u64		fpmr;
+		unsigned long	pad;
 		struct user_fpsimd_state fpsimd_state;
 	} uw;
 
 	enum fp_type		fp_type;	/* registers FPSIMD or SVE? */
 	unsigned int		fpsimd_cpu;
-	void			*sve_state;	/* SVE registers, if any */
-	void			*sme_state;	/* ZA and ZT state, if any */
+	struct arm64_sve_state	*sve_state;	/* SVE registers, if any */
+	struct arm64_sme_state	*sme_state;	/* ZA and ZT state, if any */
 	unsigned int		vl[ARM64_VEC_MAX];	/* vector length */
 	unsigned int		vl_onexec[ARM64_VEC_MAX]; /* vl after next exec */
 	unsigned long		fault_address;	/* fault info */
 	unsigned long		fault_code;	/* ESR_EL1 value */
 	struct debug_info	debug;		/* debugging */
+
+	/*
+	 * Set [cleared] by kernel_neon_begin() [kernel_neon_end()] to the
+	 * address of a caller provided buffer that will be used to preserve a
+	 * task's kernel mode FPSIMD state while it is scheduled out.
+	 */
+	struct user_fpsimd_state	*kernel_fpsimd_state;
+	unsigned int			kernel_fpsimd_cpu;
 #ifdef CONFIG_ARM64_PTR_AUTH
 	struct ptrauth_keys_user	keys_user;
 #ifdef CONFIG_ARM64_PTR_AUTH_KERNEL
@@ -179,6 +194,14 @@ struct thread_struct {
 	u64			sctlr_user;
 	u64			svcr;
 	u64			tpidr2_el0;
+	u64			por_el0;
+#ifdef CONFIG_ARM64_GCS
+	unsigned int		gcs_el0_mode;
+	unsigned int		gcs_el0_locked;
+	u64			gcspr_el0;
+	u64			gcs_base;
+	u64			gcs_size;
+#endif
 };
 
 static inline unsigned int thread_get_vl(struct thread_struct *thread,
@@ -241,7 +264,7 @@ static inline void task_set_sve_vl_onexec(struct task_struct *task,
 
 #define SCTLR_USER_MASK                                                        \
 	(SCTLR_ELx_ENIA | SCTLR_ELx_ENIB | SCTLR_ELx_ENDA | SCTLR_ELx_ENDB |   \
-	 SCTLR_EL1_TCF0_MASK)
+	 SCTLR_EL1_TCF0_MASK | SCTLR_EL1_TCSO0_MASK)
 
 static inline void arch_thread_struct_whitelist(unsigned long *offset,
 						unsigned long *size)
@@ -250,6 +273,8 @@ static inline void arch_thread_struct_whitelist(unsigned long *offset,
 	BUILD_BUG_ON(sizeof_field(struct thread_struct, uw) !=
 		     sizeof_field(struct thread_struct, uw.tp_value) +
 		     sizeof_field(struct thread_struct, uw.tp2_value) +
+		     sizeof_field(struct thread_struct, uw.fpmr) +
+		     sizeof_field(struct thread_struct, uw.pad) +
 		     sizeof_field(struct thread_struct, uw.fpsimd_state));
 
 	*offset = offsetof(struct thread_struct, uw);
@@ -277,22 +302,44 @@ void tls_preserve_current_state(void);
 	.fpsimd_cpu = NR_CPUS,			\
 }
 
-static inline void start_thread_common(struct pt_regs *regs, unsigned long pc)
+static inline void start_thread_common(struct pt_regs *regs, unsigned long pc,
+				       unsigned long pstate)
 {
-	s32 previous_syscall = regs->syscallno;
-	memset(regs, 0, sizeof(*regs));
-	regs->syscallno = previous_syscall;
-	regs->pc = pc;
+	/*
+	 * Ensure all GPRs are zeroed, and initialize PC + PSTATE.
+	 * The SP (or compat SP) will be initialized later.
+	 */
+	regs->user_regs = (struct user_pt_regs) {
+		.pc = pc,
+		.pstate = pstate,
+	};
 
+	/*
+	 * To allow the syscalls:sys_exit_execve tracepoint we need to preserve
+	 * syscallno, but do not need orig_x0 or the original GPRs.
+	 */
+	regs->orig_x0 = 0;
+
+	/*
+	 * An exec from a kernel thread won't have an existing PMR value.
+	 */
 	if (system_uses_irq_prio_masking())
-		regs->pmr_save = GIC_PRIO_IRQON;
+		regs->pmr = GIC_PRIO_IRQON;
+
+	/*
+	 * The pt_regs::stackframe field must remain valid throughout this
+	 * function as a stacktrace can be taken at any time. Any user or
+	 * kernel task should have a valid final frame.
+	 */
+	WARN_ON_ONCE(regs->stackframe.record.fp != 0);
+	WARN_ON_ONCE(regs->stackframe.record.lr != 0);
+	WARN_ON_ONCE(regs->stackframe.type != FRAME_META_TYPE_FINAL);
 }
 
 static inline void start_thread(struct pt_regs *regs, unsigned long pc,
 				unsigned long sp)
 {
-	start_thread_common(regs, pc);
-	regs->pstate = PSR_MODE_EL0t;
+	start_thread_common(regs, pc, PSR_MODE_EL0t);
 	spectre_v4_enable_task_mitigation(current);
 	regs->sp = sp;
 }
@@ -301,15 +348,13 @@ static inline void start_thread(struct pt_regs *regs, unsigned long pc,
 static inline void compat_start_thread(struct pt_regs *regs, unsigned long pc,
 				       unsigned long sp)
 {
-	start_thread_common(regs, pc);
-	regs->pstate = PSR_AA32_MODE_USR;
+	unsigned long pstate = PSR_AA32_MODE_USR;
 	if (pc & 1)
-		regs->pstate |= PSR_AA32_T_BIT;
+		pstate |= PSR_AA32_T_BIT;
+	if (IS_ENABLED(CONFIG_CPU_BIG_ENDIAN))
+		pstate |= PSR_AA32_E_BIT;
 
-#ifdef __AARCH64EB__
-	regs->pstate |= PSR_AA32_E_BIT;
-#endif
-
+	start_thread_common(regs, pc, pstate);
 	spectre_v4_enable_task_mitigation(current);
 	regs->compat_sp = sp;
 }
@@ -395,5 +440,10 @@ long get_tagged_addr_ctrl(struct task_struct *task);
 #define GET_TAGGED_ADDR_CTRL()		get_tagged_addr_ctrl(current)
 #endif
 
-#endif /* __ASSEMBLY__ */
+int get_tsc_mode(unsigned long adr);
+int set_tsc_mode(unsigned int val);
+#define GET_TSC_CTL(adr)        get_tsc_mode((adr))
+#define SET_TSC_CTL(val)        set_tsc_mode((val))
+
+#endif /* __ASSEMBLER__ */
 #endif /* __ASM_PROCESSOR_H */

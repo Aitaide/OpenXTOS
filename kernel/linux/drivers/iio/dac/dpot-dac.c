@@ -30,7 +30,6 @@
 #include <linux/iio/consumer.h>
 #include <linux/iio/iio.h>
 #include <linux/module.h>
-#include <linux/mod_devicetable.h>
 #include <linux/platform_device.h>
 #include <linux/regulator/consumer.h>
 
@@ -226,20 +225,18 @@ disable_reg:
 	return ret;
 }
 
-static int dpot_dac_remove(struct platform_device *pdev)
+static void dpot_dac_remove(struct platform_device *pdev)
 {
 	struct iio_dev *indio_dev = platform_get_drvdata(pdev);
 	struct dpot_dac *dac = iio_priv(indio_dev);
 
 	iio_device_unregister(indio_dev);
 	regulator_disable(dac->vref);
-
-	return 0;
 }
 
 static const struct of_device_id dpot_dac_match[] = {
 	{ .compatible = "dpot-dac" },
-	{ /* sentinel */ }
+	{ }
 };
 MODULE_DEVICE_TABLE(of, dpot_dac_match);
 
@@ -256,3 +253,4 @@ module_platform_driver(dpot_dac_driver);
 MODULE_DESCRIPTION("DAC emulation driver using a digital potentiometer");
 MODULE_AUTHOR("Peter Rosin <peda@axentia.se>");
 MODULE_LICENSE("GPL v2");
+MODULE_IMPORT_NS("IIO_CONSUMER");

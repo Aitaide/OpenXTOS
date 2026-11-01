@@ -163,7 +163,7 @@ unsigned long host_copy_to_user(void *dst,const void *src,size_t n);
 static inline unsigned long copy_from_user(void *d,const void *s,size_t n) { if (host_fail_from) return n; memcpy(d,s,n); return 0; }
 static inline void msleep(unsigned int ms) { (void)ms; }
 struct serdev_device;
-struct serdev_device_ops { int (*receive_buf)(struct serdev_device *,const unsigned char *,size_t); void (*write_wakeup)(struct serdev_device *); };
+struct serdev_device_ops { size_t (*receive_buf)(struct serdev_device *,const unsigned char *,size_t); void (*write_wakeup)(struct serdev_device *); };
 struct serdev_device { struct device dev; void *data; const struct serdev_device_ops *ops; bool closed; };
 struct of_device_id { const char *compatible; };
 struct serdev_device_driver { int (*probe)(struct serdev_device *); void (*remove)(struct serdev_device *); struct { const char *name; const struct of_device_id *of_match_table; } driver; };

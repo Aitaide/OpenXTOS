@@ -57,9 +57,6 @@
 
 #define VGT_SPRSTRIDE(pipe)	_PIPE(pipe, _SPRA_STRIDE, _PLANE_STRIDE_2_B)
 
-#define _REG_701C0(pipe, plane) (0x701c0 + pipe * 0x1000 + (plane - 1) * 0x100)
-#define _REG_701C4(pipe, plane) (0x701c4 + pipe * 0x1000 + (plane - 1) * 0x100)
-
 #define SKL_FLIP_EVENT(pipe, plane) (PRIMARY_A_FLIP_DONE + (plane) * 3 + (pipe))
 
 #define REG50080_FLIP_TYPE_MASK	0x3
@@ -94,9 +91,9 @@
 		((((bit) & 0xffff0000) == 0) && !!((val) & (((bit) << 16))))
 
 #define IS_MASKED_BITS_ENABLED(_val, _b) \
-		(((_val) & _MASKED_BIT_ENABLE(_b)) == _MASKED_BIT_ENABLE(_b))
+		(((_val) & REG_MASKED_FIELD_ENABLE(_b)) == REG_MASKED_FIELD_ENABLE(_b))
 #define IS_MASKED_BITS_DISABLED(_val, _b) \
-		((_val) & _MASKED_BIT_DISABLE(_b))
+		((_val) & REG_MASKED_FIELD_DISABLE(_b))
 
 #define FORCEWAKE_RENDER_GEN9_REG 0xa278
 #define FORCEWAKE_ACK_RENDER_GEN9_REG 0x0D84

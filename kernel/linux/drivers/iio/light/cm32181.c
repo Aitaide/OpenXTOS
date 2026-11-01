@@ -10,7 +10,6 @@
 #include <linux/i2c.h>
 #include <linux/mutex.h>
 #include <linux/module.h>
-#include <linux/mod_devicetable.h>
 #include <linux/interrupt.h>
 #include <linux/regulator/consumer.h>
 #include <linux/iio/iio.h>
@@ -217,8 +216,7 @@ static int cm32181_reg_init(struct cm32181_chip *cm32181)
 	cm32181->lux_per_bit = CM32181_LUX_PER_BIT;
 	cm32181->lux_per_bit_base_it = CM32181_LUX_PER_BIT_BASE_IT;
 
-	if (ACPI_HANDLE(cm32181->dev))
-		cm32181_acpi_parse_cpm_tables(cm32181);
+	cm32181_acpi_parse_cpm_tables(cm32181);
 
 	/* Initialize registers*/
 	for_each_set_bit(i, &cm32181->init_regs_bitmap, CM32181_CONF_REG_NUM) {
@@ -370,7 +368,7 @@ static int cm32181_write_raw(struct iio_dev *indio_dev,
 	switch (mask) {
 	case IIO_CHAN_INFO_CALIBSCALE:
 		cm32181->calibscale = val;
-		return val;
+		return 0;
 	case IIO_CHAN_INFO_INT_TIME:
 		ret = cm32181_write_als_it(cm32181, val2);
 		return ret;
@@ -493,7 +491,7 @@ static int cm32181_probe(struct i2c_client *client)
 
 	ret = devm_iio_device_register(dev, indio_dev);
 	if (ret) {
-		dev_err(dev, "%s: regist device failed\n", __func__);
+		dev_err(dev, "%s: register device failed\n", __func__);
 		return ret;
 	}
 

@@ -226,7 +226,7 @@ static irqreturn_t pic32_sqi_isr(int irq, void *dev_id)
 	if (status & PESQI_PKTCOMP) {
 		/* mask all interrupts */
 		enable = 0;
-		/* complete trasaction */
+		/* complete transaction */
 		complete(&sqi->xfer_done);
 	}
 
@@ -344,7 +344,7 @@ static int pic32_sqi_one_message(struct spi_controller *host,
 	struct spi_transfer *xfer;
 	struct pic32_sqi *sqi;
 	int ret = 0, mode;
-	unsigned long timeout;
+	unsigned long time_left;
 	u32 val;
 
 	sqi = spi_controller_get_devdata(host);
@@ -410,8 +410,8 @@ static int pic32_sqi_one_message(struct spi_controller *host,
 	writel(val, sqi->regs + PESQI_BD_CTRL_REG);
 
 	/* wait for xfer completion */
-	timeout = wait_for_completion_timeout(&sqi->xfer_done, 5 * HZ);
-	if (timeout == 0) {
+	time_left = wait_for_completion_timeout(&sqi->xfer_done, 5 * HZ);
+	if (time_left == 0) {
 		dev_err(&sqi->host->dev, "wait timedout/interrupted\n");
 		ret = -ETIMEDOUT;
 		msg->status = ret;
@@ -467,7 +467,7 @@ static int ring_desc_ring_alloc(struct pic32_sqi *sqi)
 	}
 
 	/* allocate software ring descriptors */
-	sqi->ring = kcalloc(PESQI_BD_COUNT, sizeof(*rdesc), GFP_KERNEL);
+	sqi->ring = kzalloc_objs(*rdesc, PESQI_BD_COUNT);
 	if (!sqi->ring) {
 		dma_free_coherent(&sqi->host->dev,
 				  sizeof(*bd) * PESQI_BD_COUNT,
@@ -572,7 +572,7 @@ static int pic32_sqi_probe(struct platform_device *pdev)
 	struct pic32_sqi *sqi;
 	int ret;
 
-	host = spi_alloc_host(&pdev->dev, sizeof(*sqi));
+	host = devm_spi_alloc_host(&pdev->dev, sizeof(*sqi));
 	if (!host)
 		return -ENOMEM;
 
@@ -580,44 +580,25 @@ static int pic32_sqi_probe(struct platform_device *pdev)
 	sqi->host = host;
 
 	sqi->regs = devm_platform_ioremap_resource(pdev, 0);
-	if (IS_ERR(sqi->regs)) {
-		ret = PTR_ERR(sqi->regs);
-		goto err_free_host;
-	}
+	if (IS_ERR(sqi->regs))
+		return PTR_ERR(sqi->regs);
 
 	/* irq */
 	sqi->irq = platform_get_irq(pdev, 0);
-	if (sqi->irq < 0) {
-		ret = sqi->irq;
-		goto err_free_host;
-	}
+	if (sqi->irq < 0)
+		return sqi->irq;
 
 	/* clocks */
-	sqi->sys_clk = devm_clk_get(&pdev->dev, "reg_ck");
+	sqi->sys_clk = devm_clk_get_enabled(&pdev->dev, "reg_ck");
 	if (IS_ERR(sqi->sys_clk)) {
-		ret = PTR_ERR(sqi->sys_clk);
 		dev_err(&pdev->dev, "no sys_clk ?\n");
-		goto err_free_host;
+		return PTR_ERR(sqi->sys_clk);
 	}
 
-	sqi->base_clk = devm_clk_get(&pdev->dev, "spi_ck");
+	sqi->base_clk = devm_clk_get_enabled(&pdev->dev, "spi_ck");
 	if (IS_ERR(sqi->base_clk)) {
-		ret = PTR_ERR(sqi->base_clk);
 		dev_err(&pdev->dev, "no base clk ?\n");
-		goto err_free_host;
-	}
-
-	ret = clk_prepare_enable(sqi->sys_clk);
-	if (ret) {
-		dev_err(&pdev->dev, "sys clk enable failed\n");
-		goto err_free_host;
-	}
-
-	ret = clk_prepare_enable(sqi->base_clk);
-	if (ret) {
-		dev_err(&pdev->dev, "base clk enable failed\n");
-		clk_disable_unprepare(sqi->sys_clk);
-		goto err_free_host;
+		return PTR_ERR(sqi->base_clk);
 	}
 
 	init_completion(&sqi->xfer_done);
@@ -629,7 +610,7 @@ static int pic32_sqi_probe(struct platform_device *pdev)
 	ret = ring_desc_ring_alloc(sqi);
 	if (ret) {
 		dev_err(&pdev->dev, "ring alloc failed\n");
-		goto err_disable_clk;
+		return ret;
 	}
 
 	/* install irq handlers */
@@ -655,7 +636,7 @@ static int pic32_sqi_probe(struct platform_device *pdev)
 	host->prepare_transfer_hardware	= pic32_sqi_prepare_hardware;
 	host->unprepare_transfer_hardware	= pic32_sqi_unprepare_hardware;
 
-	ret = devm_spi_register_controller(&pdev->dev, host);
+	ret = spi_register_controller(host);
 	if (ret) {
 		dev_err(&host->dev, "failed registering spi host\n");
 		free_irq(sqi->irq, sqi);
@@ -669,12 +650,6 @@ static int pic32_sqi_probe(struct platform_device *pdev)
 err_free_ring:
 	ring_desc_ring_free(sqi);
 
-err_disable_clk:
-	clk_disable_unprepare(sqi->base_clk);
-	clk_disable_unprepare(sqi->sys_clk);
-
-err_free_host:
-	spi_controller_put(host);
 	return ret;
 }
 
@@ -682,13 +657,11 @@ static void pic32_sqi_remove(struct platform_device *pdev)
 {
 	struct pic32_sqi *sqi = platform_get_drvdata(pdev);
 
+	spi_unregister_controller(sqi->host);
+
 	/* release resources */
 	free_irq(sqi->irq, sqi);
 	ring_desc_ring_free(sqi);
-
-	/* disable clk */
-	clk_disable_unprepare(sqi->base_clk);
-	clk_disable_unprepare(sqi->sys_clk);
 }
 
 static const struct of_device_id pic32_sqi_of_ids[] = {
@@ -703,7 +676,7 @@ static struct platform_driver pic32_sqi_driver = {
 		.of_match_table = of_match_ptr(pic32_sqi_of_ids),
 	},
 	.probe = pic32_sqi_probe,
-	.remove_new = pic32_sqi_remove,
+	.remove = pic32_sqi_remove,
 };
 
 module_platform_driver(pic32_sqi_driver);

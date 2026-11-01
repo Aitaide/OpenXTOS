@@ -8,7 +8,6 @@
 #include <linux/init.h>
 #include <linux/module.h>
 #include <linux/platform_device.h>
-#include <linux/mod_devicetable.h>
 #include <linux/pinctrl/pinmux.h>
 #include <linux/pinctrl/pinconf-generic.h>
 #include <linux/pinctrl/pinctrl.h>
@@ -286,6 +285,7 @@ static const struct of_device_id loongson2_pinctrl_dt_match[] = {
 	},
 	{ }
 };
+MODULE_DEVICE_TABLE(of, loongson2_pinctrl_dt_match);
 
 static struct platform_driver loongson2_pinctrl_driver = {
 	.probe		= loongson2_pinctrl_probe,

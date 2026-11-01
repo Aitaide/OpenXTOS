@@ -11,6 +11,7 @@
  */
 #define pr_fmt(fmt) KBUILD_MODNAME ": " fmt
 
+#include <linux/cleanup.h>
 #include <linux/slab.h>
 #include <linux/io.h>
 #include <linux/module.h>
@@ -32,7 +33,7 @@ int sst_register_dsp(struct sst_device *dev)
 		return -EINVAL;
 	if (!try_module_get(dev->dev->driver->owner))
 		return -ENODEV;
-	mutex_lock(&sst_lock);
+	guard(mutex)(&sst_lock);
 	if (sst) {
 		dev_err(dev->dev, "we already have a device %s\n", sst->name);
 		module_put(dev->dev->driver->owner);
@@ -41,7 +42,7 @@ int sst_register_dsp(struct sst_device *dev)
 	}
 	dev_dbg(dev->dev, "registering device %s\n", dev->name);
 	sst = dev;
-	mutex_unlock(&sst_lock);
+
 	return 0;
 }
 EXPORT_SYMBOL_GPL(sst_register_dsp);
@@ -53,17 +54,15 @@ int sst_unregister_dsp(struct sst_device *dev)
 	if (dev != sst)
 		return -EINVAL;
 
-	mutex_lock(&sst_lock);
+	guard(mutex)(&sst_lock);
 
-	if (!sst) {
-		mutex_unlock(&sst_lock);
+	if (!sst)
 		return -EIO;
-	}
 
 	module_put(sst->dev->driver->owner);
 	dev_dbg(dev->dev, "unreg %s\n", sst->name);
 	sst = NULL;
-	mutex_unlock(&sst_lock);
+
 	return 0;
 }
 EXPORT_SYMBOL_GPL(sst_unregister_dsp);
@@ -103,21 +102,14 @@ static int sst_media_digital_mute(struct snd_soc_dai *dai, int mute, int stream)
 void sst_set_stream_status(struct sst_runtime_stream *stream,
 					int state)
 {
-	unsigned long flags;
-	spin_lock_irqsave(&stream->status_lock, flags);
+	guard(spinlock_irqsave)(&stream->status_lock);
 	stream->stream_status = state;
-	spin_unlock_irqrestore(&stream->status_lock, flags);
 }
 
 static inline int sst_get_stream_status(struct sst_runtime_stream *stream)
 {
-	int state;
-	unsigned long flags;
-
-	spin_lock_irqsave(&stream->status_lock, flags);
-	state = stream->stream_status;
-	spin_unlock_irqrestore(&stream->status_lock, flags);
-	return state;
+	guard(spinlock_irqsave)(&stream->status_lock);
+	return stream->stream_status;
 }
 
 static void sst_fill_alloc_params(struct snd_pcm_substream *substream,
@@ -244,12 +236,7 @@ static int sst_platform_alloc_stream(struct snd_pcm_substream *substream,
 
 	stream->stream_info.str_id = str_params.stream_id;
 
-	ret_val = stream->ops->open(sst->dev, &str_params);
-	if (ret_val <= 0)
-		return ret_val;
-
-
-	return ret_val;
+	return stream->ops->open(sst->dev, &str_params);
 }
 
 static void sst_period_elapsed(void *arg)
@@ -273,7 +260,7 @@ static int sst_platform_init_stream(struct snd_pcm_substream *substream)
 {
 	struct sst_runtime_stream *stream =
 			substream->runtime->private_data;
-	struct snd_soc_pcm_runtime *rtd = asoc_substream_to_rtd(substream);
+	struct snd_soc_pcm_runtime *rtd = snd_soc_substream_to_rtd(substream);
 	int ret_val;
 
 	dev_dbg(rtd->dev, "setting buffer ptr param\n");
@@ -304,23 +291,22 @@ static int sst_media_open(struct snd_pcm_substream *substream,
 {
 	int ret_val = 0;
 	struct snd_pcm_runtime *runtime = substream->runtime;
-	struct sst_runtime_stream *stream;
+	struct sst_runtime_stream *stream __free(kfree) = NULL;
 
-	stream = kzalloc(sizeof(*stream), GFP_KERNEL);
+	stream = kzalloc_obj(*stream);
 	if (!stream)
 		return -ENOMEM;
 	spin_lock_init(&stream->status_lock);
 
 	/* get the sst ops */
-	mutex_lock(&sst_lock);
-	if (!sst ||
-	    !try_module_get(sst->dev->driver->owner)) {
-		dev_err(dai->dev, "no device available to run\n");
-		ret_val = -ENODEV;
-		goto out_ops;
+	scoped_guard(mutex, &sst_lock) {
+		if (!sst ||
+		    !try_module_get(sst->dev->driver->owner)) {
+			dev_err(dai->dev, "no device available to run\n");
+			return -ENODEV;
+		}
+		stream->ops = sst->ops;
 	}
-	stream->ops = sst->ops;
-	mutex_unlock(&sst_lock);
 
 	stream->stream_info.str_id = 0;
 
@@ -330,7 +316,7 @@ static int sst_media_open(struct snd_pcm_substream *substream,
 
 	ret_val = power_up_sst(stream);
 	if (ret_val < 0)
-		goto out_power_up;
+		return ret_val;
 
 	/*
 	 * Make sure the period to be multiple of 1ms to align the
@@ -347,12 +333,14 @@ static int sst_media_open(struct snd_pcm_substream *substream,
 	snd_pcm_hw_constraint_step(substream->runtime, 0,
 			   SNDRV_PCM_HW_PARAM_PERIODS, 2);
 
-	return snd_pcm_hw_constraint_integer(runtime,
-			 SNDRV_PCM_HW_PARAM_PERIODS);
-out_ops:
-	mutex_unlock(&sst_lock);
-out_power_up:
-	kfree(stream);
+	ret_val = snd_pcm_hw_constraint_integer(runtime,
+						SNDRV_PCM_HW_PARAM_PERIODS);
+
+	if (ret_val < 0)
+		return ret_val;
+
+	stream = NULL;
+
 	return ret_val;
 }
 
@@ -593,7 +581,7 @@ static int sst_soc_trigger(struct snd_soc_component *component,
 	int ret_val = 0, str_id;
 	struct sst_runtime_stream *stream;
 	int status;
-	struct snd_soc_pcm_runtime *rtd = asoc_substream_to_rtd(substream);
+	struct snd_soc_pcm_runtime *rtd = snd_soc_substream_to_rtd(substream);
 
 	dev_dbg(rtd->dev, "%s called\n", __func__);
 	if (substream->pcm->internal)
@@ -641,7 +629,7 @@ static snd_pcm_uframes_t sst_soc_pointer(struct snd_soc_component *component,
 	struct sst_runtime_stream *stream;
 	int ret_val, status;
 	struct pcm_stream_info *str_info;
-	struct snd_soc_pcm_runtime *rtd = asoc_substream_to_rtd(substream);
+	struct snd_soc_pcm_runtime *rtd = snd_soc_substream_to_rtd(substream);
 
 	stream = substream->runtime->private_data;
 	status = sst_get_stream_status(stream);
@@ -671,7 +659,7 @@ static snd_pcm_sframes_t sst_soc_delay(struct snd_soc_component *component,
 static int sst_soc_pcm_new(struct snd_soc_component *component,
 			   struct snd_soc_pcm_runtime *rtd)
 {
-	struct snd_soc_dai *dai = asoc_rtd_to_cpu(rtd, 0);
+	struct snd_soc_dai *dai = snd_soc_rtd_to_cpu(rtd, 0);
 	struct snd_pcm *pcm = rtd->pcm;
 
 	if (dai->driver->playback.channels_min ||
@@ -707,7 +695,7 @@ static const struct snd_soc_component_driver sst_soc_platform_drv  = {
 	.pointer	= sst_soc_pointer,
 	.delay		= sst_soc_delay,
 	.compress_ops	= &sst_platform_compress_ops,
-	.pcm_construct	= sst_soc_pcm_new,
+	.pcm_new	= sst_soc_pcm_new,
 };
 
 static int sst_platform_probe(struct platform_device *pdev)
@@ -762,7 +750,7 @@ static int sst_soc_prepare(struct device *dev)
 
 	/* set the SSPs to idle */
 	for_each_card_rtds(drv->soc_card, rtd) {
-		struct snd_soc_dai *dai = asoc_rtd_to_cpu(rtd, 0);
+		struct snd_soc_dai *dai = snd_soc_rtd_to_cpu(rtd, 0);
 
 		if (snd_soc_dai_active(dai)) {
 			send_ssp_cmd(dai, dai->name, 0);
@@ -783,7 +771,7 @@ static void sst_soc_complete(struct device *dev)
 
 	/* restart SSPs */
 	for_each_card_rtds(drv->soc_card, rtd) {
-		struct snd_soc_dai *dai = asoc_rtd_to_cpu(rtd, 0);
+		struct snd_soc_dai *dai = snd_soc_rtd_to_cpu(rtd, 0);
 
 		if (snd_soc_dai_active(dai)) {
 			sst_handle_vb_timer(dai, true);
@@ -812,7 +800,7 @@ static struct platform_driver sst_platform_driver = {
 		.pm             = &sst_platform_pm,
 	},
 	.probe		= sst_platform_probe,
-	.remove_new	= sst_platform_remove,
+	.remove		= sst_platform_remove,
 };
 
 module_platform_driver(sst_platform_driver);

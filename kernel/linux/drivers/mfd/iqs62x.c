@@ -31,7 +31,7 @@
 #include <linux/property.h>
 #include <linux/regmap.h>
 #include <linux/slab.h>
-#include <asm/unaligned.h>
+#include <linux/unaligned.h>
 
 #define IQS62X_PROD_NUM				0x00
 
@@ -96,7 +96,7 @@ struct iqs62x_fw_blk {
 	u8 addr;
 	u8 mask;
 	u8 len;
-	u8 data[];
+	u8 data[] __counted_by(len);
 };
 
 struct iqs62x_info {
@@ -237,7 +237,7 @@ static int iqs62x_firmware_parse(struct iqs62x_core *iqs62x,
 		fw_rec = (struct iqs62x_fw_rec *)(fw->data + pos);
 		pos += sizeof(*fw_rec);
 
-		if (pos + fw_rec->len - 1 > fw->size) {
+		if (!fw_rec->len || fw_rec->len - 1 > fw->size - pos) {
 			ret = -EINVAL;
 			break;
 		}

@@ -24,57 +24,10 @@
 #include <sys/timex.h>
 #include <string.h>
 #include <signal.h>
-#include "../kselftest.h"
+#include "clock-helpers.h"
+#include "kselftest.h"
 
-#define NSEC_PER_SEC 1000000000ULL
-
-#define UNRESONABLE_LATENCY 40000000 /* 40ms in nanosecs */
-
-
-#define CLOCK_REALTIME			0
-#define CLOCK_MONOTONIC			1
-#define CLOCK_PROCESS_CPUTIME_ID	2
-#define CLOCK_THREAD_CPUTIME_ID		3
-#define CLOCK_MONOTONIC_RAW		4
-#define CLOCK_REALTIME_COARSE		5
-#define CLOCK_MONOTONIC_COARSE		6
-#define CLOCK_BOOTTIME			7
-#define CLOCK_REALTIME_ALARM		8
-#define CLOCK_BOOTTIME_ALARM		9
-#define CLOCK_HWSPECIFIC		10
-#define CLOCK_TAI			11
-#define NR_CLOCKIDS			12
-
-#define UNSUPPORTED 0xf00f
-
-char *clockstring(int clockid)
-{
-	switch (clockid) {
-	case CLOCK_REALTIME:
-		return "CLOCK_REALTIME";
-	case CLOCK_MONOTONIC:
-		return "CLOCK_MONOTONIC";
-	case CLOCK_PROCESS_CPUTIME_ID:
-		return "CLOCK_PROCESS_CPUTIME_ID";
-	case CLOCK_THREAD_CPUTIME_ID:
-		return "CLOCK_THREAD_CPUTIME_ID";
-	case CLOCK_MONOTONIC_RAW:
-		return "CLOCK_MONOTONIC_RAW";
-	case CLOCK_REALTIME_COARSE:
-		return "CLOCK_REALTIME_COARSE";
-	case CLOCK_MONOTONIC_COARSE:
-		return "CLOCK_MONOTONIC_COARSE";
-	case CLOCK_BOOTTIME:
-		return "CLOCK_BOOTTIME";
-	case CLOCK_REALTIME_ALARM:
-		return "CLOCK_REALTIME_ALARM";
-	case CLOCK_BOOTTIME_ALARM:
-		return "CLOCK_BOOTTIME_ALARM";
-	case CLOCK_TAI:
-		return "CLOCK_TAI";
-	};
-	return "UNKNOWN_CLOCKID";
-}
+#define UNRESONABLE_LATENCY (40 * NSEC_PER_MSEC)
 
 struct timespec timespec_add(struct timespec ts, unsigned long long ns)
 {
@@ -105,57 +58,68 @@ int nanosleep_lat_test(int clockid, long long ns)
 	target.tv_nsec = ns%NSEC_PER_SEC;
 
 	if (clock_gettime(clockid, &start))
-		return UNSUPPORTED;
+		return KSFT_SKIP;
 	if (clock_nanosleep(clockid, 0, &target, NULL))
-		return UNSUPPORTED;
+		return KSFT_SKIP;
 
 	count = 10;
 
 	/* First check relative latency */
-	clock_gettime(clockid, &start);
-	for (i = 0; i < count; i++)
-		clock_nanosleep(clockid, 0, &target, NULL);
-	clock_gettime(clockid, &end);
+	if (clock_gettime(clockid, &start))
+		return KSFT_FAIL;
+
+	for (i = 0; i < count; i++) {
+		if (clock_nanosleep(clockid, 0, &target, NULL))
+			return KSFT_FAIL;
+	}
+
+	if (clock_gettime(clockid, &end))
+		return KSFT_FAIL;
 
 	if (((timespec_sub(start, end)/count)-ns) > UNRESONABLE_LATENCY) {
-		printf("Large rel latency: %lld ns :", (timespec_sub(start, end)/count)-ns);
-		return -1;
+		ksft_print_msg("Large rel latency: %lld ns :", (timespec_sub(start, end)/count)-ns);
+		return KSFT_FAIL;
 	}
 
 	/* Next check absolute latency */
 	for (i = 0; i < count; i++) {
-		clock_gettime(clockid, &start);
+		if (clock_gettime(clockid, &start))
+			return KSFT_FAIL;
 		target = timespec_add(start, ns);
-		clock_nanosleep(clockid, TIMER_ABSTIME, &target, NULL);
-		clock_gettime(clockid, &end);
+		if (clock_nanosleep(clockid, TIMER_ABSTIME, &target, NULL))
+			return KSFT_FAIL;
+		if (clock_gettime(clockid, &end))
+			return KSFT_FAIL;
 		latency += timespec_sub(target, end);
 	}
 
 	if (latency/count > UNRESONABLE_LATENCY) {
-		printf("Large abs latency: %lld ns :", latency/count);
-		return -1;
+		ksft_print_msg("Large abs latency: %lld ns :", latency/count);
+		return KSFT_FAIL;
 	}
 
-	return 0;
+	return KSFT_PASS;
 }
-
-
 
 int main(int argc, char **argv)
 {
 	long long length;
 	int clockid, ret;
 
-	for (clockid = CLOCK_REALTIME; clockid < NR_CLOCKIDS; clockid++) {
+	static const clockid_t tested_clocks[] = {
+		CLOCK_REALTIME,
+		CLOCK_MONOTONIC,
+		CLOCK_BOOTTIME,
+		CLOCK_BOOTTIME_ALARM,
+		CLOCK_REALTIME_ALARM,
+		CLOCK_TAI,
+	};
 
-		/* Skip cputime clockids since nanosleep won't increment cputime */
-		if (clockid == CLOCK_PROCESS_CPUTIME_ID ||
-				clockid == CLOCK_THREAD_CPUTIME_ID ||
-				clockid == CLOCK_HWSPECIFIC)
-			continue;
+	ksft_print_header();
+	ksft_set_plan(ARRAY_SIZE(tested_clocks));
 
-		printf("nsleep latency %-26s ", clockstring(clockid));
-		fflush(stdout);
+	for (size_t clock_index = 0; clock_index < ARRAY_SIZE(tested_clocks); clock_index++) {
+		clockid = tested_clocks[clock_index];
 
 		length = 10;
 		while (length <= (NSEC_PER_SEC * 10)) {
@@ -166,15 +130,8 @@ int main(int argc, char **argv)
 
 		}
 
-		if (ret == UNSUPPORTED) {
-			printf("[UNSUPPORTED]\n");
-			continue;
-		}
-		if (ret < 0) {
-			printf("[FAILED]\n");
-			return ksft_exit_fail();
-		}
-		printf("[OK]\n");
+		ksft_test_result_report(ret, "%s\n", clock_name(clockid));
 	}
-	return ksft_exit_pass();
+
+	ksft_finished();
 }

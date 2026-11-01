@@ -9,12 +9,11 @@
 
 #include <linux/cs5535.h>
 #include <linux/device.h>
-#include <linux/gpio.h>
+#include <linux/gpio/legacy.h>
 #include <linux/input.h>
 #include <linux/interrupt.h>
 #include <linux/platform_device.h>
 #include <linux/pm.h>
-#include <linux/pm_wakeup.h>
 #include <linux/power_supply.h>
 #include <linux/suspend.h>
 #include <linux/workqueue.h>
@@ -312,12 +311,13 @@ static int xo1_sci_resume(struct platform_device *pdev)
 
 static int setup_sci_interrupt(struct platform_device *pdev)
 {
-	u32 lo, hi;
+	u64 msr;
+	u32 lo;
 	u32 sts;
 	int r;
 
-	rdmsr(0x51400020, lo, hi);
-	sci_irq = (lo >> 20) & 15;
+	rdmsrq(0x51400020, msr);
+	sci_irq = (msr >> 20) & 15;
 
 	if (sci_irq) {
 		dev_info(&pdev->dev, "SCI is mapped to IRQ %d\n", sci_irq);
@@ -325,8 +325,8 @@ static int setup_sci_interrupt(struct platform_device *pdev)
 		/* Zero means masked */
 		dev_info(&pdev->dev, "SCI unmapped. Mapping to IRQ 3\n");
 		sci_irq = 3;
-		lo |= 0x00300000;
-		wrmsrl(0x51400020, lo);
+		msr |= 0x00300000;
+		wrmsrq(0x51400020, msr);
 	}
 
 	/* Select level triggered in PIC */
@@ -598,7 +598,7 @@ err_ebook:
 	return r;
 }
 
-static int xo1_sci_remove(struct platform_device *pdev)
+static void xo1_sci_remove(struct platform_device *pdev)
 {
 	free_irq(sci_irq, pdev);
 	cancel_work_sync(&sci_work);
@@ -608,7 +608,6 @@ static int xo1_sci_remove(struct platform_device *pdev)
 	free_ebook_switch();
 	free_power_button();
 	acpi_base = 0;
-	return 0;
 }
 
 static struct platform_driver xo1_sci_driver = {

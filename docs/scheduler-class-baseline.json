@@ -1,80 +1,111 @@
 {
-  "schema": "xtos-scheduler-baseline-v1",
-  "recorded_at": "2026-10-25T00:58:43.715833+00:00",
-  "repository_head": "3f6d63e4b1518e5e923fdb77c90c0d73d8aba382",
-  "branch": "main",
-  "baseline_source_state": "scheduler_source_matches_HEAD; integration_patch_contains_uncommitted_Cyton_delta",
-  "public_release_reference": {
-    "tag": "v1.0.1",
-    "repository": "Aitaide/OpenXTOS",
-    "commit": "3894b4f90ba48e05061019ce6603929feced48b2",
-    "not_the_private_repository_head": true
-  },
-  "bundled_kernel_source": "6.6.0-rt15",
+  "schema": "xtos-scheduler-baseline-v2",
+  "recorded_at": "2026-11-01T13:57:54.040423+00:00",
+  "repository_head": "155beef4e3eadb0824bf4dd7fd3ead73765b4bb2",
+  "baseline_source_state": "current_worktree_source_inspection; not a build or runtime claim",
+  "bundled_kernel_source": "7.3.1",
+  "inspection_scope": "source_inspection_only",
+  "source_pin": "kernel/source-pin.json",
   "version_evidence": [
     "kernel/linux/Makefile",
-    "kernel/linux/localversion-rt"
+    "kernel/source-pin.json"
   ],
+  "rt_mode": "mainline",
+  "rt_patch": null,
   "class_order": [
     "stop",
     "dl",
     "rt",
     "fair",
+    "ext",
     "idle"
   ],
+  "class_order_scope": "SCHED_DATA linker sections; configured/active classes require separate artifact/runtime verification",
+  "class_guards": {
+    "stop": "CONFIG_SMP",
+    "ext": "CONFIG_SCHED_CLASS_EXT"
+  },
+  "callbacks": {
+    "enqueue_task": "always",
+    "dequeue_task": "always",
+    "yield_task": "always",
+    "yield_to_task": "always",
+    "wakeup_preempt": "always",
+    "balance": "always",
+    "pick_task": "always",
+    "put_prev_task": "always",
+    "set_next_task": "always",
+    "select_task_rq": "always",
+    "migrate_task_rq": "always",
+    "task_woken": "always",
+    "set_cpus_allowed": "always",
+    "rq_online": "always",
+    "rq_offline": "always",
+    "find_lock_rq": "always",
+    "task_tick": "always",
+    "task_fork": "always",
+    "task_dead": "always",
+    "switching_from": "always",
+    "switched_from": "always",
+    "switching_to": "always",
+    "switched_to": "always",
+    "get_prio": "always",
+    "prio_changed": "always",
+    "reweight_task": "always",
+    "get_rr_interval": "always",
+    "update_curr": "always",
+    "task_change_group": "CONFIG_FAIR_GROUP_SCHED",
+    "task_is_throttled": "CONFIG_SCHED_CORE"
+  },
   "helper_is_sched_class": false,
-  "helper_evidence": "kernel/linux/kernel/sched/xtos_sched.c: comment deliberately not a sched_class; no XTOS class in SCHED_DATA",
+  "helper_evidence": "xtos_sched.c explicitly says deliberately not a sched_class; no XTOS SCHED_DATA section or core pick_next_task_xtos call",
   "config_default": "XTOS_SCHED tristate default n (not resolved artifact config)",
+  "config_defaults": {
+    "XTOS_SCHED": "tristate default n",
+    "SCHED_CLASS_EXT": "bool; no explicit default; depends on BPF_SYSCALL && BPF_JIT && DEBUG_INFO_BTF",
+    "PREEMPT_RT": "bool; no explicit default; depends on EXPERT && ARCH_SUPPORTS_RT && !COMPILE_TEST"
+  },
+  "history": {
+    "path": "docs/history/scheduler-class-baseline-6.6.0-rt15.json",
+    "sha256": "91a91027c4f4b2782c90afe49e86cdbdddf1d3da29d7d1f235158982759c0cde",
+    "scope": "original 6.6.0-rt15 bytes; historical patches and hashes are not current acceptance"
+  },
   "files": {
-    "kernel/patches/xtos-linux-6.6.patch": {
-      "sha256": "b22c3bd7cafbf78679e19f45ec3b9d7c7043e0d2bde124798d3d8922614fcd28",
-      "matches_head": false,
-      "historical_head_sha256": "59f96281610024f6879f250f730da4a89eae007170cc3550b7e7d21f66c1905e",
-      "delta": "Cyton verified configuration and versioned frame read/immutable frame snapshots, independent frame-ring lifetime and explicit alias module identity; all non-BCI patch sections and scheduler sources unchanged"
-    },
-    "kernel/patches/preempt-rt-6.6-rt15.patch": {
-      "sha256": "ccf2d5a5bb41585f1bea33f3c1d4d2c5a5d9fb66742dde25bb92730aa2728784",
-      "matches_head": true
+    "kernel/source-pin.json": {
+      "sha256": "f6030daa6c231db13785e93fa879fa7e4d4290416c232de76bca60318343b6e3"
     },
     "kernel/linux/Makefile": {
-      "sha256": "e2c19bb5a1ef678d150dfc26f11bfa91e5a4458738f305f4abb7848ebeb2b399",
-      "matches_head": true
+      "sha256": "912401b1a346bfc7a904af4ab20716fe86bcbe9de1e494e0f2a7f22ccd478726"
     },
-    "kernel/linux/localversion-rt": {
-      "sha256": "f9353dcbf28ddbb457ab6241718c05d103daad00710448f6e11529c95b7b38e9",
-      "matches_head": true
+    "kernel/linux/kernel/Kconfig.preempt": {
+      "sha256": "4581211b854e9300497776dea1998499af95e521dbfe9f08065236be09673f16"
     },
     "kernel/linux/kernel/sched/xtos_sched.c": {
-      "sha256": "4019dc9f63972e718b4a00202c24518fd914266d79dc8a8e700ea500ef243c45",
-      "matches_head": true
+      "sha256": "4019dc9f63972e718b4a00202c24518fd914266d79dc8a8e700ea500ef243c45"
     },
     "kernel/linux/kernel/sched/xtos/Kconfig": {
-      "sha256": "085dbd8f61da2ecc2d3dfe2e2fd8997ed6693c490786f2e12c12e09fe1babb58",
-      "matches_head": true
+      "sha256": "085dbd8f61da2ecc2d3dfe2e2fd8997ed6693c490786f2e12c12e09fe1babb58"
+    },
+    "kernel/linux/kernel/sched/Makefile": {
+      "sha256": "b3bb9a48240ec73277ff13bb8bf544259730826a64635217762966347618b7e1"
     },
     "kernel/linux/kernel/sched/core.c": {
-      "sha256": "b6ddbf6161133114e69359735116469a336e8b2bf450443f608ead3f85b28821",
-      "matches_head": true
+      "sha256": "73f3071711962c72b3ea2dbb1e88c53feef950c8f243b185fb6206a5a19b67ee"
     },
     "kernel/linux/kernel/sched/sched.h": {
-      "sha256": "d9d8fa3a9086f489564ae11c3a3cadb9c1d4f4d4ea40b514f9e8e5d7061bfa51",
-      "matches_head": true
+      "sha256": "40f9b78752fbd166a11b3e3d8120b3aaaa7ef52d6101e83d5883d0ba7c1c54f3"
     },
     "kernel/linux/kernel/sched/rt.c": {
-      "sha256": "667c2dfd5381d8025260fa6e9720041253c4a746a029601fa78202a2c1ede77f",
-      "matches_head": true
+      "sha256": "b36ec6b58c10d3a30ab5e7ed889a9cf708c7ecfc392e33f2b9ff4e6b2d6722bc"
     },
     "kernel/linux/kernel/sched/deadline.c": {
-      "sha256": "01735d8f56d051f1462b88d7c5b9aa187ee6003c7927c52285812f6b4c8ae864",
-      "matches_head": true
+      "sha256": "4b65a160f2a71c461780211e6b38c0a16b077bfe4ccc1632503ae85b193a3a47"
     },
     "kernel/linux/include/asm-generic/vmlinux.lds.h": {
-      "sha256": "0a9c8cd5acce5681956d6ef10beea2d8aa6b88ddb7b4da1cc22456f48c68bc52",
-      "matches_head": true
+      "sha256": "04fdf528a4ea7248a8b2a91ca69733daa8042e2620701153bb29dd591dac6087"
     },
     "kernel/linux/include/uapi/linux/sched.h": {
-      "sha256": "1a4a3cef927a5b620add2879da2d469df4ebce135e033d8fff5264c010de535c",
-      "matches_head": true
+      "sha256": "9fa784e828fbd2c523333c3c37ada311d494b76f521350bb0f1003990e286494"
     }
   },
   "verification_gates": {
@@ -83,10 +114,14 @@
     "exact_image_boot_this_attempt": "NOT_RUN",
     "hardware_latency": "NOT_VERIFIED",
     "real_device_loop": "NOT_VERIFIED",
-    "custom_class": "NOT_IMPLEMENTED"
+    "custom_class": "NOT_IMPLEMENTED",
+    "M0_M1_physical_go_nogo": "BLOCKED",
+    "M2": "NOT_STARTED"
   },
   "limits": [
-    "Historical build and QEMU reports are not rerun evidence for this work-in-progress candidate.",
-    "Do not treat host Linux version or helper CONFIG=y as XTOS scheduler integration."
+    "Source inspection only; no build, guest, physical, latency or device acceptance.",
+    "RT support is mainline; no localversion-rt or external historical RT patch dependency.",
+    "CONFIG_XTOS_SCHED default n is not the effective configuration; xtos_defconfig currently requests helper=y.",
+    "M0/M1 physical go/no-go and independent review remain prerequisites before M2."
   ]
 }

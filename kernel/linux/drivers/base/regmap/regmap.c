@@ -17,7 +17,7 @@
 #include <linux/delay.h>
 #include <linux/log2.h>
 #include <linux/hwspinlock.h>
-#include <asm/unaligned.h>
+#include <linux/unaligned.h>
 
 #define CREATE_TRACE_POINTS
 #include "trace.h"
@@ -89,7 +89,7 @@ EXPORT_SYMBOL_GPL(regmap_check_range_table);
 
 bool regmap_writeable(struct regmap *map, unsigned int reg)
 {
-	if (map->max_register && reg > map->max_register)
+	if (map->max_register_is_set && reg > map->max_register)
 		return false;
 
 	if (map->writeable_reg)
@@ -112,7 +112,7 @@ bool regmap_cached(struct regmap *map, unsigned int reg)
 	if (!map->cache_ops)
 		return false;
 
-	if (map->max_register && reg > map->max_register)
+	if (map->max_register_is_set && reg > map->max_register)
 		return false;
 
 	map->lock(map->lock_arg);
@@ -129,7 +129,7 @@ bool regmap_readable(struct regmap *map, unsigned int reg)
 	if (!map->reg_read)
 		return false;
 
-	if (map->max_register && reg > map->max_register)
+	if (map->max_register_is_set && reg > map->max_register)
 		return false;
 
 	if (map->format.format_write)
@@ -408,9 +408,11 @@ static void regmap_lock_hwlock_irq(void *__map)
 static void regmap_lock_hwlock_irqsave(void *__map)
 {
 	struct regmap *map = __map;
+	unsigned long flags = 0;
 
 	hwspin_lock_timeout_irqsave(map->hwlock, UINT_MAX,
-				    &map->spinlock_flags);
+				    &flags);
+	map->spinlock_flags = flags;
 }
 
 static void regmap_unlock_hwlock(void *__map)
@@ -598,6 +600,17 @@ int regmap_attach_dev(struct device *dev, struct regmap *map,
 }
 EXPORT_SYMBOL_GPL(regmap_attach_dev);
 
+static int dev_get_regmap_match(struct device *dev, void *res, void *data);
+
+static int regmap_detach_dev(struct device *dev, struct regmap *map)
+{
+	if (!dev)
+		return 0;
+
+	return devres_release(dev, dev_get_regmap_release,
+			      dev_get_regmap_match, (void *)map->name);
+}
+
 static enum regmap_endian regmap_get_reg_endian(const struct regmap_bus *bus,
 					const struct regmap_config *config)
 {
@@ -676,7 +689,7 @@ struct regmap *__regmap_init(struct device *dev,
 	if (!config)
 		goto err;
 
-	map = kzalloc(sizeof(*map), GFP_KERNEL);
+	map = kzalloc_obj(*map);
 	if (map == NULL) {
 		ret = -ENOMEM;
 		goto err;
@@ -745,6 +758,7 @@ struct regmap *__regmap_init(struct device *dev,
 						   lock_key, lock_name);
 		}
 		map->lock_arg = map;
+		map->lock_key = lock_key;
 	}
 
 	/*
@@ -757,14 +771,13 @@ struct regmap *__regmap_init(struct device *dev,
 		map->alloc_flags = GFP_KERNEL;
 
 	map->reg_base = config->reg_base;
+	map->reg_shift = config->pad_bits % 8;
 
-	map->format.reg_bytes = DIV_ROUND_UP(config->reg_bits, 8);
 	map->format.pad_bytes = config->pad_bits / 8;
 	map->format.reg_shift = config->reg_shift;
-	map->format.val_bytes = DIV_ROUND_UP(config->val_bits, 8);
-	map->format.buf_size = DIV_ROUND_UP(config->reg_bits +
-			config->val_bits + config->pad_bits, 8);
-	map->reg_shift = config->pad_bits % 8;
+	map->format.reg_bytes = BITS_TO_BYTES(config->reg_bits);
+	map->format.val_bytes = BITS_TO_BYTES(config->val_bits);
+	map->format.buf_size = BITS_TO_BYTES(config->reg_bits + config->val_bits + config->pad_bits);
 	if (config->reg_stride)
 		map->reg_stride = config->reg_stride;
 	else
@@ -787,6 +800,7 @@ struct regmap *__regmap_init(struct device *dev,
 	map->bus = bus;
 	map->bus_context = bus_context;
 	map->max_register = config->max_register;
+	map->max_register_is_set = map->max_register ?: config->max_register_is_0;
 	map->wr_table = config->wr_table;
 	map->rd_table = config->rd_table;
 	map->volatile_table = config->volatile_table;
@@ -799,6 +813,7 @@ struct regmap *__regmap_init(struct device *dev,
 	map->precious_reg = config->precious_reg;
 	map->writeable_noinc_reg = config->writeable_noinc_reg;
 	map->readable_noinc_reg = config->readable_noinc_reg;
+	map->reg_default_cb = config->reg_default_cb;
 	map->cache_type = config->cache_type;
 
 	spin_lock_init(&map->async_lock);
@@ -815,7 +830,7 @@ struct regmap *__regmap_init(struct device *dev,
 		map->read_flag_mask = bus->read_flag_mask;
 	}
 
-	if (config && config->read && config->write) {
+	if (config->read && config->write) {
 		map->reg_read  = _regmap_bus_read;
 		if (config->reg_update_bits)
 			map->reg_update_bits = config->reg_update_bits;
@@ -1050,13 +1065,13 @@ skip_format_initialization:
 
 		/* Sanity check */
 		if (range_cfg->range_max < range_cfg->range_min) {
-			dev_err(map->dev, "Invalid range %d: %d < %d\n", i,
+			dev_err(map->dev, "Invalid range %d: %u < %u\n", i,
 				range_cfg->range_max, range_cfg->range_min);
 			goto err_range;
 		}
 
 		if (range_cfg->range_max > map->max_register) {
-			dev_err(map->dev, "Invalid range %d: %d > %d\n", i,
+			dev_err(map->dev, "Invalid range %d: %u > %u\n", i,
 				range_cfg->range_max, map->max_register);
 			goto err_range;
 		}
@@ -1102,7 +1117,7 @@ skip_format_initialization:
 			}
 		}
 
-		new = kzalloc(sizeof(*new), GFP_KERNEL);
+		new = kzalloc_obj(*new);
 		if (new == NULL) {
 			ret = -ENOMEM;
 			goto err_range;
@@ -1161,13 +1176,15 @@ err_name:
 err_map:
 	kfree(map);
 err:
+	if (bus && bus->free_on_exit)
+		kfree(bus);
 	return ERR_PTR(ret);
 }
 EXPORT_SYMBOL_GPL(__regmap_init);
 
-static void devm_regmap_release(struct device *dev, void *res)
+static void devm_regmap_release(void *regmap)
 {
-	regmap_exit(*(struct regmap **)res);
+	regmap_exit(regmap);
 }
 
 struct regmap *__devm_regmap_init(struct device *dev,
@@ -1177,20 +1194,17 @@ struct regmap *__devm_regmap_init(struct device *dev,
 				  struct lock_class_key *lock_key,
 				  const char *lock_name)
 {
-	struct regmap **ptr, *regmap;
-
-	ptr = devres_alloc(devm_regmap_release, sizeof(*ptr), GFP_KERNEL);
-	if (!ptr)
-		return ERR_PTR(-ENOMEM);
+	struct regmap *regmap;
+	int ret;
 
 	regmap = __regmap_init(dev, bus, bus_context, config,
 			       lock_key, lock_name);
-	if (!IS_ERR(regmap)) {
-		*ptr = regmap;
-		devres_add(dev, ptr);
-	} else {
-		devres_free(ptr);
-	}
+	if (IS_ERR(regmap))
+		return regmap;
+
+	ret = devm_add_action_or_reset(dev, devm_regmap_release, regmap);
+	if (ret)
+		return ERR_PTR(ret);
 
 	return regmap;
 }
@@ -1257,7 +1271,7 @@ int regmap_field_bulk_alloc(struct regmap *regmap,
 	struct regmap_field *rf;
 	int i;
 
-	rf = kcalloc(num_fields, sizeof(*rf), GFP_KERNEL);
+	rf = kzalloc_objs(*rf, num_fields);
 	if (!rf)
 		return -ENOMEM;
 
@@ -1367,7 +1381,7 @@ EXPORT_SYMBOL_GPL(devm_regmap_field_free);
 struct regmap_field *regmap_field_alloc(struct regmap *regmap,
 		struct reg_field reg_field)
 {
-	struct regmap_field *rm_field = kzalloc(sizeof(*rm_field), GFP_KERNEL);
+	struct regmap_field *rm_field = kzalloc_obj(*rm_field);
 
 	if (!rm_field)
 		return ERR_PTR(-ENOMEM);
@@ -1408,28 +1422,34 @@ int regmap_reinit_cache(struct regmap *map, const struct regmap_config *config)
 {
 	int ret;
 
-	regcache_exit(map);
 	regmap_debugfs_exit(map);
+	regcache_exit(map);
 
 	map->max_register = config->max_register;
+	map->max_register_is_set = map->max_register ?: config->max_register_is_0;
 	map->writeable_reg = config->writeable_reg;
 	map->readable_reg = config->readable_reg;
 	map->volatile_reg = config->volatile_reg;
 	map->precious_reg = config->precious_reg;
 	map->writeable_noinc_reg = config->writeable_noinc_reg;
 	map->readable_noinc_reg = config->readable_noinc_reg;
+	map->reg_default_cb = config->reg_default_cb;
 	map->cache_type = config->cache_type;
 
 	ret = regmap_set_name(map, config);
 	if (ret)
 		return ret;
 
-	regmap_debugfs_init(map);
-
 	map->cache_bypass = false;
 	map->cache_only = false;
 
-	return regcache_init(map, config);
+	ret = regcache_init(map, config);
+	if (ret)
+		return ret;
+
+	regmap_debugfs_init(map);
+
+	return 0;
 }
 EXPORT_SYMBOL_GPL(regmap_reinit_cache);
 
@@ -1442,8 +1462,9 @@ void regmap_exit(struct regmap *map)
 {
 	struct regmap_async *async;
 
-	regcache_exit(map);
+	regmap_detach_dev(map->dev, map);
 	regmap_debugfs_exit(map);
+	regcache_exit(map);
 	regmap_range_exit(map);
 	if (map->bus && map->bus->free_context)
 		map->bus->free_context(map->bus_context);
@@ -1524,6 +1545,7 @@ static int _regmap_select_page(struct regmap *map, unsigned int *reg,
 			       unsigned int val_num)
 {
 	void *orig_work_buf;
+	unsigned int selector_reg;
 	unsigned int win_offset;
 	unsigned int win_page;
 	bool page_chg;
@@ -1542,10 +1564,31 @@ static int _regmap_select_page(struct regmap *map, unsigned int *reg,
 			return -EINVAL;
 	}
 
-	/* It is possible to have selector register inside data window.
-	   In that case, selector register is located on every page and
-	   it needs no page switching, when accessed alone. */
+	/*
+	 * Calculate the address of the selector register in the corresponding
+	 * data window if it is located on every page.
+	 */
+	page_chg = in_range(range->selector_reg, range->window_start, range->window_len);
+	if (page_chg)
+		selector_reg = range->range_min + win_page * range->window_len +
+			       range->selector_reg - range->window_start;
+
+	/*
+	 * It is possible to have selector register inside data window.
+	 * In that case, selector register is located on every page and it
+	 * needs no page switching, when accessed alone.
+	 *
+	 * Nevertheless we should synchronize the cache values for it.
+	 * This can't be properly achieved if the selector register is
+	 * the first and the only one to be read inside the data window.
+	 * That's why we update it in that case as well.
+	 *
+	 * However, we specifically avoid updating it for the default page,
+	 * when it's overlapped with the real data window, to prevent from
+	 * infinite looping.
+	 */
 	if (val_num > 1 ||
+	    (page_chg && selector_reg != range->selector_reg) ||
 	    range->window_start + win_offset != range->selector_reg) {
 		/* Use separate work_buf during page switching */
 		orig_work_buf = map->work_buf;
@@ -1554,7 +1597,7 @@ static int _regmap_select_page(struct regmap *map, unsigned int *reg,
 		ret = _regmap_update_bits(map, range->selector_reg,
 					  range->selector_mask,
 					  win_page << range->selector_shift,
-					  &page_chg, false);
+					  NULL, false);
 
 		map->work_buf = orig_work_buf;
 
@@ -1620,17 +1663,19 @@ static int _regmap_raw_write_impl(struct regmap *map, unsigned int reg,
 	}
 
 	if (!map->cache_bypass && map->format.parse_val) {
-		unsigned int ival;
+		unsigned int ival, offset;
 		int val_bytes = map->format.val_bytes;
-		for (i = 0; i < val_len / val_bytes; i++) {
-			ival = map->format.parse_val(val + (i * val_bytes));
-			ret = regcache_write(map,
-					     reg + regmap_get_offset(map, i),
-					     ival);
+
+		/* Cache the last written value for noinc writes */
+		i = noinc ? val_len - val_bytes : 0;
+		for (; i < val_len; i += val_bytes) {
+			ival = map->format.parse_val(val + i);
+			offset = noinc ? 0 : regmap_get_offset(map, i / val_bytes);
+			ret = regcache_write(map, reg + offset, ival);
 			if (ret) {
 				dev_err(map->dev,
 					"Error in caching of register: %x ret: %d\n",
-					reg + regmap_get_offset(map, i), ret);
+					reg + offset, ret);
 				return ret;
 			}
 		}
@@ -2134,7 +2179,7 @@ static int regmap_noinc_readwrite(struct regmap *map, unsigned int reg,
 }
 
 /**
- * regmap_noinc_write(): Write data from a register without incrementing the
+ * regmap_noinc_write(): Write data to a register without incrementing the
  *			register number
  *
  * @map: Register map to write to
@@ -2239,12 +2284,14 @@ EXPORT_SYMBOL_GPL(regmap_field_update_bits_base);
  * @field: Register field to operate on
  * @bits: Bits to test
  *
- * Returns -1 if the underlying regmap_field_read() fails, 0 if at least one of the
- * tested bits is not set and 1 if all tested bits are set.
+ * Returns negative errno if the underlying regmap_field_read() fails,
+ * 0 if at least one of the tested bits is not set and 1 if all tested
+ * bits are set.
  */
 int regmap_field_test_bits(struct regmap_field *field, unsigned int bits)
 {
-	unsigned int val, ret;
+	unsigned int val;
+	int ret;
 
 	ret = regmap_field_read(field, &val);
 	if (ret)
@@ -2343,7 +2390,7 @@ out:
 	} else {
 		void *wval;
 
-		wval = kmemdup(val, val_count * val_bytes, map->alloc_flags);
+		wval = kmemdup_array(val, val_count, val_bytes, map->alloc_flags);
 		if (!wval)
 			return -ENOMEM;
 
@@ -2835,6 +2882,43 @@ int regmap_read(struct regmap *map, unsigned int reg, unsigned int *val)
 EXPORT_SYMBOL_GPL(regmap_read);
 
 /**
+ * regmap_read_bypassed() - Read a value from a single register direct
+ *			    from the device, bypassing the cache
+ *
+ * @map: Register map to read from
+ * @reg: Register to be read from
+ * @val: Pointer to store read value
+ *
+ * A value of zero will be returned on success, a negative errno will
+ * be returned in error cases.
+ */
+int regmap_read_bypassed(struct regmap *map, unsigned int reg, unsigned int *val)
+{
+	int ret;
+	bool bypass, cache_only;
+
+	if (!IS_ALIGNED(reg, map->reg_stride))
+		return -EINVAL;
+
+	map->lock(map->lock_arg);
+
+	bypass = map->cache_bypass;
+	cache_only = map->cache_only;
+	map->cache_bypass = true;
+	map->cache_only = false;
+
+	ret = _regmap_read(map, reg, val);
+
+	map->cache_bypass = bypass;
+	map->cache_only = cache_only;
+
+	map->unlock(map->lock_arg);
+
+	return ret;
+}
+EXPORT_SYMBOL_GPL(regmap_read_bypassed);
+
+/**
  * regmap_raw_read() - Read raw data from the device
  *
  * @map: Register map to read from
@@ -3060,8 +3144,53 @@ int regmap_fields_read(struct regmap_field *field, unsigned int id,
 }
 EXPORT_SYMBOL_GPL(regmap_fields_read);
 
+static int _regmap_bulk_read(struct regmap *map, unsigned int reg,
+			     const unsigned int *regs, void *val, size_t val_count)
+{
+	u32 *u32 = val;
+	u16 *u16 = val;
+	u8 *u8 = val;
+	int ret, i;
+
+	map->lock(map->lock_arg);
+
+	for (i = 0; i < val_count; i++) {
+		unsigned int ival;
+
+		if (regs) {
+			if (!IS_ALIGNED(regs[i], map->reg_stride)) {
+				ret = -EINVAL;
+				goto out;
+			}
+			ret = _regmap_read(map, regs[i], &ival);
+		} else {
+			ret = _regmap_read(map, reg + regmap_get_offset(map, i), &ival);
+		}
+		if (ret != 0)
+			goto out;
+
+		switch (map->format.val_bytes) {
+		case 4:
+			u32[i] = ival;
+			break;
+		case 2:
+			u16[i] = ival;
+			break;
+		case 1:
+			u8[i] = ival;
+			break;
+		default:
+			ret = -EINVAL;
+			goto out;
+		}
+	}
+out:
+	map->unlock(map->lock_arg);
+	return ret;
+}
+
 /**
- * regmap_bulk_read() - Read multiple registers from the device
+ * regmap_bulk_read() - Read multiple sequential registers from the device
  *
  * @map: Register map to read from
  * @reg: First register to be read from
@@ -3091,46 +3220,34 @@ int regmap_bulk_read(struct regmap *map, unsigned int reg, void *val,
 		for (i = 0; i < val_count * val_bytes; i += val_bytes)
 			map->format.parse_inplace(val + i);
 	} else {
-		u32 *u32 = val;
-		u16 *u16 = val;
-		u8 *u8 = val;
-
-		map->lock(map->lock_arg);
-
-		for (i = 0; i < val_count; i++) {
-			unsigned int ival;
-
-			ret = _regmap_read(map, reg + regmap_get_offset(map, i),
-					   &ival);
-			if (ret != 0)
-				goto out;
-
-			switch (map->format.val_bytes) {
-			case 4:
-				u32[i] = ival;
-				break;
-			case 2:
-				u16[i] = ival;
-				break;
-			case 1:
-				u8[i] = ival;
-				break;
-			default:
-				ret = -EINVAL;
-				goto out;
-			}
-		}
-
-out:
-		map->unlock(map->lock_arg);
+		ret = _regmap_bulk_read(map, reg, NULL, val, val_count);
 	}
-
 	if (!ret)
 		trace_regmap_bulk_read(map, reg, val, val_bytes * val_count);
-
 	return ret;
 }
 EXPORT_SYMBOL_GPL(regmap_bulk_read);
+
+/**
+ * regmap_multi_reg_read() - Read multiple non-sequential registers from the device
+ *
+ * @map: Register map to read from
+ * @regs: Array of registers to read from
+ * @val: Pointer to store read value, in native register size for device
+ * @val_count: Number of registers to read
+ *
+ * A value of zero will be returned on success, a negative errno will
+ * be returned in error cases.
+ */
+int regmap_multi_reg_read(struct regmap *map, const unsigned int *regs, void *val,
+			  size_t val_count)
+{
+	if (val_count == 0)
+		return -EINVAL;
+
+	return _regmap_bulk_read(map, 0, regs, val, val_count);
+}
+EXPORT_SYMBOL_GPL(regmap_multi_reg_read);
 
 static int _regmap_update_bits(struct regmap *map, unsigned int reg,
 			       unsigned int mask, unsigned int val,
@@ -3143,6 +3260,9 @@ static int _regmap_update_bits(struct regmap *map, unsigned int reg,
 		*change = false;
 
 	if (regmap_volatile(map, reg) && map->reg_update_bits) {
+		if (map->cache_only)
+			return -EBUSY;
+
 		reg = regmap_reg_addr(map, reg);
 		ret = map->reg_update_bits(map->bus_context, reg, mask, val);
 		if (ret == 0 && change)
@@ -3220,7 +3340,8 @@ EXPORT_SYMBOL_GPL(regmap_update_bits_base);
  */
 int regmap_test_bits(struct regmap *map, unsigned int reg, unsigned int bits)
 {
-	unsigned int val, ret;
+	unsigned int val;
+	int ret;
 
 	ret = regmap_read(map, reg, &val);
 	if (ret)
@@ -3381,7 +3502,7 @@ EXPORT_SYMBOL_GPL(regmap_get_val_bytes);
  */
 int regmap_get_max_register(struct regmap *map)
 {
-	return map->max_register ? map->max_register : -EINVAL;
+	return map->max_register_is_set ? map->max_register : -EINVAL;
 }
 EXPORT_SYMBOL_GPL(regmap_get_max_register);
 

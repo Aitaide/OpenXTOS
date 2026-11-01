@@ -32,8 +32,8 @@ static void map_browser__write(struct ui_browser *browser, void *nd, int row)
 	ui_browser__set_percent_color(browser, 0, current_entry);
 	ui_browser__printf(browser, "%*" PRIx64 " %*" PRIx64 " %c ",
 			   mb->addrlen, sym->start, mb->addrlen, sym->end,
-			   sym->binding == STB_GLOBAL ? 'g' :
-				sym->binding == STB_LOCAL  ? 'l' : 'w');
+			   symbol__binding(sym) == STB_GLOBAL ? 'g' :
+				symbol__binding(sym) == STB_LOCAL  ? 'l' : 'w');
 	width = browser->width - ((mb->addrlen * 2) + 4);
 	if (width > 0)
 		ui_browser__write_nstring(browser, sym->name, width);
@@ -76,7 +76,7 @@ static int map_browser__run(struct map_browser *browser)
 {
 	int key;
 
-	if (ui_browser__show(&browser->b, map__dso(browser->map)->long_name,
+	if (ui_browser__show(&browser->b, dso__long_name(map__dso(browser->map)),
 			     "Press ESC to exit, %s / to search",
 			     verbose > 0 ? "" : "restart with -v to use") < 0)
 		return -1;
@@ -88,8 +88,10 @@ static int map_browser__run(struct map_browser *browser)
 		case '/':
 			if (verbose > 0)
 				map_browser__search(browser);
+			/* fall thru */
 		default:
-			break;
+			ui_browser__warn_unhandled_hotkey(&browser->b, key, 0, NULL);
+			continue;
                 case K_LEFT:
                 case K_ESC:
                 case 'q':
@@ -106,7 +108,7 @@ int map__browse(struct map *map)
 {
 	struct map_browser mb = {
 		.b = {
-			.entries = &map__dso(map)->symbols,
+			.entries = dso__symbols(map__dso(map)),
 			.refresh = ui_browser__rb_tree_refresh,
 			.seek	 = ui_browser__rb_tree_seek,
 			.write	 = map_browser__write,

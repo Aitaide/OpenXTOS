@@ -7,12 +7,8 @@
 #include <asm/cache.h>
 #include <linux/const.h>
 
-/*
- * PAGE_SHIFT determines the page size: 4KB
- */
-#define PAGE_SHIFT	12
-#define PAGE_SIZE	(_AC(1, UL) << PAGE_SHIFT)
-#define PAGE_MASK	(~(PAGE_SIZE - 1))
+#include <vdso/page.h>
+
 #define THREAD_SIZE	(PAGE_SIZE * 2)
 #define THREAD_MASK	(~(THREAD_SIZE - 1))
 #define THREAD_SHIFT	(PAGE_SHIFT + 1)
@@ -30,7 +26,7 @@
 
 #define PHYS_OFFSET_OFFSET (CONFIG_DRAM_BASE & (SSEG_SIZE - 1))
 
-#ifndef __ASSEMBLY__
+#ifndef __ASSEMBLER__
 
 #include <linux/pfn.h>
 
@@ -42,9 +38,6 @@ extern void *memcpy(void *to, const void *from, size_t l);
 
 #define clear_page(page)	memset((page), 0, PAGE_SIZE)
 #define copy_page(to, from)	memcpy((to), (from), PAGE_SIZE)
-
-#define page_to_phys(page)	(page_to_pfn(page) << PAGE_SHIFT)
-#define phys_to_page(paddr)	(pfn_to_page(PFN_DOWN(paddr)))
 
 struct page;
 
@@ -82,11 +75,6 @@ static inline unsigned long virt_to_pfn(const void *kaddr)
 	return __pa(kaddr) >> PAGE_SHIFT;
 }
 
-static inline void * pfn_to_virt(unsigned long pfn)
-{
-	return (void *)((unsigned long)__va(pfn) << PAGE_SHIFT);
-}
-
 #define MAP_NR(x)	PFN_DOWN((unsigned long)(x) - PAGE_OFFSET - \
 				 PHYS_OFFSET_OFFSET)
 #define virt_to_page(x)	(mem_map + MAP_NR(x))
@@ -96,5 +84,5 @@ static inline void * pfn_to_virt(unsigned long pfn)
 #include <asm-generic/memory_model.h>
 #include <asm-generic/getorder.h>
 
-#endif /* !__ASSEMBLY__ */
+#endif /* !__ASSEMBLER__ */
 #endif /* __ASM_CSKY_PAGE_H */

@@ -7,6 +7,7 @@
 #include <drm/drm_atomic_helper.h>
 #include <drm/drm_drv.h>
 #include <drm/drm_gem_atomic_helper.h>
+#include <drm/drm_print.h>
 #include <drm/drm_probe_helper.h>
 
 #include "mgag200_drv.h"
@@ -61,7 +62,7 @@ static void mgag200_g200_init_registers(struct mgag200_g200_device *g200)
  * PIXPLLC
  */
 
-static int mgag200_g200_pixpllc_atomic_check(struct drm_crtc *crtc, struct drm_atomic_state *new_state)
+static int mgag200_g200_pixpllc_atomic_check(struct drm_crtc *crtc, struct drm_atomic_commit *new_state)
 {
 	static const int post_div_max = 7;
 	static const int in_div_min = 1;
@@ -137,7 +138,7 @@ static int mgag200_g200_pixpllc_atomic_check(struct drm_crtc *crtc, struct drm_a
 }
 
 static void mgag200_g200_pixpllc_atomic_update(struct drm_crtc *crtc,
-					       struct drm_atomic_state *old_state)
+					       struct drm_atomic_commit *old_state)
 {
 	struct drm_device *dev = crtc->dev;
 	struct mga_device *mdev = to_mga_device(dev);
@@ -183,26 +184,11 @@ static const struct drm_crtc_funcs mgag200_g200_crtc_funcs = {
 	MGAG200_CRTC_FUNCS,
 };
 
-static const struct drm_encoder_funcs mgag200_g200_dac_encoder_funcs = {
-	MGAG200_DAC_ENCODER_FUNCS,
-};
-
-static const struct drm_connector_helper_funcs mgag200_g200_vga_connector_helper_funcs = {
-	MGAG200_VGA_CONNECTOR_HELPER_FUNCS,
-};
-
-static const struct drm_connector_funcs mgag200_g200_vga_connector_funcs = {
-	MGAG200_VGA_CONNECTOR_FUNCS,
-};
-
 static int mgag200_g200_pipeline_init(struct mga_device *mdev)
 {
 	struct drm_device *dev = &mdev->base;
 	struct drm_plane *primary_plane = &mdev->primary_plane;
 	struct drm_crtc *crtc = &mdev->crtc;
-	struct drm_encoder *encoder = &mdev->encoder;
-	struct mga_i2c_chan *i2c = &mdev->i2c;
-	struct drm_connector *connector = &mdev->connector;
 	int ret;
 
 	ret = drm_universal_plane_init(dev, primary_plane, 0,
@@ -230,35 +216,9 @@ static int mgag200_g200_pipeline_init(struct mga_device *mdev)
 	drm_mode_crtc_set_gamma_size(crtc, MGAG200_LUT_SIZE);
 	drm_crtc_enable_color_mgmt(crtc, 0, false, MGAG200_LUT_SIZE);
 
-	encoder->possible_crtcs = drm_crtc_mask(crtc);
-	ret = drm_encoder_init(dev, encoder, &mgag200_g200_dac_encoder_funcs,
-			       DRM_MODE_ENCODER_DAC, NULL);
-	if (ret) {
-		drm_err(dev, "drm_encoder_init() failed: %d\n", ret);
+	ret = mgag200_vga_output_init(mdev);
+	if (ret)
 		return ret;
-	}
-
-	ret = mgag200_i2c_init(mdev, i2c);
-	if (ret) {
-		drm_err(dev, "failed to add DDC bus: %d\n", ret);
-		return ret;
-	}
-
-	ret = drm_connector_init_with_ddc(dev, connector,
-					  &mgag200_g200_vga_connector_funcs,
-					  DRM_MODE_CONNECTOR_VGA,
-					  &i2c->adapter);
-	if (ret) {
-		drm_err(dev, "drm_connector_init_with_ddc() failed: %d\n", ret);
-		return ret;
-	}
-	drm_connector_helper_add(connector, &mgag200_g200_vga_connector_helper_funcs);
-
-	ret = drm_connector_attach_encoder(connector, encoder);
-	if (ret) {
-		drm_err(dev, "drm_connector_attach_encoder() failed: %d\n", ret);
-		return ret;
-	}
 
 	return 0;
 }
@@ -442,6 +402,7 @@ struct mga_device *mgag200_g200_device_create(struct pci_dev *pdev, const struct
 		return ERR_PTR(ret);
 
 	drm_mode_config_reset(dev);
+	drm_kms_helper_poll_init(dev);
 
 	return mdev;
 }

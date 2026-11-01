@@ -70,12 +70,12 @@ static void update_cu_mask(struct mqd_manager *mm, void *mqd,
 static void set_priority(struct cik_mqd *m, struct queue_properties *q)
 {
 	m->cp_hqd_pipe_priority = pipe_priority_map[q->priority];
-	m->cp_hqd_queue_priority = q->priority;
 }
 
-static struct kfd_mem_obj *allocate_mqd(struct kfd_node *kfd,
+static struct kfd_mem_obj *allocate_mqd(struct mqd_manager *mm,
 					struct queue_properties *q)
 {
+	struct kfd_node *kfd = mm->dev;
 	struct kfd_mem_obj *mqd_mem_obj;
 
 	if (kfd_gtt_sa_allocate(kfd, sizeof(struct cik_mqd),
@@ -206,11 +206,11 @@ static void __update_mqd(struct mqd_manager *mm, void *mqd,
 	q->is_active = QUEUE_IS_ACTIVE(*q);
 }
 
-static uint32_t read_doorbell_id(void *mqd)
+static bool check_preemption_failed(struct mqd_manager *mm, void *mqd)
 {
 	struct cik_mqd *m = (struct cik_mqd *)mqd;
 
-	return m->queue_doorbell_id0;
+	return kfd_check_hiq_mqd_doorbell_id(mm->dev, m->queue_doorbell_id0, 0);
 }
 
 static void update_mqd(struct mqd_manager *mm, void *mqd,
@@ -388,7 +388,7 @@ struct mqd_manager *mqd_manager_init_cik(enum KFD_MQD_TYPE type,
 	if (WARN_ON(type >= KFD_MQD_TYPE_MAX))
 		return NULL;
 
-	mqd = kzalloc(sizeof(*mqd), GFP_KERNEL);
+	mqd = kzalloc_obj(*mqd);
 	if (!mqd)
 		return NULL;
 
@@ -423,7 +423,7 @@ struct mqd_manager *mqd_manager_init_cik(enum KFD_MQD_TYPE type,
 #if defined(CONFIG_DEBUG_FS)
 		mqd->debugfs_show_mqd = debugfs_show_mqd;
 #endif
-		mqd->read_doorbell_id = read_doorbell_id;
+		mqd->check_preemption_failed = check_preemption_failed;
 		break;
 	case KFD_MQD_TYPE_DIQ:
 		mqd->allocate_mqd = allocate_mqd;

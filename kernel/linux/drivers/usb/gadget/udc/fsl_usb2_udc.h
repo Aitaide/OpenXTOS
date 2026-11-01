@@ -470,6 +470,7 @@ struct fsl_ep {
 #define EP_DIR_OUT	0
 
 struct fsl_udc {
+	struct device *dev;
 	struct usb_gadget gadget;
 	struct usb_gadget_driver *driver;
 	struct fsl_usb2_platform_data *pdata;
@@ -505,53 +506,6 @@ struct fsl_udc {
 				   USB_DIR_IN or USB_DIR_OUT */
 	u8 device_address;	/* Device USB address */
 };
-
-/*-------------------------------------------------------------------------*/
-
-#ifdef DEBUG
-#define DBG(fmt, args...) 	printk(KERN_DEBUG "[%s]  " fmt "\n", \
-				__func__, ## args)
-#else
-#define DBG(fmt, args...)	do{}while(0)
-#endif
-
-#if 0
-static void dump_msg(const char *label, const u8 * buf, unsigned int length)
-{
-	unsigned int start, num, i;
-	char line[52], *p;
-
-	if (length >= 512)
-		return;
-	DBG("%s, length %u:\n", label, length);
-	start = 0;
-	while (length > 0) {
-		num = min(length, 16u);
-		p = line;
-		for (i = 0; i < num; ++i) {
-			if (i == 8)
-				*p++ = ' ';
-			sprintf(p, " %02x", buf[i]);
-			p += 3;
-		}
-		*p = 0;
-		printk(KERN_DEBUG "%6x: %s\n", start, line);
-		buf += num;
-		start += num;
-		length -= num;
-	}
-}
-#endif
-
-#ifdef VERBOSE
-#define VDBG		DBG
-#else
-#define VDBG(stuff...)	do{}while(0)
-#endif
-
-#define ERR(stuff...)		pr_err("udc: " stuff)
-#define WARNING(stuff...)	pr_warn("udc: " stuff)
-#define INFO(stuff...)		pr_info("udc: " stuff)
 
 /*-------------------------------------------------------------------------*/
 

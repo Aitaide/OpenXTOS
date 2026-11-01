@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: GPL-2.0-only
+#include <errno.h>
 #include <perf/cpumap.h>
 #include <stdlib.h>
 #include <linux/refcount.h>
@@ -9,17 +10,25 @@
 #include <unistd.h>
 #include <ctype.h>
 #include <limits.h>
+#include "internal.h"
+#include <api/fs/fs.h>
 
-void perf_cpu_map__set_nr(struct perf_cpu_map *map, int nr_cpus)
+#define MAX_NR_CPUS 4096
+
+void perf_cpu_map__set_nr(struct perf_cpu_map *map, unsigned int nr_cpus)
 {
 	RC_CHK_ACCESS(map)->nr = nr_cpus;
 }
 
-struct perf_cpu_map *perf_cpu_map__alloc(int nr_cpus)
+struct perf_cpu_map *perf_cpu_map__alloc(unsigned int nr_cpus)
 {
-	RC_STRUCT(perf_cpu_map) *cpus = malloc(sizeof(*cpus) + sizeof(struct perf_cpu) * nr_cpus);
+	RC_STRUCT(perf_cpu_map) *cpus;
 	struct perf_cpu_map *result;
 
+	if (nr_cpus == 0)
+		return NULL;
+
+	cpus = malloc(sizeof(*cpus) + sizeof(struct perf_cpu) * nr_cpus);
 	if (ADD_RC_CHK(result, cpus)) {
 		cpus->nr = nr_cpus;
 		refcount_set(&cpus->refcnt, 1);
@@ -27,7 +36,7 @@ struct perf_cpu_map *perf_cpu_map__alloc(int nr_cpus)
 	return result;
 }
 
-struct perf_cpu_map *perf_cpu_map__dummy_new(void)
+struct perf_cpu_map *perf_cpu_map__new_any_cpu(void)
 {
 	struct perf_cpu_map *cpus = perf_cpu_map__alloc(1);
 
@@ -66,29 +75,51 @@ void perf_cpu_map__put(struct perf_cpu_map *map)
 	}
 }
 
-static struct perf_cpu_map *cpu_map__default_new(void)
+static struct perf_cpu_map *cpu_map__new_sysconf(void)
 {
 	struct perf_cpu_map *cpus;
-	int nr_cpus;
+	long nr_cpus, nr_cpus_conf;
 
 	nr_cpus = sysconf(_SC_NPROCESSORS_ONLN);
 	if (nr_cpus < 0)
 		return NULL;
 
+	nr_cpus_conf = sysconf(_SC_NPROCESSORS_CONF);
+	if (nr_cpus != nr_cpus_conf) {
+		pr_warning("Number of online CPUs (%ld) differs from the number configured (%ld) the CPU map will only cover the first %ld CPUs.",
+			nr_cpus, nr_cpus_conf, nr_cpus);
+	}
+
 	cpus = perf_cpu_map__alloc(nr_cpus);
 	if (cpus != NULL) {
-		int i;
-
-		for (i = 0; i < nr_cpus; ++i)
+		for (long i = 0; i < nr_cpus; ++i)
 			RC_CHK_ACCESS(cpus)->map[i].cpu = i;
 	}
 
 	return cpus;
 }
 
-struct perf_cpu_map *perf_cpu_map__default_new(void)
+static struct perf_cpu_map *cpu_map__new_sysfs_online(void)
 {
-	return cpu_map__default_new();
+	struct perf_cpu_map *cpus = NULL;
+	char *buf = NULL;
+	size_t buf_len;
+
+	if (sysfs__read_str("devices/system/cpu/online", &buf, &buf_len) >= 0) {
+		cpus = perf_cpu_map__new(buf);
+		free(buf);
+	}
+	return cpus;
+}
+
+struct perf_cpu_map *perf_cpu_map__new_online_cpus(void)
+{
+	struct perf_cpu_map *cpus = cpu_map__new_sysfs_online();
+
+	if (cpus)
+		return cpus;
+
+	return cpu_map__new_sysconf();
 }
 
 
@@ -99,23 +130,23 @@ static int cmp_cpu(const void *a, const void *b)
 	return cpu_a->cpu - cpu_b->cpu;
 }
 
-static struct perf_cpu __perf_cpu_map__cpu(const struct perf_cpu_map *cpus, int idx)
+static struct perf_cpu __perf_cpu_map__cpu(const struct perf_cpu_map *cpus, unsigned int idx)
 {
 	return RC_CHK_ACCESS(cpus)->map[idx];
 }
 
-static struct perf_cpu_map *cpu_map__trim_new(int nr_cpus, const struct perf_cpu *tmp_cpus)
+static struct perf_cpu_map *cpu_map__trim_new(unsigned int nr_cpus, const struct perf_cpu *tmp_cpus)
 {
 	size_t payload_size = nr_cpus * sizeof(struct perf_cpu);
 	struct perf_cpu_map *cpus = perf_cpu_map__alloc(nr_cpus);
-	int i, j;
 
 	if (cpus != NULL) {
+		unsigned int j = 0;
+
 		memcpy(RC_CHK_ACCESS(cpus)->map, tmp_cpus, payload_size);
 		qsort(RC_CHK_ACCESS(cpus)->map, nr_cpus, sizeof(struct perf_cpu), cmp_cpu);
 		/* Remove dups */
-		j = 0;
-		for (i = 0; i < nr_cpus; i++) {
+		for (unsigned int i = 0; i < nr_cpus; i++) {
 			if (i == 0 ||
 			    __perf_cpu_map__cpu(cpus, i).cpu !=
 			    __perf_cpu_map__cpu(cpus, i - 1).cpu) {
@@ -129,89 +160,16 @@ static struct perf_cpu_map *cpu_map__trim_new(int nr_cpus, const struct perf_cpu
 	return cpus;
 }
 
-struct perf_cpu_map *perf_cpu_map__read(FILE *file)
-{
-	struct perf_cpu_map *cpus = NULL;
-	int nr_cpus = 0;
-	struct perf_cpu *tmp_cpus = NULL, *tmp;
-	int max_entries = 0;
-	int n, cpu, prev;
-	char sep;
-
-	sep = 0;
-	prev = -1;
-	for (;;) {
-		n = fscanf(file, "%u%c", &cpu, &sep);
-		if (n <= 0)
-			break;
-		if (prev >= 0) {
-			int new_max = nr_cpus + cpu - prev - 1;
-
-			WARN_ONCE(new_max >= MAX_NR_CPUS, "Perf can support %d CPUs. "
-							  "Consider raising MAX_NR_CPUS\n", MAX_NR_CPUS);
-
-			if (new_max >= max_entries) {
-				max_entries = new_max + MAX_NR_CPUS / 2;
-				tmp = realloc(tmp_cpus, max_entries * sizeof(struct perf_cpu));
-				if (tmp == NULL)
-					goto out_free_tmp;
-				tmp_cpus = tmp;
-			}
-
-			while (++prev < cpu)
-				tmp_cpus[nr_cpus++].cpu = prev;
-		}
-		if (nr_cpus == max_entries) {
-			max_entries += MAX_NR_CPUS;
-			tmp = realloc(tmp_cpus, max_entries * sizeof(struct perf_cpu));
-			if (tmp == NULL)
-				goto out_free_tmp;
-			tmp_cpus = tmp;
-		}
-
-		tmp_cpus[nr_cpus++].cpu = cpu;
-		if (n == 2 && sep == '-')
-			prev = cpu;
-		else
-			prev = -1;
-		if (n == 1 || sep == '\n')
-			break;
-	}
-
-	if (nr_cpus > 0)
-		cpus = cpu_map__trim_new(nr_cpus, tmp_cpus);
-	else
-		cpus = cpu_map__default_new();
-out_free_tmp:
-	free(tmp_cpus);
-	return cpus;
-}
-
-static struct perf_cpu_map *cpu_map__read_all_cpu_map(void)
-{
-	struct perf_cpu_map *cpus = NULL;
-	FILE *onlnf;
-
-	onlnf = fopen("/sys/devices/system/cpu/online", "r");
-	if (!onlnf)
-		return cpu_map__default_new();
-
-	cpus = perf_cpu_map__read(onlnf);
-	fclose(onlnf);
-	return cpus;
-}
-
 struct perf_cpu_map *perf_cpu_map__new(const char *cpu_list)
 {
 	struct perf_cpu_map *cpus = NULL;
 	unsigned long start_cpu, end_cpu = 0;
 	char *p = NULL;
-	int i, nr_cpus = 0;
+	unsigned int nr_cpus = 0, max_entries = 0;
 	struct perf_cpu *tmp_cpus = NULL, *tmp;
-	int max_entries = 0;
 
 	if (!cpu_list)
-		return cpu_map__read_all_cpu_map();
+		return perf_cpu_map__new_online_cpus();
 
 	/*
 	 * must handle the case of empty cpumap to cover
@@ -224,8 +182,8 @@ struct perf_cpu_map *perf_cpu_map__new(const char *cpu_list)
 	while (isdigit(*cpu_list)) {
 		p = NULL;
 		start_cpu = strtoul(cpu_list, &p, 0);
-		if (start_cpu >= INT_MAX
-		    || (*p != '\0' && *p != ',' && *p != '-'))
+		if (start_cpu >= INT16_MAX
+		    || (*p != '\0' && *p != ',' && *p != '-' && *p != '\n'))
 			goto invalid;
 
 		if (*p == '-') {
@@ -233,7 +191,7 @@ struct perf_cpu_map *perf_cpu_map__new(const char *cpu_list)
 			p = NULL;
 			end_cpu = strtoul(cpu_list, &p, 0);
 
-			if (end_cpu >= INT_MAX || (*p != '\0' && *p != ','))
+			if (end_cpu >= INT16_MAX || (*p != '\0' && *p != ',' && *p != '\n'))
 				goto invalid;
 
 			if (end_cpu < start_cpu)
@@ -247,18 +205,19 @@ struct perf_cpu_map *perf_cpu_map__new(const char *cpu_list)
 
 		for (; start_cpu <= end_cpu; start_cpu++) {
 			/* check for duplicates */
-			for (i = 0; i < nr_cpus; i++)
-				if (tmp_cpus[i].cpu == (int)start_cpu)
+			for (unsigned int i = 0; i < nr_cpus; i++) {
+				if (tmp_cpus[i].cpu == (int16_t)start_cpu)
 					goto invalid;
+			}
 
 			if (nr_cpus == max_entries) {
-				max_entries += MAX_NR_CPUS;
+				max_entries += max(end_cpu - start_cpu + 1, 16UL);
 				tmp = realloc(tmp_cpus, max_entries * sizeof(struct perf_cpu));
 				if (tmp == NULL)
 					goto invalid;
 				tmp_cpus = tmp;
 			}
-			tmp_cpus[nr_cpus++].cpu = (int)start_cpu;
+			tmp_cpus[nr_cpus++].cpu = (int16_t)start_cpu;
 		}
 		if (*p)
 			++p;
@@ -266,24 +225,37 @@ struct perf_cpu_map *perf_cpu_map__new(const char *cpu_list)
 		cpu_list = p;
 	}
 
-	if (nr_cpus > 0)
+	if (nr_cpus > 0) {
 		cpus = cpu_map__trim_new(nr_cpus, tmp_cpus);
-	else if (*cpu_list != '\0')
-		cpus = cpu_map__default_new();
-	else
-		cpus = perf_cpu_map__dummy_new();
+	} else if (*cpu_list != '\0') {
+		pr_warning("Unexpected characters at end of cpu list ('%s'), using online CPUs.",
+			   cpu_list);
+		cpus = perf_cpu_map__new_online_cpus();
+	} else {
+		cpus = perf_cpu_map__new_any_cpu();
+	}
 invalid:
 	free(tmp_cpus);
 out:
 	return cpus;
 }
 
-static int __perf_cpu_map__nr(const struct perf_cpu_map *cpus)
+struct perf_cpu_map *perf_cpu_map__new_int(int cpu)
+{
+	struct perf_cpu_map *cpus = perf_cpu_map__alloc(1);
+
+	if (cpus)
+		RC_CHK_ACCESS(cpus)->map[0].cpu = cpu;
+
+	return cpus;
+}
+
+static unsigned int __perf_cpu_map__nr(const struct perf_cpu_map *cpus)
 {
 	return RC_CHK_ACCESS(cpus)->nr;
 }
 
-struct perf_cpu perf_cpu_map__cpu(const struct perf_cpu_map *cpus, int idx)
+struct perf_cpu perf_cpu_map__cpu(const struct perf_cpu_map *cpus, unsigned int idx)
 {
 	struct perf_cpu result = {
 		.cpu = -1
@@ -295,19 +267,32 @@ struct perf_cpu perf_cpu_map__cpu(const struct perf_cpu_map *cpus, int idx)
 	return result;
 }
 
-int perf_cpu_map__nr(const struct perf_cpu_map *cpus)
+unsigned int perf_cpu_map__nr(const struct perf_cpu_map *cpus)
 {
 	return cpus ? __perf_cpu_map__nr(cpus) : 1;
 }
 
-bool perf_cpu_map__empty(const struct perf_cpu_map *map)
+bool perf_cpu_map__has_any_cpu_or_is_empty(const struct perf_cpu_map *map)
 {
 	return map ? __perf_cpu_map__cpu(map, 0).cpu == -1 : true;
 }
 
+bool perf_cpu_map__is_any_cpu_or_is_empty(const struct perf_cpu_map *map)
+{
+	if (!map)
+		return true;
+
+	return __perf_cpu_map__nr(map) == 1 && __perf_cpu_map__cpu(map, 0).cpu == -1;
+}
+
+bool perf_cpu_map__is_empty(const struct perf_cpu_map *map)
+{
+	return map == NULL;
+}
+
 int perf_cpu_map__idx(const struct perf_cpu_map *cpus, struct perf_cpu cpu)
 {
-	int low, high;
+	unsigned int low, high;
 
 	if (!cpus)
 		return -1;
@@ -337,7 +322,7 @@ bool perf_cpu_map__has(const struct perf_cpu_map *cpus, struct perf_cpu cpu)
 
 bool perf_cpu_map__equal(const struct perf_cpu_map *lhs, const struct perf_cpu_map *rhs)
 {
-	int nr;
+	unsigned int nr;
 
 	if (lhs == rhs)
 		return true;
@@ -349,7 +334,7 @@ bool perf_cpu_map__equal(const struct perf_cpu_map *lhs, const struct perf_cpu_m
 	if (nr != __perf_cpu_map__nr(rhs))
 		return false;
 
-	for (int idx = 0; idx < nr; idx++) {
+	for (unsigned int idx = 0; idx < nr; idx++) {
 		if (__perf_cpu_map__cpu(lhs, idx).cpu != __perf_cpu_map__cpu(rhs, idx).cpu)
 			return false;
 	}
@@ -361,16 +346,32 @@ bool perf_cpu_map__has_any_cpu(const struct perf_cpu_map *map)
 	return map && __perf_cpu_map__cpu(map, 0).cpu == -1;
 }
 
+struct perf_cpu perf_cpu_map__min(const struct perf_cpu_map *map)
+{
+	struct perf_cpu cpu, result = {
+		.cpu = -1
+	};
+	unsigned int idx;
+
+	perf_cpu_map__for_each_cpu_skip_any(cpu, idx, map) {
+		result = cpu;
+		break;
+	}
+	return result;
+}
+
 struct perf_cpu perf_cpu_map__max(const struct perf_cpu_map *map)
 {
 	struct perf_cpu result = {
 		.cpu = -1
 	};
 
-	// cpu_map__trim_new() qsort()s it, cpu_map__default_new() sorts it as well.
-	return __perf_cpu_map__nr(map) > 0
-		? __perf_cpu_map__cpu(map, __perf_cpu_map__nr(map) - 1)
-		: result;
+	if (!map)
+		return result;
+
+	// The CPUs are always sorted and nr is always > 0 as 0 length map is
+	// encoded as NULL.
+	return __perf_cpu_map__cpu(map, __perf_cpu_map__nr(map) - 1);
 }
 
 /** Is 'b' a subset of 'a'. */
@@ -381,7 +382,7 @@ bool perf_cpu_map__is_subset(const struct perf_cpu_map *a, const struct perf_cpu
 	if (!a || __perf_cpu_map__nr(b) > __perf_cpu_map__nr(a))
 		return false;
 
-	for (int i = 0, j = 0; i < __perf_cpu_map__nr(a); i++) {
+	for (unsigned int i = 0, j = 0; i < __perf_cpu_map__nr(a); i++) {
 		if (__perf_cpu_map__cpu(a, i).cpu > __perf_cpu_map__cpu(b, j).cpu)
 			return false;
 		if (__perf_cpu_map__cpu(a, i).cpu == __perf_cpu_map__cpu(b, j).cpu) {
@@ -394,46 +395,48 @@ bool perf_cpu_map__is_subset(const struct perf_cpu_map *a, const struct perf_cpu
 }
 
 /*
- * Merge two cpumaps
+ * Merge two cpumaps.
  *
- * orig either gets freed and replaced with a new map, or reused
- * with no reference count change (similar to "realloc")
- * other has its reference count increased.
+ * If 'other' is subset of '*orig', '*orig' keeps itself with no reference count
+ * change (similar to "realloc").
+ *
+ * If '*orig' is subset of 'other', '*orig' reuses 'other' with its reference
+ * count increased.
+ *
+ * Otherwise, '*orig' gets freed and replaced with a new map.
  */
-
-struct perf_cpu_map *perf_cpu_map__merge(struct perf_cpu_map *orig,
-					 struct perf_cpu_map *other)
+int perf_cpu_map__merge(struct perf_cpu_map **orig, struct perf_cpu_map *other)
 {
 	struct perf_cpu *tmp_cpus;
-	int tmp_len;
-	int i, j, k;
+	unsigned int tmp_len, i, j, k;
 	struct perf_cpu_map *merged;
 
-	if (perf_cpu_map__is_subset(orig, other))
-		return orig;
-	if (perf_cpu_map__is_subset(other, orig)) {
-		perf_cpu_map__put(orig);
-		return perf_cpu_map__get(other);
+	if (perf_cpu_map__is_subset(*orig, other))
+		return 0;
+	if (perf_cpu_map__is_subset(other, *orig)) {
+		perf_cpu_map__put(*orig);
+		*orig = perf_cpu_map__get(other);
+		return 0;
 	}
 
-	tmp_len = __perf_cpu_map__nr(orig) + __perf_cpu_map__nr(other);
+	tmp_len = __perf_cpu_map__nr(*orig) + __perf_cpu_map__nr(other);
 	tmp_cpus = malloc(tmp_len * sizeof(struct perf_cpu));
 	if (!tmp_cpus)
-		return NULL;
+		return -ENOMEM;
 
 	/* Standard merge algorithm from wikipedia */
 	i = j = k = 0;
-	while (i < __perf_cpu_map__nr(orig) && j < __perf_cpu_map__nr(other)) {
-		if (__perf_cpu_map__cpu(orig, i).cpu <= __perf_cpu_map__cpu(other, j).cpu) {
-			if (__perf_cpu_map__cpu(orig, i).cpu == __perf_cpu_map__cpu(other, j).cpu)
+	while (i < __perf_cpu_map__nr(*orig) && j < __perf_cpu_map__nr(other)) {
+		if (__perf_cpu_map__cpu(*orig, i).cpu <= __perf_cpu_map__cpu(other, j).cpu) {
+			if (__perf_cpu_map__cpu(*orig, i).cpu == __perf_cpu_map__cpu(other, j).cpu)
 				j++;
-			tmp_cpus[k++] = __perf_cpu_map__cpu(orig, i++);
+			tmp_cpus[k++] = __perf_cpu_map__cpu(*orig, i++);
 		} else
 			tmp_cpus[k++] = __perf_cpu_map__cpu(other, j++);
 	}
 
-	while (i < __perf_cpu_map__nr(orig))
-		tmp_cpus[k++] = __perf_cpu_map__cpu(orig, i++);
+	while (i < __perf_cpu_map__nr(*orig))
+		tmp_cpus[k++] = __perf_cpu_map__cpu(*orig, i++);
 
 	while (j < __perf_cpu_map__nr(other))
 		tmp_cpus[k++] = __perf_cpu_map__cpu(other, j++);
@@ -441,28 +444,41 @@ struct perf_cpu_map *perf_cpu_map__merge(struct perf_cpu_map *orig,
 
 	merged = cpu_map__trim_new(k, tmp_cpus);
 	free(tmp_cpus);
-	perf_cpu_map__put(orig);
-	return merged;
+	perf_cpu_map__put(*orig);
+	*orig = merged;
+	return 0;
 }
 
 struct perf_cpu_map *perf_cpu_map__intersect(struct perf_cpu_map *orig,
 					     struct perf_cpu_map *other)
 {
-	struct perf_cpu *tmp_cpus;
-	int tmp_len;
-	int i, j, k;
-	struct perf_cpu_map *merged = NULL;
+	unsigned int i, j, k;
+	struct perf_cpu_map *merged;
 
 	if (perf_cpu_map__is_subset(other, orig))
 		return perf_cpu_map__get(orig);
 	if (perf_cpu_map__is_subset(orig, other))
 		return perf_cpu_map__get(other);
 
-	tmp_len = max(__perf_cpu_map__nr(orig), __perf_cpu_map__nr(other));
-	tmp_cpus = malloc(tmp_len * sizeof(struct perf_cpu));
-	if (!tmp_cpus)
+	i = j = k = 0;
+	while (i < __perf_cpu_map__nr(orig) && j < __perf_cpu_map__nr(other)) {
+		if (__perf_cpu_map__cpu(orig, i).cpu < __perf_cpu_map__cpu(other, j).cpu)
+			i++;
+		else if (__perf_cpu_map__cpu(orig, i).cpu > __perf_cpu_map__cpu(other, j).cpu)
+			j++;
+		else { /* CPUs match. */
+			i++;
+			j++;
+			k++;
+		}
+	}
+	if (k == 0) /* Maps are completely disjoint. */
 		return NULL;
 
+	merged = perf_cpu_map__alloc(k);
+	if (!merged)
+		return NULL;
+	/* Entries are added to merged in sorted order, so no need to sort again. */
 	i = j = k = 0;
 	while (i < __perf_cpu_map__nr(orig) && j < __perf_cpu_map__nr(other)) {
 		if (__perf_cpu_map__cpu(orig, i).cpu < __perf_cpu_map__cpu(other, j).cpu)
@@ -471,11 +487,8 @@ struct perf_cpu_map *perf_cpu_map__intersect(struct perf_cpu_map *orig,
 			j++;
 		else {
 			j++;
-			tmp_cpus[k++] = __perf_cpu_map__cpu(orig, i++);
+			RC_CHK_ACCESS(merged)->map[k++] = __perf_cpu_map__cpu(orig, i++);
 		}
 	}
-	if (k)
-		merged = cpu_map__trim_new(k, tmp_cpus);
-	free(tmp_cpus);
 	return merged;
 }

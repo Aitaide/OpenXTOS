@@ -11,6 +11,7 @@
 #include <linux/sizes.h>
 #include <linux/pagemap.h>
 #include <linux/vfs.h>
+#include <linux/fileattr.h>
 #include "vfsmod.h"
 
 struct inode *vboxsf_new_inode(struct super_block *sb)
@@ -126,12 +127,12 @@ int vboxsf_init_inode(struct vboxsf_sbi *sbi, struct inode *inode,
 	do_div(allocated, 512);
 	inode->i_blocks = allocated;
 
-	inode->i_atime = ns_to_timespec64(
-				 info->access_time.ns_relative_to_unix_epoch);
+	inode_set_atime_to_ts(inode,
+			      ns_to_timespec64(info->access_time.ns_relative_to_unix_epoch));
 	inode_set_ctime_to_ts(inode,
 			      ns_to_timespec64(info->change_time.ns_relative_to_unix_epoch));
-	inode->i_mtime = ns_to_timespec64(
-			   info->modification_time.ns_relative_to_unix_epoch);
+	inode_set_mtime_to_ts(inode,
+			      ns_to_timespec64(info->modification_time.ns_relative_to_unix_epoch));
 	return 0;
 }
 
@@ -194,7 +195,7 @@ int vboxsf_inode_revalidate(struct dentry *dentry)
 	struct vboxsf_sbi *sbi;
 	struct vboxsf_inode *sf_i;
 	struct shfl_fsobjinfo info;
-	struct timespec64 prev_mtime;
+	struct timespec64 mtime, prev_mtime;
 	struct inode *inode;
 	int err;
 
@@ -202,7 +203,7 @@ int vboxsf_inode_revalidate(struct dentry *dentry)
 		return -EINVAL;
 
 	inode = d_inode(dentry);
-	prev_mtime = inode->i_mtime;
+	prev_mtime = inode_get_mtime(inode);
 	sf_i = VBOXSF_I(inode);
 	sbi = VBOXSF_SBI(dentry->d_sb);
 	if (!sf_i->force_restat) {
@@ -225,7 +226,8 @@ int vboxsf_inode_revalidate(struct dentry *dentry)
 	 * page-cache for it.  Note this also gets triggered by our own writes,
 	 * this is unavoidable.
 	 */
-	if (timespec64_compare(&inode->i_mtime, &prev_mtime) > 0)
+	mtime = inode_get_mtime(inode);
+	if (timespec64_compare(&mtime, &prev_mtime) > 0)
 		invalidate_inode_pages2(inode->i_mapping);
 
 	return 0;
@@ -439,7 +441,6 @@ int vboxsf_nlscpy(struct vboxsf_sbi *sbi, char *name, size_t name_bound_len,
 {
 	const char *in;
 	char *out;
-	size_t out_len;
 	size_t out_bound_len;
 	size_t in_bound_len;
 
@@ -447,7 +448,6 @@ int vboxsf_nlscpy(struct vboxsf_sbi *sbi, char *name, size_t name_bound_len,
 	in_bound_len = utf8_len;
 
 	out = name;
-	out_len = 0;
 	/* Reserve space for terminating 0 */
 	out_bound_len = name_bound_len - 1;
 
@@ -468,7 +468,6 @@ int vboxsf_nlscpy(struct vboxsf_sbi *sbi, char *name, size_t name_bound_len,
 
 		out += nb;
 		out_bound_len -= nb;
-		out_len += nb;
 	}
 
 	*out = 0;
@@ -480,7 +479,7 @@ static struct vboxsf_dir_buf *vboxsf_dir_buf_alloc(struct list_head *list)
 {
 	struct vboxsf_dir_buf *b;
 
-	b = kmalloc(sizeof(*b), GFP_KERNEL);
+	b = kmalloc_obj(*b);
 	if (!b)
 		return NULL;
 
@@ -509,7 +508,7 @@ struct vboxsf_dir_info *vboxsf_dir_info_alloc(void)
 {
 	struct vboxsf_dir_info *p;
 
-	p = kmalloc(sizeof(*p), GFP_KERNEL);
+	p = kmalloc_obj(*p);
 	if (!p)
 		return NULL;
 
@@ -568,4 +567,33 @@ int vboxsf_dir_read_all(struct vboxsf_sbi *sbi, struct vboxsf_dir_info *sf_d,
 		err = 0;
 
 	return err;
+}
+
+int vboxsf_query_case_sensitive(struct vboxsf_sbi *sbi)
+{
+	struct shfl_volinfo volinfo = {};
+	u32 buf_len;
+	int err;
+
+	buf_len = sizeof(volinfo);
+	err = vboxsf_fsinfo(sbi->root, 0, SHFL_INFO_GET | SHFL_INFO_VOLUME,
+			    &buf_len, &volinfo);
+	if (err)
+		return err;
+	if (buf_len < sizeof(volinfo))
+		return 0;
+
+	sbi->case_insensitive = !volinfo.properties.case_sensitive;
+	return 0;
+}
+
+int vboxsf_fileattr_get(struct dentry *dentry, struct file_kattr *fa)
+{
+	struct vboxsf_sbi *sbi = VBOXSF_SBI(dentry->d_sb);
+
+	if (sbi->case_insensitive) {
+		fa->fsx_xflags |= FS_XFLAG_CASEFOLD;
+		fa->flags |= FS_CASEFOLD_FL;
+	}
+	return 0;
 }

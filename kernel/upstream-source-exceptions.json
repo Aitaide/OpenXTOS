@@ -1,0 +1,103 @@
+{
+  "schema": "xtos.official-kernel-source-exceptions.v1",
+  "upstream_archive_sha256": "fa595aad93734f829c963c2a90ef7c3673224fd7fdae7b49406e397cde2de231",
+  "purpose": "Exact signed upstream KUnit input fixtures whose .log names resemble build outputs. Unknown or modified generated-looking files remain forbidden.",
+  "files": {
+    "kernel/linux/tools/testing/kunit/test_data/test_config_printk_time.log": {
+      "sha256": "115e5bd906137a4f86b98a29f4016ac99b3624e790b502524b9e40a16d3171e2",
+      "bytes": 1605
+    },
+    "kernel/linux/tools/testing/kunit/test_data/test_insufficient_memory.log": {
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "bytes": 0
+    },
+    "kernel/linux/tools/testing/kunit/test_data/test_interrupted_tap_output.log": {
+      "sha256": "d6b49b1d6e11c8339c8b126a483c5a476375ddb47028667a9ff81ce73c9afdd6",
+      "bytes": 2003
+    },
+    "kernel/linux/tools/testing/kunit/test_data/test_is_test_passed-all_passed.log": {
+      "sha256": "fa23fe4bc3bdade23cca05724946fe233f9fab68c7c62170e37ce6c3a49012c2",
+      "bytes": 1567
+    },
+    "kernel/linux/tools/testing/kunit/test_data/test_is_test_passed-all_passed_nested.log": {
+      "sha256": "7c4eaf1d33ade7ca106aa735c0b532b064c42befb4ecb12fa3e40f43447eb9b6",
+      "bytes": 1158
+    },
+    "kernel/linux/tools/testing/kunit/test_data/test_is_test_passed-failure-nested.log": {
+      "sha256": "80ae5e90585b099db8ff75ef15e25054b6fda5dfabaf72d880859dfc87befe1e",
+      "bytes": 164
+    },
+    "kernel/linux/tools/testing/kunit/test_data/test_is_test_passed-failure.log": {
+      "sha256": "3a5660daa472a4e0b0f5198a796e4f919d145951a871ca1b7538c550327c7372",
+      "bytes": 1705
+    },
+    "kernel/linux/tools/testing/kunit/test_data/test_is_test_passed-kselftest.log": {
+      "sha256": "d690f3bb26ee104aa295c923818b0d2693498f39921f1242210c50fe8cf63e65",
+      "bytes": 620
+    },
+    "kernel/linux/tools/testing/kunit/test_data/test_is_test_passed-missing_plan.log": {
+      "sha256": "e2f39d87e9c4c3232da8f8f31d623fce226ff659e7835d740c475ea7f7fef731",
+      "bytes": 1556
+    },
+    "kernel/linux/tools/testing/kunit/test_data/test_is_test_passed-no_tests_no_plan.log": {
+      "sha256": "41f481fd0631553bde574944e542344f422e8af2632b692068a221fea6bd9dcc",
+      "bytes": 93
+    },
+    "kernel/linux/tools/testing/kunit/test_data/test_is_test_passed-no_tests_run_no_header.log": {
+      "sha256": "54df581112aeb2273f4cffa9da36fe437788c4bb24a8313de987b4b4f2b8ccf3",
+      "bytes": 3921
+    },
+    "kernel/linux/tools/testing/kunit/test_data/test_is_test_passed-no_tests_run_with_header.log": {
+      "sha256": "9086dd877a9d7a5ec1e7050b6b5e7869071fabb4a4dc469f1173e4d70e8841e6",
+      "bytes": 20
+    },
+    "kernel/linux/tools/testing/kunit/test_data/test_kernel_panic_interrupt.log": {
+      "sha256": "c995fa28bd9640580f23647e95bc2c4bc9f2cae4de037bdd94266ca528b6148b",
+      "bytes": 1342
+    },
+    "kernel/linux/tools/testing/kunit/test_data/test_multiple_prefixes.log": {
+      "sha256": "911399137fce0130c9ece94947555259431e3c6160367899f79ff8ee0a414031",
+      "bytes": 1861
+    },
+    "kernel/linux/tools/testing/kunit/test_data/test_output_isolated_correctly.log": {
+      "sha256": "77b6cda15b03bfa66e110121571c6b3125f1d9f3fc11f82d6d9deff5344c06a8",
+      "bytes": 5128
+    },
+    "kernel/linux/tools/testing/kunit/test_data/test_output_with_prefix_isolated_correctly.log": {
+      "sha256": "862ca5b595bdff0dd2714df64bd527358c4e647f8d059295c78fa8554ac537b1",
+      "bytes": 1655
+    },
+    "kernel/linux/tools/testing/kunit/test_data/test_parse_attributes.log": {
+      "sha256": "dc28f46deb3bdcb715ac8dc2ac24351e377dc6a4d8d446420744abcfc14b2c3a",
+      "bytes": 126
+    },
+    "kernel/linux/tools/testing/kunit/test_data/test_parse_ktap_output.log": {
+      "sha256": "e0e5de94b5b2f5891208047eb264d582b05063262409fcc14643db9efb6307c6",
+      "bytes": 97
+    },
+    "kernel/linux/tools/testing/kunit/test_data/test_parse_subtest_header.log": {
+      "sha256": "3ec5d407665b263e76c9400459733e7873157e713b78704f81ebd65bc8f28917",
+      "bytes": 85
+    },
+    "kernel/linux/tools/testing/kunit/test_data/test_pound_no_prefix.log": {
+      "sha256": "fb0ba70d56f809c2261a7abc7cf365113a75e60d1ac4bfe577c3ed6f77e6350b",
+      "bytes": 1200
+    },
+    "kernel/linux/tools/testing/kunit/test_data/test_pound_sign.log": {
+      "sha256": "786f8f808b895174fe484ee9cebc0a29b57a50851f3137621d6dc41f9d3d8d53",
+      "bytes": 1676
+    },
+    "kernel/linux/tools/testing/kunit/test_data/test_skip_all_tests.log": {
+      "sha256": "01790f1186116c295542c89a2d4f96a334953bcea49d3f83f8751370ae22ac06",
+      "bytes": 562
+    },
+    "kernel/linux/tools/testing/kunit/test_data/test_skip_tests.log": {
+      "sha256": "7dabb95f6765de505ca66c2571c5f1d85de8049712ec09648245570888af6c02",
+      "bytes": 448
+    },
+    "kernel/linux/tools/testing/kunit/test_data/test_strip_hyphen.log": {
+      "sha256": "b384136fe1a8b1ea0a15aa79d0f15969adbb8da067b25916091a1363f969fd58",
+      "bytes": 425
+    }
+  }
+}

@@ -54,10 +54,42 @@ extern "C" {
  */
 #define NOUVEAU_GETPARAM_EXEC_PUSH_MAX   17
 
+/*
+ * NOUVEAU_GETPARAM_VRAM_BAR_SIZE - query bar size
+ *
+ * Query the VRAM BAR size.
+ */
+#define NOUVEAU_GETPARAM_VRAM_BAR_SIZE 18
+
+/*
+ * NOUVEAU_GETPARAM_VRAM_USED
+ *
+ * Get remaining VRAM size.
+ */
+#define NOUVEAU_GETPARAM_VRAM_USED 19
+
+/*
+ * NOUVEAU_GETPARAM_HAS_VMA_TILEMODE
+ *
+ * Query whether tile mode and PTE kind are accepted with VM allocs or not.
+ */
+#define NOUVEAU_GETPARAM_HAS_VMA_TILEMODE 20
+
 struct drm_nouveau_getparam {
 	__u64 param;
 	__u64 value;
 };
+
+/*
+ * Those are used to support selecting the main engine used on Kepler.
+ * This goes into drm_nouveau_channel_alloc::tt_ctxdma_handle
+ */
+#define NOUVEAU_FIFO_ENGINE_GR  0x01
+#define NOUVEAU_FIFO_ENGINE_VP  0x02
+#define NOUVEAU_FIFO_ENGINE_PPP 0x04
+#define NOUVEAU_FIFO_ENGINE_BSP 0x08
+#define NOUVEAU_FIFO_ENGINE_CE  0x30
+#define NOUVEAU_FIFO_ENGINE_NVDEC 0x300
 
 struct drm_nouveau_channel_alloc {
 	__u32     fb_ctxdma_handle;
@@ -79,6 +111,18 @@ struct drm_nouveau_channel_alloc {
 
 struct drm_nouveau_channel_free {
 	__s32 channel;
+};
+
+struct drm_nouveau_notifierobj_alloc {
+	__u32 channel;
+	__u32 handle;
+	__u32 size;
+	__u32 offset;
+};
+
+struct drm_nouveau_gpuobj_free {
+	__s32 channel;
+	__u32 handle;
 };
 
 #define NOUVEAU_GEM_DOMAIN_CPU       (1 << 0)
@@ -238,34 +282,32 @@ struct drm_nouveau_vm_init {
 struct drm_nouveau_vm_bind_op {
 	/**
 	 * @op: the operation type
+	 *
+	 * Supported values:
+	 *
+	 * %DRM_NOUVEAU_VM_BIND_OP_MAP - Map a GEM object to the GPU's VA
+	 * space. Optionally, the &DRM_NOUVEAU_VM_BIND_SPARSE flag can be
+	 * passed to instruct the kernel to create sparse mappings for the
+	 * given range.
+	 *
+	 * %DRM_NOUVEAU_VM_BIND_OP_UNMAP - Unmap an existing mapping in the
+	 * GPU's VA space. If the region the mapping is located in is a
+	 * sparse region, new sparse mappings are created where the unmapped
+	 * (memory backed) mapping was mapped previously. To remove a sparse
+	 * region the &DRM_NOUVEAU_VM_BIND_SPARSE must be set.
 	 */
 	__u32 op;
-/**
- * @DRM_NOUVEAU_VM_BIND_OP_MAP:
- *
- * Map a GEM object to the GPU's VA space. Optionally, the
- * &DRM_NOUVEAU_VM_BIND_SPARSE flag can be passed to instruct the kernel to
- * create sparse mappings for the given range.
- */
 #define DRM_NOUVEAU_VM_BIND_OP_MAP 0x0
-/**
- * @DRM_NOUVEAU_VM_BIND_OP_UNMAP:
- *
- * Unmap an existing mapping in the GPU's VA space. If the region the mapping
- * is located in is a sparse region, new sparse mappings are created where the
- * unmapped (memory backed) mapping was mapped previously. To remove a sparse
- * region the &DRM_NOUVEAU_VM_BIND_SPARSE must be set.
- */
 #define DRM_NOUVEAU_VM_BIND_OP_UNMAP 0x1
 	/**
 	 * @flags: the flags for a &drm_nouveau_vm_bind_op
+	 *
+	 * Supported values:
+	 *
+	 * %DRM_NOUVEAU_VM_BIND_SPARSE - Indicates that an allocated VA
+	 * space region should be sparse.
 	 */
 	__u32 flags;
-/**
- * @DRM_NOUVEAU_VM_BIND_SPARSE:
- *
- * Indicates that an allocated VA space region should be sparse.
- */
 #define DRM_NOUVEAU_VM_BIND_SPARSE (1 << 8)
 	/**
 	 * @handle: the handle of the DRM GEM object to map
@@ -301,17 +343,17 @@ struct drm_nouveau_vm_bind {
 	__u32 op_count;
 	/**
 	 * @flags: the flags for a &drm_nouveau_vm_bind ioctl
+	 *
+	 * Supported values:
+	 *
+	 * %DRM_NOUVEAU_VM_BIND_RUN_ASYNC - Indicates that the given VM_BIND
+	 * operation should be executed asynchronously by the kernel.
+	 *
+	 * If this flag is not supplied the kernel executes the associated
+	 * operations synchronously and doesn't accept any &drm_nouveau_sync
+	 * objects.
 	 */
 	__u32 flags;
-/**
- * @DRM_NOUVEAU_VM_BIND_RUN_ASYNC:
- *
- * Indicates that the given VM_BIND operation should be executed asynchronously
- * by the kernel.
- *
- * If this flag is not supplied the kernel executes the associated operations
- * synchronously and doesn't accept any &drm_nouveau_sync objects.
- */
 #define DRM_NOUVEAU_VM_BIND_RUN_ASYNC 0x1
 	/**
 	 * @wait_count: the number of wait &drm_nouveau_syncs
@@ -391,6 +433,69 @@ struct drm_nouveau_exec {
 	__u64 push_ptr;
 };
 
+struct drm_nouveau_get_zcull_info {
+	/**
+	 * @width_align_pixels: required alignment for region widths, in pixels
+	 * (typically #TPC's * 16).
+	 */
+	__u32 width_align_pixels;
+	/**
+	 * @height_align_pixels: required alignment for region heights, in
+	 * pixels (typically 32).
+	 */
+	__u32 height_align_pixels;
+	/**
+	 * @pixel_squares_by_aliquots: the pixel area covered by an aliquot
+	 * (typically #Zcull_banks * 16 * 16).
+	 */
+	__u32 pixel_squares_by_aliquots;
+	/**
+	 * @aliquot_total: the total aliquot pool available in hardware
+	 */
+	__u32 aliquot_total;
+	/**
+	 * @zcull_region_byte_multiplier: the size of an aliquot in bytes, which
+	 * is used for save/restore operations on a region
+	 */
+	__u32 zcull_region_byte_multiplier;
+	/**
+	 * @zcull_region_header_size: the region header size in bytes, which is
+	 * used for save/restore operations on a region
+	 */
+	__u32 zcull_region_header_size;
+	/**
+	 * @zcull_subregion_header_size: the subregion header size in bytes,
+	 * which is used for save/restore operations on a region
+	 */
+	__u32 zcull_subregion_header_size;
+	/**
+	 * @subregion_count: the total number of subregions the hardware
+	 * supports
+	 */
+	__u32 subregion_count;
+	/**
+	 * @subregion_width_align_pixels: required alignment for subregion
+	 * widths, in pixels (typically #TPC's * 16).
+	 */
+	__u32 subregion_width_align_pixels;
+	/**
+	 * @subregion_height_align_pixels: required alignment for subregion
+	 * heights, in pixels
+	 */
+	__u32 subregion_height_align_pixels;
+
+	/**
+	 * @ctxsw_size: the size, in bytes, of a zcull context switching region.
+	 * Will be zero if the kernel does not support zcull context switching.
+	 */
+	__u32 ctxsw_size;
+	/**
+	 * @ctxsw_align: the alignment, in bytes, of a zcull context switching
+	 * region
+	 */
+	__u32 ctxsw_align;
+};
+
 #define DRM_NOUVEAU_GETPARAM           0x00
 #define DRM_NOUVEAU_SETPARAM           0x01 /* deprecated */
 #define DRM_NOUVEAU_CHANNEL_ALLOC      0x02
@@ -404,6 +509,7 @@ struct drm_nouveau_exec {
 #define DRM_NOUVEAU_VM_INIT            0x10
 #define DRM_NOUVEAU_VM_BIND            0x11
 #define DRM_NOUVEAU_EXEC               0x12
+#define DRM_NOUVEAU_GET_ZCULL_INFO     0x13
 #define DRM_NOUVEAU_GEM_NEW            0x40
 #define DRM_NOUVEAU_GEM_PUSHBUF        0x41
 #define DRM_NOUVEAU_GEM_CPU_PREP       0x42
@@ -472,6 +578,8 @@ struct drm_nouveau_svm_bind {
 #define DRM_IOCTL_NOUVEAU_VM_INIT            DRM_IOWR(DRM_COMMAND_BASE + DRM_NOUVEAU_VM_INIT, struct drm_nouveau_vm_init)
 #define DRM_IOCTL_NOUVEAU_VM_BIND            DRM_IOWR(DRM_COMMAND_BASE + DRM_NOUVEAU_VM_BIND, struct drm_nouveau_vm_bind)
 #define DRM_IOCTL_NOUVEAU_EXEC               DRM_IOWR(DRM_COMMAND_BASE + DRM_NOUVEAU_EXEC, struct drm_nouveau_exec)
+
+#define DRM_IOCTL_NOUVEAU_GET_ZCULL_INFO     DRM_IOR (DRM_COMMAND_BASE + DRM_NOUVEAU_GET_ZCULL_INFO, struct drm_nouveau_get_zcull_info)
 #if defined(__cplusplus)
 }
 #endif

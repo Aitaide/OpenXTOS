@@ -4,7 +4,7 @@
  *
  * Maintainer: Ronen Shitrit <rshitrit@marvell.com>
  */
-#include <linux/gpio.h>
+#include <linux/gpio/consumer.h>
 #include <linux/kernel.h>
 #include <linux/init.h>
 #include <linux/platform_device.h>
@@ -373,7 +373,7 @@ static void __init kurobox_pro_init(void)
 	i2c_register_board_info(0, &kurobox_pro_i2c_rtc, 1);
 
 	/* register Kurobox Pro specific power-off method */
-	pm_power_off = kurobox_pro_power_off;
+	register_platform_power_off(kurobox_pro_power_off);
 }
 
 #ifdef CONFIG_MACH_KUROBOX_PRO

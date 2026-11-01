@@ -171,18 +171,22 @@ static bool hisi_ptt_wait_trace_hw_idle(struct hisi_ptt *hisi_ptt)
 					  HISI_PTT_WAIT_TRACE_TIMEOUT_US);
 }
 
-static void hisi_ptt_wait_dma_reset_done(struct hisi_ptt *hisi_ptt)
+static bool hisi_ptt_wait_dma_reset_done(struct hisi_ptt *hisi_ptt)
 {
 	u32 val;
 
-	readl_poll_timeout_atomic(hisi_ptt->iobase + HISI_PTT_TRACE_WR_STS,
-				  val, !val, HISI_PTT_RESET_POLL_INTERVAL_US,
-				  HISI_PTT_RESET_TIMEOUT_US);
+	return !readl_poll_timeout_atomic(hisi_ptt->iobase + HISI_PTT_TRACE_WR_STS,
+					  val, !val, HISI_PTT_RESET_POLL_INTERVAL_US,
+					  HISI_PTT_RESET_TIMEOUT_US);
 }
 
 static void hisi_ptt_trace_end(struct hisi_ptt *hisi_ptt)
 {
 	writel(0, hisi_ptt->iobase + HISI_PTT_TRACE_CTRL);
+
+	/* Mask the interrupt on the end */
+	writel(HISI_PTT_TRACE_INT_MASK_ALL, hisi_ptt->iobase + HISI_PTT_TRACE_INT_MASK);
+
 	hisi_ptt->trace_ctrl.started = false;
 }
 
@@ -190,7 +194,6 @@ static int hisi_ptt_trace_start(struct hisi_ptt *hisi_ptt)
 {
 	struct hisi_ptt_trace_ctrl *ctrl = &hisi_ptt->trace_ctrl;
 	u32 val;
-	int i;
 
 	/* Check device idle before start trace */
 	if (!hisi_ptt_wait_trace_hw_idle(hisi_ptt)) {
@@ -198,14 +201,18 @@ static int hisi_ptt_trace_start(struct hisi_ptt *hisi_ptt)
 		return -EBUSY;
 	}
 
-	ctrl->started = true;
-
 	/* Reset the DMA before start tracing */
 	val = readl(hisi_ptt->iobase + HISI_PTT_TRACE_CTRL);
 	val |= HISI_PTT_TRACE_CTRL_RST;
 	writel(val, hisi_ptt->iobase + HISI_PTT_TRACE_CTRL);
 
-	hisi_ptt_wait_dma_reset_done(hisi_ptt);
+	if (!hisi_ptt_wait_dma_reset_done(hisi_ptt)) {
+		pci_err(hisi_ptt->pdev, "timed out waiting for DMA reset\n");
+		val = readl(hisi_ptt->iobase + HISI_PTT_TRACE_CTRL);
+		val &= ~HISI_PTT_TRACE_CTRL_RST;
+		writel(val, hisi_ptt->iobase + HISI_PTT_TRACE_CTRL);
+		return -ETIMEDOUT;
+	}
 
 	val = readl(hisi_ptt->iobase + HISI_PTT_TRACE_CTRL);
 	val &= ~HISI_PTT_TRACE_CTRL_RST;
@@ -213,10 +220,6 @@ static int hisi_ptt_trace_start(struct hisi_ptt *hisi_ptt)
 
 	/* Reset the index of current buffer */
 	hisi_ptt->trace_ctrl.buf_index = 0;
-
-	/* Zero the trace buffers */
-	for (i = 0; i < HISI_PTT_TRACE_BUF_CNT; i++)
-		memset(ctrl->trace_buf[i].addr, 0, HISI_PTT_TRACE_BUF_SIZE);
 
 	/* Clear the interrupt status */
 	writel(HISI_PTT_TRACE_INT_STAT_MASK, hisi_ptt->iobase + HISI_PTT_TRACE_INT_STAT);
@@ -229,6 +232,8 @@ static int hisi_ptt_trace_start(struct hisi_ptt *hisi_ptt)
 	val |= FIELD_PREP(HISI_PTT_TRACE_CTRL_TARGET_SEL, hisi_ptt->trace_ctrl.filter);
 	if (!hisi_ptt->trace_ctrl.is_port)
 		val |= HISI_PTT_TRACE_CTRL_FILTER_MODE;
+
+	ctrl->started = true;
 
 	/* Start the Trace */
 	val |= HISI_PTT_TRACE_CTRL_EN;
@@ -270,15 +275,14 @@ static int hisi_ptt_update_aux(struct hisi_ptt *hisi_ptt, int index, bool stop)
 	buf->pos += size;
 
 	/*
-	 * Just commit the traced data if we're going to stop. Otherwise if the
-	 * resident AUX buffer cannot contain the data of next trace buffer,
-	 * apply a new one.
+	 * Always commit the data to the AUX buffer in time to make sure
+	 * userspace got enough time to consume the data.
+	 *
+	 * If we're not going to stop, apply a new one and check whether
+	 * there's enough room for the next trace.
 	 */
-	if (stop) {
-		perf_aux_output_end(handle, buf->pos);
-	} else if (buf->length - buf->pos < HISI_PTT_TRACE_BUF_SIZE) {
-		perf_aux_output_end(handle, buf->pos);
-
+	perf_aux_output_end(handle, size);
+	if (!stop) {
 		buf = perf_aux_output_begin(handle, event);
 		if (!buf)
 			return -EINVAL;
@@ -342,9 +346,9 @@ static int hisi_ptt_register_irq(struct hisi_ptt *hisi_ptt)
 		return ret;
 
 	hisi_ptt->trace_irq = pci_irq_vector(pdev, HISI_PTT_TRACE_DMA_IRQ);
-	ret = devm_request_threaded_irq(&pdev->dev, hisi_ptt->trace_irq,
-					NULL, hisi_ptt_isr, 0,
-					DRV_NAME, hisi_ptt);
+	ret = devm_request_irq(&pdev->dev, hisi_ptt->trace_irq, hisi_ptt_isr,
+				IRQF_NOBALANCING | IRQF_NO_THREAD, DRV_NAME,
+				hisi_ptt);
 	if (ret) {
 		pci_err(pdev, "failed to request irq %d, ret = %d\n",
 			hisi_ptt->trace_irq, ret);
@@ -381,7 +385,7 @@ hisi_ptt_alloc_add_filter(struct hisi_ptt *hisi_ptt, u16 devid, bool is_port)
 		return NULL;
 	}
 
-	filter = kzalloc(sizeof(*filter), GFP_KERNEL);
+	filter = kzalloc_obj(*filter);
 	if (!filter) {
 		pci_err(hisi_ptt->pdev, "failed to add filter for %s\n",
 			filter_name);
@@ -777,7 +781,7 @@ static ssize_t cpumask_show(struct device *dev, struct device_attribute *attr,
 	struct hisi_ptt *hisi_ptt = to_hisi_ptt(dev_get_drvdata(dev));
 	const cpumask_t *cpumask = cpumask_of_node(dev_to_node(&hisi_ptt->pdev->dev));
 
-	return cpumap_print_to_pagebuf(true, buf, cpumask);
+	return sysfs_emit(buf, "%*pbl\n", cpumask_pr_args(cpumask));
 }
 static DEVICE_ATTR_RO(cpumask);
 
@@ -995,13 +999,16 @@ static int hisi_ptt_pmu_event_init(struct perf_event *event)
 	int ret;
 	u32 val;
 
+	if (event->attr.type != hisi_ptt->hisi_ptt_pmu.type)
+		return -ENOENT;
+
 	if (event->cpu < 0) {
 		dev_dbg(event->pmu->dev, "Per-task mode not supported\n");
 		return -EOPNOTSUPP;
 	}
 
-	if (event->attr.type != hisi_ptt->hisi_ptt_pmu.type)
-		return -ENOENT;
+	if (event->attach_state & PERF_ATTACH_TASK)
+		return -EOPNOTSUPP;
 
 	ret = hisi_ptt_trace_valid_filter(hisi_ptt, event->attr.config);
 	if (ret < 0)
@@ -1037,11 +1044,11 @@ static void *hisi_ptt_pmu_setup_aux(struct perf_event *event, void **pages,
 	if (nr_pages < HISI_PTT_TRACE_TOTAL_BUF_SIZE / PAGE_SIZE)
 		return NULL;
 
-	buf = kzalloc(sizeof(*buf), GFP_KERNEL);
+	buf = kzalloc_obj(*buf);
 	if (!buf)
 		return NULL;
 
-	pagelist = kcalloc(nr_pages, sizeof(*pagelist), GFP_KERNEL);
+	pagelist = kzalloc_objs(*pagelist, nr_pages);
 	if (!pagelist)
 		goto err;
 
@@ -1178,6 +1185,10 @@ static void hisi_ptt_pmu_del(struct perf_event *event, int flags)
 	hisi_ptt_pmu_stop(event, PERF_EF_UPDATE);
 }
 
+static void hisi_ptt_pmu_read(struct perf_event *event)
+{
+}
+
 static void hisi_ptt_remove_cpuhp_instance(void *hotplug_node)
 {
 	cpuhp_state_remove_instance_nocalls(hisi_ptt_pmu_online, hotplug_node);
@@ -1211,6 +1222,7 @@ static int hisi_ptt_register_pmu(struct hisi_ptt *hisi_ptt)
 
 	hisi_ptt->hisi_ptt_pmu = (struct pmu) {
 		.module		= THIS_MODULE,
+		.parent         = &hisi_ptt->pdev->dev,
 		.capabilities	= PERF_PMU_CAP_EXCLUSIVE | PERF_PMU_CAP_NO_EXCLUDE,
 		.task_ctx_nr	= perf_sw_context,
 		.attr_groups	= hisi_ptt_pmu_groups,
@@ -1221,6 +1233,7 @@ static int hisi_ptt_register_pmu(struct hisi_ptt *hisi_ptt)
 		.stop		= hisi_ptt_pmu_stop,
 		.add		= hisi_ptt_pmu_add,
 		.del		= hisi_ptt_pmu_del,
+		.read		= hisi_ptt_pmu_read,
 	};
 
 	reg = readl(hisi_ptt->iobase + HISI_PTT_LOCATION);

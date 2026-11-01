@@ -44,14 +44,12 @@ static struct snd_soc_card acp_card = {
 static int acp_probe(struct platform_device *pdev)
 {
 	int ret;
-	struct acp_pdm *machine = NULL;
 	struct snd_soc_card *card;
 
 	card = &acp_card;
 	acp_card.dev = &pdev->dev;
 
 	platform_set_drvdata(pdev, card);
-	snd_soc_card_set_drvdata(card, machine);
 	ret = devm_snd_soc_register_card(&pdev->dev, card);
 	if (ret) {
 		return dev_err_probe(&pdev->dev, ret,
@@ -72,5 +70,6 @@ static struct platform_driver acp_mach_driver = {
 module_platform_driver(acp_mach_driver);
 
 MODULE_AUTHOR("Vijendar.Mukunda@amd.com");
+MODULE_DESCRIPTION("AMD Renoir support for DMIC");
 MODULE_LICENSE("GPL v2");
 MODULE_ALIAS("platform:" DRV_NAME);

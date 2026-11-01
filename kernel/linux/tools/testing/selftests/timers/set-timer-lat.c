@@ -28,24 +28,12 @@
 #include <signal.h>
 #include <stdlib.h>
 #include <pthread.h>
-#include "../kselftest.h"
+#include "clock-helpers.h"
+#include "kselftest.h"
 
-#define CLOCK_REALTIME			0
-#define CLOCK_MONOTONIC			1
-#define CLOCK_PROCESS_CPUTIME_ID	2
-#define CLOCK_THREAD_CPUTIME_ID		3
-#define CLOCK_MONOTONIC_RAW		4
-#define CLOCK_REALTIME_COARSE		5
-#define CLOCK_MONOTONIC_COARSE		6
-#define CLOCK_BOOTTIME			7
-#define CLOCK_REALTIME_ALARM		8
-#define CLOCK_BOOTTIME_ALARM		9
+/* CLOCK_HWSPECIFIC == CLOCK_SGI_CYCLE (Deprecated) */
 #define CLOCK_HWSPECIFIC		10
-#define CLOCK_TAI			11
-#define NR_CLOCKIDS			12
 
-
-#define NSEC_PER_SEC 1000000000ULL
 #define UNRESONABLE_LATENCY 40000000 /* 40ms in nanosecs */
 
 #define TIMER_SECS 1
@@ -54,36 +42,6 @@ int clock_id;
 struct timespec start_time;
 long long max_latency_ns;
 int timer_fired_early;
-
-char *clockstring(int clockid)
-{
-	switch (clockid) {
-	case CLOCK_REALTIME:
-		return "CLOCK_REALTIME";
-	case CLOCK_MONOTONIC:
-		return "CLOCK_MONOTONIC";
-	case CLOCK_PROCESS_CPUTIME_ID:
-		return "CLOCK_PROCESS_CPUTIME_ID";
-	case CLOCK_THREAD_CPUTIME_ID:
-		return "CLOCK_THREAD_CPUTIME_ID";
-	case CLOCK_MONOTONIC_RAW:
-		return "CLOCK_MONOTONIC_RAW";
-	case CLOCK_REALTIME_COARSE:
-		return "CLOCK_REALTIME_COARSE";
-	case CLOCK_MONOTONIC_COARSE:
-		return "CLOCK_MONOTONIC_COARSE";
-	case CLOCK_BOOTTIME:
-		return "CLOCK_BOOTTIME";
-	case CLOCK_REALTIME_ALARM:
-		return "CLOCK_REALTIME_ALARM";
-	case CLOCK_BOOTTIME_ALARM:
-		return "CLOCK_BOOTTIME_ALARM";
-	case CLOCK_TAI:
-		return "CLOCK_TAI";
-	};
-	return "UNKNOWN_CLOCKID";
-}
-
 
 long long timespec_sub(struct timespec a, struct timespec b)
 {
@@ -115,7 +73,7 @@ void sigalarm(int signo)
 void describe_timer(int flags, int interval)
 {
 	printf("%-22s %s %s ",
-			clockstring(clock_id),
+			clock_name(clock_id),
 			flags ? "ABSTIME":"RELTIME",
 			interval ? "PERIODIC":"ONE-SHOT");
 }
@@ -141,12 +99,12 @@ int setup_timer(int clock_id, int flags, int interval, timer_t *tm1)
 		if ((clock_id == CLOCK_REALTIME_ALARM) ||
 		    (clock_id == CLOCK_BOOTTIME_ALARM)) {
 			printf("%-22s %s missing CAP_WAKE_ALARM?    : [UNSUPPORTED]\n",
-					clockstring(clock_id),
+					clock_name(clock_id),
 					flags ? "ABSTIME":"RELTIME");
 			/* Indicate timer isn't set, so caller doesn't wait */
 			return 1;
 		}
-		printf("%s - timer_create() failed\n", clockstring(clock_id));
+		printf("%s - timer_create() failed\n", clock_name(clock_id));
 		return -1;
 	}
 
@@ -163,7 +121,7 @@ int setup_timer(int clock_id, int flags, int interval, timer_t *tm1)
 
 	err = timer_settime(*tm1, flags, &its1, &its2);
 	if (err) {
-		printf("%s - timer_settime() failed\n", clockstring(clock_id));
+		printf("%s - timer_settime() failed\n", clock_name(clock_id));
 		return -1;
 	}
 
@@ -254,6 +212,7 @@ int main(void)
 	struct sigaction act;
 	int signum = SIGRTMAX;
 	int ret = 0;
+	int max_clocks = CLOCK_TAI + 1;
 
 	/* Set up signal handler: */
 	sigfillset(&act.sa_mask);
@@ -262,7 +221,7 @@ int main(void)
 	sigaction(signum, &act, NULL);
 
 	printf("Setting timers for every %i seconds\n", TIMER_SECS);
-	for (clock_id = 0; clock_id < NR_CLOCKIDS; clock_id++) {
+	for (clock_id = 0; clock_id < max_clocks; clock_id++) {
 
 		if ((clock_id == CLOCK_PROCESS_CPUTIME_ID) ||
 				(clock_id == CLOCK_THREAD_CPUTIME_ID) ||
@@ -278,6 +237,6 @@ int main(void)
 		ret |= do_timer_oneshot(clock_id, 0);
 	}
 	if (ret)
-		return ksft_exit_fail();
-	return ksft_exit_pass();
+		ksft_exit_fail();
+	ksft_exit_pass();
 }

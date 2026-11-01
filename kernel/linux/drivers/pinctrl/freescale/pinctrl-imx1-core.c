@@ -244,8 +244,7 @@ static int imx1_dt_node_to_map(struct pinctrl_dev *pctldev,
 	for (i = 0; i < grp->npins; i++)
 		map_num++;
 
-	new_map = kmalloc_array(map_num, sizeof(struct pinctrl_map),
-				GFP_KERNEL);
+	new_map = kmalloc_objs(struct pinctrl_map, map_num);
 	if (!new_map)
 		return -ENOMEM;
 
@@ -508,7 +507,6 @@ static int imx1_pinctrl_parse_functions(struct device_node *np,
 				       struct imx1_pinctrl_soc_info *info,
 				       u32 index)
 {
-	struct device_node *child;
 	struct imx1_pmx_func *func;
 	struct imx1_pin_group *grp;
 	int ret;
@@ -531,24 +529,42 @@ static int imx1_pinctrl_parse_functions(struct device_node *np,
 	if (!func->groups)
 		return -ENOMEM;
 
-	for_each_child_of_node(np, child) {
+	for_each_child_of_node_scoped(np, child) {
 		func->groups[i] = child->name;
 		grp = &info->groups[grp_index++];
 		ret = imx1_pinctrl_parse_groups(child, grp, info, i++);
-		if (ret == -ENOMEM) {
-			of_node_put(child);
+		if (ret == -ENOMEM)
 			return ret;
-		}
 	}
 
 	return 0;
+}
+
+/*
+ * Check if the DT contains pins in the direct child nodes. This indicates the
+ * newer DT format to store pins. This function returns true if the first found
+ * fsl,pins property is in a child of np. Otherwise false is returned.
+ */
+static bool imx1_pinctrl_dt_is_flat_functions(struct device_node *np)
+{
+	for_each_child_of_node_scoped(np, function_np) {
+		if (of_property_present(function_np, "fsl,pins"))
+			return true;
+
+		for_each_child_of_node_scoped(function_np, pinctrl_np) {
+			if (of_property_present(pinctrl_np, "fsl,pins"))
+				return false;
+		}
+	}
+
+	return true;
 }
 
 static int imx1_pinctrl_parse_dt(struct platform_device *pdev,
 		struct imx1_pinctrl *pctl, struct imx1_pinctrl_soc_info *info)
 {
 	struct device_node *np = pdev->dev.of_node;
-	struct device_node *child;
+	bool flat_funcs;
 	int ret;
 	u32 nfuncs = 0;
 	u32 ngroups = 0;
@@ -557,9 +573,15 @@ static int imx1_pinctrl_parse_dt(struct platform_device *pdev,
 	if (!np)
 		return -ENODEV;
 
-	for_each_child_of_node(np, child) {
-		++nfuncs;
-		ngroups += of_get_child_count(child);
+	flat_funcs = imx1_pinctrl_dt_is_flat_functions(np);
+	if (flat_funcs) {
+		nfuncs = 1;
+		ngroups = of_get_child_count(np);
+	} else {
+		for_each_child_of_node_scoped(np, child) {
+			++nfuncs;
+			ngroups += of_get_child_count(child);
+		}
 	}
 
 	if (!nfuncs) {
@@ -579,11 +601,13 @@ static int imx1_pinctrl_parse_dt(struct platform_device *pdev,
 	if (!info->functions || !info->groups)
 		return -ENOMEM;
 
-	for_each_child_of_node(np, child) {
-		ret = imx1_pinctrl_parse_functions(child, info, ifunc++);
-		if (ret == -ENOMEM) {
-			of_node_put(child);
-			return -ENOMEM;
+	if (flat_funcs) {
+		imx1_pinctrl_parse_functions(np, info, 0);
+	} else {
+		for_each_child_of_node_scoped(np, child) {
+			ret = imx1_pinctrl_parse_functions(child, info, ifunc++);
+			if (ret == -ENOMEM)
+				return -ENOMEM;
 		}
 	}
 

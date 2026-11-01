@@ -54,7 +54,7 @@
 #define KERN_DEBUG KERN_WARNING
 #endif
 
-MODULE_AUTHOR("Paul Mackerras (paulus@samba.org)");
+MODULE_AUTHOR("Paul Mackerras <paulus@samba.org>");
 MODULE_DESCRIPTION("PowerMac MESH SCSI driver");
 MODULE_LICENSE("GPL");
 
@@ -1625,7 +1625,7 @@ static void cmd_complete(struct mesh_state *ms)
  * Called by midlayer with host locked to queue a new
  * request
  */
-static int mesh_queue_lck(struct scsi_cmnd *cmd)
+static enum scsi_qc_status mesh_queue_lck(struct scsi_cmnd *cmd)
 {
 	struct mesh_state *ms;
 
@@ -1762,6 +1762,7 @@ static int mesh_suspend(struct macio_dev *mdev, pm_message_t mesg)
 	case PM_EVENT_SUSPEND:
 	case PM_EVENT_HIBERNATE:
 	case PM_EVENT_FREEZE:
+	case PM_EVENT_POWEROFF:
 		break;
 	default:
 		return 0;
@@ -1986,7 +1987,7 @@ static int mesh_probe(struct macio_dev *mdev, const struct of_device_id *match)
 	return -ENODEV;
 }
 
-static int mesh_remove(struct macio_dev *mdev)
+static void mesh_remove(struct macio_dev *mdev)
 {
 	struct mesh_state *ms = (struct mesh_state *)macio_get_drvdata(mdev);
 	struct Scsi_Host *mesh_host = ms->host;
@@ -2013,10 +2014,7 @@ static int mesh_remove(struct macio_dev *mdev)
 	macio_release_resources(mdev);
 
 	scsi_host_put(mesh_host);
-
-	return 0;
 }
-
 
 static struct of_device_id mesh_match[] = 
 {

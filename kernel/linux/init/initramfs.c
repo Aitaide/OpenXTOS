@@ -1,23 +1,32 @@
 // SPDX-License-Identifier: GPL-2.0
-#include <linux/init.h>
 #include <linux/async.h>
-#include <linux/fs.h>
-#include <linux/slab.h>
-#include <linux/types.h>
-#include <linux/fcntl.h>
 #include <linux/delay.h>
-#include <linux/string.h>
 #include <linux/dirent.h>
-#include <linux/syscalls.h>
-#include <linux/utime.h>
+#include <linux/export.h>
+#include <linux/fcntl.h>
 #include <linux/file.h>
+#include <linux/fs.h>
+#include <linux/fs_struct.h>
+#include <linux/hex.h>
+#include <linux/init.h>
+#include <linux/init_syscalls.h>
 #include <linux/kstrtox.h>
 #include <linux/memblock.h>
 #include <linux/mm.h>
 #include <linux/namei.h>
-#include <linux/init_syscalls.h>
-#include <linux/task_work.h>
+#include <linux/overflow.h>
+#include <linux/security.h>
+#include <linux/slab.h>
+#include <linux/string.h>
+#include <linux/syscalls.h>
+#include <linux/types.h>
 #include <linux/umh.h>
+#include <linux/utime.h>
+
+#include <asm/byteorder.h>
+
+#include "do_mounts.h"
+#include "initramfs_internal.h"
 
 static __initdata bool csum_present;
 static __initdata u32 io_csum;
@@ -73,6 +82,7 @@ static __initdata struct hash {
 	struct hash *next;
 	char name[N_ALIGN(PATH_MAX)];
 } *head[32];
+static __initdata bool hardlink_seen;
 
 static inline int hash(int major, int minor, int ino)
 {
@@ -96,29 +106,31 @@ static char __init *find_link(int major, int minor, int ino,
 			continue;
 		return (*p)->name;
 	}
-	q = kmalloc(sizeof(struct hash), GFP_KERNEL);
+	q = kmalloc_obj(struct hash);
 	if (!q)
 		panic_show_mem("can't allocate link hash entry");
 	q->major = major;
 	q->minor = minor;
 	q->ino = ino;
 	q->mode = mode;
-	strcpy(q->name, name);
+	strscpy(q->name, name);
 	q->next = NULL;
 	*p = q;
+	hardlink_seen = true;
 	return NULL;
 }
 
 static void __init free_hash(void)
 {
 	struct hash **p, *q;
-	for (p = head; p < head + 32; p++) {
+	for (p = head; hardlink_seen && p < head + 32; p++) {
 		while (*p) {
 			q = *p;
 			*p = q->next;
 			kfree(q);
 		}
 	}
+	hardlink_seen = false;
 }
 
 #ifdef CONFIG_INITRAMFS_PRESERVE_MTIME
@@ -141,12 +153,11 @@ struct dir_entry {
 	char name[];
 };
 
-static void __init dir_add(const char *name, time64_t mtime)
+static void __init dir_add(const char *name, size_t nlen, time64_t mtime)
 {
-	size_t nlen = strlen(name) + 1;
 	struct dir_entry *de;
 
-	de = kmalloc(sizeof(struct dir_entry) + nlen, GFP_KERNEL);
+	de = kmalloc_flex(*de, name, nlen);
 	if (!de)
 		panic_show_mem("can't allocate dir_entry buffer");
 	INIT_LIST_HEAD(&de->list);
@@ -167,7 +178,7 @@ static void __init dir_utime(void)
 #else
 static void __init do_utime(char *filename, time64_t mtime) {}
 static void __init do_utime_path(const struct path *path, time64_t mtime) {}
-static void __init dir_add(const char *name, time64_t mtime) {}
+static void __init dir_add(const char *name, size_t nlen, time64_t mtime) {}
 static void __init dir_utime(void) {}
 #endif
 
@@ -183,32 +194,33 @@ static __initdata gid_t gid;
 static __initdata unsigned rdev;
 static __initdata u32 hdr_csum;
 
-static void __init parse_header(char *s)
+static int __init parse_header(char *s)
 {
-	unsigned long parsed[13];
-	char buf[9];
-	int i;
+	__be32 header[13];
+	int ret;
 
-	buf[8] = '\0';
-	for (i = 0, s += 6; i < 13; i++, s += 8) {
-		memcpy(buf, s, 8);
-		parsed[i] = simple_strtoul(buf, NULL, 16);
+	ret = hex2bin((u8 *)header, s + 6, sizeof(header));
+	if (ret) {
+		error("damaged header");
+		return ret;
 	}
-	ino = parsed[0];
-	mode = parsed[1];
-	uid = parsed[2];
-	gid = parsed[3];
-	nlink = parsed[4];
-	mtime = parsed[5]; /* breaks in y2106 */
-	body_len = parsed[6];
-	major = parsed[7];
-	minor = parsed[8];
-	rdev = new_encode_dev(MKDEV(parsed[9], parsed[10]));
-	name_len = parsed[11];
-	hdr_csum = parsed[12];
+
+	ino = be32_to_cpu(header[0]);
+	mode = be32_to_cpu(header[1]);
+	uid = be32_to_cpu(header[2]);
+	gid = be32_to_cpu(header[3]);
+	nlink = be32_to_cpu(header[4]);
+	mtime = be32_to_cpu(header[5]); /* breaks in y2106 */
+	body_len = be32_to_cpu(header[6]);
+	major = be32_to_cpu(header[7]);
+	minor = be32_to_cpu(header[8]);
+	rdev = new_encode_dev(MKDEV(be32_to_cpu(header[9]), be32_to_cpu(header[10])));
+	name_len = be32_to_cpu(header[11]);
+	hdr_csum = be32_to_cpu(header[12]);
+	return 0;
 }
 
-/* FSM */
+/* Finite-state machine */
 
 static __initdata enum state {
 	Start,
@@ -254,7 +266,7 @@ static __initdata char *header_buf, *symlink_buf, *name_buf;
 
 static int __init do_start(void)
 {
-	read_into(header_buf, 110, GotHeader);
+	read_into(header_buf, CPIO_HDRLEN, GotHeader);
 	return 0;
 }
 
@@ -285,7 +297,8 @@ static int __init do_header(void)
 			error("no cpio magic");
 		return 1;
 	}
-	parse_header(collected);
+	if (parse_header(collected))
+		return 1;
 	next_header = this_header + N_ALIGN(name_len) + body_len;
 	next_header = (next_header + 3) & ~3;
 	state = SkipIt;
@@ -358,6 +371,15 @@ static int __init do_name(void)
 {
 	state = SkipIt;
 	next_state = Reset;
+
+	/* name_len > 0 && name_len <= PATH_MAX checked in do_header */
+	if (collected[name_len - 1] != '\0') {
+		pr_err("initramfs name without nulterm: %.*s\n",
+		       (int)name_len, collected);
+		error("malformed archive");
+		return 1;
+	}
+
 	if (strcmp(collected, "TRAILER!!!") == 0) {
 		free_hash();
 		return 0;
@@ -366,7 +388,7 @@ static int __init do_name(void)
 	if (S_ISREG(mode)) {
 		int ml = maybe_link();
 		if (ml >= 0) {
-			int openflags = O_WRONLY|O_CREAT;
+			int openflags = O_WRONLY|O_CREAT|O_LARGEFILE;
 			if (ml != 1)
 				openflags |= O_TRUNC;
 			wfile = filp_open(collected, openflags, mode);
@@ -385,7 +407,7 @@ static int __init do_name(void)
 		init_mkdir(collected, mode);
 		init_chown(collected, uid, gid, 0);
 		init_chmod(collected, mode);
-		dir_add(collected, mtime);
+		dir_add(collected, name_len, mtime);
 	} else if (S_ISBLK(mode) || S_ISCHR(mode) ||
 		   S_ISFIFO(mode) || S_ISSOCK(mode)) {
 		if (maybe_link() == 0) {
@@ -422,6 +444,12 @@ static int __init do_copy(void)
 
 static int __init do_symlink(void)
 {
+	if (collected[name_len - 1] != '\0') {
+		pr_err("initramfs symlink without nulterm: %.*s\n",
+		       (int)name_len, collected);
+		error("malformed archive");
+		return 1;
+	}
 	collected[N_ALIGN(name_len) + body_len] = '\0';
 	clean_path(collected, 0);
 	init_symlink(collected + N_ALIGN(name_len), collected);
@@ -480,19 +508,32 @@ static unsigned long my_inptr __initdata; /* index of next byte to be processed 
 
 #include <linux/decompress/generic.h>
 
-static char * __init unpack_to_rootfs(char *buf, unsigned long len)
+/**
+ * unpack_to_rootfs - decompress and extract an initramfs archive
+ * @buf: input initramfs archive to extract
+ * @len: length of initramfs data to process
+ *
+ * Returns: NULL for success or an error message string
+ *
+ * This symbol shouldn't be used externally. It's available for unit tests.
+ */
+char * __init unpack_to_rootfs(char *buf, unsigned long len)
 {
 	long written;
 	decompress_fn decompress;
 	const char *compress_name;
-	static __initdata char msg_buf[64];
+	struct {
+		char header[CPIO_HDRLEN];
+		char symlink[PATH_MAX + N_ALIGN(PATH_MAX) + 1];
+		char name[N_ALIGN(PATH_MAX)];
+	} *bufs = kmalloc_obj(*bufs);
 
-	header_buf = kmalloc(110, GFP_KERNEL);
-	symlink_buf = kmalloc(PATH_MAX + N_ALIGN(PATH_MAX) + 1, GFP_KERNEL);
-	name_buf = kmalloc(N_ALIGN(PATH_MAX), GFP_KERNEL);
-
-	if (!header_buf || !symlink_buf || !name_buf)
+	if (!bufs)
 		panic_show_mem("can't allocate buffers");
+
+	header_buf = bufs->header;
+	symlink_buf = bufs->symlink;
+	name_buf = bufs->name;
 
 	state = Start;
 	this_header = 0;
@@ -521,12 +562,9 @@ static char * __init unpack_to_rootfs(char *buf, unsigned long len)
 			if (res)
 				error("decompressor failed");
 		} else if (compress_name) {
-			if (!message) {
-				snprintf(msg_buf, sizeof msg_buf,
-					 "compression method %s not configured",
-					 compress_name);
-				message = msg_buf;
-			}
+			pr_err("compression method %s not configured\n",
+			       compress_name);
+			error("decompressor failed");
 		} else
 			error("invalid magic at start of compressed archive");
 		if (state != Reset)
@@ -536,9 +574,9 @@ static char * __init unpack_to_rootfs(char *buf, unsigned long len)
 		len -= my_inptr;
 	}
 	dir_utime();
-	kfree(name_buf);
-	kfree(symlink_buf);
-	kfree(header_buf);
+	/* free any hardlink state collected without optional TRAILER!!! */
+	free_hash();
+	kfree(bufs);
 	return message;
 }
 
@@ -574,12 +612,14 @@ extern unsigned long __initramfs_size;
 #include <linux/initrd.h>
 #include <linux/kexec.h>
 
+static BIN_ATTR(initrd, 0440, sysfs_bin_attr_simple_read, NULL, 0);
+
 void __init reserve_initrd_mem(void)
 {
 	phys_addr_t start;
 	unsigned long size;
 
-	/* Ignore the virtul address computed during device tree parsing */
+	/* Ignore the virtual address computed during device tree parsing */
 	initrd_start = initrd_end = 0;
 
 	if (!phys_initrd_size)
@@ -621,18 +661,11 @@ disable:
 
 void __weak __init free_initrd_mem(unsigned long start, unsigned long end)
 {
-#ifdef CONFIG_ARCH_KEEP_MEMBLOCK
-	unsigned long aligned_start = ALIGN_DOWN(start, PAGE_SIZE);
-	unsigned long aligned_end = ALIGN(end, PAGE_SIZE);
-
-	memblock_free((void *)aligned_start, aligned_end - aligned_start);
-#endif
-
 	free_reserved_area((void *)start, (void *)end, POISON_FREE_INITMEM,
 			"initrd");
 }
 
-#ifdef CONFIG_KEXEC_CORE
+#ifdef CONFIG_CRASH_RESERVE
 static bool __init kexec_free_initrd(void)
 {
 	unsigned long crashk_start = (unsigned long)__va(crashk_res.start);
@@ -669,11 +702,9 @@ static void __init populate_initrd_image(char *err)
 	struct file *file;
 	loff_t pos = 0;
 
-	unpack_to_rootfs(__initramfs_start, __initramfs_size);
-
 	printk(KERN_INFO "rootfs image is not initramfs (%s); looks like an initrd\n",
 			err);
-	file = filp_open("/initrd.image", O_WRONLY | O_CREAT, 0700);
+	file = filp_open("/initrd.image", O_WRONLY|O_CREAT|O_LARGEFILE, 0700);
 	if (IS_ERR(file))
 		return;
 
@@ -686,7 +717,7 @@ static void __init populate_initrd_image(char *err)
 }
 #endif /* CONFIG_BLK_DEV_RAM */
 
-static void __init do_populate_rootfs(void *unused, async_cookie_t cookie)
+static void __init unpack_initramfs(async_cookie_t cookie)
 {
 	/* Load the built in initramfs */
 	char *err = unpack_to_rootfs(__initramfs_start, __initramfs_size);
@@ -694,7 +725,7 @@ static void __init do_populate_rootfs(void *unused, async_cookie_t cookie)
 		panic_show_mem("%s", err); /* Failed to decompress INTERNAL initramfs */
 
 	if (!initrd_start || IS_ENABLED(CONFIG_INITRAMFS_FORCE))
-		goto done;
+		return;
 
 	if (IS_ENABLED(CONFIG_BLK_DEV_RAM))
 		printk(KERN_INFO "Trying to unpack rootfs image as initramfs...\n");
@@ -709,19 +740,31 @@ static void __init do_populate_rootfs(void *unused, async_cookie_t cookie)
 		printk(KERN_EMERG "Initramfs unpacking failed: %s\n", err);
 #endif
 	}
+}
 
-done:
+static void __init do_populate_rootfs(void *unused, async_cookie_t cookie)
+{
+	scoped_with_init_fs() {
+		unpack_initramfs(cookie);
+		security_initramfs_populated();
+	}
+
 	/*
 	 * If the initrd region is overlapped with crashkernel reserved region,
 	 * free only memory that is not part of crashkernel region.
 	 */
-	if (!do_retain_initrd && initrd_start && !kexec_free_initrd())
+	if (!do_retain_initrd && initrd_start && !kexec_free_initrd()) {
 		free_initrd_mem(initrd_start, initrd_end);
+	} else if (do_retain_initrd && initrd_start) {
+		bin_attr_initrd.size = initrd_end - initrd_start;
+		bin_attr_initrd.private = (void *)initrd_start;
+		if (sysfs_create_bin_file(firmware_kobj, &bin_attr_initrd))
+			pr_err("Failed to create initrd sysfs file");
+	}
 	initrd_start = 0;
 	initrd_end = 0;
 
-	flush_delayed_fput();
-	task_work_run();
+	init_flush_fput();
 }
 
 static ASYNC_DOMAIN_EXCLUSIVE(initramfs_domain);

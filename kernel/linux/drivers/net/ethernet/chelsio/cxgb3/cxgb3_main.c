@@ -83,7 +83,7 @@ enum {
 #define EEPROM_MAGIC 0x38E2F10C
 
 #define CH_DEVICE(devid, idx) \
-	{ PCI_VENDOR_ID_CHELSIO, devid, PCI_ANY_ID, PCI_ANY_ID, 0, 0, idx }
+	{ PCI_VDEVICE(CHELSIO, devid), .driver_data = idx }
 
 static const struct pci_device_id cxgb3_pci_tbl[] = {
 	CH_DEVICE(0x20, 0),	/* PE9000 */
@@ -99,7 +99,7 @@ static const struct pci_device_id cxgb3_pci_tbl[] = {
 	CH_DEVICE(0x35, 6),	/* T3C20-derived T3C10 */
 	CH_DEVICE(0x36, 3),	/* S320E-CR */
 	CH_DEVICE(0x37, 7),	/* N320E-G2 */
-	{0,}
+	{ }
 };
 
 MODULE_DESCRIPTION(DRV_DESC);
@@ -380,19 +380,18 @@ static irqreturn_t t3_async_intr_handler(int irq, void *cookie)
  */
 static void name_msix_vecs(struct adapter *adap)
 {
-	int i, j, msi_idx = 1, n = sizeof(adap->msix_info[0].desc) - 1;
+	int i, j, msi_idx = 1;
 
-	snprintf(adap->msix_info[0].desc, n, "%s", adap->name);
-	adap->msix_info[0].desc[n] = 0;
+	strscpy(adap->msix_info[0].desc, adap->name, sizeof(adap->msix_info[0].desc));
 
 	for_each_port(adap, j) {
 		struct net_device *d = adap->port[j];
 		const struct port_info *pi = netdev_priv(d);
 
 		for (i = 0; i < pi->nqsets; i++, msi_idx++) {
-			snprintf(adap->msix_info[msi_idx].desc, n,
+			snprintf(adap->msix_info[msi_idx].desc,
+				 sizeof(adap->msix_info[0].desc),
 				 "%s-%d", d->name, pi->first_qset + i);
-			adap->msix_info[msi_idx].desc[n] = 0;
 		}
 	}
 }
@@ -2560,7 +2559,7 @@ static int cxgb_change_mtu(struct net_device *dev, int new_mtu)
 
 	if ((ret = t3_mac_set_mtu(&pi->mac, new_mtu)))
 		return ret;
-	dev->mtu = new_mtu;
+	WRITE_ONCE(dev->mtu, new_mtu);
 	init_port_mtus(adapter);
 	if (adapter->params.rev == 0 && offload_running(adapter))
 		t3_load_mtus(adapter, adapter->params.mtus,
@@ -2934,7 +2933,6 @@ static int t3_reenable_adapter(struct adapter *adapter)
 	}
 	pci_set_master(adapter->pdev);
 	pci_restore_state(adapter->pdev);
-	pci_save_state(adapter->pdev);
 
 	/* Free sge resources */
 	t3_free_sge_resources(adapter);
@@ -3244,7 +3242,7 @@ static int init_one(struct pci_dev *pdev, const struct pci_device_id *ent)
 	mmio_len = pci_resource_len(pdev, 0);
 	ai = t3_get_adapter_info(ent->driver_data);
 
-	adapter = kzalloc(sizeof(*adapter), GFP_KERNEL);
+	adapter = kzalloc_obj(*adapter);
 	if (!adapter) {
 		err = -ENOMEM;
 		goto out_release_regions;

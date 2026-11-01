@@ -18,7 +18,7 @@
 #include <linux/crc32.h>
 #include <linux/slab.h>
 #include <linux/module.h>
-#include <asm/unaligned.h>
+#include <linux/unaligned.h>
 #include "smsc9420.h"
 
 #define DRV_NAME		"smsc9420"
@@ -26,6 +26,7 @@
 #define DRV_DESCRIPTION		"SMSC LAN9420 driver"
 #define DRV_VERSION		"1.01"
 
+MODULE_DESCRIPTION("SMSC LAN9420 Ethernet driver");
 MODULE_LICENSE("GPL");
 MODULE_VERSION(DRV_VERSION);
 
@@ -1178,9 +1179,7 @@ static int smsc9420_alloc_tx_ring(struct smsc9420_pdata *pd)
 
 	BUG_ON(!pd->tx_ring);
 
-	pd->tx_buffers = kmalloc_array(TX_RING_SIZE,
-				       sizeof(struct smsc9420_ring_info),
-				       GFP_KERNEL);
+	pd->tx_buffers = kmalloc_objs(struct smsc9420_ring_info, TX_RING_SIZE);
 	if (!pd->tx_buffers)
 		return -ENOMEM;
 
@@ -1211,9 +1210,7 @@ static int smsc9420_alloc_rx_ring(struct smsc9420_pdata *pd)
 
 	BUG_ON(!pd->rx_ring);
 
-	pd->rx_buffers = kmalloc_array(RX_RING_SIZE,
-				       sizeof(struct smsc9420_ring_info),
-				       GFP_KERNEL);
+	pd->rx_buffers = kmalloc_objs(struct smsc9420_ring_info, RX_RING_SIZE);
 	if (pd->rx_buffers == NULL)
 		goto out;
 

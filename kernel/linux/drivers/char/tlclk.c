@@ -42,11 +42,12 @@
 #include <linux/sysfs.h>
 #include <linux/device.h>
 #include <linux/miscdevice.h>
-#include <linux/platform_device.h>
+#include <linux/device/faux.h>
 #include <asm/io.h>		/* inb/outb */
 #include <linux/uaccess.h>
 
 MODULE_AUTHOR("Sebastien Bouchard <sebastien.bouchard@ca.kontron.com>");
+MODULE_DESCRIPTION("Telecom Clock driver for Intel NetStructure(tm) MPCBL0010");
 MODULE_LICENSE("GPL");
 
 /*Hardware Reset of the PLL */
@@ -263,6 +264,7 @@ static ssize_t tlclk_read(struct file *filp, char __user *buf, size_t count,
 }
 
 static const struct file_operations tlclk_fops = {
+	.owner = THIS_MODULE,
 	.read = tlclk_read,
 	.open = tlclk_open,
 	.release = tlclk_release,
@@ -326,7 +328,7 @@ static DEVICE_ATTR(alarms, S_IRUGO, show_alarms, NULL);
 static ssize_t store_received_ref_clk3a(struct device *d,
 		 struct device_attribute *attr, const char *buf, size_t count)
 {
-	unsigned long tmp;
+	unsigned long tmp = 0;
 	unsigned char val;
 	unsigned long flags;
 
@@ -348,7 +350,7 @@ static DEVICE_ATTR(received_ref_clk3a, (S_IWUSR|S_IWGRP), NULL,
 static ssize_t store_received_ref_clk3b(struct device *d,
 		 struct device_attribute *attr, const char *buf, size_t count)
 {
-	unsigned long tmp;
+	unsigned long tmp = 0;
 	unsigned char val;
 	unsigned long flags;
 
@@ -370,7 +372,7 @@ static DEVICE_ATTR(received_ref_clk3b, (S_IWUSR|S_IWGRP), NULL,
 static ssize_t store_enable_clk3b_output(struct device *d,
 		 struct device_attribute *attr, const char *buf, size_t count)
 {
-	unsigned long tmp;
+	unsigned long tmp = 0;
 	unsigned char val;
 	unsigned long flags;
 
@@ -392,7 +394,7 @@ static ssize_t store_enable_clk3a_output(struct device *d,
 		 struct device_attribute *attr, const char *buf, size_t count)
 {
 	unsigned long flags;
-	unsigned long tmp;
+	unsigned long tmp = 0;
 	unsigned char val;
 
 	sscanf(buf, "%lX", &tmp);
@@ -413,7 +415,7 @@ static ssize_t store_enable_clkb1_output(struct device *d,
 		 struct device_attribute *attr, const char *buf, size_t count)
 {
 	unsigned long flags;
-	unsigned long tmp;
+	unsigned long tmp = 0;
 	unsigned char val;
 
 	sscanf(buf, "%lX", &tmp);
@@ -435,7 +437,7 @@ static ssize_t store_enable_clka1_output(struct device *d,
 		 struct device_attribute *attr, const char *buf, size_t count)
 {
 	unsigned long flags;
-	unsigned long tmp;
+	unsigned long tmp = 0;
 	unsigned char val;
 
 	sscanf(buf, "%lX", &tmp);
@@ -456,7 +458,7 @@ static ssize_t store_enable_clkb0_output(struct device *d,
 		 struct device_attribute *attr, const char *buf, size_t count)
 {
 	unsigned long flags;
-	unsigned long tmp;
+	unsigned long tmp = 0;
 	unsigned char val;
 
 	sscanf(buf, "%lX", &tmp);
@@ -477,7 +479,7 @@ static ssize_t store_enable_clka0_output(struct device *d,
 		 struct device_attribute *attr, const char *buf, size_t count)
 {
 	unsigned long flags;
-	unsigned long tmp;
+	unsigned long tmp = 0;
 	unsigned char val;
 
 	sscanf(buf, "%lX", &tmp);
@@ -498,7 +500,7 @@ static ssize_t store_select_amcb2_transmit_clock(struct device *d,
 		struct device_attribute *attr, const char *buf, size_t count)
 {
 	unsigned long flags;
-	unsigned long tmp;
+	unsigned long tmp = 0;
 	unsigned char val;
 
 	sscanf(buf, "%lX", &tmp);
@@ -539,7 +541,7 @@ static DEVICE_ATTR(select_amcb2_transmit_clock, (S_IWUSR|S_IWGRP), NULL,
 static ssize_t store_select_amcb1_transmit_clock(struct device *d,
 		 struct device_attribute *attr, const char *buf, size_t count)
 {
-	unsigned long tmp;
+	unsigned long tmp = 0;
 	unsigned char val;
 	unsigned long flags;
 
@@ -581,7 +583,7 @@ static DEVICE_ATTR(select_amcb1_transmit_clock, (S_IWUSR|S_IWGRP), NULL,
 static ssize_t store_select_redundant_clock(struct device *d,
 		 struct device_attribute *attr, const char *buf, size_t count)
 {
-	unsigned long tmp;
+	unsigned long tmp = 0;
 	unsigned char val;
 	unsigned long flags;
 
@@ -602,7 +604,7 @@ static DEVICE_ATTR(select_redundant_clock, (S_IWUSR|S_IWGRP), NULL,
 static ssize_t store_select_ref_frequency(struct device *d,
 		 struct device_attribute *attr, const char *buf, size_t count)
 {
-	unsigned long tmp;
+	unsigned long tmp = 0;
 	unsigned char val;
 	unsigned long flags;
 
@@ -623,7 +625,7 @@ static DEVICE_ATTR(select_ref_frequency, (S_IWUSR|S_IWGRP), NULL,
 static ssize_t store_filter_select(struct device *d,
 		 struct device_attribute *attr, const char *buf, size_t count)
 {
-	unsigned long tmp;
+	unsigned long tmp = 0;
 	unsigned char val;
 	unsigned long flags;
 
@@ -643,7 +645,7 @@ static DEVICE_ATTR(filter_select, (S_IWUSR|S_IWGRP), NULL, store_filter_select);
 static ssize_t store_hardware_switching_mode(struct device *d,
 		 struct device_attribute *attr, const char *buf, size_t count)
 {
-	unsigned long tmp;
+	unsigned long tmp = 0;
 	unsigned char val;
 	unsigned long flags;
 
@@ -664,7 +666,7 @@ static DEVICE_ATTR(hardware_switching_mode, (S_IWUSR|S_IWGRP), NULL,
 static ssize_t store_hardware_switching(struct device *d,
 		 struct device_attribute *attr, const char *buf, size_t count)
 {
-	unsigned long tmp;
+	unsigned long tmp = 0;
 	unsigned char val;
 	unsigned long flags;
 
@@ -685,7 +687,7 @@ static DEVICE_ATTR(hardware_switching, (S_IWUSR|S_IWGRP), NULL,
 static ssize_t store_refalign (struct device *d,
 		 struct device_attribute *attr, const char *buf, size_t count)
 {
-	unsigned long tmp;
+	unsigned long tmp = 0;
 	unsigned long flags;
 
 	sscanf(buf, "%lX", &tmp);
@@ -704,7 +706,7 @@ static DEVICE_ATTR(refalign, (S_IWUSR|S_IWGRP), NULL, store_refalign);
 static ssize_t store_mode_select (struct device *d,
 		 struct device_attribute *attr, const char *buf, size_t count)
 {
-	unsigned long tmp;
+	unsigned long tmp = 0;
 	unsigned char val;
 	unsigned long flags;
 
@@ -724,7 +726,7 @@ static DEVICE_ATTR(mode_select, (S_IWUSR|S_IWGRP), NULL, store_mode_select);
 static ssize_t store_reset (struct device *d,
 		 struct device_attribute *attr, const char *buf, size_t count)
 {
-	unsigned long tmp;
+	unsigned long tmp = 0;
 	unsigned char val;
 	unsigned long flags;
 
@@ -741,7 +743,7 @@ static ssize_t store_reset (struct device *d,
 
 static DEVICE_ATTR(reset, (S_IWUSR|S_IWGRP), NULL, store_reset);
 
-static struct attribute *tlclk_sysfs_entries[] = {
+static struct attribute *tlclk_attrs[] = {
 	&dev_attr_current_ref.attr,
 	&dev_attr_telclock_version.attr,
 	&dev_attr_alarms.attr,
@@ -765,13 +767,9 @@ static struct attribute *tlclk_sysfs_entries[] = {
 	&dev_attr_reset.attr,
 	NULL
 };
+ATTRIBUTE_GROUPS(tlclk);
 
-static const struct attribute_group tlclk_attribute_group = {
-	.name = NULL,		/* put in device directory */
-	.attrs = tlclk_sysfs_entries,
-};
-
-static struct platform_device *tlclk_device;
+static struct faux_device *tlclk_device;
 
 static int __init tlclk_init(void)
 {
@@ -779,7 +777,7 @@ static int __init tlclk_init(void)
 
 	telclk_interrupt = (inb(TLCLK_REG7) & 0x0f);
 
-	alarm_events = kzalloc( sizeof(struct tlclk_alarms), GFP_KERNEL);
+	alarm_events = kzalloc_obj(struct tlclk_alarms);
 	if (!alarm_events) {
 		ret = -ENOMEM;
 		goto out1;
@@ -816,24 +814,13 @@ static int __init tlclk_init(void)
 		goto out3;
 	}
 
-	tlclk_device = platform_device_register_simple("telco_clock",
-				-1, NULL, 0);
-	if (IS_ERR(tlclk_device)) {
-		printk(KERN_ERR "tlclk: platform_device_register failed.\n");
-		ret = PTR_ERR(tlclk_device);
+	tlclk_device = faux_device_create_with_groups("telco_clock", NULL, NULL, tlclk_groups);
+	if (!tlclk_device) {
+		ret = -ENODEV;
 		goto out4;
 	}
 
-	ret = sysfs_create_group(&tlclk_device->dev.kobj,
-			&tlclk_attribute_group);
-	if (ret) {
-		printk(KERN_ERR "tlclk: failed to create sysfs device attributes.\n");
-		goto out5;
-	}
-
 	return 0;
-out5:
-	platform_device_unregister(tlclk_device);
 out4:
 	misc_deregister(&tlclk_miscdev);
 out3:
@@ -847,13 +834,15 @@ out1:
 
 static void __exit tlclk_cleanup(void)
 {
-	sysfs_remove_group(&tlclk_device->dev.kobj, &tlclk_attribute_group);
-	platform_device_unregister(tlclk_device);
+	faux_device_destroy(tlclk_device);
 	misc_deregister(&tlclk_miscdev);
 	unregister_chrdev(tlclk_major, "telco_clock");
 
+	got_event = 1;
+	wake_up_all(&wq);
+
 	release_region(TLCLK_BASE, 8);
-	del_timer_sync(&switchover_timer);
+	timer_delete_sync(&switchover_timer);
 	kfree(alarm_events);
 
 }
@@ -871,7 +860,7 @@ static void switchover_timeout(struct timer_list *unused)
 	}
 
 	/* Alarm processing is done, wake up read task */
-	del_timer(&switchover_timer);
+	timer_delete(&switchover_timer);
 	got_event = 1;
 	wake_up(&wq);
 }

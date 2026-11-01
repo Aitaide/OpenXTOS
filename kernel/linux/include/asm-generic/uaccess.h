@@ -11,7 +11,7 @@
 #include <asm-generic/access_ok.h>
 
 #ifdef CONFIG_UACCESS_MEMCPY
-#include <asm/unaligned.h>
+#include <linux/unaligned.h>
 
 static __always_inline int
 __get_user_fn(size_t size, const void __user *from, void *to)
@@ -91,8 +91,7 @@ raw_copy_to_user(void __user *to, const void *from, unsigned long n)
 	memcpy((void __force *)to, from, n);
 	return 0;
 }
-#define INLINE_COPY_FROM_USER
-#define INLINE_COPY_TO_USER
+#define INLINE_COPY_USER
 #endif /* CONFIG_UACCESS_MEMCPY */
 
 /*

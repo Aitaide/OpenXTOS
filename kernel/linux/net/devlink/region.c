@@ -50,7 +50,7 @@ devlink_port_region_get_by_name(struct devlink_port *port,
 	struct devlink_region *region;
 
 	list_for_each_entry(region, &port->region_list, list)
-		if (!strcmp(region->ops->name, region_name))
+		if (!strcmp(region->port_ops->name, region_name))
 			return region;
 
 	return NULL;
@@ -77,7 +77,7 @@ static int devlink_nl_region_snapshot_id_put(struct sk_buff *msg,
 
 	snap_attr = nla_nest_start_noflag(msg, DEVLINK_ATTR_REGION_SNAPSHOT);
 	if (!snap_attr)
-		return -EINVAL;
+		return -EMSGSIZE;
 
 	err = nla_put_u32(msg, DEVLINK_ATTR_REGION_SNAPSHOT_ID, snapshot->id);
 	if (err)
@@ -102,7 +102,7 @@ static int devlink_nl_region_snapshots_id_put(struct sk_buff *msg,
 	snapshots_attr = nla_nest_start_noflag(msg,
 					       DEVLINK_ATTR_REGION_SNAPSHOTS);
 	if (!snapshots_attr)
-		return -EINVAL;
+		return -EMSGSIZE;
 
 	list_for_each_entry(snapshot, &region->snapshot_list, list) {
 		err = devlink_nl_region_snapshot_id_put(msg, devlink, snapshot);
@@ -145,9 +145,7 @@ static int devlink_nl_region_fill(struct sk_buff *msg, struct devlink *devlink,
 	if (err)
 		goto nla_put_failure;
 
-	err = nla_put_u64_64bit(msg, DEVLINK_ATTR_REGION_SIZE,
-				region->size,
-				DEVLINK_ATTR_PAD);
+	err = devlink_nl_put_u64(msg, DEVLINK_ATTR_REGION_SIZE, region->size);
 	if (err)
 		goto nla_put_failure;
 
@@ -210,8 +208,8 @@ devlink_nl_region_notify_build(struct devlink_region *region,
 		if (err)
 			goto out_cancel_msg;
 	} else {
-		err = nla_put_u64_64bit(msg, DEVLINK_ATTR_REGION_SIZE,
-					region->size, DEVLINK_ATTR_PAD);
+		err = devlink_nl_put_u64(msg, DEVLINK_ATTR_REGION_SIZE,
+					 region->size);
 		if (err)
 			goto out_cancel_msg;
 	}
@@ -234,15 +232,15 @@ static void devlink_nl_region_notify(struct devlink_region *region,
 	struct sk_buff *msg;
 
 	WARN_ON(cmd != DEVLINK_CMD_REGION_NEW && cmd != DEVLINK_CMD_REGION_DEL);
-	if (!xa_get_mark(&devlinks, devlink->index, DEVLINK_REGISTERED))
+
+	if (!__devl_is_registered(devlink) || !devlink_nl_notify_need(devlink))
 		return;
 
 	msg = devlink_nl_region_notify_build(region, snapshot, cmd, 0, 0);
 	if (IS_ERR(msg))
 		return;
 
-	genlmsg_multicast_netns(&devlink_nl_family, devlink_net(devlink), msg,
-				0, DEVLINK_MCGRP_CONFIG, GFP_KERNEL);
+	devlink_nl_notify_send(devlink, msg);
 }
 
 void devlink_regions_notify_register(struct devlink *devlink)
@@ -430,7 +428,7 @@ __devlink_region_snapshot_create(struct devlink_region *region,
 	if (devlink_region_snapshot_get_by_id(region, snapshot_id))
 		return -EEXIST;
 
-	snapshot = kzalloc(sizeof(*snapshot), GFP_KERNEL);
+	snapshot = kzalloc_obj(*snapshot);
 	if (!snapshot)
 		return -ENOMEM;
 
@@ -471,7 +469,7 @@ static void devlink_region_snapshot_del(struct devlink_region *region,
 
 int devlink_nl_region_get_doit(struct sk_buff *skb, struct genl_info *info)
 {
-	struct devlink *devlink = info->user_ptr[0];
+	struct devlink *devlink = devlink_nl_ctx(info)->devlink;
 	struct devlink_port *port = NULL;
 	struct devlink_region *region;
 	const char *region_name;
@@ -588,9 +586,9 @@ int devlink_nl_region_get_dumpit(struct sk_buff *skb,
 	return devlink_nl_dumpit(skb, cb, devlink_nl_region_get_dump_one);
 }
 
-int devlink_nl_cmd_region_del(struct sk_buff *skb, struct genl_info *info)
+int devlink_nl_region_del_doit(struct sk_buff *skb, struct genl_info *info)
 {
-	struct devlink *devlink = info->user_ptr[0];
+	struct devlink *devlink = devlink_nl_ctx(info)->devlink;
 	struct devlink_snapshot *snapshot;
 	struct devlink_port *port = NULL;
 	struct devlink_region *region;
@@ -633,9 +631,9 @@ int devlink_nl_cmd_region_del(struct sk_buff *skb, struct genl_info *info)
 	return 0;
 }
 
-int devlink_nl_cmd_region_new(struct sk_buff *skb, struct genl_info *info)
+int devlink_nl_region_new_doit(struct sk_buff *skb, struct genl_info *info)
 {
-	struct devlink *devlink = info->user_ptr[0];
+	struct devlink *devlink = devlink_nl_ctx(info)->devlink;
 	struct devlink_snapshot *snapshot;
 	struct devlink_port *port = NULL;
 	struct nlattr *snapshot_id_attr;
@@ -773,8 +771,7 @@ static int devlink_nl_cmd_region_read_chunk_fill(struct sk_buff *msg,
 	if (err)
 		goto nla_put_failure;
 
-	err = nla_put_u64_64bit(msg, DEVLINK_ATTR_REGION_CHUNK_ADDR, addr,
-				DEVLINK_ATTR_PAD);
+	err = devlink_nl_put_u64(msg, DEVLINK_ATTR_REGION_CHUNK_ADDR, addr);
 	if (err)
 		goto nla_put_failure;
 
@@ -863,8 +860,8 @@ devlink_region_direct_fill(void *cb_priv, u8 *chunk, u32 chunk_size,
 				 curr_offset, chunk_size, chunk);
 }
 
-int devlink_nl_cmd_region_read_dumpit(struct sk_buff *skb,
-				      struct netlink_callback *cb)
+int devlink_nl_region_read_dumpit(struct sk_buff *skb,
+				  struct netlink_callback *cb)
 {
 	const struct genl_dumpit_info *info = genl_dumpit_info(cb);
 	struct devlink_nl_dump_state *state = devlink_dump_state(cb);
@@ -883,7 +880,8 @@ int devlink_nl_cmd_region_read_dumpit(struct sk_buff *skb,
 
 	start_offset = state->start_offset;
 
-	devlink = devlink_get_from_attrs_lock(sock_net(cb->skb->sk), attrs);
+	devlink = devlink_get_from_attrs_lock(sock_net(cb->skb->sk), attrs,
+					      false);
 	if (IS_ERR(devlink))
 		return PTR_ERR(devlink);
 
@@ -1057,7 +1055,7 @@ struct devlink_region *devl_region_create(struct devlink *devlink,
 	if (devlink_region_get_by_name(devlink, ops->name))
 		return ERR_PTR(-EEXIST);
 
-	region = kzalloc(sizeof(*region), GFP_KERNEL);
+	region = kzalloc_obj(*region);
 	if (!region)
 		return ERR_PTR(-ENOMEM);
 
@@ -1130,7 +1128,7 @@ devlink_port_region_create(struct devlink_port *port,
 		goto unlock;
 	}
 
-	region = kzalloc(sizeof(*region), GFP_KERNEL);
+	region = kzalloc_obj(*region);
 	if (!region) {
 		err = -ENOMEM;
 		goto unlock;

@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: ISC
+// SPDX-License-Identifier: BSD-3-Clause-Clear
 /* Copyright (C) 2021 MediaTek Inc. */
 
 #include "mt7921.h"
@@ -34,9 +34,9 @@ int mt7921e_tx_prepare_skb(struct mt76_dev *mdev, void *txwi_ptr,
 	if (sta) {
 		struct mt792x_sta *msta = (struct mt792x_sta *)sta->drv_priv;
 
-		if (time_after(jiffies, msta->last_txs + HZ / 4)) {
+		if (time_after(jiffies, msta->deflink.last_txs + HZ / 4)) {
 			info->flags |= IEEE80211_TX_CTL_REQ_TX_STATUS;
-			msta->last_txs = jiffies;
+			msta->deflink.last_txs = jiffies;
 		}
 	}
 
@@ -48,7 +48,7 @@ int mt7921e_tx_prepare_skb(struct mt76_dev *mdev, void *txwi_ptr,
 	memset(txp, 0, sizeof(struct mt76_connac_hw_txp));
 	mt76_connac_write_hw_txp(mdev, tx_info, txp, id);
 
-	tx_info->skb = DMA_DUMMY_DATA;
+	tx_info->skb = NULL;
 
 	return 0;
 }
@@ -64,7 +64,6 @@ int mt7921e_mac_reset(struct mt792x_dev *dev)
 	mt76_wr(dev, dev->irq_map->host_irq_enable, 0);
 	mt76_wr(dev, MT_PCIE_MAC_INT_ENABLE, 0x0);
 
-	set_bit(MT76_RESET, &dev->mphy.state);
 	set_bit(MT76_MCU_RESET, &dev->mphy.state);
 	wake_up(&dev->mt76.mcu.wait);
 	skb_queue_purge(&dev->mt76.mcu.res_q);
@@ -72,9 +71,9 @@ int mt7921e_mac_reset(struct mt792x_dev *dev)
 	mt76_txq_schedule_all(&dev->mphy);
 
 	mt76_worker_disable(&dev->mt76.tx_worker);
-	napi_disable(&dev->mt76.napi[MT_RXQ_MAIN]);
-	napi_disable(&dev->mt76.napi[MT_RXQ_MCU]);
-	napi_disable(&dev->mt76.napi[MT_RXQ_MCU_WA]);
+	mt76_for_each_q_rx(&dev->mt76, i) {
+		napi_disable(&dev->mt76.napi[i]);
+	}
 	napi_disable(&dev->mt76.tx_napi);
 
 	mt76_connac2_tx_token_put(&dev->mt76);
@@ -82,9 +81,12 @@ int mt7921e_mac_reset(struct mt792x_dev *dev)
 
 	mt792x_wpdma_reset(dev, true);
 
-	local_bh_disable();
 	mt76_for_each_q_rx(&dev->mt76, i) {
 		napi_enable(&dev->mt76.napi[i]);
+	}
+
+	local_bh_disable();
+	mt76_for_each_q_rx(&dev->mt76, i) {
 		napi_schedule(&dev->mt76.napi[i]);
 	}
 	local_bh_enable();
@@ -94,7 +96,8 @@ int mt7921e_mac_reset(struct mt792x_dev *dev)
 
 	mt76_wr(dev, dev->irq_map->host_irq_enable,
 		dev->irq_map->tx.all_complete_mask |
-		MT_INT_RX_DONE_ALL | MT_INT_MCU_CMD);
+		dev->irq_map->rx.all_complete_mask |
+		MT_INT_MCU_CMD);
 	mt76_wr(dev, MT_PCIE_MAC_INT_ENABLE, 0xff);
 
 	err = mt7921e_driver_own(dev);
@@ -115,10 +118,9 @@ int mt7921e_mac_reset(struct mt792x_dev *dev)
 
 	err = __mt7921_start(&dev->phy);
 out:
-	clear_bit(MT76_RESET, &dev->mphy.state);
 
-	local_bh_disable();
 	napi_enable(&dev->mt76.tx_napi);
+	local_bh_disable();
 	napi_schedule(&dev->mt76.tx_napi);
 	local_bh_enable();
 

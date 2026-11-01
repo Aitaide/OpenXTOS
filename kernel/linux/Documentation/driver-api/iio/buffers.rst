@@ -15,8 +15,8 @@ trigger source. Multiple data channels can be read at once from
 IIO buffer sysfs interface
 ==========================
 An IIO buffer has an associated attributes directory under
-:file:`/sys/bus/iio/iio:device{X}/buffer/*`. Here are some of the existing
-attributes:
+:file:`/sys/bus/iio/devices/iio:device{X}/buffer/*`. Here are some of the
+existing attributes:
 
 * :file:`length`, the total number of data samples (capacity) that can be
   stored by the buffer.
@@ -28,8 +28,8 @@ IIO buffer setup
 The meta information associated with a channel reading placed in a buffer is
 called a scan element. The important bits configuring scan elements are
 exposed to userspace applications via the
-:file:`/sys/bus/iio/iio:device{X}/scan_elements/` directory. This directory contains
-attributes of the following form:
+:file:`/sys/bus/iio/devices/iio:device{X}/scan_elements/` directory. This
+directory contains attributes of the following form:
 
 * :file:`enable`, used for enabling a channel. If and only if its attribute
   is non *zero*, then a triggered capture will contain data samples for this
@@ -37,9 +37,10 @@ attributes of the following form:
 * :file:`index`, the scan_index of the channel.
 * :file:`type`, description of the scan element data storage within the buffer
   and hence the form in which it is read from user space.
-  Format is [be|le]:[s|u]bits/storagebits[Xrepeat][>>shift] .
+  Format is [be|le]:[f|s|u]bits/storagebits[Xrepeat][>>shift] .
 
   * *be* or *le*, specifies big or little endian.
+  * *f*, specifies if floating-point.
   * *s* or *u*, specifies if signed (2's complement) or unsigned.
   * *bits*, is the number of valid data bits.
   * *storagebits*, is the number of bits (after padding) that it occupies in the
@@ -78,7 +79,7 @@ fields in iio_chan_spec definition::
    /* other members */
            int scan_index
            struct {
-                   char sign;
+                   char format;
                    u8 realbits;
                    u8 storagebits;
                    u8 shift;
@@ -98,7 +99,7 @@ following channel definition::
 		   /* other stuff here */
 		   .scan_index = 0,
 		   .scan_type = {
-		           .sign = 's',
+		           .format = IIO_SCAN_FORMAT_SIGNED_INT,
 			   .realbits = 12,
 			   .storagebits = 16,
 			   .shift = 4,

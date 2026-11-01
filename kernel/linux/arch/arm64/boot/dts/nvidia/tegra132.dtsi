@@ -93,6 +93,8 @@
 		resets = <&tegra_car 28>;
 		reset-names = "host1x";
 
+		iommus = <&mc TEGRA_SWGROUP_HC>;
+
 		#address-cells = <2>;
 		#size-cells = <2>;
 
@@ -173,6 +175,7 @@
 
 	gic: interrupt-controller@50041000 {
 		compatible = "arm,cortex-a15-gic";
+		#address-cells = <0>;
 		#interrupt-cells = <3>;
 		interrupt-controller;
 		reg = <0x0 0x50041000 0x0 0x1000>,
@@ -269,7 +272,7 @@
 		interrupt-controller;
 	};
 
-	apbdma: dma@60020000 {
+	apbdma: dma-controller@60020000 {
 		compatible = "nvidia,tegra124-apbdma", "nvidia,tegra148-apbdma";
 		reg = <0x0 0x60020000 0x0 0x1400>;
 		interrupts = <GIC_SPI 104 IRQ_TYPE_LEVEL_HIGH>,
@@ -570,7 +573,7 @@
 		status = "disabled";
 	};
 
-	rtc@7000e000 {
+	tegra_rtc: rtc@7000e000 {
 		compatible = "nvidia,tegra124-rtc", "nvidia,tegra20-rtc";
 		reg = <0x0 0x7000e000 0x0 0x100>;
 		interrupts = <GIC_SPI 2 IRQ_TYPE_LEVEL_HIGH>;

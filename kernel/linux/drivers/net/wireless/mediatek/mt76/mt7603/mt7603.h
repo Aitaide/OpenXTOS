@@ -1,4 +1,4 @@
-/* SPDX-License-Identifier: ISC */
+/* SPDX-License-Identifier: BSD-3-Clause-Clear */
 
 #ifndef __MT7603_H
 #define __MT7603_H
@@ -80,6 +80,7 @@ struct mt7603_sta {
 	u8 smps;
 
 	u8 ps;
+	u8 ps_sleeping;
 };
 
 struct mt7603_vif {
@@ -213,6 +214,7 @@ void mt7603_mac_sta_poll(struct mt7603_dev *dev);
 
 void mt7603_pse_client_reset(struct mt7603_dev *dev);
 
+int mt7603_set_channel(struct mt76_phy *mphy);
 int mt7603_mcu_set_channel(struct mt7603_dev *dev);
 int mt7603_mcu_set_eeprom(struct mt7603_dev *dev);
 void mt7603_mcu_exit(struct mt7603_dev *dev);
@@ -228,6 +230,9 @@ int mt7603_wtbl_set_key(struct mt7603_dev *dev, int wcid,
 			struct ieee80211_key_conf *key);
 void mt7603_wtbl_set_ps(struct mt7603_dev *dev, struct mt7603_sta *sta,
 			bool enabled);
+void mt7603_wtbl_sta_ps(struct mt7603_dev *dev, struct mt7603_sta *sta,
+			bool ps);
+void mt7603_wtbl_restore_ps(struct mt7603_dev *dev, struct mt7603_sta *sta);
 void mt7603_wtbl_set_smps(struct mt7603_dev *dev, struct mt7603_sta *sta,
 			  bool enabled);
 void mt7603_filter_tx(struct mt7603_dev *dev, int mac_idx, int idx, bool abort);
@@ -245,8 +250,8 @@ void mt7603_rx_poll_complete(struct mt76_dev *mdev, enum mt76_rxq_id q);
 void mt7603_sta_ps(struct mt76_dev *mdev, struct ieee80211_sta *sta, bool ps);
 int mt7603_sta_add(struct mt76_dev *mdev, struct ieee80211_vif *vif,
 		   struct ieee80211_sta *sta);
-void mt7603_sta_assoc(struct mt76_dev *mdev, struct ieee80211_vif *vif,
-		      struct ieee80211_sta *sta);
+int mt7603_sta_event(struct mt76_dev *mdev, struct ieee80211_vif *vif,
+		     struct ieee80211_sta *sta, enum mt76_sta_event ev);
 void mt7603_sta_remove(struct mt76_dev *mdev, struct ieee80211_vif *vif,
 		       struct ieee80211_sta *sta);
 

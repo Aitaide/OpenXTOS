@@ -293,9 +293,20 @@ static int ufs_hisi_link_startup_notify(struct ufs_hba *hba,
 	return err;
 }
 
-static void ufs_hisi_set_dev_cap(struct ufs_dev_params *hisi_param)
+static void ufs_hisi_set_dev_cap(struct ufs_host_params *host_params)
 {
-	ufshcd_init_pwr_dev_param(hisi_param);
+	ufshcd_init_host_params(host_params);
+}
+
+static int ufs_hisi_negotiate_pwr_mode(struct ufs_hba *hba,
+				       const struct ufs_pa_layer_attr *dev_max_params,
+				       struct ufs_pa_layer_attr *dev_req_params)
+{
+	struct ufs_host_params host_params;
+
+	ufs_hisi_set_dev_cap(&host_params);
+
+	return ufshcd_negotiate_pwr_params(&host_params, dev_max_params, dev_req_params);
 }
 
 static void ufs_hisi_pwr_change_pre_change(struct ufs_hba *hba)
@@ -361,11 +372,9 @@ static void ufs_hisi_pwr_change_pre_change(struct ufs_hba *hba)
 }
 
 static int ufs_hisi_pwr_change_notify(struct ufs_hba *hba,
-				       enum ufs_notify_change_status status,
-				       struct ufs_pa_layer_attr *dev_max_params,
-				       struct ufs_pa_layer_attr *dev_req_params)
+				enum ufs_notify_change_status status,
+				struct ufs_pa_layer_attr *dev_req_params)
 {
-	struct ufs_dev_params ufs_hisi_cap;
 	int ret = 0;
 
 	if (!dev_req_params) {
@@ -377,15 +386,6 @@ static int ufs_hisi_pwr_change_notify(struct ufs_hba *hba,
 
 	switch (status) {
 	case PRE_CHANGE:
-		ufs_hisi_set_dev_cap(&ufs_hisi_cap);
-		ret = ufshcd_get_pwr_dev_param(&ufs_hisi_cap,
-					       dev_max_params, dev_req_params);
-		if (ret) {
-			dev_err(hba->dev,
-			    "%s: failed to determine capabilities\n", __func__);
-			goto out;
-		}
-
 		ufs_hisi_pwr_change_pre_change(hba);
 		break;
 	case POST_CHANGE:
@@ -544,6 +544,7 @@ static const struct ufs_hba_variant_ops ufs_hba_hi3660_vops = {
 	.name = "hi3660",
 	.init = ufs_hi3660_init,
 	.link_startup_notify = ufs_hisi_link_startup_notify,
+	.negotiate_pwr_mode = ufs_hisi_negotiate_pwr_mode,
 	.pwr_change_notify = ufs_hisi_pwr_change_notify,
 	.suspend = ufs_hisi_suspend,
 	.resume = ufs_hisi_resume,
@@ -553,6 +554,7 @@ static const struct ufs_hba_variant_ops ufs_hba_hi3670_vops = {
 	.name = "hi3670",
 	.init = ufs_hi3670_init,
 	.link_startup_notify = ufs_hisi_link_startup_notify,
+	.negotiate_pwr_mode = ufs_hisi_negotiate_pwr_mode,
 	.pwr_change_notify = ufs_hisi_pwr_change_notify,
 	.suspend = ufs_hisi_suspend,
 	.resume = ufs_hisi_resume,
@@ -575,12 +577,9 @@ static int ufs_hisi_probe(struct platform_device *pdev)
 	return ufshcd_pltfrm_init(pdev, of_id->data);
 }
 
-static int ufs_hisi_remove(struct platform_device *pdev)
+static void ufs_hisi_remove(struct platform_device *pdev)
 {
-	struct ufs_hba *hba =  platform_get_drvdata(pdev);
-
-	ufshcd_remove(hba);
-	return 0;
+	ufshcd_pltfrm_remove(pdev);
 }
 
 static const struct dev_pm_ops ufs_hisi_pm_ops = {
@@ -592,7 +591,7 @@ static const struct dev_pm_ops ufs_hisi_pm_ops = {
 
 static struct platform_driver ufs_hisi_pltform = {
 	.probe	= ufs_hisi_probe,
-	.remove	= ufs_hisi_remove,
+	.remove = ufs_hisi_remove,
 	.driver	= {
 		.name	= "ufshcd-hisi",
 		.pm	= &ufs_hisi_pm_ops,

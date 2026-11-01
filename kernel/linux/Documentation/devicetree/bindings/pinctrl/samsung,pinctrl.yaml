@@ -18,7 +18,7 @@ description: |
   All the pin controller nodes should be represented in the aliases node using
   the following format 'pinctrl{n}' where n is a unique number for the alias.
 
-  The controller supports three types of interrupts::
+  The controller supports three types of interrupts:
    - External GPIO interrupts (see interrupts property in pin controller node);
 
    - External wake-up interrupts - multiplexed (capable of waking up the system
@@ -35,12 +35,12 @@ properties:
 
   compatible:
     enum:
-      - samsung,s3c2412-pinctrl
-      - samsung,s3c2416-pinctrl
-      - samsung,s3c2440-pinctrl
-      - samsung,s3c2450-pinctrl
+      - axis,artpec8-pinctrl
+      - axis,artpec9-pinctrl
+      - google,gs101-pinctrl
       - samsung,s3c64xx-pinctrl
       - samsung,s5pv210-pinctrl
+      - samsung,exynos2200-pinctrl
       - samsung,exynos3250-pinctrl
       - samsung,exynos4210-pinctrl
       - samsung,exynos4x12-pinctrl
@@ -50,9 +50,17 @@ properties:
       - samsung,exynos5420-pinctrl
       - samsung,exynos5433-pinctrl
       - samsung,exynos7-pinctrl
+      - samsung,exynos7870-pinctrl
       - samsung,exynos7885-pinctrl
       - samsung,exynos850-pinctrl
+      - samsung,exynos8855-pinctrl
+      - samsung,exynos8890-pinctrl
+      - samsung,exynos8895-pinctrl
+      - samsung,exynos9610-pinctrl
+      - samsung,exynos9810-pinctrl
+      - samsung,exynos990-pinctrl
       - samsung,exynosautov9-pinctrl
+      - samsung,exynosautov920-pinctrl
       - tesla,fsd-pinctrl
 
   interrupts:
@@ -70,6 +78,13 @@ properties:
       Only certain banks of certain pin controller might need it.
     minItems: 1
     maxItems: 2
+
+  clocks:
+    maxItems: 1
+
+  clock-names:
+    items:
+      - const: pclk
 
   wakeup-interrupt-controller:
     $ref: samsung,pinctrl-wakeup-interrupt.yaml
@@ -118,6 +133,22 @@ required:
 
 allOf:
   - $ref: pinctrl.yaml#
+  - if:
+      properties:
+        compatible:
+          contains:
+            enum:
+              - google,gs101-pinctrl
+              - samsung,exynos8890-pinctrl
+    then:
+      required:
+        - clocks
+        - clock-names
+    else:
+      properties:
+        clocks: false
+        clock-names: false
+
   - if:
       properties:
         compatible:
@@ -313,7 +344,8 @@ examples:
         pinctrl-0 = <&initial_alive>;
 
         wakeup-interrupt-controller {
-            compatible = "samsung,exynos7-wakeup-eint";
+            compatible = "samsung,exynos5433-wakeup-eint",
+                         "samsung,exynos7-wakeup-eint";
             interrupts = <GIC_SPI 16 IRQ_TYPE_LEVEL_HIGH>;
         };
 

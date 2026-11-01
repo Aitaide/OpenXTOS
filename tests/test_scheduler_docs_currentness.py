@@ -26,7 +26,9 @@ class SchedulerDocumentationStatusTests(unittest.TestCase):
 
         baseline = json.loads((ROOT / 'docs/scheduler-class-baseline.json').read_text())
         self.assertFalse(baseline['helper_is_sched_class'])
-        self.assertEqual(baseline['class_order'], ['stop', 'dl', 'rt', 'fair', 'idle'])
+        linker = (ROOT / 'kernel/linux/include/asm-generic/vmlinux.lds.h').read_text()
+        sched_data = linker.split('#define SCHED_DATA', 1)[1].split('__sched_class_lowest', 1)[0]
+        self.assertEqual(baseline['class_order'], re.findall(r'__([a-z]+)_sched_class', sched_data))
         for relative, evidence in baseline['files'].items():
             with self.subTest(path=relative):
                 self.assertEqual(hashlib.sha256((ROOT / relative).read_bytes()).hexdigest(), evidence['sha256'])

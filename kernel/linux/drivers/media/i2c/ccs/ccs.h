@@ -13,6 +13,7 @@
 #define __CCS_H__
 
 #include <linux/mutex.h>
+#include <linux/regmap.h>
 #include <media/v4l2-ctrls.h>
 #include <media/v4l2-subdev.h>
 
@@ -42,8 +43,12 @@
 #define SMIAPP_RESET_DELAY(clk)				\
 	(1000 +	(SMIAPP_RESET_DELAY_CLOCKS * 1000	\
 		 + (clk) / 1000 - 1) / ((clk) / 1000))
+#define CCS_RESET_DELAY_US		5000
+#define CCS_RESET_TIMEOUT_US		1000000
 
 #define CCS_COLOUR_COMPONENTS		4
+
+#define CCS_DEFAULT_COMPRESSED_DT	MIPI_CSI2_DT_USER_DEFINED(0)
 
 #define SMIAPP_NAME			"smiapp"
 #define CCS_NAME			"ccs"
@@ -174,6 +179,8 @@ struct ccs_csi_data_format {
 #define CCS_PAD_SRC			1
 #define CCS_PADS			2
 
+#define CCS_STREAM_PIXEL		0
+
 struct ccs_binning_subtype {
 	u8 horizontal:4;
 	u8 vertical:4;
@@ -182,9 +189,6 @@ struct ccs_binning_subtype {
 struct ccs_subdev {
 	struct v4l2_subdev sd;
 	struct media_pad pads[CCS_PADS];
-	struct v4l2_rect sink_fmt;
-	struct v4l2_rect crop[CCS_PADS];
-	struct v4l2_rect compose; /* compose on sink */
 	unsigned short sink_pad;
 	unsigned short source_pad;
 	int npads;
@@ -214,21 +218,16 @@ struct ccs_sensor {
 	struct clk *ext_clk;
 	struct gpio_desc *xshutdown;
 	struct gpio_desc *reset;
+	struct regmap *regmap;
 	void *ccs_limits;
 	u8 nbinning_subtypes;
 	struct ccs_binning_subtype binning_subtypes[CCS_LIM_BINNING_SUB_TYPE_MAX_N + 1];
-	u32 mbus_frame_fmts;
+	u64 mbus_frame_fmts;
 	const struct ccs_csi_data_format *csi_format;
 	const struct ccs_csi_data_format *internal_csi_format;
-	u32 default_mbus_frame_fmts;
+	u64 default_mbus_frame_fmts;
 	int default_pixel_order;
 	struct ccs_data_container sdata, mdata;
-
-	u8 binning_horizontal;
-	u8 binning_vertical;
-
-	u8 scale_m;
-	u8 scaling_mode;
 
 	u8 frame_skip;
 	u16 embedded_start; /* embedded data start line */
@@ -236,8 +235,9 @@ struct ccs_sensor {
 	u16 image_start; /* image data start line */
 	u16 visible_pixel_start; /* start pixel of the visible image */
 
-	bool streaming;
+	u8 streaming;
 	bool dev_init_done;
+	bool handler_setup_needed;
 	u8 compressed_min_bpp;
 
 	struct ccs_module_info minfo;

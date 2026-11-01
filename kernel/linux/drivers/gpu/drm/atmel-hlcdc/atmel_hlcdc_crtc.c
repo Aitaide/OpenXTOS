@@ -20,6 +20,7 @@
 #include <drm/drm_atomic_helper.h>
 #include <drm/drm_crtc.h>
 #include <drm/drm_modeset_helper_vtables.h>
+#include <drm/drm_print.h>
 #include <drm/drm_probe_helper.h>
 #include <drm/drm_vblank.h>
 
@@ -30,10 +31,12 @@
  *
  * @base: base CRTC state
  * @output_mode: RGBXXX output mode
+ * @dpi: output DPI mode
  */
 struct atmel_hlcdc_crtc_state {
 	struct drm_crtc_state base;
 	unsigned int output_mode;
+	u8 dpi;
 };
 
 static inline struct atmel_hlcdc_crtc_state *
@@ -164,18 +167,24 @@ static void atmel_hlcdc_crtc_mode_set_nofb(struct drm_crtc *c)
 	state = drm_crtc_state_to_atmel_hlcdc_crtc_state(c->state);
 	cfg = state->output_mode << 8;
 
-	if (adj->flags & DRM_MODE_FLAG_NVSYNC)
-		cfg |= ATMEL_HLCDC_VSPOL;
+	if (!crtc->dc->desc->is_xlcdc) {
+		if (adj->flags & DRM_MODE_FLAG_NVSYNC)
+			cfg |= ATMEL_HLCDC_VSPOL;
 
-	if (adj->flags & DRM_MODE_FLAG_NHSYNC)
-		cfg |= ATMEL_HLCDC_HSPOL;
+		if (adj->flags & DRM_MODE_FLAG_NHSYNC)
+			cfg |= ATMEL_HLCDC_HSPOL;
+	} else {
+		cfg |= state->dpi << 11;
+	}
 
 	regmap_update_bits(regmap, ATMEL_HLCDC_CFG(5),
 			   ATMEL_HLCDC_HSPOL | ATMEL_HLCDC_VSPOL |
 			   ATMEL_HLCDC_VSPDLYS | ATMEL_HLCDC_VSPDLYE |
 			   ATMEL_HLCDC_DISPPOL | ATMEL_HLCDC_DISPDLY |
 			   ATMEL_HLCDC_VSPSU | ATMEL_HLCDC_VSPHO |
-			   ATMEL_HLCDC_GUARDTIME_MASK | ATMEL_HLCDC_MODE_MASK,
+			   ATMEL_HLCDC_GUARDTIME_MASK |
+			   (crtc->dc->desc->is_xlcdc ? ATMEL_XLCDC_MODE_MASK |
+			   ATMEL_XLCDC_DPI : ATMEL_HLCDC_MODE_MASK),
 			   cfg);
 
 	clk_disable_unprepare(crtc->dc->hlcdc->sys_clk);
@@ -191,7 +200,7 @@ atmel_hlcdc_crtc_mode_valid(struct drm_crtc *c,
 }
 
 static void atmel_hlcdc_crtc_atomic_disable(struct drm_crtc *c,
-					    struct drm_atomic_state *state)
+					    struct drm_atomic_commit *state)
 {
 	struct drm_device *dev = c->dev;
 	struct atmel_hlcdc_crtc *crtc = drm_crtc_to_atmel_hlcdc_crtc(c);
@@ -202,20 +211,37 @@ static void atmel_hlcdc_crtc_atomic_disable(struct drm_crtc *c,
 
 	pm_runtime_get_sync(dev->dev);
 
+	if (crtc->dc->desc->is_xlcdc) {
+		regmap_write(regmap, ATMEL_HLCDC_DIS, ATMEL_XLCDC_CM);
+		if (regmap_read_poll_timeout(regmap, ATMEL_HLCDC_SR, status,
+					     !(status & ATMEL_XLCDC_CM),
+					     10, 1000))
+			drm_warn(dev, "Atmel LCDC status register CMSTS timeout\n");
+
+		regmap_write(regmap, ATMEL_HLCDC_DIS, ATMEL_XLCDC_SD);
+		if (regmap_read_poll_timeout(regmap, ATMEL_HLCDC_SR, status,
+					     status & ATMEL_XLCDC_SD,
+					     10, 1000))
+			drm_warn(dev, "Atmel LCDC status register SDSTS timeout\n");
+	}
+
 	regmap_write(regmap, ATMEL_HLCDC_DIS, ATMEL_HLCDC_DISP);
-	while (!regmap_read(regmap, ATMEL_HLCDC_SR, &status) &&
-	       (status & ATMEL_HLCDC_DISP))
-		cpu_relax();
+	if (regmap_read_poll_timeout(regmap, ATMEL_HLCDC_SR, status,
+				     !(status & ATMEL_HLCDC_DISP),
+				    10, 1000))
+		drm_warn(dev, "Atmel LCDC status register DISPSTS timeout\n");
 
 	regmap_write(regmap, ATMEL_HLCDC_DIS, ATMEL_HLCDC_SYNC);
-	while (!regmap_read(regmap, ATMEL_HLCDC_SR, &status) &&
-	       (status & ATMEL_HLCDC_SYNC))
-		cpu_relax();
+	if (regmap_read_poll_timeout(regmap, ATMEL_HLCDC_SR, status,
+				     !(status & ATMEL_HLCDC_SYNC),
+				    10, 1000))
+		drm_warn(dev, "Atmel LCDC status register LCDSTS timeout\n");
 
 	regmap_write(regmap, ATMEL_HLCDC_DIS, ATMEL_HLCDC_PIXEL_CLK);
-	while (!regmap_read(regmap, ATMEL_HLCDC_SR, &status) &&
-	       (status & ATMEL_HLCDC_PIXEL_CLK))
-		cpu_relax();
+	if (regmap_read_poll_timeout(regmap, ATMEL_HLCDC_SR, status,
+				     !(status & ATMEL_HLCDC_PIXEL_CLK),
+				    10, 1000))
+		drm_warn(dev, "Atmel LCDC status register CLKSTS timeout\n");
 
 	clk_disable_unprepare(crtc->dc->hlcdc->sys_clk);
 	pinctrl_pm_select_sleep_state(dev->dev);
@@ -226,7 +252,7 @@ static void atmel_hlcdc_crtc_atomic_disable(struct drm_crtc *c,
 }
 
 static void atmel_hlcdc_crtc_atomic_enable(struct drm_crtc *c,
-					   struct drm_atomic_state *state)
+					   struct drm_atomic_commit *state)
 {
 	struct drm_device *dev = c->dev;
 	struct atmel_hlcdc_crtc *crtc = drm_crtc_to_atmel_hlcdc_crtc(c);
@@ -241,30 +267,95 @@ static void atmel_hlcdc_crtc_atomic_enable(struct drm_crtc *c,
 	clk_prepare_enable(crtc->dc->hlcdc->sys_clk);
 
 	regmap_write(regmap, ATMEL_HLCDC_EN, ATMEL_HLCDC_PIXEL_CLK);
-	while (!regmap_read(regmap, ATMEL_HLCDC_SR, &status) &&
-	       !(status & ATMEL_HLCDC_PIXEL_CLK))
-		cpu_relax();
-
+	if (regmap_read_poll_timeout(regmap, ATMEL_HLCDC_SR, status,
+				     status & ATMEL_HLCDC_PIXEL_CLK,
+				     10, 1000))
+		drm_warn(dev, "Atmel LCDC status register CLKSTS timeout\n");
 
 	regmap_write(regmap, ATMEL_HLCDC_EN, ATMEL_HLCDC_SYNC);
-	while (!regmap_read(regmap, ATMEL_HLCDC_SR, &status) &&
-	       !(status & ATMEL_HLCDC_SYNC))
-		cpu_relax();
+	if (regmap_read_poll_timeout(regmap, ATMEL_HLCDC_SR, status,
+				     status & ATMEL_HLCDC_SYNC,
+				     10, 1000))
+		drm_warn(dev, "Atmel LCDC status register LCDSTS timeout\n");
 
 	regmap_write(regmap, ATMEL_HLCDC_EN, ATMEL_HLCDC_DISP);
-	while (!regmap_read(regmap, ATMEL_HLCDC_SR, &status) &&
-	       !(status & ATMEL_HLCDC_DISP))
-		cpu_relax();
+	if (regmap_read_poll_timeout(regmap, ATMEL_HLCDC_SR, status,
+				     status & ATMEL_HLCDC_DISP,
+				     10, 1000))
+		drm_warn(dev, "Atmel LCDC status register DISPSTS timeout\n");
+
+	if (crtc->dc->desc->is_xlcdc) {
+		regmap_write(regmap, ATMEL_HLCDC_EN, ATMEL_XLCDC_CM);
+		if (regmap_read_poll_timeout(regmap, ATMEL_HLCDC_SR, status,
+					     status & ATMEL_XLCDC_CM,
+					     10, 1000))
+			drm_warn(dev, "Atmel LCDC status register CMSTS timeout\n");
+
+		regmap_write(regmap, ATMEL_HLCDC_EN, ATMEL_XLCDC_SD);
+		if (regmap_read_poll_timeout(regmap, ATMEL_HLCDC_SR, status,
+					     !(status & ATMEL_XLCDC_SD),
+					     10, 1000))
+			drm_warn(dev, "Atmel LCDC status register SDSTS timeout\n");
+	}
 
 	pm_runtime_put_sync(dev->dev);
 
 }
 
-#define ATMEL_HLCDC_RGB444_OUTPUT	BIT(0)
-#define ATMEL_HLCDC_RGB565_OUTPUT	BIT(1)
-#define ATMEL_HLCDC_RGB666_OUTPUT	BIT(2)
-#define ATMEL_HLCDC_RGB888_OUTPUT	BIT(3)
-#define ATMEL_HLCDC_OUTPUT_MODE_MASK	GENMASK(3, 0)
+#define ATMEL_HLCDC_RGB444_OUTPUT		BIT(0)
+#define ATMEL_HLCDC_RGB565_OUTPUT		BIT(1)
+#define ATMEL_HLCDC_RGB666_OUTPUT		BIT(2)
+#define ATMEL_HLCDC_RGB888_OUTPUT		BIT(3)
+#define ATMEL_HLCDC_DPI_RGB565C1_OUTPUT		BIT(4)
+#define ATMEL_HLCDC_DPI_RGB565C2_OUTPUT		BIT(5)
+#define ATMEL_HLCDC_DPI_RGB565C3_OUTPUT		BIT(6)
+#define ATMEL_HLCDC_DPI_RGB666C1_OUTPUT		BIT(7)
+#define ATMEL_HLCDC_DPI_RGB666C2_OUTPUT		BIT(8)
+#define ATMEL_HLCDC_DPI_RGB888_OUTPUT		BIT(9)
+#define ATMEL_HLCDC_OUTPUT_MODE_MASK		GENMASK(3, 0)
+#define ATMEL_XLCDC_OUTPUT_MODE_MASK		GENMASK(9, 0)
+
+static int atmel_xlcdc_connector_output_dsi(struct drm_encoder *encoder,
+					    struct drm_display_info *info)
+{
+	int j;
+	unsigned int supported_fmts = 0;
+
+	switch (atmel_hlcdc_encoder_get_bus_fmt(encoder)) {
+	case 0:
+		break;
+	case MEDIA_BUS_FMT_RGB565_1X16:
+		return ATMEL_HLCDC_DPI_RGB565C1_OUTPUT;
+	case MEDIA_BUS_FMT_RGB666_1X18:
+		return ATMEL_HLCDC_DPI_RGB666C1_OUTPUT;
+	case MEDIA_BUS_FMT_RGB666_1X24_CPADHI:
+		return ATMEL_HLCDC_DPI_RGB666C2_OUTPUT;
+	case MEDIA_BUS_FMT_RGB888_1X24:
+		return ATMEL_HLCDC_DPI_RGB888_OUTPUT;
+	default:
+		return -EINVAL;
+	}
+
+	for (j = 0; j < info->num_bus_formats; j++) {
+		switch (info->bus_formats[j]) {
+		case MEDIA_BUS_FMT_RGB565_1X16:
+			supported_fmts |= ATMEL_HLCDC_DPI_RGB565C1_OUTPUT;
+			break;
+		case MEDIA_BUS_FMT_RGB666_1X18:
+			supported_fmts |= ATMEL_HLCDC_DPI_RGB666C1_OUTPUT;
+			break;
+		case MEDIA_BUS_FMT_RGB666_1X24_CPADHI:
+			supported_fmts |= ATMEL_HLCDC_DPI_RGB666C2_OUTPUT;
+			break;
+		case MEDIA_BUS_FMT_RGB888_1X24:
+			supported_fmts |= ATMEL_HLCDC_DPI_RGB888_OUTPUT;
+			break;
+		default:
+			break;
+		}
+	}
+	return supported_fmts;
+}
 
 static int atmel_hlcdc_connector_output_mode(struct drm_connector_state *state)
 {
@@ -277,6 +368,13 @@ static int atmel_hlcdc_connector_output_mode(struct drm_connector_state *state)
 	encoder = state->best_encoder;
 	if (!encoder)
 		encoder = connector->encoder;
+	/*
+	 * atmel-hlcdc to support DSI formats with DSI video pipeline
+	 * when DRM_MODE_ENCODER_DSI type is set by
+	 * connector driver component.
+	 */
+	if (encoder->encoder_type == DRM_MODE_ENCODER_DSI)
+		return atmel_xlcdc_connector_output_dsi(encoder, info);
 
 	switch (atmel_hlcdc_encoder_get_bus_fmt(encoder)) {
 	case 0:
@@ -317,7 +415,7 @@ static int atmel_hlcdc_connector_output_mode(struct drm_connector_state *state)
 
 static int atmel_hlcdc_crtc_select_output_mode(struct drm_crtc_state *state)
 {
-	unsigned int output_fmts = ATMEL_HLCDC_OUTPUT_MODE_MASK;
+	unsigned int output_fmts;
 	struct atmel_hlcdc_crtc_state *hstate;
 	struct drm_connector_state *cstate;
 	struct drm_connector *connector;
@@ -325,6 +423,8 @@ static int atmel_hlcdc_crtc_select_output_mode(struct drm_crtc_state *state)
 	int i;
 
 	crtc = drm_crtc_to_atmel_hlcdc_crtc(state->crtc);
+	output_fmts = crtc->dc->desc->is_xlcdc ? ATMEL_XLCDC_OUTPUT_MODE_MASK :
+		      ATMEL_HLCDC_OUTPUT_MODE_MASK;
 
 	for_each_new_connector_in_state(state->state, connector, cstate, i) {
 		unsigned int supported_fmts = 0;
@@ -345,12 +445,20 @@ static int atmel_hlcdc_crtc_select_output_mode(struct drm_crtc_state *state)
 
 	hstate = drm_crtc_state_to_atmel_hlcdc_crtc_state(state);
 	hstate->output_mode = fls(output_fmts) - 1;
-
+	if (crtc->dc->desc->is_xlcdc) {
+		/* check if MIPI DPI bit needs to be set */
+		if (fls(output_fmts) > 3) {
+			hstate->output_mode -= 4;
+			hstate->dpi = 1;
+		} else {
+			hstate->dpi = 0;
+		}
+	}
 	return 0;
 }
 
 static int atmel_hlcdc_crtc_atomic_check(struct drm_crtc *c,
-					 struct drm_atomic_state *state)
+					 struct drm_atomic_commit *state)
 {
 	struct drm_crtc_state *s = drm_atomic_get_new_crtc_state(state, c);
 	int ret;
@@ -367,13 +475,13 @@ static int atmel_hlcdc_crtc_atomic_check(struct drm_crtc *c,
 }
 
 static void atmel_hlcdc_crtc_atomic_begin(struct drm_crtc *c,
-					  struct drm_atomic_state *state)
+					  struct drm_atomic_commit *state)
 {
 	drm_crtc_vblank_on(c);
 }
 
 static void atmel_hlcdc_crtc_atomic_flush(struct drm_crtc *c,
-					  struct drm_atomic_state *state)
+					  struct drm_atomic_commit *state)
 {
 	struct atmel_hlcdc_crtc *crtc = drm_crtc_to_atmel_hlcdc_crtc(c);
 	unsigned long flags;
@@ -400,14 +508,6 @@ static const struct drm_crtc_helper_funcs lcdc_crtc_helper_funcs = {
 	.atomic_enable = atmel_hlcdc_crtc_atomic_enable,
 	.atomic_disable = atmel_hlcdc_crtc_atomic_disable,
 };
-
-static void atmel_hlcdc_crtc_destroy(struct drm_crtc *c)
-{
-	struct atmel_hlcdc_crtc *crtc = drm_crtc_to_atmel_hlcdc_crtc(c);
-
-	drm_crtc_cleanup(c);
-	kfree(crtc);
-}
 
 static void atmel_hlcdc_crtc_finish_page_flip(struct atmel_hlcdc_crtc *crtc)
 {
@@ -440,7 +540,7 @@ static void atmel_hlcdc_crtc_reset(struct drm_crtc *crtc)
 		crtc->state = NULL;
 	}
 
-	state = kzalloc(sizeof(*state), GFP_KERNEL);
+	state = kzalloc_obj(*state);
 	if (state)
 		__drm_atomic_helper_crtc_reset(crtc, &state->base);
 }
@@ -449,17 +549,20 @@ static struct drm_crtc_state *
 atmel_hlcdc_crtc_duplicate_state(struct drm_crtc *crtc)
 {
 	struct atmel_hlcdc_crtc_state *state, *cur;
+	struct atmel_hlcdc_crtc *c = drm_crtc_to_atmel_hlcdc_crtc(crtc);
 
 	if (WARN_ON(!crtc->state))
 		return NULL;
 
-	state = kmalloc(sizeof(*state), GFP_KERNEL);
+	state = kmalloc_obj(*state);
 	if (!state)
 		return NULL;
 	__drm_atomic_helper_crtc_duplicate_state(crtc, &state->base);
 
 	cur = drm_crtc_state_to_atmel_hlcdc_crtc_state(crtc->state);
 	state->output_mode = cur->output_mode;
+	if (c->dc->desc->is_xlcdc)
+		state->dpi = cur->dpi;
 
 	return &state->base;
 }
@@ -496,7 +599,6 @@ static void atmel_hlcdc_crtc_disable_vblank(struct drm_crtc *c)
 static const struct drm_crtc_funcs atmel_hlcdc_crtc_funcs = {
 	.page_flip = drm_atomic_helper_page_flip,
 	.set_config = drm_atomic_helper_set_config,
-	.destroy = atmel_hlcdc_crtc_destroy,
 	.reset = atmel_hlcdc_crtc_reset,
 	.atomic_duplicate_state =  atmel_hlcdc_crtc_duplicate_state,
 	.atomic_destroy_state = atmel_hlcdc_crtc_destroy_state,
@@ -509,14 +611,7 @@ int atmel_hlcdc_crtc_create(struct drm_device *dev)
 	struct atmel_hlcdc_plane *primary = NULL, *cursor = NULL;
 	struct atmel_hlcdc_dc *dc = dev->dev_private;
 	struct atmel_hlcdc_crtc *crtc;
-	int ret;
 	int i;
-
-	crtc = kzalloc(sizeof(*crtc), GFP_KERNEL);
-	if (!crtc)
-		return -ENOMEM;
-
-	crtc->dc = dc;
 
 	for (i = 0; i < ATMEL_HLCDC_MAX_LAYERS; i++) {
 		if (!dc->layers[i])
@@ -535,13 +630,13 @@ int atmel_hlcdc_crtc_create(struct drm_device *dev)
 			break;
 		}
 	}
+	crtc = drmm_crtc_alloc_with_planes(dev, struct atmel_hlcdc_crtc, base,
+					   &primary->base, &cursor->base, &atmel_hlcdc_crtc_funcs,
+					   NULL);
+	if (IS_ERR(crtc))
+		return PTR_ERR(crtc);
 
-	ret = drm_crtc_init_with_planes(dev, &crtc->base, &primary->base,
-					&cursor->base, &atmel_hlcdc_crtc_funcs,
-					NULL);
-	if (ret < 0)
-		goto fail;
-
+	crtc->dc = dc;
 	crtc->id = drm_crtc_index(&crtc->base);
 
 	for (i = 0; i < ATMEL_HLCDC_MAX_LAYERS; i++) {
@@ -563,8 +658,4 @@ int atmel_hlcdc_crtc_create(struct drm_device *dev)
 	dc->crtc = &crtc->base;
 
 	return 0;
-
-fail:
-	atmel_hlcdc_crtc_destroy(&crtc->base);
-	return ret;
 }

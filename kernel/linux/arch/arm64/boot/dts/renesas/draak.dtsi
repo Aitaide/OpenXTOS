@@ -247,9 +247,10 @@
 			     "ethernet-phy-ieee802.3-c22";
 		rxc-skew-ps = <1500>;
 		reg = <0>;
-		interrupt-parent = <&gpio5>;
-		interrupts = <19 IRQ_TYPE_LEVEL_LOW>;
+		interrupts-extended = <&gpio5 19 IRQ_TYPE_LEVEL_LOW>;
 		reset-gpios = <&gpio5 18 GPIO_ACTIVE_LOW>;
+		reset-assert-us = <10000>;
+		reset-deassert-us = <300>;
 		/*
 		 * TX clock internal delay mode is required for reliable
 		 * 1Gbps communication using the KSZ9031RNX phy present on
@@ -309,6 +310,7 @@
 &i2c0 {
 	pinctrl-0 = <&i2c0_pins>;
 	pinctrl-names = "default";
+	bootph-all;
 	status = "okay";
 
 	ak4613: codec@10 {
@@ -356,12 +358,9 @@
 				 * CVBS and HDMI inputs through SW[49-53]
 				 * switches.
 				 *
-				 * CVBS is the default selection, link it to
-				 * VIN4 here.
+				 * HDMI is the default selection, leave CVBS
+				 * not connected here.
 				 */
-				adv7180_out: endpoint {
-					remote-endpoint = <&vin4_in>;
-				};
 			};
 		};
 
@@ -371,8 +370,13 @@
 		compatible = "adi,adv7511w";
 		reg = <0x39>, <0x3f>, <0x3c>, <0x38>;
 		reg-names = "main", "edid", "cec", "packet";
-		interrupt-parent = <&gpio1>;
-		interrupts = <28 IRQ_TYPE_LEVEL_LOW>;
+		interrupts-extended = <&gpio1 28 IRQ_TYPE_LEVEL_LOW>;
+
+		avdd-supply = <&reg_1p8v>;
+		dvdd-supply = <&reg_1p8v>;
+		pvdd-supply = <&reg_1p8v>;
+		dvdd-3v-supply = <&reg_3p3v>;
+		bgvdd-supply = <&reg_1p8v>;
 
 		adi,input-depth = <8>;
 		adi,input-colorspace = "rgb";
@@ -423,19 +427,17 @@
 				 * CVBS and HDMI inputs through SW[49-53]
 				 * switches.
 				 *
-				 * CVBS is the default selection, leave HDMI
-				 * not connected here.
+				 * HDMI is the default selection, link it to
+				 * VIN4 here.
 				 */
 				adv7612_out: endpoint {
-					pclk-sample = <0>;
-					hsync-active = <0>;
-					vsync-active = <0>;
+					remote-endpoint = <&vin4_in>;
 				};
 			};
 		};
 	};
 
-	cs2000: clk-multiplier@4f {
+	cs2000: clock-controller@4f {
 		#clock-cells = <0>;
 		compatible = "cirrus,cs2000-cp";
 		reg = <0x4f>;
@@ -450,6 +452,7 @@
 		compatible = "rohm,br24t01", "atmel,24c01";
 		reg = <0x50>;
 		pagesize = <8>;
+		bootph-all;
 	};
 };
 
@@ -580,8 +583,8 @@
 		function = "usb0";
 	};
 
-	vin4_pins_cvbs: vin4 {
-		groups = "vin4_data8", "vin4_sync", "vin4_clk";
+	vin4_pins: vin4 {
+		groups = "vin4_data24", "vin4_sync", "vin4_clk";
 		function = "vin4";
 	};
 };
@@ -659,7 +662,7 @@
 				reg = <0x00040000 0x140000>;
 				read-only;
 			};
-			cert_header_sa6@180000 {
+			cert-header-sa6@180000 {
 				reg = <0x00180000 0x040000>;
 				read-only;
 			};
@@ -696,6 +699,7 @@
 &scif2 {
 	pinctrl-0 = <&scif2_pins>;
 	pinctrl-names = "default";
+	bootph-all;
 
 	status = "okay";
 };
@@ -720,6 +724,11 @@
 	shared-pin;
 };
 
+/* Firmware should reserve it but sadly doesn't */
+&swdt {
+	status = "reserved";
+};
+
 &usb2_phy0 {
 	pinctrl-0 = <&usb0_pins>;
 	pinctrl-names = "default";
@@ -729,7 +738,7 @@
 };
 
 &vin4 {
-	pinctrl-0 = <&vin4_pins_cvbs>;
+	pinctrl-0 = <&vin4_pins>;
 	pinctrl-names = "default";
 
 	status = "okay";
@@ -737,7 +746,10 @@
 	ports {
 		port {
 			vin4_in: endpoint {
-				remote-endpoint = <&adv7180_out>;
+				pclk-sample = <0>;
+				hsync-active = <0>;
+				vsync-active = <0>;
+				remote-endpoint = <&adv7612_out>;
 			};
 		};
 	};

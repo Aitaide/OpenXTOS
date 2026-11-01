@@ -82,6 +82,9 @@ void ubi_err(const struct ubi_device *ubi, const char *fmt, ...);
 #define UBI_DFS_DIR_NAME "ubi%d"
 #define UBI_DFS_DIR_LEN  (3 + 2 + 1)
 
+/* Number of physical eraseblocks reserved for atomic LEB change operation */
+#define EBA_RESERVED_PEBS 1
+
 /*
  * Error codes returned by the I/O sub-system.
  *
@@ -140,17 +143,6 @@ enum {
 enum {
 	UBI_NO_FASTMAP = 1,
 	UBI_BAD_FASTMAP,
-};
-
-/*
- * Flags for emulate_power_cut in ubi_debug_info
- *
- * POWER_CUT_EC_WRITE: Emulate a power cut when writing an EC header
- * POWER_CUT_VID_WRITE: Emulate a power cut when writing a VID header
- */
-enum {
-	POWER_CUT_EC_WRITE = 0x01,
-	POWER_CUT_VID_WRITE = 0x02,
 };
 
 /**
@@ -345,6 +337,7 @@ struct ubi_volume {
 	int writers;
 	int exclusive;
 	int metaonly;
+	bool is_dead;
 
 	int reserved_pebs;
 	int vol_type;
@@ -401,6 +394,7 @@ struct ubi_volume_desc {
  * @power_cut_counter: count down for writes left until emulated power cut
  * @power_cut_min: minimum number of writes before emulating a power cut
  * @power_cut_max: maximum number of writes until emulating a power cut
+ * @emulate_failures: emulate failures for testing purposes
  * @dfs_dir_name: name of debugfs directory containing files of this UBI device
  * @dfs_dir: direntry object of the UBI device debugfs directory
  * @dfs_chk_gen: debugfs knob to enable UBI general extra checks
@@ -412,6 +406,7 @@ struct ubi_volume_desc {
  * @dfs_emulate_power_cut: debugfs knob to emulate power cuts
  * @dfs_power_cut_min: debugfs knob for minimum writes before power cut
  * @dfs_power_cut_max: debugfs knob for maximum writes until power cut
+ * @dfs_emulate_failures: debugfs entry to control the fault injection type
  */
 struct ubi_debug_info {
 	unsigned int chk_gen:1;
@@ -424,7 +419,8 @@ struct ubi_debug_info {
 	unsigned int power_cut_counter;
 	unsigned int power_cut_min;
 	unsigned int power_cut_max;
-	char dfs_dir_name[UBI_DFS_DIR_LEN + 1];
+	unsigned int emulate_failures;
+	char dfs_dir_name[UBI_DFS_DIR_LEN];
 	struct dentry *dfs_dir;
 	struct dentry *dfs_chk_gen;
 	struct dentry *dfs_chk_io;
@@ -435,6 +431,7 @@ struct ubi_debug_info {
 	struct dentry *dfs_emulate_power_cut;
 	struct dentry *dfs_power_cut_min;
 	struct dentry *dfs_power_cut_max;
+	struct dentry *dfs_emulate_failures;
 };
 
 /**
@@ -491,6 +488,7 @@ struct ubi_debug_info {
  * @fast_attach: non-zero if UBI was attached by fastmap
  * @fm_anchor: The next anchor PEB to use for fastmap
  * @fm_do_produce_anchor: If true produce an anchor PEB in wl
+ * @fm_pool_rsv_cnt: Number of reserved PEBs for filling pool/wl_pool
  *
  * @used: RB-tree of used physical eraseblocks
  * @erroneous: RB-tree of erroneous used physical eraseblocks
@@ -518,6 +516,22 @@ struct ubi_debug_info {
  * @bgt_thread: background thread description object
  * @thread_enabled: if the background thread is enabled
  * @bgt_name: background thread name
+ * @wl_threshold: Maximum difference between two erase counters. If this
+ *		   threshold is exceeded, the WL sub-system starts moving
+ *		   data from used physical eraseblocks with low erase
+ *		   counter to free physical eraseblocks with high erase counter.
+ * @wl_free_max_diff: When a physical eraseblock is moved, the WL sub-system
+ *		       has to pick the target physical eraseblock to move to.
+ *		       The simplest way would be just to pick the one with the
+ *		       highest erase counter. But in certain workloads this
+ *		       could lead to an unlimited wear of one or few physical
+ *		       eraseblock. Indeed, imagine a situation when the picked
+ *		       physical eraseblock is constantly erased after the
+ *		       data is written to it. So, we have a constant which
+ *		       limits the highest erase counter of the free physical
+ *		       eraseblock to pick. Namely, the WL sub-system does not
+ *		       pick eraseblocks with erase counter greater than the
+ *		       lowest erase counter plus @wl_free_max_diff.
  *
  * @flash_size: underlying MTD device size (in bytes)
  * @peb_count: count of physical eraseblocks on the MTD device
@@ -564,6 +578,7 @@ struct ubi_device {
 	spinlock_t volumes_lock;
 	int ref_count;
 	int image_seq;
+	bool is_dead;
 
 	int rsvd_pebs;
 	int avail_pebs;
@@ -601,6 +616,7 @@ struct ubi_device {
 	int fast_attach;
 	struct ubi_wl_entry *fm_anchor;
 	int fm_do_produce_anchor;
+	int fm_pool_rsv_cnt;
 
 	/* Wear-leveling sub-system's stuff */
 	struct rb_root used;
@@ -623,6 +639,8 @@ struct ubi_device {
 	struct task_struct *bgt_thread;
 	int thread_enabled;
 	char bgt_name[sizeof(UBI_BGT_NAME_PATTERN)+2];
+	int wl_threshold;
+	int wl_free_max_diff;
 
 	/* I/O sub-system's stuff */
 	long long flash_size;
@@ -814,7 +832,7 @@ extern struct kmem_cache *ubi_wl_entry_slab;
 extern const struct file_operations ubi_ctrl_cdev_operations;
 extern const struct file_operations ubi_cdev_operations;
 extern const struct file_operations ubi_vol_cdev_operations;
-extern struct class ubi_class;
+extern const struct class ubi_class;
 extern struct mutex ubi_devices_mutex;
 extern struct blocking_notifier_head ubi_notifiers;
 
@@ -831,7 +849,6 @@ void ubi_remove_av(struct ubi_attach_info *ai, struct ubi_ainf_volume *av);
 struct ubi_ainf_peb *ubi_early_get_peb(struct ubi_device *ubi,
 				       struct ubi_attach_info *ai);
 int ubi_attach(struct ubi_device *ubi, int force_scan);
-void ubi_destroy_ai(struct ubi_attach_info *ai);
 
 /* vtbl.c */
 int ubi_change_vtbl_record(struct ubi_device *ubi, int idx,
@@ -902,6 +919,7 @@ int self_check_eba(struct ubi_device *ubi, struct ubi_attach_info *ai_fastmap,
 		   struct ubi_attach_info *ai_scan);
 
 /* wl.c */
+int ubi_sync_erase(struct ubi_device *ubi, struct ubi_wl_entry *e, int *torture);
 int ubi_wl_get_peb(struct ubi_device *ubi);
 int ubi_wl_put_peb(struct ubi_device *ubi, int vol_id, int lnum,
 		   int pnum, int torture);
@@ -914,7 +932,7 @@ struct ubi_wl_entry *ubi_wl_get_fm_peb(struct ubi_device *ubi, int anchor);
 int ubi_wl_put_fm_peb(struct ubi_device *ubi, struct ubi_wl_entry *used_e,
 		      int lnum, int torture);
 int ubi_is_erase_work(struct ubi_work *wrk);
-void ubi_refill_pools(struct ubi_device *ubi);
+void ubi_refill_pools_and_lock(struct ubi_device *ubi);
 int ubi_ensure_anchor_pebs(struct ubi_device *ubi);
 int ubi_bitflip_check(struct ubi_device *ubi, int pnum, int force_scrub);
 
@@ -923,7 +941,7 @@ int ubi_io_read(const struct ubi_device *ubi, void *buf, int pnum, int offset,
 		int len);
 int ubi_io_write(struct ubi_device *ubi, const void *buf, int pnum, int offset,
 		 int len);
-int ubi_io_sync_erase(struct ubi_device *ubi, int pnum, int torture);
+int ubi_io_sync_erase(struct ubi_device *ubi, int pnum, int *torture);
 int ubi_io_is_bad(const struct ubi_device *ubi, int pnum);
 int ubi_io_mark_bad(const struct ubi_device *ubi, int pnum);
 int ubi_io_read_ec_hdr(struct ubi_device *ubi, int pnum,
@@ -938,7 +956,8 @@ int ubi_io_write_vid_hdr(struct ubi_device *ubi, int pnum,
 /* build.c */
 int ubi_attach_mtd_dev(struct mtd_info *mtd, int ubi_num,
 		       int vid_hdr_offset, int max_beb_per1024,
-		       bool disable_fm);
+		       bool disable_fm, bool need_resv_pool,
+		       int wl_threshold);
 int ubi_detach_mtd_dev(int ubi_num, int anyway);
 struct ubi_device *ubi_get_device(int ubi_num);
 void ubi_put_device(struct ubi_device *ubi);
@@ -956,6 +975,7 @@ void ubi_free_internal_volumes(struct ubi_device *ubi);
 void ubi_do_get_device_info(struct ubi_device *ubi, struct ubi_device_info *di);
 void ubi_do_get_volume_info(struct ubi_device *ubi, struct ubi_volume *vol,
 			    struct ubi_volume_info *vi);
+int ubi_get_num_by_path(const char *pathname, int *ubi_num, int *vol_id);
 /* scan.c */
 int ubi_compare_lebs(struct ubi_device *ubi, const struct ubi_ainf_peb *aeb,
 		      int pnum, const struct ubi_vid_hdr *vid_hdr);
@@ -968,10 +988,22 @@ int ubi_scan_fastmap(struct ubi_device *ubi, struct ubi_attach_info *ai,
 		     struct ubi_attach_info *scan_ai);
 int ubi_fastmap_init_checkmap(struct ubi_volume *vol, int leb_count);
 void ubi_fastmap_destroy_checkmap(struct ubi_volume *vol);
+static inline void ubi_free_fastmap(struct ubi_device *ubi)
+{
+	if (ubi->fm) {
+		int i;
+
+		for (i = 0; i < ubi->fm->used_blocks; i++)
+			kmem_cache_free(ubi_wl_entry_slab, ubi->fm->e[i]);
+		kfree(ubi->fm);
+		ubi->fm = NULL;
+	}
+}
 #else
 static inline int ubi_update_fastmap(struct ubi_device *ubi) { return 0; }
 static inline int ubi_fastmap_init_checkmap(struct ubi_volume *vol, int leb_count) { return 0; }
 static inline void ubi_fastmap_destroy_checkmap(struct ubi_volume *vol) {}
+static inline void ubi_free_fastmap(struct ubi_device *ubi) { }
 #endif
 
 /* block.c */
@@ -1087,7 +1119,7 @@ ubi_alloc_vid_buf(const struct ubi_device *ubi, gfp_t gfp_flags)
 	struct ubi_vid_io_buf *vidb;
 	void *buf;
 
-	vidb = kzalloc(sizeof(*vidb), gfp_flags);
+	vidb = kzalloc_obj(*vidb, gfp_flags);
 	if (!vidb)
 		return NULL;
 
@@ -1124,6 +1156,19 @@ static inline struct ubi_vid_hdr *ubi_get_vid_hdr(struct ubi_vid_io_buf *vidb)
 	return vidb->hdr;
 }
 
+/**
+ * ubi_ro_mode - switch to read-only mode.
+ * @ubi: UBI device description object
+ */
+static inline void ubi_ro_mode(struct ubi_device *ubi)
+{
+	if (!ubi->ro_mode) {
+		ubi->ro_mode = 1;
+		ubi_warn(ubi, "switch to read-only mode");
+		dump_stack();
+	}
+}
+
 /*
  * This function is equivalent to 'ubi_io_read()', but @offset is relative to
  * the beginning of the logical eraseblock, not to the beginning of the
@@ -1145,20 +1190,13 @@ static inline int ubi_io_write_data(struct ubi_device *ubi, const void *buf,
 				    int pnum, int offset, int len)
 {
 	ubi_assert(offset >= 0);
-	return ubi_io_write(ubi, buf, pnum, offset + ubi->leb_start, len);
-}
 
-/**
- * ubi_ro_mode - switch to read-only mode.
- * @ubi: UBI device description object
- */
-static inline void ubi_ro_mode(struct ubi_device *ubi)
-{
-	if (!ubi->ro_mode) {
-		ubi->ro_mode = 1;
-		ubi_warn(ubi, "switch to read-only mode");
-		dump_stack();
+	if (ubi_dbg_power_cut(ubi, MASK_POWER_CUT_DATA)) {
+		ubi_warn(ubi, "XXXXX emulating a power cut when writing data XXXXX");
+		ubi_ro_mode(ubi);
+		return -EROFS;
 	}
+	return ubi_io_write(ubi, buf, pnum, offset + ubi->leb_start, len);
 }
 
 /**

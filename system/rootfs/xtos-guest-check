@@ -11,7 +11,8 @@ mkdir -p /dev/pts /run /tmp
 printf 'XTOS_GUEST_CHECK=START\n'
 printf 'kernel='; uname -r
 printf 'arch='; uname -m
-printf 'realtime='; cat /sys/kernel/realtime 2>/dev/null || echo 0
+realtime=$(/usr/bin/xtos-rt-status) || realtime=${realtime:-unknown}
+printf 'realtime=%s\n' "$realtime"
 if [ -f /proc/config.gz ]; then
     zcat /proc/config.gz | grep -x 'CONFIG_PREEMPT_RT=y' >/dev/null \
         && printf 'preempt_rt=y\n' || printf 'preempt_rt=n\n'

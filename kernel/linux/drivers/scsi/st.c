@@ -46,7 +46,7 @@ static const char *verstr = "20160209";
 
 #include <linux/uaccess.h>
 #include <asm/dma.h>
-#include <asm/unaligned.h>
+#include <linux/unaligned.h>
 
 #include <scsi/scsi.h>
 #include <scsi/scsi_dbg.h>
@@ -87,7 +87,7 @@ static int try_rdio = 1;
 static int try_wdio = 1;
 static int debug_flag;
 
-static struct class st_sysfs_class;
+static const struct class st_sysfs_class;
 static const struct attribute_group *st_dev_groups[];
 static const struct attribute_group *st_drv_groups[];
 
@@ -163,9 +163,11 @@ static const char *st_formats[] = {
 
 static int debugging = DEBUG;
 
+/* Setting these non-zero may risk recognizing resets */
 #define MAX_RETRIES 0
 #define MAX_WRITE_RETRIES 0
 #define MAX_READY_RETRIES 0
+
 #define NO_TAPE  NOT_READY
 
 #define ST_TIMEOUT (900 * HZ)
@@ -200,15 +202,14 @@ static int sgl_map_user_pages(struct st_buffer *, const unsigned int,
 			      unsigned long, size_t, int);
 static int sgl_unmap_user_pages(struct st_buffer *, const unsigned int, int);
 
-static int st_probe(struct device *);
-static int st_remove(struct device *);
+static int st_probe(struct scsi_device *);
+static void st_remove(struct scsi_device *);
 
 static struct scsi_driver st_template = {
+	.probe = st_probe,
+	.remove = st_remove,
 	.gendrv = {
 		.name		= "st",
-		.owner		= THIS_MODULE,
-		.probe		= st_probe,
-		.remove		= st_remove,
 		.groups		= st_drv_groups,
 	},
 };
@@ -358,9 +359,17 @@ static int st_chk_result(struct scsi_tape *STp, struct st_request * SRpnt)
 {
 	int result = SRpnt->result;
 	u8 scode;
+	unsigned int ctr;
 	DEB(const char *stp;)
 	char *name = STp->name;
 	struct st_cmdstatus *cmdstatp;
+
+	ctr = scsi_get_ua_por_ctr(STp->device);
+	if (ctr != STp->por_ctr) {
+		STp->por_ctr = ctr;
+		STp->pos_unknown = 1; /* ASC => power on / reset */
+		st_printk(KERN_WARNING, STp, "Power on/reset recognized.");
+	}
 
 	if (!result)
 		return 0;
@@ -414,10 +423,11 @@ static int st_chk_result(struct scsi_tape *STp, struct st_request * SRpnt)
 	if (cmdstatp->have_sense &&
 	    cmdstatp->sense_hdr.asc == 0 && cmdstatp->sense_hdr.ascq == 0x17)
 		STp->cleaning_req = 1; /* ASC and ASCQ => cleaning requested */
-	if (cmdstatp->have_sense && scode == UNIT_ATTENTION && cmdstatp->sense_hdr.asc == 0x29)
+	if (cmdstatp->have_sense && scode == UNIT_ATTENTION &&
+		cmdstatp->sense_hdr.asc == 0x29 && !STp->pos_unknown) {
 		STp->pos_unknown = 1; /* ASC => power on / reset */
-
-	STp->pos_unknown |= STp->device->was_reset;
+		st_printk(KERN_WARNING, STp, "Power on/reset recognized.");
+	}
 
 	if (cmdstatp->have_sense &&
 	    scode == RECOVERED_ERROR
@@ -452,7 +462,7 @@ static struct st_request *st_allocate_request(struct scsi_tape *stp)
 {
 	struct st_request *streq;
 
-	streq = kzalloc(sizeof(*streq), GFP_KERNEL);
+	streq = kzalloc_obj(*streq);
 	if (streq)
 		streq->stp = stp;
 	else {
@@ -515,7 +525,8 @@ static void st_do_stats(struct scsi_tape *STp, struct request *req)
 }
 
 static enum rq_end_io_ret st_scsi_execute_end(struct request *req,
-					      blk_status_t status)
+					      blk_status_t status,
+					      const struct io_comp_batch *iob)
 {
 	struct scsi_cmnd *scmd = blk_mq_rq_to_pdu(req);
 	struct st_request *SRpnt = req->end_io_data;
@@ -835,6 +846,9 @@ static int flush_buffer(struct scsi_tape *STp, int seek_next)
 	int backspace, result;
 	struct st_partstat *STps;
 
+	if (STp->ready != ST_READY)
+		return 0;
+
 	/*
 	 * If there was a bus reset, block further access
 	 * to this device.
@@ -842,8 +856,6 @@ static int flush_buffer(struct scsi_tape *STp, int seek_next)
 	if (STp->pos_unknown)
 		return (-EIO);
 
-	if (STp->ready != ST_READY)
-		return 0;
 	STps = &(STp->ps[STp->partition]);
 	if (STps->rw == ST_WRITING)	/* Writing */
 		return st_flush_write_buffer(STp);
@@ -952,7 +964,6 @@ static void reset_state(struct scsi_tape *STp)
 		STp->partition = find_partition(STp);
 		if (STp->partition < 0)
 			STp->partition = 0;
-		STp->new_partition = STp->partition;
 	}
 }
 
@@ -969,6 +980,7 @@ static int test_ready(struct scsi_tape *STp, int do_wait)
 {
 	int attentions, waits, max_wait, scode;
 	int retval = CHKRES_READY, new_session = 0;
+	unsigned int ctr;
 	unsigned char cmd[MAX_COMMAND_SIZE];
 	struct st_request *SRpnt = NULL;
 	struct st_cmdstatus *cmdstatp = &STp->buffer->cmdstat;
@@ -991,7 +1003,10 @@ static int test_ready(struct scsi_tape *STp, int do_wait)
 			scode = cmdstatp->sense_hdr.sense_key;
 
 			if (scode == UNIT_ATTENTION) { /* New media? */
-				new_session = 1;
+				if (cmdstatp->sense_hdr.asc == 0x28) { /* New media */
+					new_session = 1;
+					DEBC_printk(STp, "New tape session.");
+				}
 				if (attentions < MAX_ATTENTIONS) {
 					attentions++;
 					continue;
@@ -1022,10 +1037,22 @@ static int test_ready(struct scsi_tape *STp, int do_wait)
 			}
 		}
 
+		ctr = scsi_get_ua_new_media_ctr(STp->device);
+		if (ctr != STp->new_media_ctr) {
+			STp->new_media_ctr = ctr;
+			new_session = 1;
+			DEBC_printk(STp, "New tape session.");
+		}
+
 		retval = (STp->buffer)->syscall_result;
 		if (!retval)
 			retval = new_session ? CHKRES_NEW_SESSION : CHKRES_READY;
 		break;
+	}
+	if (STp->first_tur) {
+		/* Don't set pos_unknown right after device recognition */
+		STp->pos_unknown = 0;
+		STp->first_tur = 0;
 	}
 
 	if (SRpnt != NULL)
@@ -2889,7 +2916,6 @@ static int st_int_ioctl(struct scsi_tape *STp, unsigned int cmd_in, unsigned lon
 			timeout = STp->long_timeout * 8;
 
 		DEBC_printk(STp, "Erasing tape.\n");
-		fileno = blkno = at_sm = 0;
 		break;
 	case MTSETBLK:		/* Set block length */
 	case MTSETDENSITY:	/* Set tape density */
@@ -2922,14 +2948,17 @@ static int st_int_ioctl(struct scsi_tape *STp, unsigned int cmd_in, unsigned lon
 		if (cmd_in == MTSETDENSITY) {
 			(STp->buffer)->b_data[4] = arg;
 			STp->density_changed = 1;	/* At least we tried ;-) */
+			STp->changed_density = arg;
 		} else if (cmd_in == SET_DENS_AND_BLK)
 			(STp->buffer)->b_data[4] = arg >> 24;
 		else
 			(STp->buffer)->b_data[4] = STp->density;
 		if (cmd_in == MTSETBLK || cmd_in == SET_DENS_AND_BLK) {
 			ltmp = arg & MT_ST_BLKSIZE_MASK;
-			if (cmd_in == MTSETBLK)
+			if (cmd_in == MTSETBLK) {
 				STp->blksize_changed = 1; /* At least we tried ;-) */
+				STp->changed_blksize = arg;
+			}
 		} else
 			ltmp = STp->block_size;
 		(STp->buffer)->b_data[9] = (ltmp >> 16);
@@ -3076,7 +3105,9 @@ static int st_int_ioctl(struct scsi_tape *STp, unsigned int cmd_in, unsigned lon
 			   cmd_in == MTSETDRVBUFFER ||
 			   cmd_in == SET_DENS_AND_BLK) {
 			if (cmdstatp->sense_hdr.sense_key == ILLEGAL_REQUEST &&
-			    !(STp->use_pf & PF_TESTED)) {
+				cmdstatp->sense_hdr.asc == 0x24 &&
+				(STp->device)->scsi_level <= SCSI_2 &&
+				!(STp->use_pf & PF_TESTED)) {
 				/* Try the other possible state of Page Format if not
 				   already tried */
 				STp->use_pf = (STp->use_pf ^ USE_PF) | PF_TESTED;
@@ -3186,14 +3217,20 @@ static int set_location(struct scsi_tape *STp, unsigned int block, int partition
 	    partition >= ST_NBR_PARTITIONS)
 		return (-EINVAL);
 	if (partition != STp->partition) {
-		if (get_location(STp, &blk, &p, 1))
+		/*
+		 * Save the location for the partition the drive reports,
+		 * not for STp->partition: after a reset STp->partition may
+		 * not match the partition the drive is in.
+		 */
+		if (get_location(STp, &blk, &p, 1) ||
+		    p < 0 || p >= ST_NBR_PARTITIONS)
 			STps->last_block_valid = 0;
 		else {
-			STps->last_block_valid = 1;
-			STps->last_block_visited = blk;
+			STp->ps[p].last_block_valid = 1;
+			STp->ps[p].last_block_visited = blk;
 			DEBC_printk(STp, "Visited block %d for "
 				    "partition %d saved.\n",
-				    blk, STp->partition);
+				    blk, p);
 		}
 	}
 
@@ -3496,8 +3533,64 @@ static int partition_tape(struct scsi_tape *STp, int size)
 out:
 	return result;
 }
-
 
+/*
+ * Handles any extra state needed for ioctls which are not st-specific.
+ * Called with the scsi_tape lock held, released before return
+ */
+static long st_common_ioctl(struct scsi_tape *STp, struct st_modedef *STm,
+			    struct file *file, unsigned int cmd_in,
+			    unsigned long arg)
+{
+	int i, retval = 0;
+
+	if (!STm->defined) {
+		retval = -ENXIO;
+		goto out;
+	}
+
+	switch (cmd_in) {
+	case SCSI_IOCTL_GET_IDLUN:
+	case SCSI_IOCTL_GET_BUS_NUMBER:
+	case SCSI_IOCTL_GET_PCI:
+		break;
+	case SG_IO:
+	case SCSI_IOCTL_SEND_COMMAND:
+	case CDROM_SEND_PACKET:
+		if (!capable(CAP_SYS_RAWIO)) {
+			retval = -EPERM;
+			goto out;
+		}
+		fallthrough;
+	default:
+		if ((i = flush_buffer(STp, 0)) < 0) {
+			retval = i;
+			goto out;
+		} else { /* flush_buffer succeeds */
+			if (STp->can_partitions) {
+				i = switch_partition(STp);
+				if (i < 0) {
+					retval = i;
+					goto out;
+				}
+			}
+		}
+	}
+	mutex_unlock(&STp->lock);
+
+	retval = scsi_ioctl(STp->device, file->f_mode & FMODE_WRITE,
+			    cmd_in, (void __user *)arg);
+	if (!retval && cmd_in == SCSI_IOCTL_STOP_UNIT) {
+		/* unload */
+		STp->rew_at_close = 0;
+		STp->ready = ST_NO_TAPE;
+	}
+
+	return retval;
+out:
+	mutex_unlock(&STp->lock);
+	return retval;
+}
 
 /* The ioctl command */
 static long st_ioctl(struct file *file, unsigned int cmd_in, unsigned long arg)
@@ -3506,6 +3599,7 @@ static long st_ioctl(struct file *file, unsigned int cmd_in, unsigned long arg)
 	int i, cmd_nr, cmd_type, bt;
 	int retval = 0;
 	unsigned int blk;
+	bool cmd_mtiocget;
 	struct scsi_tape *STp = file->private_data;
 	struct st_modedef *STm;
 	struct st_partstat *STps;
@@ -3533,6 +3627,15 @@ static long st_ioctl(struct file *file, unsigned int cmd_in, unsigned long arg)
 			file->f_flags & O_NDELAY);
 	if (retval)
 		goto out;
+
+	switch (cmd_in) {
+	case MTIOCPOS:
+	case MTIOCGET:
+	case MTIOCTOP:
+		break;
+	default:
+		return st_common_ioctl(STp, STm, file, cmd_in, arg);
+	}
 
 	cmd_type = _IOC_TYPE(cmd_in);
 	cmd_nr = _IOC_NR(cmd_in);
@@ -3619,6 +3722,7 @@ static long st_ioctl(struct file *file, unsigned int cmd_in, unsigned long arg)
 			 */
 			if (mtc.mt_op != MTREW &&
 			    mtc.mt_op != MTOFFL &&
+			    mtc.mt_op != MTLOAD &&
 			    mtc.mt_op != MTRETEN &&
 			    mtc.mt_op != MTERASE &&
 			    mtc.mt_op != MTSEEK &&
@@ -3626,9 +3730,23 @@ static long st_ioctl(struct file *file, unsigned int cmd_in, unsigned long arg)
 				retval = (-EIO);
 				goto out;
 			}
-			reset_state(STp);
-			/* remove this when the midlevel properly clears was_reset */
-			STp->device->was_reset = 0;
+			reset_state(STp); /* Clears pos_unknown */
+
+			/* Fix the device settings after reset, ignore errors */
+			if (mtc.mt_op == MTREW || mtc.mt_op == MTSEEK ||
+				mtc.mt_op == MTEOM) {
+				if (STp->can_partitions) {
+					/* STp->new_partition contains the
+					 *  latest partition set
+					 */
+					STp->partition = 0;
+					switch_partition(STp);
+				}
+				if (STp->density_changed)
+					st_int_ioctl(STp, MTSETDENSITY, STp->changed_density);
+				if (STp->blksize_changed)
+					st_int_ioctl(STp, MTSETBLK, STp->changed_blksize);
+			}
 		}
 
 		if (mtc.mt_op != MTNOP && mtc.mt_op != MTSETBLK &&
@@ -3732,17 +3850,28 @@ static long st_ioctl(struct file *file, unsigned int cmd_in, unsigned long arg)
 		goto out;
 	}
 
+	cmd_mtiocget = cmd_type == _IOC_TYPE(MTIOCGET) && cmd_nr == _IOC_NR(MTIOCGET);
+
 	if ((i = flush_buffer(STp, 0)) < 0) {
-		retval = i;
-		goto out;
-	}
-	if (STp->can_partitions &&
-	    (i = switch_partition(STp)) < 0) {
-		retval = i;
-		goto out;
+		if (cmd_mtiocget && STp->pos_unknown) {
+			/* flush fails -> modify status accordingly */
+			reset_state(STp);
+			STp->pos_unknown = 1;
+		} else { /* return error */
+			retval = i;
+			goto out;
+		}
+	} else { /* flush_buffer succeeds */
+		if (STp->can_partitions) {
+			i = switch_partition(STp);
+			if (i < 0) {
+				retval = i;
+				goto out;
+			}
+		}
 	}
 
-	if (cmd_type == _IOC_TYPE(MTIOCGET) && cmd_nr == _IOC_NR(MTIOCGET)) {
+	if (cmd_mtiocget) {
 		struct mtget mt_status;
 
 		if (_IOC_SIZE(cmd_in) != sizeof(struct mtget)) {
@@ -3756,7 +3885,7 @@ static long st_ioctl(struct file *file, unsigned int cmd_in, unsigned long arg)
 		    ((STp->density << MT_ST_DENSITY_SHIFT) & MT_ST_DENSITY_MASK);
 		mt_status.mt_blkno = STps->drv_block;
 		mt_status.mt_fileno = STps->drv_file;
-		if (STp->block_size != 0) {
+		if (STp->block_size != 0 && mt_status.mt_blkno >= 0) {
 			if (STps->rw == ST_WRITING)
 				mt_status.mt_blkno +=
 				    (STp->buffer)->buffer_bytes / STp->block_size;
@@ -3819,29 +3948,7 @@ static long st_ioctl(struct file *file, unsigned int cmd_in, unsigned long arg)
 		}
 		mt_pos.mt_blkno = blk;
 		retval = put_user_mtpos(p, &mt_pos);
-		goto out;
 	}
-	mutex_unlock(&STp->lock);
-
-	switch (cmd_in) {
-	case SG_IO:
-	case SCSI_IOCTL_SEND_COMMAND:
-	case CDROM_SEND_PACKET:
-		if (!capable(CAP_SYS_RAWIO))
-			return -EPERM;
-		break;
-	default:
-		break;
-	}
-
-	retval = scsi_ioctl(STp->device, file->f_mode & FMODE_WRITE, cmd_in, p);
-	if (!retval && cmd_in == SCSI_IOCTL_STOP_UNIT) {
-		/* unload */
-		STp->rew_at_close = 0;
-		STp->ready = ST_NO_TAPE;
-	}
-	return retval;
-
  out:
 	mutex_unlock(&STp->lock);
 	return retval;
@@ -3872,7 +3979,7 @@ static struct st_buffer *new_tape_buffer(int max_sg)
 {
 	struct st_buffer *tb;
 
-	tb = kzalloc(sizeof(struct st_buffer), GFP_KERNEL);
+	tb = kzalloc_obj(struct st_buffer);
 	if (!tb) {
 		printk(KERN_NOTICE "st: Can't allocate new tape buffer.\n");
 		return NULL;
@@ -3881,8 +3988,7 @@ static struct st_buffer *new_tape_buffer(int max_sg)
 	tb->use_sg = max_sg;
 	tb->buffer_size = 0;
 
-	tb->reserved_pages = kcalloc(max_sg, sizeof(struct page *),
-				     GFP_KERNEL);
+	tb->reserved_pages = kzalloc_objs(struct page *, max_sg);
 	if (!tb->reserved_pages) {
 		kfree(tb);
 		return NULL;
@@ -4101,7 +4207,7 @@ static void validate_options(void)
  */
 static int __init st_setup(char *str)
 {
-	int i, len, ints[5];
+	int i, len, ints[ARRAY_SIZE(parms) + 1];
 	char *stp;
 
 	stp = get_options(str, ARRAY_SIZE(ints), ints);
@@ -4242,9 +4348,9 @@ static void remove_cdevs(struct scsi_tape *tape)
 	}
 }
 
-static int st_probe(struct device *dev)
+static int st_probe(struct scsi_device *SDp)
 {
-	struct scsi_device *SDp = to_scsi_device(dev);
+	struct device *dev = &SDp->sdev_gendev;
 	struct scsi_tape *tpnt = NULL;
 	struct st_modedef *STm;
 	struct st_partstat *STps;
@@ -4273,7 +4379,7 @@ static int st_probe(struct device *dev)
 		goto out;
 	}
 
-	tpnt = kzalloc(sizeof(struct scsi_tape), GFP_KERNEL);
+	tpnt = kzalloc_obj(struct scsi_tape);
 	if (tpnt == NULL) {
 		sdev_printk(KERN_ERR, SDp,
 			    "st: Can't allocate device descriptor.\n");
@@ -4312,6 +4418,7 @@ static int st_probe(struct device *dev)
 	blk_queue_rq_timeout(tpnt->device->request_queue, ST_TIMEOUT);
 	tpnt->long_timeout = ST_LONG_TIMEOUT;
 	tpnt->try_dio = try_direct_io;
+	tpnt->first_tur = 1;
 
 	for (i = 0; i < ST_NBR_MODES; i++) {
 		STm = &(tpnt->modes[i]);
@@ -4355,12 +4462,15 @@ static int st_probe(struct device *dev)
 	}
 	tpnt->index = error;
 	sprintf(tpnt->name, "st%d", tpnt->index);
-	tpnt->stats = kzalloc(sizeof(struct scsi_tape_stats), GFP_KERNEL);
+	tpnt->stats = kzalloc_obj(struct scsi_tape_stats);
 	if (tpnt->stats == NULL) {
 		sdev_printk(KERN_ERR, SDp,
 			    "st: Can't allocate statistics.\n");
 		goto out_idr_remove;
 	}
+
+	tpnt->new_media_ctr = scsi_get_ua_new_media_ctr(SDp);
+	tpnt->por_ctr = scsi_get_ua_por_ctr(SDp);
 
 	dev_set_drvdata(dev, tpnt);
 
@@ -4395,21 +4505,21 @@ out:
 };
 
 
-static int st_remove(struct device *dev)
+static void st_remove(struct scsi_device *SDp)
 {
+	struct device *dev = &SDp->sdev_gendev;
 	struct scsi_tape *tpnt = dev_get_drvdata(dev);
 	int index = tpnt->index;
 
-	scsi_autopm_get_device(to_scsi_device(dev));
+	scsi_autopm_get_device(SDp);
 	remove_cdevs(tpnt);
 
 	mutex_lock(&st_ref_mutex);
-	kref_put(&tpnt->kref, scsi_tape_release);
-	mutex_unlock(&st_ref_mutex);
 	spin_lock(&st_index_lock);
 	idr_remove(&st_index_idr, index);
 	spin_unlock(&st_index_lock);
-	return 0;
+	kref_put(&tpnt->kref, scsi_tape_release);
+	mutex_unlock(&st_ref_mutex);
 }
 
 /**
@@ -4438,7 +4548,7 @@ static void scsi_tape_release(struct kref *kref)
 	return;
 }
 
-static struct class st_sysfs_class = {
+static const struct class st_sysfs_class = {
 	.name = "scsi_tape",
 	.dev_groups = st_dev_groups,
 };
@@ -4472,7 +4582,7 @@ static int __init init_st(void)
 		goto err_class;
 	}
 
-	err = scsi_register_driver(&st_template.gendrv);
+	err = scsi_register_driver(&st_template);
 	if (err)
 		goto err_chrdev;
 
@@ -4488,7 +4598,7 @@ err_class:
 
 static void __exit exit_st(void)
 {
-	scsi_unregister_driver(&st_template.gendrv);
+	scsi_unregister_driver(&st_template);
 	unregister_chrdev_region(MKDEV(SCSI_TAPE_MAJOR, 0),
 				 ST_MAX_TAPE_ENTRIES);
 	class_unregister(&st_sysfs_class);
@@ -4642,6 +4752,24 @@ options_show(struct device *dev, struct device_attribute *attr, char *buf)
 	return l;
 }
 static DEVICE_ATTR_RO(options);
+
+/**
+ * position_lost_in_reset_show - Value 1 indicates that reads, writes, etc.
+ * are blocked because a device reset has occurred and no operation positioning
+ * the tape has been issued.
+ * @dev: struct device
+ * @attr: attribute structure
+ * @buf: buffer to return formatted data in
+ */
+static ssize_t position_lost_in_reset_show(struct device *dev,
+	struct device_attribute *attr, char *buf)
+{
+	struct st_modedef *STm = dev_get_drvdata(dev);
+	struct scsi_tape *STp = STm->tape;
+
+	return sprintf(buf, "%d", STp->pos_unknown);
+}
+static DEVICE_ATTR_RO(position_lost_in_reset);
 
 /* Support for tape stats */
 
@@ -4827,6 +4955,7 @@ static struct attribute *st_dev_attrs[] = {
 	&dev_attr_default_density.attr,
 	&dev_attr_default_compression.attr,
 	&dev_attr_options.attr,
+	&dev_attr_position_lost_in_reset.attr,
 	NULL,
 };
 
@@ -4883,7 +5012,7 @@ static int sgl_map_user_pages(struct st_buffer *STbp,
 	if (count == 0)
 		return 0;
 
-	pages = kmalloc_array(max_pages, sizeof(*pages), GFP_KERNEL);
+	pages = kmalloc_objs(*pages, max_pages);
 	if (pages == NULL)
 		return -ENOMEM;
 

@@ -88,12 +88,12 @@ void intel_uc_fw_change_status(struct intel_uc_fw *uc_fw,
  * security fixes, etc. to be enabled.
  */
 #define INTEL_GUC_FIRMWARE_DEFS(fw_def, guc_maj, guc_mmp) \
-	fw_def(METEORLAKE,   0, guc_maj(mtl,  70, 6, 6)) \
-	fw_def(DG2,          0, guc_maj(dg2,  70, 5, 1)) \
-	fw_def(ALDERLAKE_P,  0, guc_maj(adlp, 70, 5, 1)) \
+	fw_def(METEORLAKE,   0, guc_maj(mtl,  70, 53, 0)) \
+	fw_def(DG2,          0, guc_maj(dg2,  70, 53, 0)) \
+	fw_def(ALDERLAKE_P,  0, guc_maj(adlp, 70, 12, 1)) \
 	fw_def(ALDERLAKE_P,  0, guc_mmp(adlp, 70, 1, 1)) \
 	fw_def(ALDERLAKE_P,  0, guc_mmp(adlp, 69, 0, 3)) \
-	fw_def(ALDERLAKE_S,  0, guc_maj(tgl,  70, 5, 1)) \
+	fw_def(ALDERLAKE_S,  0, guc_maj(tgl,  70, 12, 1)) \
 	fw_def(ALDERLAKE_S,  0, guc_mmp(tgl,  70, 1, 1)) \
 	fw_def(ALDERLAKE_S,  0, guc_mmp(tgl,  69, 0, 3)) \
 	fw_def(DG1,          0, guc_maj(dg1,  70, 5, 1)) \
@@ -132,6 +132,17 @@ void intel_uc_fw_change_status(struct intel_uc_fw *uc_fw,
 	fw_def(SKYLAKE,      0, huc_mmp(skl,  2, 0, 0))
 
 /*
+ * The GSC FW has multiple version (see intel_gsc_uc.h for details); since what
+ * we care about is the interface, we use the compatibility version in the
+ * binary names.
+ * Same as with the GuC, a major version bump indicate a
+ * backward-incompatible change, while a minor version bump indicates a
+ * backward-compatible one, so we use only the former in the file name.
+ */
+#define INTEL_GSC_FIRMWARE_DEFS(fw_def, gsc_def) \
+	fw_def(METEORLAKE,   0, gsc_def(mtl, 1, 0))
+
+/*
  * Set of macros for producing a list of filenames from the above table.
  */
 #define __MAKE_UC_FW_PATH_BLANK(prefix_, name_) \
@@ -166,6 +177,9 @@ void intel_uc_fw_change_status(struct intel_uc_fw *uc_fw,
 #define MAKE_HUC_FW_PATH_MMP(prefix_, major_, minor_, patch_) \
 	__MAKE_UC_FW_PATH_MMP(prefix_, "huc", major_, minor_, patch_)
 
+#define MAKE_GSC_FW_PATH(prefix_, major_, minor_) \
+	__MAKE_UC_FW_PATH_MAJOR(prefix_, "gsc", major_)
+
 /*
  * All blobs need to be declared via MODULE_FIRMWARE().
  * This first expansion of the table macros is solely to provide
@@ -176,6 +190,7 @@ void intel_uc_fw_change_status(struct intel_uc_fw *uc_fw,
 
 INTEL_GUC_FIRMWARE_DEFS(INTEL_UC_MODULE_FW, MAKE_GUC_FW_PATH_MAJOR, MAKE_GUC_FW_PATH_MMP)
 INTEL_HUC_FIRMWARE_DEFS(INTEL_UC_MODULE_FW, MAKE_HUC_FW_PATH_BLANK, MAKE_HUC_FW_PATH_MMP, MAKE_HUC_FW_PATH_GSC)
+INTEL_GSC_FIRMWARE_DEFS(INTEL_UC_MODULE_FW, MAKE_GSC_FW_PATH)
 
 /*
  * The next expansion of the table macros (in __uc_fw_auto_select below) provides
@@ -225,6 +240,10 @@ struct __packed uc_fw_blob {
 #define HUC_FW_BLOB_GSC(prefix_) \
 	UC_FW_BLOB_NEW(0, 0, 0, true, MAKE_HUC_FW_PATH_GSC(prefix_))
 
+#define GSC_FW_BLOB(prefix_, major_, minor_) \
+	UC_FW_BLOB_NEW(major_, minor_, 0, true, \
+		       MAKE_GSC_FW_PATH(prefix_, major_, minor_))
+
 struct __packed uc_fw_platform_requirement {
 	enum intel_platform p;
 	u8 rev; /* first platform rev using this FW */
@@ -251,9 +270,14 @@ static const struct uc_fw_platform_requirement blobs_huc[] = {
 	INTEL_HUC_FIRMWARE_DEFS(MAKE_FW_LIST, HUC_FW_BLOB, HUC_FW_BLOB_MMP, HUC_FW_BLOB_GSC)
 };
 
+static const struct uc_fw_platform_requirement blobs_gsc[] = {
+	INTEL_GSC_FIRMWARE_DEFS(MAKE_FW_LIST, GSC_FW_BLOB)
+};
+
 static const struct fw_blobs_by_type blobs_all[INTEL_UC_FW_NUM_TYPES] = {
 	[INTEL_UC_FW_TYPE_GUC] = { blobs_guc, ARRAY_SIZE(blobs_guc) },
 	[INTEL_UC_FW_TYPE_HUC] = { blobs_huc, ARRAY_SIZE(blobs_huc) },
+	[INTEL_UC_FW_TYPE_GSC] = { blobs_gsc, ARRAY_SIZE(blobs_gsc) },
 };
 
 static void
@@ -265,14 +289,6 @@ __uc_fw_auto_select(struct drm_i915_private *i915, struct intel_uc_fw *uc_fw)
 	u8 rev = INTEL_REVID(i915);
 	int i;
 	bool found;
-
-	/*
-	 * GSC FW support is still not fully in place, so we're not defining
-	 * the FW blob yet because we don't want the driver to attempt to load
-	 * it until we're ready for it.
-	 */
-	if (uc_fw->type == INTEL_UC_FW_TYPE_GSC)
-		return;
 
 	/*
 	 * The only difference between the ADL GuC FWs is the HWConfig support.
@@ -526,43 +542,6 @@ void intel_uc_fw_init_early(struct intel_uc_fw *uc_fw,
 				  INTEL_UC_FIRMWARE_NOT_SUPPORTED);
 }
 
-static void __force_fw_fetch_failures(struct intel_uc_fw *uc_fw, int e)
-{
-	struct drm_i915_private *i915 = __uc_fw_to_gt(uc_fw)->i915;
-	bool user = e == -EINVAL;
-
-	if (i915_inject_probe_error(i915, e)) {
-		/* non-existing blob */
-		uc_fw->file_selected.path = "<invalid>";
-		uc_fw->user_overridden = user;
-	} else if (i915_inject_probe_error(i915, e)) {
-		/* require next major version */
-		uc_fw->file_wanted.ver.major += 1;
-		uc_fw->file_wanted.ver.minor = 0;
-		uc_fw->user_overridden = user;
-	} else if (i915_inject_probe_error(i915, e)) {
-		/* require next minor version */
-		uc_fw->file_wanted.ver.minor += 1;
-		uc_fw->user_overridden = user;
-	} else if (uc_fw->file_wanted.ver.major &&
-		   i915_inject_probe_error(i915, e)) {
-		/* require prev major version */
-		uc_fw->file_wanted.ver.major -= 1;
-		uc_fw->file_wanted.ver.minor = 0;
-		uc_fw->user_overridden = user;
-	} else if (uc_fw->file_wanted.ver.minor &&
-		   i915_inject_probe_error(i915, e)) {
-		/* require prev minor version - hey, this should work! */
-		uc_fw->file_wanted.ver.minor -= 1;
-		uc_fw->user_overridden = user;
-	} else if (user && i915_inject_probe_error(i915, e)) {
-		/* officially unsupported platform */
-		uc_fw->file_wanted.ver.major = 0;
-		uc_fw->file_wanted.ver.minor = 0;
-		uc_fw->user_overridden = true;
-	}
-}
-
 static void uc_unpack_css_version(struct intel_uc_fw_ver *ver, u32 css_value)
 {
 	/* Get version numbers from the CSS header */
@@ -682,12 +661,18 @@ static int check_gsc_manifest(struct intel_gt *gt,
 			      const struct firmware *fw,
 			      struct intel_uc_fw *uc_fw)
 {
+	int ret;
+
 	switch (uc_fw->type) {
 	case INTEL_UC_FW_TYPE_HUC:
-		intel_huc_fw_get_binary_info(uc_fw, fw->data, fw->size);
+		ret = intel_huc_fw_get_binary_info(uc_fw, fw->data, fw->size);
+		if (ret)
+			return ret;
 		break;
 	case INTEL_UC_FW_TYPE_GSC:
-		intel_gsc_fw_get_binary_info(uc_fw, fw->data, fw->size);
+		ret = intel_gsc_fw_get_binary_info(uc_fw, fw->data, fw->size);
+		if (ret)
+			return ret;
 		break;
 	default:
 		MISSING_CASE(uc_fw->type);
@@ -744,7 +729,7 @@ static int guc_check_version_range(struct intel_uc_fw *uc_fw)
 		return -EINVAL;
 	}
 
-	return i915_inject_probe_error(gt->i915, -EINVAL);
+	return 0;
 }
 
 static int check_fw_header(struct intel_gt *gt,
@@ -791,7 +776,7 @@ static int try_firmware_load(struct intel_uc_fw *uc_fw, const struct firmware **
 static int check_mtl_huc_guc_compatibility(struct intel_gt *gt,
 					   struct intel_uc_fw_file *huc_selected)
 {
-	struct intel_uc_fw_file *guc_selected = &gt->uc.guc.fw.file_selected;
+	struct intel_uc_fw_file *guc_selected = &gt_to_guc(gt)->fw.file_selected;
 	struct intel_uc_fw_ver *huc_ver = &huc_selected->ver;
 	struct intel_uc_fw_ver *guc_ver = &guc_selected->ver;
 	bool new_huc, new_guc;
@@ -882,13 +867,6 @@ int intel_uc_fw_fetch(struct intel_uc_fw *uc_fw)
 
 	GEM_BUG_ON(!gt->wopcm.size);
 	GEM_BUG_ON(!intel_uc_fw_is_enabled(uc_fw));
-
-	err = i915_inject_probe_error(i915, -ENXIO);
-	if (err)
-		goto fail;
-
-	__force_fw_fetch_failures(uc_fw, -EINVAL);
-	__force_fw_fetch_failures(uc_fw, -ESTALE);
 
 	err = try_firmware_load(uc_fw, &fw);
 	memcpy(&file_ideal, &uc_fw->file_wanted, sizeof(file_ideal));
@@ -1066,10 +1044,6 @@ static int uc_fw_xfer(struct intel_uc_fw *uc_fw, u32 dst_offset, u32 dma_flags)
 	u64 offset;
 	int ret;
 
-	ret = i915_inject_probe_error(gt->i915, -ETIMEDOUT);
-	if (ret)
-		return ret;
-
 	intel_uncore_forcewake_get(uncore, FORCEWAKE_ALL);
 
 	/* Set the source address for the uCode */
@@ -1091,17 +1065,17 @@ static int uc_fw_xfer(struct intel_uc_fw *uc_fw, u32 dst_offset, u32 dma_flags)
 
 	/* Start the DMA */
 	intel_uncore_write_fw(uncore, DMA_CTRL,
-			      _MASKED_BIT_ENABLE(dma_flags | START_DMA));
+			      REG_MASKED_FIELD_ENABLE(dma_flags | START_DMA));
 
 	/* Wait for DMA to finish */
-	ret = intel_wait_for_register_fw(uncore, DMA_CTRL, START_DMA, 0, 100);
+	ret = intel_wait_for_register_fw(uncore, DMA_CTRL, START_DMA, 0, 100, NULL);
 	if (ret)
 		gt_err(gt, "DMA for %s fw failed, DMA_CTRL=%u\n",
 		       intel_uc_fw_type_repr(uc_fw->type),
 		       intel_uncore_read_fw(uncore, DMA_CTRL));
 
 	/* Disable the bits once DMA is over */
-	intel_uncore_write_fw(uncore, DMA_CTRL, _MASKED_BIT_DISABLE(dma_flags));
+	intel_uncore_write_fw(uncore, DMA_CTRL, REG_MASKED_FIELD_DISABLE(dma_flags));
 
 	intel_uncore_forcewake_put(uncore, FORCEWAKE_ALL);
 
@@ -1133,15 +1107,10 @@ int intel_uc_fw_mark_load_failed(struct intel_uc_fw *uc_fw, int err)
  */
 int intel_uc_fw_upload(struct intel_uc_fw *uc_fw, u32 dst_offset, u32 dma_flags)
 {
-	struct intel_gt *gt = __uc_fw_to_gt(uc_fw);
 	int err;
 
 	/* make sure the status was cleared the last time we reset the uc */
 	GEM_BUG_ON(intel_uc_fw_is_loaded(uc_fw));
-
-	err = i915_inject_probe_error(gt->i915, -ENOEXEC);
-	if (err)
-		return err;
 
 	if (!intel_uc_fw_is_loadable(uc_fw))
 		return -ENOEXEC;
@@ -1176,10 +1145,6 @@ static int uc_fw_rsa_data_create(struct intel_uc_fw *uc_fw)
 	void *vaddr;
 	int err;
 
-	err = i915_inject_probe_error(gt->i915, -ENXIO);
-	if (err)
-		return err;
-
 	if (!uc_fw_need_rsa_in_memory(uc_fw))
 		return 0;
 
@@ -1193,7 +1158,7 @@ static int uc_fw_rsa_data_create(struct intel_uc_fw *uc_fw)
 	 * since its GGTT offset will be GuC accessible.
 	 */
 	GEM_BUG_ON(uc_fw->rsa_size > PAGE_SIZE);
-	vma = intel_guc_allocate_vma(&gt->uc.guc, PAGE_SIZE);
+	vma = intel_guc_allocate_vma(gt_to_guc(gt), PAGE_SIZE);
 	if (IS_ERR(vma))
 		return PTR_ERR(vma);
 
@@ -1221,6 +1186,7 @@ unpin_out:
 	i915_vma_unpin_and_release(&vma, 0);
 	return err;
 }
+ALLOW_ERROR_INJECTION(uc_fw_rsa_data_create, ERRNO);
 
 static void uc_fw_rsa_data_destroy(struct intel_uc_fw *uc_fw)
 {
@@ -1327,16 +1293,13 @@ size_t intel_uc_fw_copy_rsa(struct intel_uc_fw *uc_fw, void *dst, u32 max_len)
 
 		for_each_sgt_page(page, iter, uc_fw->obj->mm.pages) {
 			u32 len = min_t(u32, size, PAGE_SIZE - offset);
-			void *vaddr;
 
 			if (idx > 0) {
 				idx--;
 				continue;
 			}
 
-			vaddr = kmap_atomic(page);
-			memcpy(dst, vaddr + offset, len);
-			kunmap_atomic(vaddr);
+			memcpy_from_page(dst, page, offset, len);
 
 			offset = 0;
 			dst += len;

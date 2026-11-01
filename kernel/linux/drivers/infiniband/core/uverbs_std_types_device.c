@@ -203,9 +203,43 @@ static int UVERBS_HANDLER(UVERBS_METHOD_QUERY_PORT)(
 
 	copy_port_attr_to_resp(&attr, &resp.legacy_resp, ib_dev, port_num);
 	resp.port_cap_flags2 = attr.port_cap_flags2;
+	resp.active_speed_ex = attr.active_speed;
 
 	return uverbs_copy_to_struct_or_zero(attrs, UVERBS_ATTR_QUERY_PORT_RESP,
 					     &resp, sizeof(resp));
+}
+
+static int UVERBS_HANDLER(UVERBS_METHOD_QUERY_PORT_SPEED)(
+	struct uverbs_attr_bundle *attrs)
+{
+	struct ib_ucontext *ucontext;
+	struct ib_device *ib_dev;
+	u32 port_num;
+	u64 speed;
+	int ret;
+
+	ucontext = ib_uverbs_get_ucontext(attrs);
+	if (IS_ERR(ucontext))
+		return PTR_ERR(ucontext);
+	ib_dev = ucontext->device;
+
+	if (!ib_dev->ops.query_port_speed)
+		return -EOPNOTSUPP;
+
+	ret = uverbs_get_const(&port_num, attrs,
+			       UVERBS_ATTR_QUERY_PORT_SPEED_PORT_NUM);
+	if (ret)
+		return ret;
+
+	if (!rdma_is_port_valid(ib_dev, port_num))
+		return -EINVAL;
+
+	ret = ib_dev->ops.query_port_speed(ib_dev, port_num, &speed);
+	if (ret)
+		return ret;
+
+	return uverbs_copy_to(attrs, UVERBS_ATTR_QUERY_PORT_SPEED_RESP,
+			      &speed, sizeof(speed));
 }
 
 static int UVERBS_HANDLER(UVERBS_METHOD_GET_CONTEXT)(
@@ -213,13 +247,21 @@ static int UVERBS_HANDLER(UVERBS_METHOD_GET_CONTEXT)(
 {
 	u32 num_comp = attrs->ufile->device->num_comp_vectors;
 	u64 core_support = IB_UVERBS_CORE_SUPPORT_OPTIONAL_MR_ACCESS;
+	struct ib_device *ib_dev;
 	int ret;
+
+	ib_dev = srcu_dereference(attrs->ufile->device->ib_dev,
+				  &attrs->ufile->device->disassociate_srcu);
+	if (!ib_dev)
+		return -EIO;
 
 	ret = uverbs_copy_to(attrs, UVERBS_ATTR_GET_CONTEXT_NUM_COMP_VECTORS,
 			     &num_comp, sizeof(num_comp));
 	if (IS_UVERBS_COPY_ERR(ret))
 		return ret;
 
+	if (ib_dev->ops.uverbs_robust_udata)
+		core_support |= IB_UVERBS_CORE_SUPPORT_ROBUST_UDATA;
 	ret = uverbs_copy_to(attrs, UVERBS_ATTR_GET_CONTEXT_CORE_SUPPORT,
 			     &core_support, sizeof(core_support));
 	if (IS_UVERBS_COPY_ERR(ret))
@@ -430,12 +472,52 @@ out:
 	return ret;
 }
 
+static int UVERBS_HANDLER(UVERBS_METHOD_QUERY_COMP_CNTR_CAPS)(
+	struct uverbs_attr_bundle *attrs)
+{
+	struct ib_comp_cntr_caps caps = {};
+	struct ib_ucontext *ucontext;
+	struct ib_device *ib_dev;
+	int ret;
+
+	ucontext = ib_uverbs_get_ucontext(attrs);
+	if (IS_ERR(ucontext))
+		return PTR_ERR(ucontext);
+	ib_dev = ucontext->device;
+
+	if (!ib_dev->ops.query_comp_cntr_caps)
+		return -EOPNOTSUPP;
+
+	ret = ib_dev->ops.query_comp_cntr_caps(ib_dev, &caps, attrs);
+	if (ret)
+		return ret;
+
+	ret = uverbs_copy_to(attrs, UVERBS_ATTR_QUERY_COMP_CNTR_CAPS_MAX_COUNTERS,
+			     &caps.max_counters, sizeof(caps.max_counters));
+	if (IS_UVERBS_COPY_ERR(ret))
+		return ret;
+
+	ret = uverbs_copy_to(attrs, UVERBS_ATTR_QUERY_COMP_CNTR_CAPS_MAX_VALUE,
+			     &caps.max_value, sizeof(caps.max_value));
+	if (IS_UVERBS_COPY_ERR(ret))
+		return ret;
+
+	ret = uverbs_copy_to(attrs, UVERBS_ATTR_QUERY_COMP_CNTR_CAPS_SUPPORTED_QP_ATTACH_OPS,
+			     &caps.supported_qp_attach_ops,
+			     sizeof(caps.supported_qp_attach_ops));
+	return IS_UVERBS_COPY_ERR(ret) ? ret : 0;
+}
+
 DECLARE_UVERBS_NAMED_METHOD(
 	UVERBS_METHOD_GET_CONTEXT,
 	UVERBS_ATTR_PTR_OUT(UVERBS_ATTR_GET_CONTEXT_NUM_COMP_VECTORS,
 			    UVERBS_ATTR_TYPE(u32), UA_OPTIONAL),
 	UVERBS_ATTR_PTR_OUT(UVERBS_ATTR_GET_CONTEXT_CORE_SUPPORT,
 			    UVERBS_ATTR_TYPE(u64), UA_OPTIONAL),
+	UVERBS_ATTR_PTR_IN(UVERBS_ATTR_GET_CONTEXT_FD_ARR,
+			   UVERBS_ATTR_MIN_SIZE(sizeof(int)),
+			   UA_OPTIONAL,
+			   UA_ALLOC_AND_COPY),
 	UVERBS_ATTR_UHW());
 
 DECLARE_UVERBS_NAMED_METHOD(
@@ -461,8 +543,16 @@ DECLARE_UVERBS_NAMED_METHOD(
 	UVERBS_ATTR_PTR_OUT(
 		UVERBS_ATTR_QUERY_PORT_RESP,
 		UVERBS_ATTR_STRUCT(struct ib_uverbs_query_port_resp_ex,
-				   reserved),
+				   active_speed_ex),
 		UA_MANDATORY));
+
+DECLARE_UVERBS_NAMED_METHOD(
+	UVERBS_METHOD_QUERY_PORT_SPEED,
+	UVERBS_ATTR_CONST_IN(UVERBS_ATTR_QUERY_PORT_SPEED_PORT_NUM, u32,
+			     UA_MANDATORY),
+	UVERBS_ATTR_PTR_OUT(UVERBS_ATTR_QUERY_PORT_SPEED_RESP,
+			    UVERBS_ATTR_TYPE(u64),
+			    UA_MANDATORY));
 
 DECLARE_UVERBS_NAMED_METHOD(
 	UVERBS_METHOD_QUERY_GID_TABLE,
@@ -488,14 +578,28 @@ DECLARE_UVERBS_NAMED_METHOD(
 					       netdev_ifindex),
 			    UA_MANDATORY));
 
+DECLARE_UVERBS_NAMED_METHOD(
+	UVERBS_METHOD_QUERY_COMP_CNTR_CAPS,
+	UVERBS_ATTR_PTR_OUT(UVERBS_ATTR_QUERY_COMP_CNTR_CAPS_MAX_COUNTERS,
+			    UVERBS_ATTR_TYPE(u32),
+			    UA_OPTIONAL),
+	UVERBS_ATTR_PTR_OUT(UVERBS_ATTR_QUERY_COMP_CNTR_CAPS_MAX_VALUE,
+			    UVERBS_ATTR_TYPE(u64),
+			    UA_OPTIONAL),
+	UVERBS_ATTR_PTR_OUT(UVERBS_ATTR_QUERY_COMP_CNTR_CAPS_SUPPORTED_QP_ATTACH_OPS,
+			    UVERBS_ATTR_TYPE(u32),
+			    UA_OPTIONAL));
+
 DECLARE_UVERBS_GLOBAL_METHODS(UVERBS_OBJECT_DEVICE,
 			      &UVERBS_METHOD(UVERBS_METHOD_GET_CONTEXT),
 			      &UVERBS_METHOD(UVERBS_METHOD_INVOKE_WRITE),
 			      &UVERBS_METHOD(UVERBS_METHOD_INFO_HANDLES),
 			      &UVERBS_METHOD(UVERBS_METHOD_QUERY_PORT),
+			      &UVERBS_METHOD(UVERBS_METHOD_QUERY_PORT_SPEED),
 			      &UVERBS_METHOD(UVERBS_METHOD_QUERY_CONTEXT),
 			      &UVERBS_METHOD(UVERBS_METHOD_QUERY_GID_TABLE),
-			      &UVERBS_METHOD(UVERBS_METHOD_QUERY_GID_ENTRY));
+			      &UVERBS_METHOD(UVERBS_METHOD_QUERY_GID_ENTRY),
+			      &UVERBS_METHOD(UVERBS_METHOD_QUERY_COMP_CNTR_CAPS));
 
 const struct uapi_definition uverbs_def_obj_device[] = {
 	UAPI_DEF_CHAIN_OBJ_TREE_NAMED(UVERBS_OBJECT_DEVICE),

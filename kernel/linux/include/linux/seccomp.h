@@ -3,6 +3,7 @@
 #define _LINUX_SECCOMP_H
 
 #include <uapi/linux/seccomp.h>
+#include <linux/seccomp_types.h>
 
 #define SECCOMP_FILTER_FLAG_MASK	(SECCOMP_FILTER_FLAG_TSYNC | \
 					 SECCOMP_FILTER_FLAG_LOG | \
@@ -21,32 +22,14 @@
 #include <linux/atomic.h>
 #include <asm/seccomp.h>
 
-struct seccomp_filter;
-/**
- * struct seccomp - the state of a seccomp'ed process
- *
- * @mode:  indicates one of the valid values above for controlled
- *         system calls available to a process.
- * @filter_count: number of seccomp filters
- * @filter: must always point to a valid seccomp-filter or NULL as it is
- *          accessed without locking during system call entry.
- *
- *          @filter must only be accessed from the context of current as there
- *          is no read locking.
- */
-struct seccomp {
-	int mode;
-	atomic_t filter_count;
-	struct seccomp_filter *filter;
-};
+extern bool __seccomp_permit_syscall(void);
 
 #ifdef CONFIG_HAVE_ARCH_SECCOMP_FILTER
-extern int __secure_computing(const struct seccomp_data *sd);
-static inline int secure_computing(void)
+static __always_inline bool seccomp_permit_syscall(void)
 {
 	if (unlikely(test_syscall_work(SECCOMP)))
-		return  __secure_computing(NULL);
-	return 0;
+		return  __seccomp_permit_syscall();
+	return true;
 }
 #else
 extern void secure_computing_strict(int this_syscall);
@@ -64,16 +47,14 @@ static inline int seccomp_mode(struct seccomp *s)
 
 #include <linux/errno.h>
 
-struct seccomp { };
-struct seccomp_filter { };
 struct seccomp_data;
 
 #ifdef CONFIG_HAVE_ARCH_SECCOMP_FILTER
-static inline int secure_computing(void) { return 0; }
-static inline int __secure_computing(const struct seccomp_data *sd) { return 0; }
+static inline bool seccomp_permit_syscall(void) { return true; }
 #else
 static inline void secure_computing_strict(int this_syscall) { return; }
 #endif
+static inline bool __seccomp_permit_syscall(void) { return true; }
 
 static inline long prctl_get_seccomp(void)
 {
@@ -126,6 +107,8 @@ static inline long seccomp_get_metadata(struct task_struct *task,
 
 #ifdef CONFIG_SECCOMP_CACHE_DEBUG
 struct seq_file;
+struct pid_namespace;
+struct pid;
 
 int proc_pid_seccomp_cache(struct seq_file *m, struct pid_namespace *ns,
 			   struct pid *pid, struct task_struct *task);

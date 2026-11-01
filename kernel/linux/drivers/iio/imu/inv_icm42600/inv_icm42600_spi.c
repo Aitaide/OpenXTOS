@@ -3,13 +3,12 @@
  * Copyright (C) 2020 InvenSense, Inc.
  */
 
-#include <linux/kernel.h>
 #include <linux/device.h>
+#include <linux/kernel.h>
 #include <linux/module.h>
-#include <linux/mod_devicetable.h>
-#include <linux/spi/spi.h>
-#include <linux/regmap.h>
 #include <linux/property.h>
+#include <linux/regmap.h>
+#include <linux/spi/spi.h>
 
 #include "inv_icm42600.h"
 
@@ -27,8 +26,8 @@ static int inv_icm42600_spi_bus_setup(struct inv_icm42600_state *st)
 	if (ret)
 		return ret;
 
-	ret = regmap_update_bits(st->map, INV_ICM42600_REG_INTF_CONFIG4,
-				 INV_ICM42600_INTF_CONFIG4_I3C_BUS_ONLY, 0);
+	ret = regmap_clear_bits(st->map, INV_ICM42600_REG_INTF_CONFIG4,
+				INV_ICM42600_INTF_CONFIG4_I3C_BUS_ONLY);
 	if (ret)
 		return ret;
 
@@ -59,13 +58,29 @@ static int inv_icm42600_probe(struct spi_device *spi)
 		return -EINVAL;
 	chip = (uintptr_t)match;
 
-	regmap = devm_regmap_init_spi(spi, &inv_icm42600_regmap_config);
+	/* use SPI specific regmap */
+	regmap = devm_regmap_init_spi(spi, &inv_icm42600_spi_regmap_config);
 	if (IS_ERR(regmap))
 		return PTR_ERR(regmap);
 
-	return inv_icm42600_core_probe(regmap, chip, spi->irq,
-				       inv_icm42600_spi_bus_setup);
+	return inv_icm42600_core_probe(regmap, chip, inv_icm42600_spi_bus_setup);
 }
+
+/*
+ * device id table is used to identify what device can be
+ * supported by this driver
+ */
+static const struct spi_device_id inv_icm42600_id[] = {
+	{ .name = "icm42600", .driver_data = INV_CHIP_ICM42600 },
+	{ .name = "icm42602", .driver_data = INV_CHIP_ICM42602 },
+	{ .name = "icm42605", .driver_data = INV_CHIP_ICM42605 },
+	{ .name = "icm42686", .driver_data = INV_CHIP_ICM42686 },
+	{ .name = "icm42622", .driver_data = INV_CHIP_ICM42622 },
+	{ .name = "icm42688", .driver_data = INV_CHIP_ICM42688 },
+	{ .name = "icm42631", .driver_data = INV_CHIP_ICM42631 },
+	{ }
+};
+MODULE_DEVICE_TABLE(spi, inv_icm42600_id);
 
 static const struct of_device_id inv_icm42600_of_matches[] = {
 	{
@@ -78,13 +93,19 @@ static const struct of_device_id inv_icm42600_of_matches[] = {
 		.compatible = "invensense,icm42605",
 		.data = (void *)INV_CHIP_ICM42605,
 	}, {
+		.compatible = "invensense,icm42686",
+		.data = (void *)INV_CHIP_ICM42686,
+	}, {
 		.compatible = "invensense,icm42622",
 		.data = (void *)INV_CHIP_ICM42622,
+	}, {
+		.compatible = "invensense,icm42688",
+		.data = (void *)INV_CHIP_ICM42688,
 	}, {
 		.compatible = "invensense,icm42631",
 		.data = (void *)INV_CHIP_ICM42631,
 	},
-	{}
+	{ }
 };
 MODULE_DEVICE_TABLE(of, inv_icm42600_of_matches);
 
@@ -94,6 +115,7 @@ static struct spi_driver inv_icm42600_driver = {
 		.of_match_table = inv_icm42600_of_matches,
 		.pm = pm_ptr(&inv_icm42600_pm_ops),
 	},
+	.id_table = inv_icm42600_id,
 	.probe = inv_icm42600_probe,
 };
 module_spi_driver(inv_icm42600_driver);
@@ -101,4 +123,4 @@ module_spi_driver(inv_icm42600_driver);
 MODULE_AUTHOR("InvenSense, Inc.");
 MODULE_DESCRIPTION("InvenSense ICM-426xx SPI driver");
 MODULE_LICENSE("GPL");
-MODULE_IMPORT_NS(IIO_ICM42600);
+MODULE_IMPORT_NS("IIO_ICM42600");

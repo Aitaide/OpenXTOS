@@ -188,7 +188,7 @@ static int mchp23k256_probe(struct spi_device *spi)
 
 	data = dev_get_platdata(&spi->dev);
 
-	flash->caps = of_device_get_match_data(&spi->dev);
+	flash->caps = spi_get_device_match_data(spi);
 	if (!flash->caps)
 		flash->caps = &mchp23k256_caps;
 
@@ -257,4 +257,3 @@ module_spi_driver(mchp23k256_driver);
 MODULE_DESCRIPTION("MTD SPI driver for MCHP23K256 RAM chips");
 MODULE_AUTHOR("Andrew Lunn <andre@lunn.ch>");
 MODULE_LICENSE("GPL v2");
-MODULE_ALIAS("spi:mchp23k256");

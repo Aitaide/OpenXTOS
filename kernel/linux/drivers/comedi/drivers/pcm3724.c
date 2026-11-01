@@ -194,7 +194,8 @@ static int pcm3724_attach(struct comedi_device *dev,
 	if (!priv)
 		return -ENOMEM;
 
-	ret = comedi_request_region(dev, it->options[0], 0x10);
+	ret = comedi_check_request_region(dev, it->options[0], 0x10,
+					  0, 0x3ff, 16);
 	if (ret)
 		return ret;
 
@@ -204,7 +205,7 @@ static int pcm3724_attach(struct comedi_device *dev,
 
 	for (i = 0; i < dev->n_subdevices; i++) {
 		s = &dev->subdevices[i];
-		ret = subdev_8255_init(dev, s, NULL, i * I8255_SIZE);
+		ret = subdev_8255_io_init(dev, s, i * I8255_SIZE);
 		if (ret)
 			return ret;
 		s->insn_config = subdev_3724_insn_config;

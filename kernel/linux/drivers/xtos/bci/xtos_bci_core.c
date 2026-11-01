@@ -626,7 +626,8 @@ static long xtos_bci_ioctl_locked(struct file *filp,
 	case XTOS_BCI_GET_INFO: {
 		struct xtos_bci_info info = { 0 };
 		
-		strncpy(info.name, dev->name, sizeof(info.name));
+		memcpy(info.name, dev->name,
+		       strnlen(dev->name, sizeof(info.name)));
 		info.dev_id = dev->dev_id;
 		info.num_channels = dev->num_channels;
 		info.sampling_rate = dev->sampling_rate;

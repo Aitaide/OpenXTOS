@@ -39,7 +39,7 @@ static int lpit_read_residency_counter_us(u64 *counter, bool io_mem)
 		return 0;
 	}
 
-	err = rdmsrl_safe(residency_info_ffh.gaddr.address, counter);
+	err = rdmsrq_safe(residency_info_ffh.gaddr.address, counter);
 	if (!err) {
 		u64 mask = GENMASK_ULL(residency_info_ffh.gaddr.bit_offset +
 				       residency_info_ffh.gaddr. bit_width - 1,
@@ -105,7 +105,7 @@ static void lpit_update_residency(struct lpit_residency_info *info,
 		return;
 
 	info->frequency = lpit_native->counter_frequency ?
-				lpit_native->counter_frequency : tsc_khz * 1000;
+				lpit_native->counter_frequency : mul_u32_u32(tsc_khz, 1000U);
 	if (!info->frequency)
 		info->frequency = 1;
 

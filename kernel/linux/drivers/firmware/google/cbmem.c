@@ -12,6 +12,7 @@
 #include <linux/io.h>
 #include <linux/kernel.h>
 #include <linux/kobject.h>
+#include <linux/device-id/coreboot.h>
 #include <linux/module.h>
 #include <linux/platform_device.h>
 #include <linux/slab.h>
@@ -30,7 +31,7 @@ static struct cbmem_entry *to_cbmem_entry(struct kobject *kobj)
 }
 
 static ssize_t mem_read(struct file *filp, struct kobject *kobj,
-			struct bin_attribute *bin_attr, char *buf, loff_t pos,
+			const struct bin_attribute *bin_attr, char *buf, loff_t pos,
 			size_t count)
 {
 	struct cbmem_entry *entry = to_cbmem_entry(kobj);
@@ -40,7 +41,7 @@ static ssize_t mem_read(struct file *filp, struct kobject *kobj,
 }
 
 static ssize_t mem_write(struct file *filp, struct kobject *kobj,
-			 struct bin_attribute *bin_attr, char *buf, loff_t pos,
+			 const struct bin_attribute *bin_attr, char *buf, loff_t pos,
 			 size_t count)
 {
 	struct cbmem_entry *entry = to_cbmem_entry(kobj);
@@ -53,7 +54,7 @@ static ssize_t mem_write(struct file *filp, struct kobject *kobj,
 	memcpy(entry->mem_file_buf + pos, buf, count);
 	return count;
 }
-static BIN_ATTR_ADMIN_RW(mem, 0);
+static const BIN_ATTR_ADMIN_RW(mem, 0);
 
 static ssize_t address_show(struct device *dev, struct device_attribute *attr,
 			    char *buf)
@@ -79,7 +80,7 @@ static struct attribute *attrs[] = {
 	NULL,
 };
 
-static struct bin_attribute *bin_attrs[] = {
+static const struct bin_attribute *const bin_attrs[] = {
 	&bin_attr_mem,
 	NULL,
 };
@@ -114,16 +115,22 @@ static int cbmem_entry_probe(struct coreboot_device *dev)
 	return 0;
 }
 
+static const struct coreboot_device_id cbmem_ids[] = {
+	{ .tag = LB_TAG_CBMEM_ENTRY },
+	{ /* sentinel */ }
+};
+MODULE_DEVICE_TABLE(coreboot, cbmem_ids);
+
 static struct coreboot_driver cbmem_entry_driver = {
 	.probe = cbmem_entry_probe,
 	.drv = {
 		.name = "cbmem",
-		.owner = THIS_MODULE,
 		.dev_groups = dev_groups,
 	},
-	.tag = LB_TAG_CBMEM_ENTRY,
+	.id_table = cbmem_ids,
 };
 module_coreboot_driver(cbmem_entry_driver);
 
 MODULE_AUTHOR("Jack Rosenthal <jrosenth@chromium.org>");
+MODULE_DESCRIPTION("Driver for exporting CBMEM entries in sysfs");
 MODULE_LICENSE("GPL");

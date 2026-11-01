@@ -21,7 +21,7 @@
 #include <linux/platform_device.h>
 #include <linux/power_supply.h>
 #include <linux/iio/consumer.h>
-#include <asm/unaligned.h>
+#include <linux/unaligned.h>
 #include <asm/iosf_mbi.h>
 
 #define PS_STAT_VBUS_TRIGGER			(1 << 0)
@@ -550,18 +550,20 @@ static const struct dmi_system_id axp288_quirks[] = {
 		.driver_data = (void *)AXP288_QUIRK_NO_BATTERY,
 	},
 	{
-		/* Intel Cherry Trail Compute Stick, Windows version */
+		/* Intel Bay Trail Compute Stick */
 		.matches = {
 			DMI_MATCH(DMI_SYS_VENDOR, "Intel"),
-			DMI_MATCH(DMI_PRODUCT_NAME, "STK1AW32SC"),
+			/* Partial match for STCK1A32WFC STCK1A32FC, STCK1A8LFC variants */
+			DMI_MATCH(DMI_PRODUCT_NAME, "STCK1A"),
 		},
 		.driver_data = (void *)AXP288_QUIRK_NO_BATTERY,
 	},
 	{
-		/* Intel Cherry Trail Compute Stick, version without an OS */
+		/* Intel Cherry Trail Compute Stick */
 		.matches = {
 			DMI_MATCH(DMI_SYS_VENDOR, "Intel"),
-			DMI_MATCH(DMI_PRODUCT_NAME, "STK1A32SC"),
+			/* Partial match for STK1AW32SC and STK1A32SC variants */
+			DMI_MATCH(DMI_PRODUCT_NAME, "STK1A"),
 		},
 		.driver_data = (void *)AXP288_QUIRK_NO_BATTERY,
 	},
@@ -598,6 +600,14 @@ static const struct dmi_system_id axp288_quirks[] = {
 			DMI_MATCH(DMI_BIOS_DATE, "06/14/2018"),
 		},
 		.driver_data = NULL,
+	},
+	{
+		/* Radxa ROCK Pi X Single Board Computer */
+		.matches = {
+			DMI_MATCH(DMI_BOARD_NAME, "ROCK Pi X"),
+			DMI_MATCH(DMI_BOARD_VENDOR, "Radxa"),
+		},
+		.driver_data = (void *)AXP288_QUIRK_NO_BATTERY,
 	},
 	{
 		/*
@@ -781,7 +791,7 @@ static int axp288_fuel_gauge_probe(struct platform_device *pdev)
 						fuel_gauge_thread_handler,
 						IRQF_ONESHOT, DEV_NAME, info);
 		if (ret)
-			return dev_err_probe(dev, ret, "requesting IRQ %d\n", info->irq[i]);
+			return ret;
 	}
 
 	return 0;
@@ -789,7 +799,7 @@ static int axp288_fuel_gauge_probe(struct platform_device *pdev)
 
 static const struct platform_device_id axp288_fg_id_table[] = {
 	{ .name = DEV_NAME },
-	{},
+	{ }
 };
 MODULE_DEVICE_TABLE(platform, axp288_fg_id_table);
 
@@ -807,3 +817,4 @@ MODULE_AUTHOR("Ramakrishna Pallala <ramakrishna.pallala@intel.com>");
 MODULE_AUTHOR("Todd Brandt <todd.e.brandt@linux.intel.com>");
 MODULE_DESCRIPTION("Xpower AXP288 Fuel Gauge Driver");
 MODULE_LICENSE("GPL");
+MODULE_IMPORT_NS("IIO_CONSUMER");

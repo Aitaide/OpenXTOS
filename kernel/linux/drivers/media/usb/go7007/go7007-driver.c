@@ -80,7 +80,7 @@ static int go7007_load_encoder(struct go7007 *go)
 	const struct firmware *fw_entry;
 	char fw_name[] = "go7007/go7007fw.bin";
 	void *bounce;
-	int fw_len, rv = 0;
+	int fw_len;
 	u16 intr_val, intr_data;
 
 	if (go->boot_fw == NULL) {
@@ -109,9 +109,11 @@ static int go7007_load_encoder(struct go7007 *go)
 	    go7007_read_interrupt(go, &intr_val, &intr_data) < 0 ||
 			(intr_val & ~0x1) != 0x5a5a) {
 		v4l2_err(go, "error transferring firmware\n");
-		rv = -1;
+		kfree(go->boot_fw);
+		go->boot_fw = NULL;
+		return -1;
 	}
-	return rv;
+	return 0;
 }
 
 MODULE_FIRMWARE("go7007/go7007fw.bin");
@@ -262,17 +264,17 @@ int go7007_register_encoder(struct go7007 *go, unsigned num_i2c_devs)
 	ret = go7007_init_encoder(go);
 	mutex_unlock(&go->hw_lock);
 	if (ret < 0)
-		return ret;
+		goto err_unregister_v4l2_dev;
 
 	ret = go7007_v4l2_ctrl_init(go);
 	if (ret < 0)
-		return ret;
+		goto err_free_controls;
 
 	if (!go->i2c_adapter_online &&
 			go->board_info->flags & GO7007_BOARD_USE_ONBOARD_I2C) {
 		ret = go7007_i2c_init(go);
 		if (ret < 0)
-			return ret;
+			goto err_free_controls;
 		go->i2c_adapter_online = 1;
 	}
 	if (go->i2c_adapter_online) {
@@ -302,13 +304,19 @@ int go7007_register_encoder(struct go7007 *go, unsigned num_i2c_devs)
 
 	ret = go7007_v4l2_init(go);
 	if (ret < 0)
-		return ret;
+		goto err_free_controls;
 
 	if (go->board_info->flags & GO7007_BOARD_HAS_AUDIO) {
 		go->audio_enabled = 1;
 		go7007_snd_init(go);
 	}
 	return 0;
+
+err_free_controls:
+	v4l2_ctrl_handler_free(&go->hdl);
+err_unregister_v4l2_dev:
+	v4l2_device_unregister(&go->v4l2_dev);
+	return ret;
 }
 EXPORT_SYMBOL(go7007_register_encoder);
 
@@ -692,7 +700,7 @@ struct go7007 *go7007_alloc(const struct go7007_board_info *board,
 {
 	struct go7007 *go;
 
-	go = kzalloc(sizeof(struct go7007), GFP_KERNEL);
+	go = kzalloc_obj(struct go7007);
 	if (go == NULL)
 		return NULL;
 	go->dev = dev;
@@ -734,4 +742,5 @@ void go7007_update_board(struct go7007 *go)
 }
 EXPORT_SYMBOL(go7007_update_board);
 
+MODULE_DESCRIPTION("WIS GO7007 MPEG encoder support");
 MODULE_LICENSE("GPL v2");

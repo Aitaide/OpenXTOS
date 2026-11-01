@@ -48,7 +48,7 @@ struct ptr_ring {
  */
 static inline bool __ptr_ring_full(struct ptr_ring *r)
 {
-	return r->queue[r->producer];
+	return data_race(r->queue[r->producer]);
 }
 
 static inline bool ptr_ring_full(struct ptr_ring *r)
@@ -96,6 +96,26 @@ static inline bool ptr_ring_full_bh(struct ptr_ring *r)
 	return ret;
 }
 
+/* Report whether the next __ptr_ring_produce() has room for one entry:
+ * 0 means the single slot at r->queue[r->producer] is free, -ENOSPC means
+ * the ring is full, which is transient, and -EINVAL means r->size is 0,
+ * which is permanent. A caller that stops producing and waits for space
+ * must therefore do so only for -ENOSPC.
+ *
+ * Note: callers invoking this in a loop must use a compiler barrier,
+ * for example cpu_relax(). Callers must hold producer_lock.
+ */
+static inline int __ptr_ring_check_produce(struct ptr_ring *r)
+{
+	if (unlikely(!r->size))
+		return -EINVAL;
+
+	if (data_race(r->queue[r->producer]))
+		return -ENOSPC;
+
+	return 0;
+}
+
 /* Note: callers invoking this in a loop must use a compiler barrier,
  * for example cpu_relax(). Callers must hold producer_lock.
  * Callers are responsible for making sure pointer that is being queued
@@ -103,8 +123,10 @@ static inline bool ptr_ring_full_bh(struct ptr_ring *r)
  */
 static inline int __ptr_ring_produce(struct ptr_ring *r, void *ptr)
 {
-	if (unlikely(!r->size) || r->queue[r->producer])
-		return -ENOSPC;
+	int ret = __ptr_ring_check_produce(r);
+
+	if (ret)
+		return ret;
 
 	/* Make sure the pointer we are storing points to a valid data. */
 	/* Pairs with the dependency ordering in __ptr_ring_consume. */
@@ -194,7 +216,7 @@ static inline void *__ptr_ring_peek(struct ptr_ring *r)
 static inline bool __ptr_ring_empty(struct ptr_ring *r)
 {
 	if (likely(r->size))
-		return !r->queue[READ_ONCE(r->consumer_head)];
+		return !data_race(r->queue[READ_ONCE(r->consumer_head)]);
 	return true;
 }
 
@@ -243,6 +265,24 @@ static inline bool ptr_ring_empty_bh(struct ptr_ring *r)
 	return ret;
 }
 
+/* Zero entries from tail to specified head.
+ * NB: if consumer_head can be >= r->size need to fixup tail later.
+ */
+static inline void __ptr_ring_zero_tail(struct ptr_ring *r, int consumer_head)
+{
+	int head = consumer_head;
+
+	/* Zero out entries in the reverse order: this way we touch the
+	 * cache line that producer might currently be reading the last;
+	 * producer won't make progress and touch other cache lines
+	 * besides the first one until we write out all entries.
+	 */
+	while (likely(head > r->consumer_tail))
+		data_race(r->queue[--head] = NULL);
+
+	r->consumer_tail = consumer_head;
+}
+
 /* Must only be called after __ptr_ring_peek returned !NULL */
 static inline void __ptr_ring_discard_one(struct ptr_ring *r)
 {
@@ -261,8 +301,7 @@ static inline void __ptr_ring_discard_one(struct ptr_ring *r)
 	/* Note: we must keep consumer_head valid at all times for __ptr_ring_empty
 	 * to work correctly.
 	 */
-	int consumer_head = r->consumer_head;
-	int head = consumer_head++;
+	int consumer_head = r->consumer_head + 1;
 
 	/* Once we have processed enough entries invalidate them in
 	 * the ring all at once so producer can reuse their space in the ring.
@@ -270,16 +309,9 @@ static inline void __ptr_ring_discard_one(struct ptr_ring *r)
 	 * but helps keep the implementation simple.
 	 */
 	if (unlikely(consumer_head - r->consumer_tail >= r->batch ||
-		     consumer_head >= r->size)) {
-		/* Zero out entries in the reverse order: this way we touch the
-		 * cache line that producer might currently be reading the last;
-		 * producer won't make progress and touch other cache lines
-		 * besides the first one until we write out all entries.
-		 */
-		while (likely(head >= r->consumer_tail))
-			r->queue[head--] = NULL;
-		r->consumer_tail = consumer_head;
-	}
+		     consumer_head >= r->size))
+		__ptr_ring_zero_tail(r, consumer_head);
+
 	if (unlikely(consumer_head >= r->size)) {
 		consumer_head = 0;
 		r->consumer_tail = 0;
@@ -464,11 +496,11 @@ static inline int ptr_ring_consume_batched_bh(struct ptr_ring *r,
 /* Not all gfp_t flags (besides GFP_KERNEL) are allowed. See
  * documentation for vmalloc for which of them are legal.
  */
-static inline void **__ptr_ring_init_queue_alloc(unsigned int size, gfp_t gfp)
+static inline void **__ptr_ring_init_queue_alloc_noprof(unsigned int size, gfp_t gfp)
 {
 	if (size > KMALLOC_MAX_SIZE / sizeof(void *))
 		return NULL;
-	return kvmalloc_array(size, sizeof(void *), gfp | __GFP_ZERO);
+	return kvmalloc_array_noprof(size, sizeof(void *), gfp | __GFP_ZERO);
 }
 
 static inline void __ptr_ring_set_size(struct ptr_ring *r, int size)
@@ -484,9 +516,9 @@ static inline void __ptr_ring_set_size(struct ptr_ring *r, int size)
 		r->batch = 1;
 }
 
-static inline int ptr_ring_init(struct ptr_ring *r, int size, gfp_t gfp)
+static inline int ptr_ring_init_noprof(struct ptr_ring *r, int size, gfp_t gfp)
 {
-	r->queue = __ptr_ring_init_queue_alloc(size, gfp);
+	r->queue = __ptr_ring_init_queue_alloc_noprof(size, gfp);
 	if (!r->queue)
 		return -ENOMEM;
 
@@ -497,6 +529,7 @@ static inline int ptr_ring_init(struct ptr_ring *r, int size, gfp_t gfp)
 
 	return 0;
 }
+#define ptr_ring_init(...)	alloc_hooks(ptr_ring_init_noprof(__VA_ARGS__))
 
 /*
  * Return entries into ring. Destroy entries that don't fit.
@@ -512,7 +545,6 @@ static inline void ptr_ring_unconsume(struct ptr_ring *r, void **batch, int n,
 				      void (*destroy)(void *))
 {
 	unsigned long flags;
-	int head;
 
 	spin_lock_irqsave(&r->consumer_lock, flags);
 	spin_lock(&r->producer_lock);
@@ -524,17 +556,14 @@ static inline void ptr_ring_unconsume(struct ptr_ring *r, void **batch, int n,
 	 * Clean out buffered entries (for simplicity). This way following code
 	 * can test entries for NULL and if not assume they are valid.
 	 */
-	head = r->consumer_head - 1;
-	while (likely(head >= r->consumer_tail))
-		r->queue[head--] = NULL;
-	r->consumer_tail = r->consumer_head;
+	__ptr_ring_zero_tail(r, r->consumer_head);
 
 	/*
 	 * Go over entries in batch, start moving head back and copy entries.
 	 * Stop when we run into previously unconsumed entries.
 	 */
 	while (n) {
-		head = r->consumer_head - 1;
+		int head = r->consumer_head - 1;
 		if (head < 0)
 			head = r->size - 1;
 		if (r->queue[head]) {
@@ -587,11 +616,11 @@ static inline void **__ptr_ring_swap_queue(struct ptr_ring *r, void **queue,
  * In particular if you consume ring in interrupt or BH context, you must
  * disable interrupts/BH when doing so.
  */
-static inline int ptr_ring_resize(struct ptr_ring *r, int size, gfp_t gfp,
+static inline int ptr_ring_resize_noprof(struct ptr_ring *r, int size, gfp_t gfp,
 				  void (*destroy)(void *))
 {
 	unsigned long flags;
-	void **queue = __ptr_ring_init_queue_alloc(size, gfp);
+	void **queue = __ptr_ring_init_queue_alloc_noprof(size, gfp);
 	void **old;
 
 	if (!queue)
@@ -609,39 +638,39 @@ static inline int ptr_ring_resize(struct ptr_ring *r, int size, gfp_t gfp,
 
 	return 0;
 }
+#define ptr_ring_resize(...)	alloc_hooks(ptr_ring_resize_noprof(__VA_ARGS__))
 
 /*
  * Note: producer lock is nested within consumer lock, so if you
  * resize you must make sure all uses nest correctly.
- * In particular if you consume ring in interrupt or BH context, you must
- * disable interrupts/BH when doing so.
+ * In particular if you consume ring in BH context, you must
+ * disable BH when doing so.
  */
-static inline int ptr_ring_resize_multiple(struct ptr_ring **rings,
-					   unsigned int nrings,
-					   int size,
-					   gfp_t gfp, void (*destroy)(void *))
+static inline int ptr_ring_resize_multiple_bh_noprof(struct ptr_ring **rings,
+						     unsigned int nrings,
+						     int size, gfp_t gfp,
+						     void (*destroy)(void *))
 {
-	unsigned long flags;
 	void ***queues;
 	int i;
 
-	queues = kmalloc_array(nrings, sizeof(*queues), gfp);
+	queues = kmalloc_array_noprof(nrings, sizeof(*queues), gfp);
 	if (!queues)
 		goto noqueues;
 
 	for (i = 0; i < nrings; ++i) {
-		queues[i] = __ptr_ring_init_queue_alloc(size, gfp);
+		queues[i] = __ptr_ring_init_queue_alloc_noprof(size, gfp);
 		if (!queues[i])
 			goto nomem;
 	}
 
 	for (i = 0; i < nrings; ++i) {
-		spin_lock_irqsave(&(rings[i])->consumer_lock, flags);
+		spin_lock_bh(&(rings[i])->consumer_lock);
 		spin_lock(&(rings[i])->producer_lock);
 		queues[i] = __ptr_ring_swap_queue(rings[i], queues[i],
 						  size, gfp, destroy);
 		spin_unlock(&(rings[i])->producer_lock);
-		spin_unlock_irqrestore(&(rings[i])->consumer_lock, flags);
+		spin_unlock_bh(&(rings[i])->consumer_lock);
 	}
 
 	for (i = 0; i < nrings; ++i)
@@ -660,6 +689,8 @@ nomem:
 noqueues:
 	return -ENOMEM;
 }
+#define ptr_ring_resize_multiple_bh(...) \
+		alloc_hooks(ptr_ring_resize_multiple_bh_noprof(__VA_ARGS__))
 
 static inline void ptr_ring_cleanup(struct ptr_ring *r, void (*destroy)(void *))
 {

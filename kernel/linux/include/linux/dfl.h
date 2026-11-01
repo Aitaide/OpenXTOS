@@ -9,7 +9,7 @@
 #define __LINUX_DFL_H
 
 #include <linux/device.h>
-#include <linux/mod_devicetable.h>
+#include <linux/device-id/dfl.h>
 
 /**
  * enum dfl_id_type - define the DFL FIU types
@@ -71,7 +71,7 @@ struct dfl_driver {
 };
 
 #define to_dfl_dev(d) container_of(d, struct dfl_device, dev)
-#define to_dfl_drv(d) container_of(d, struct dfl_driver, drv)
+#define to_dfl_drv(d) container_of_const(d, struct dfl_driver, drv)
 
 /*
  * use a macro to avoid include chaining to get THIS_MODULE.

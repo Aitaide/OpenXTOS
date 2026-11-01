@@ -15,6 +15,7 @@
 #include <linux/delay.h>
 #include <linux/log2.h>
 #include <linux/slab.h>
+#include <linux/string_choices.h>
 #include <linux/pci.h>
 #include <linux/irq.h>
 #include <linux/dmi.h>
@@ -28,7 +29,8 @@
 unsigned int cdnsp_port_speed(unsigned int port_status)
 {
 	/*Detect gadget speed based on PORTSC register*/
-	if (DEV_SUPERSPEEDPLUS(port_status))
+	if (DEV_SUPERSPEEDPLUS(port_status) ||
+	    DEV_SSP_GEN1x2(port_status) || DEV_SSP_GEN2x2(port_status))
 		return USB_SPEED_SUPER_PLUS;
 	else if (DEV_SUPERSPEED(port_status))
 		return USB_SPEED_SUPER;
@@ -122,20 +124,48 @@ void cdnsp_set_link_state(struct cdnsp_device *pdev,
 }
 
 static void cdnsp_disable_port(struct cdnsp_device *pdev,
-			       __le32 __iomem *port_regs)
+			       struct cdnsp_port *port)
 {
-	u32 temp = cdnsp_port_state_to_neutral(readl(port_regs));
+	u32 temp;
 
-	writel(temp | PORT_PED, port_regs);
+	if (!port->exist)
+		return;
+
+	temp = cdnsp_port_state_to_neutral(readl(&port->regs->portsc));
+	writel(temp | PORT_PED, &port->regs->portsc);
 }
 
 static void cdnsp_clear_port_change_bit(struct cdnsp_device *pdev,
-					__le32 __iomem *port_regs)
+					struct cdnsp_port *port)
 {
-	u32 portsc = readl(port_regs);
+	u32 portsc;
 
+	if (!port->exist)
+		return;
+
+	portsc = readl(&port->regs->portsc);
 	writel(cdnsp_port_state_to_neutral(portsc) |
-	       (portsc & PORT_CHANGE_BITS), port_regs);
+	       (portsc & PORT_CHANGE_BITS), &port->regs->portsc);
+}
+
+static void cdnsp_set_apb_timeout_value(struct cdnsp_device *pdev)
+{
+	struct cdns *cdns = dev_get_drvdata(pdev->dev);
+	__le32 __iomem *reg;
+	void __iomem *base;
+	u32 offset = 0;
+	u32 val;
+
+	if (!cdns->override_apb_timeout)
+		return;
+
+	base = &pdev->cap_regs->hc_capbase;
+	offset = cdnsp_find_next_ext_cap(base, offset, D_XEC_PRE_REGS_CAP);
+	reg = base + offset + REG_CHICKEN_BITS_3_OFFSET;
+
+	val  = readl(reg);
+	val = CHICKEN_APB_TIMEOUT_SET(val, cdns->override_apb_timeout);
+	writel(val, reg);
 }
 
 static void cdnsp_set_chicken_bits_2(struct cdnsp_device *pdev, u32 bit)
@@ -526,6 +556,7 @@ int cdnsp_wait_for_cmd_compl(struct cdnsp_device *pdev)
 	dma_addr_t cmd_deq_dma;
 	union cdnsp_trb *event;
 	u32 cycle_state;
+	u32 retry = 10;
 	int ret, val;
 	u64 cmd_dma;
 	u32  flags;
@@ -557,8 +588,23 @@ int cdnsp_wait_for_cmd_compl(struct cdnsp_device *pdev)
 		flags = le32_to_cpu(event->event_cmd.flags);
 
 		/* Check the owner of the TRB. */
-		if ((flags & TRB_CYCLE) != cycle_state)
+		if ((flags & TRB_CYCLE) != cycle_state) {
+			/*
+			 * Give some extra time to get chance controller
+			 * to finish command before returning error code.
+			 * Checking CMD_RING_BUSY is not sufficient because
+			 * this bit is cleared to '0' when the Command
+			 * Descriptor has been executed by controller
+			 * and not when command completion event has
+			 * be added to event ring.
+			 */
+			if (retry--) {
+				udelay(20);
+				continue;
+			}
+
 			return -EINVAL;
+		}
 
 		cmd_dma = le64_to_cpu(event->event_cmd.cmd_trb);
 
@@ -906,7 +952,7 @@ void cdnsp_set_usb2_hardware_lpm(struct cdnsp_device *pdev,
 				 struct usb_request *req,
 				 int enable)
 {
-	if (pdev->active_port != &pdev->usb2_port || !pdev->gadget.lpm_capable)
+	if (pdev->active_port == &pdev->usb3_port || !pdev->gadget.lpm_capable)
 		return;
 
 	trace_cdnsp_lpm(enable);
@@ -1024,10 +1070,8 @@ static int cdnsp_gadget_ep_disable(struct usb_ep *ep)
 	pep->ep_state |= EP_DIS_IN_RROGRESS;
 
 	/* Endpoint was unconfigured by Reset Device command. */
-	if (!(pep->ep_state & EP_UNCONFIGURED)) {
+	if (!(pep->ep_state & EP_UNCONFIGURED))
 		cdnsp_cmd_stop_ep(pdev, pep);
-		cdnsp_cmd_flush_ep(pdev, pep);
-	}
 
 	/* Remove all queued USB requests. */
 	while (!list_empty(&pep->pending_list)) {
@@ -1066,7 +1110,7 @@ static struct usb_request *cdnsp_gadget_ep_alloc_request(struct usb_ep *ep,
 	struct cdnsp_ep *pep = to_cdnsp_ep(ep);
 	struct cdnsp_request *preq;
 
-	preq = kzalloc(sizeof(*preq), gfp_flags);
+	preq = kzalloc_obj(*preq, gfp_flags);
 	if (!preq)
 		return NULL;
 
@@ -1274,20 +1318,25 @@ static int cdnsp_run(struct cdnsp_device *pdev,
 		break;
 	}
 
-	if (speed >= USB_SPEED_SUPER) {
+	if (pdev->usb3_port.exist && speed >= USB_SPEED_SUPER) {
 		writel(temp, &pdev->port3x_regs->mode_addr);
 		cdnsp_set_link_state(pdev, &pdev->usb3_port.regs->portsc,
 				     XDEV_RXDETECT);
 	} else {
-		cdnsp_disable_port(pdev, &pdev->usb3_port.regs->portsc);
+		cdnsp_disable_port(pdev, &pdev->usb3_port);
 	}
 
-	cdnsp_set_link_state(pdev, &pdev->usb2_port.regs->portsc,
-			     XDEV_RXDETECT);
+	if (pdev->usb2_port.exist) {
+		cdnsp_set_link_state(pdev, &pdev->usb2_port.regs->portsc,
+				     XDEV_RXDETECT);
+		writel(PORT_REG6_L1_L0_HW_EN | fs_speed, &pdev->port20_regs->port_reg6);
+	}
+
+	if (pdev->eusb_port.exist)
+		cdnsp_set_link_state(pdev, &pdev->eusb_port.regs->portsc,
+				     XDEV_RXDETECT);
 
 	cdnsp_gadget_ep0_desc.wMaxPacketSize = cpu_to_le16(512);
-
-	writel(PORT_REG6_L1_L0_HW_EN | fs_speed, &pdev->port20_regs->port_reg6);
 
 	ret = cdnsp_start(pdev);
 	if (ret) {
@@ -1424,8 +1473,6 @@ static void cdnsp_stop(struct cdnsp_device *pdev)
 {
 	u32 temp;
 
-	cdnsp_cmd_flush_ep(pdev, &pdev->eps[0]);
-
 	/* Remove internally queued request for ep0. */
 	if (!list_empty(&pdev->eps[0].pending_list)) {
 		struct cdnsp_request *req;
@@ -1435,8 +1482,10 @@ static void cdnsp_stop(struct cdnsp_device *pdev)
 			cdnsp_ep_dequeue(&pdev->eps[0], req);
 	}
 
-	cdnsp_disable_port(pdev, &pdev->usb2_port.regs->portsc);
-	cdnsp_disable_port(pdev, &pdev->usb3_port.regs->portsc);
+	cdnsp_disable_port(pdev, &pdev->usb2_port);
+	cdnsp_disable_port(pdev, &pdev->usb3_port);
+	cdnsp_disable_port(pdev, &pdev->eusb_port);
+
 	cdnsp_disable_slot(pdev);
 	cdnsp_halt(pdev);
 
@@ -1445,8 +1494,9 @@ static void cdnsp_stop(struct cdnsp_device *pdev)
 	temp = readl(&pdev->ir_set->irq_pending);
 	writel(IMAN_IE_CLEAR(temp), &pdev->ir_set->irq_pending);
 
-	cdnsp_clear_port_change_bit(pdev, &pdev->usb2_port.regs->portsc);
-	cdnsp_clear_port_change_bit(pdev, &pdev->usb3_port.regs->portsc);
+	cdnsp_clear_port_change_bit(pdev, &pdev->usb2_port);
+	cdnsp_clear_port_change_bit(pdev, &pdev->eusb_port);
+	cdnsp_clear_port_change_bit(pdev, &pdev->usb3_port);
 
 	/* Clear interrupt line */
 	temp = readl(&pdev->ir_set->irq_pending);
@@ -1675,12 +1725,12 @@ static int cdnsp_gadget_init_endpoints(struct cdnsp_device *pdev)
 			"CTRL: %s, INT: %s, BULK: %s, ISOC %s, "
 			"SupDir IN: %s, OUT: %s\n",
 			pep->name, 1024,
-			(pep->endpoint.caps.type_control) ? "yes" : "no",
-			(pep->endpoint.caps.type_int) ? "yes" : "no",
-			(pep->endpoint.caps.type_bulk) ? "yes" : "no",
-			(pep->endpoint.caps.type_iso) ? "yes" : "no",
-			(pep->endpoint.caps.dir_in) ? "yes" : "no",
-			(pep->endpoint.caps.dir_out) ? "yes" : "no");
+			str_yes_no(pep->endpoint.caps.type_control),
+			str_yes_no(pep->endpoint.caps.type_int),
+			str_yes_no(pep->endpoint.caps.type_bulk),
+			str_yes_no(pep->endpoint.caps.type_iso),
+			str_yes_no(pep->endpoint.caps.dir_in),
+			str_yes_no(pep->endpoint.caps.dir_out));
 
 		INIT_LIST_HEAD(&pep->pending_list);
 	}
@@ -1776,12 +1826,90 @@ static void cdnsp_get_rev_cap(struct cdnsp_device *pdev)
 	reg += cdnsp_find_next_ext_cap(reg, 0, RTL_REV_CAP);
 	pdev->rev_cap  = reg;
 
+	pdev->rtl_revision = readl(&pdev->rev_cap->rtl_revision);
+
 	dev_info(pdev->dev, "Rev: %08x/%08x, eps: %08x, buff: %08x/%08x\n",
 		 readl(&pdev->rev_cap->ctrl_revision),
 		 readl(&pdev->rev_cap->rtl_revision),
 		 readl(&pdev->rev_cap->ep_supported),
 		 readl(&pdev->rev_cap->rx_buff_size),
 		 readl(&pdev->rev_cap->tx_buff_size));
+}
+
+static void cdnsp_set_event_deq(struct cdnsp_device *pdev)
+{
+	dma_addr_t deq;
+	u64 temp;
+
+	deq = cdnsp_trb_virt_to_dma(pdev->event_ring->deq_seg,
+				    pdev->event_ring->dequeue);
+
+	/* Update controller event ring dequeue pointer */
+	temp = cdnsp_read_64(&pdev->ir_set->erst_dequeue);
+	temp &= ERST_PTR_MASK;
+
+	/*
+	 * Don't clear the EHB bit (which is RW1C) because
+	 * there might be more events to service.
+	 */
+	temp &= ~ERST_EHB;
+
+	cdnsp_write_64(((u64)deq & (u64)~ERST_PTR_MASK) | temp,
+		       &pdev->ir_set->erst_dequeue);
+}
+
+static void cdnsp_add_interrupter(struct cdnsp_device *pdev)
+{
+	u64 erst_base;
+	u32 erst_size;
+
+	/* Set ERST count with the number of entries in the segment table. */
+	erst_size = readl(&pdev->ir_set->erst_size);
+	erst_size &= ERST_SIZE_MASK;
+	erst_size |= ERST_NUM_SEGS;
+	writel(erst_size, &pdev->ir_set->erst_size);
+
+	/* Set the segment table base address. */
+	erst_base = cdnsp_read_64(&pdev->ir_set->erst_base);
+	erst_base &= ERST_PTR_MASK;
+	erst_base |= (pdev->erst.erst_dma_addr & (u64)~ERST_PTR_MASK);
+	cdnsp_write_64(erst_base, &pdev->ir_set->erst_base);
+
+	/* Set the event ring dequeue address. */
+	cdnsp_set_event_deq(pdev);
+}
+
+/* Set up basic CDNSP registers */
+static void cdnsp_init(struct cdnsp_device *pdev)
+{
+	unsigned int val;
+	u64 val_64;
+
+	val = readl(&pdev->op_regs->config_reg);
+	val |= ((val & ~MAX_DEVS) | CDNSP_DEV_MAX_SLOTS) | CONFIG_U3E;
+	writel(val, &pdev->op_regs->config_reg);
+
+	/* Initialize the Command ring */
+	cdnsp_ring_init(pdev, pdev->cmd_ring);
+
+	/* Set the address in the Command Ring Control register */
+	val_64 = cdnsp_read_64(&pdev->op_regs->cmd_ring);
+	val_64 = (val_64 & (u64)CMD_RING_RSVD_BITS) |
+		 (pdev->cmd_ring->first_seg->dma & (u64)~CMD_RING_RSVD_BITS) |
+		 pdev->cmd_ring->cycle_state;
+	cdnsp_write_64(val_64, &pdev->op_regs->cmd_ring);
+
+	/* Set Device Context Base Address Array pointer */
+	cdnsp_write_64(pdev->dcbaa->dma, &pdev->op_regs->dcbaa_ptr);
+
+	/* Set Doorbell array pointer */
+	val = readl(&pdev->cap_regs->db_off);
+	val &= DBOFF_MASK;
+	pdev->dba = (void __iomem *)pdev->cap_regs + val;
+
+	/* Initialize the Primary interrupter */
+	cdnsp_ring_init(pdev, pdev->event_ring);
+	cdnsp_add_interrupter(pdev);
 }
 
 static int cdnsp_gen_setup(struct cdnsp_device *pdev)
@@ -1800,6 +1928,15 @@ static int cdnsp_gen_setup(struct cdnsp_device *pdev)
 	pdev->hcc_params = readl(&pdev->cap_regs->hc_capbase);
 	pdev->hci_version = HC_VERSION(pdev->hcc_params);
 	pdev->hcc_params = readl(&pdev->cap_regs->hcc_params);
+
+	/*
+	 * Override the APB timeout value to give the controller more time for
+	 * enabling UTMI clock and synchronizing APB and UTMI clock domains.
+	 * This fix is platform specific and is required to fixes issue with
+	 * reading incorrect value from PORTSC register after resuming
+	 * from L1 state.
+	 */
+	cdnsp_set_apb_timeout_value(pdev);
 
 	cdnsp_get_rev_cap(pdev);
 
@@ -1840,6 +1977,8 @@ static int cdnsp_gen_setup(struct cdnsp_device *pdev)
 	if (ret)
 		return ret;
 
+	cdnsp_init(pdev);
+
 	/*
 	 * Software workaround for U1: after transition
 	 * to U1 the controller starts gating clock, and in some cases,
@@ -1860,7 +1999,7 @@ static int __cdnsp_gadget_init(struct cdns *cdns)
 
 	cdns_drd_gadget_on(cdns);
 
-	pdev = kzalloc(sizeof(*pdev), GFP_KERNEL);
+	pdev = kzalloc_obj(*pdev);
 	if (!pdev)
 		return -ENOMEM;
 
@@ -1931,7 +2070,10 @@ static int __cdnsp_gadget_init(struct cdns *cdns)
 	return 0;
 
 del_gadget:
-	usb_del_gadget_udc(&pdev->gadget);
+	usb_del_gadget(&pdev->gadget);
+	cdnsp_gadget_free_endpoints(pdev);
+	usb_put_gadget(&pdev->gadget);
+	goto halt_pdev;
 free_endpoints:
 	cdnsp_gadget_free_endpoints(pdev);
 halt_pdev:
@@ -1951,10 +2093,10 @@ static void cdnsp_gadget_exit(struct cdns *cdns)
 	struct cdnsp_device *pdev = cdns->gadget_dev;
 
 	devm_free_irq(pdev->dev, cdns->dev_irq, pdev);
-	pm_runtime_mark_last_busy(cdns->dev);
 	pm_runtime_put_autosuspend(cdns->dev);
-	usb_del_gadget_udc(&pdev->gadget);
+	usb_del_gadget(&pdev->gadget);
 	cdnsp_gadget_free_endpoints(pdev);
+	usb_put_gadget(&pdev->gadget);
 	cdnsp_mem_cleanup(pdev);
 	kfree(pdev);
 	cdns->gadget_dev = NULL;
@@ -1966,9 +2108,6 @@ static int cdnsp_gadget_suspend(struct cdns *cdns, bool do_wakeup)
 	struct cdnsp_device *pdev = cdns->gadget_dev;
 	unsigned long flags;
 
-	if (pdev->link_state == XDEV_U3)
-		return 0;
-
 	spin_lock_irqsave(&pdev->lock, flags);
 	cdnsp_disconnect_gadget(pdev);
 	cdnsp_stop(pdev);
@@ -1977,17 +2116,43 @@ static int cdnsp_gadget_suspend(struct cdns *cdns, bool do_wakeup)
 	return 0;
 }
 
-static int cdnsp_gadget_resume(struct cdns *cdns, bool hibernated)
+static int cdnsp_gadget_resume(struct cdns *cdns, bool lost_power)
 {
 	struct cdnsp_device *pdev = cdns->gadget_dev;
 	enum usb_device_speed max_speed;
 	unsigned long flags;
+	bool context_lost;
+	u32 val;
 	int ret;
 
 	if (!pdev->gadget_driver)
 		return 0;
 
 	spin_lock_irqsave(&pdev->lock, flags);
+	val = readl(&pdev->port3x_regs->mode_2);
+	context_lost = !!(val & CFG_3XPORT_U1_PIPE_CLK_GATE_EN) || lost_power;
+
+	if (context_lost) {
+		cdnsp_halt(pdev);
+		cdnsp_set_apb_timeout_value(pdev);
+
+		/* Reset the internal controller memory state and registers. */
+		ret = cdnsp_reset(pdev);
+		if (ret)
+			goto unlock;
+
+		val = readl(&pdev->port3x_regs->mode_2);
+		val &= ~CFG_3XPORT_U1_PIPE_CLK_GATE_EN;
+		writel(val, &pdev->port3x_regs->mode_2);
+
+		cdnsp_clear_cmd_ring(pdev);
+
+		memset(pdev->event_ring->first_seg->trbs, 0,
+		       sizeof(union cdnsp_trb) * (TRBS_PER_SEGMENT));
+
+		cdnsp_init(pdev);
+	}
+
 	max_speed = pdev->gadget_driver->max_speed;
 
 	/* Limit speed if necessary. */
@@ -1995,9 +2160,10 @@ static int cdnsp_gadget_resume(struct cdns *cdns, bool hibernated)
 
 	ret = cdnsp_run(pdev, max_speed);
 
-	if (pdev->link_state == XDEV_U3)
+	if (!context_lost && pdev->link_state == XDEV_U3)
 		__cdnsp_gadget_wakeup(pdev);
 
+unlock:
 	spin_unlock_irqrestore(&pdev->lock, flags);
 
 	return ret;
@@ -2027,3 +2193,4 @@ int cdnsp_gadget_init(struct cdns *cdns)
 
 	return 0;
 }
+EXPORT_SYMBOL_GPL(cdnsp_gadget_init);

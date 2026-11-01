@@ -65,6 +65,7 @@
 #include <linux/slab.h>
 #include <linux/delay.h>
 
+#include <drm/clients/drm_client_setup.h>
 #include <drm/drm_atomic_helper.h>
 #include <drm/drm_bridge.h>
 #include <drm/drm_drv.h>
@@ -152,6 +153,7 @@ static int mcde_modeset_init(struct drm_device *drm)
 		if (panel) {
 			bridge = drm_panel_bridge_add_typed(panel,
 					DRM_MODE_CONNECTOR_DPI);
+			drm_panel_put(panel);
 			if (IS_ERR(bridge)) {
 				dev_err(drm->dev,
 					"Could not connect panel bridge\n");
@@ -207,11 +209,11 @@ static const struct drm_driver mcde_drm_driver = {
 	.fops = &drm_fops,
 	.name = "mcde",
 	.desc = DRIVER_DESC,
-	.date = "20180529",
 	.major = 1,
 	.minor = 0,
 	.patchlevel = 0,
 	DRM_GEM_DMA_DRIVER_OPS,
+	DRM_FBDEV_DMA_DRIVER_OPS,
 };
 
 static int mcde_drm_bind(struct device *dev)
@@ -237,7 +239,7 @@ static int mcde_drm_bind(struct device *dev)
 	if (ret < 0)
 		goto unbind;
 
-	drm_fbdev_dma_setup(drm, 32);
+	drm_client_setup(drm, NULL);
 
 	return 0;
 
@@ -459,12 +461,21 @@ static void mcde_remove(struct platform_device *pdev)
 	regulator_disable(mcde->epod);
 }
 
+static void mcde_shutdown(struct platform_device *pdev)
+{
+	struct drm_device *drm = platform_get_drvdata(pdev);
+
+	if (drm->registered)
+		drm_atomic_helper_shutdown(drm);
+}
+
 static const struct of_device_id mcde_of_match[] = {
 	{
 		.compatible = "ste,mcde",
 	},
 	{},
 };
+MODULE_DEVICE_TABLE(of, mcde_of_match);
 
 static struct platform_driver mcde_driver = {
 	.driver = {
@@ -472,7 +483,8 @@ static struct platform_driver mcde_driver = {
 		.of_match_table = mcde_of_match,
 	},
 	.probe = mcde_probe,
-	.remove_new = mcde_remove,
+	.remove = mcde_remove,
+	.shutdown = mcde_shutdown,
 };
 
 static struct platform_driver *const component_drivers[] = {

@@ -46,7 +46,7 @@ static void board_reply(struct serdev_device *s,const void *data,size_t len)
         q=strchr("12345678",p[0]);
         if (q && !no_effect) board_regs[5+(q-"12345678")] |= 0x80;
     }
-    for (size_t i=0;i<n;i+=7) { size_t part=n-i<7?n-i:7; assert(s->ops->receive_buf(s,(unsigned char *)text+i,part)==(int)part); }
+    for (size_t i=0;i<n;i+=7) { size_t part=n-i<7?n-i:7; assert(s->ops->receive_buf(s,(unsigned char *)text+i,part)==part); }
 }
 
 int serdev_device_write(struct serdev_device *s,const void *p,size_t n,unsigned long t) { (void)t; assert(!s->closed); board_reply(s,p,n); return n; }

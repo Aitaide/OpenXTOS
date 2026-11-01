@@ -313,10 +313,9 @@ static int jz4780_nemc_probe(struct platform_device *pdev)
 	writel(0, nemc->base + NEMC_NFCSR);
 
 	nemc->clk = devm_clk_get(dev, NULL);
-	if (IS_ERR(nemc->clk)) {
-		dev_err(dev, "failed to get clock\n");
-		return PTR_ERR(nemc->clk);
-	}
+	if (IS_ERR(nemc->clk))
+		return dev_err_probe(dev, PTR_ERR(nemc->clk),
+				     "failed to get clock\n");
 
 	ret = clk_prepare_enable(nemc->clk);
 	if (ret) {
@@ -384,12 +383,11 @@ static int jz4780_nemc_probe(struct platform_device *pdev)
 	return 0;
 }
 
-static int jz4780_nemc_remove(struct platform_device *pdev)
+static void jz4780_nemc_remove(struct platform_device *pdev)
 {
 	struct jz4780_nemc *nemc = platform_get_drvdata(pdev);
 
 	clk_disable_unprepare(nemc->clk);
-	return 0;
 }
 
 static const struct jz_soc_info jz4740_soc_info = {

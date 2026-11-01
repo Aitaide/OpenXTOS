@@ -491,7 +491,7 @@ struct ocs_hcu_dma_list *ocs_hcu_dma_list_alloc(struct ocs_hcu_dev *hcu_dev,
 {
 	struct ocs_hcu_dma_list *dma_list;
 
-	dma_list = kmalloc(sizeof(*dma_list), GFP_KERNEL);
+	dma_list = kmalloc_obj(*dma_list);
 	if (!dma_list)
 		return NULL;
 
@@ -837,4 +837,5 @@ complete:
 	return IRQ_HANDLED;
 }
 
+MODULE_DESCRIPTION("Intel Keem Bay OCS HCU Crypto Driver");
 MODULE_LICENSE("GPL");

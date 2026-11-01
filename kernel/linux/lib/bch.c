@@ -392,7 +392,7 @@ static void compute_syndromes(struct bch_control *bch, uint32_t *ecc,
 			for (j = 0; j < 2*t; j += 2)
 				syn[j] ^= a_pow(bch, (j+1)*(i+s));
 
-			poly ^= (1 << i);
+			poly ^= (1u << i);
 		}
 	} while (s > 0);
 
@@ -479,11 +479,8 @@ static int solve_linear_system(struct bch_control *bch, unsigned int *rows,
 		/* find suitable row for elimination */
 		for (r = p; r < m; r++) {
 			if (rows[r] & mask) {
-				if (r != p) {
-					tmp = rows[r];
-					rows[r] = rows[p];
-					rows[p] = tmp;
-				}
+				if (r != p)
+					swap(rows[r], rows[p]);
 				rem = r+1;
 				break;
 			}
@@ -615,7 +612,7 @@ static int find_poly_deg2_roots(struct bch_control *bch, struct gf_poly *poly,
 		while (v) {
 			i = deg(v);
 			r ^= bch->xi_tab[i];
-			v ^= (1 << i);
+			v ^= (1u << i);
 		}
 		/* verify root */
 		if ((gf_sqr(bch, r)^r) == u) {
@@ -799,21 +796,14 @@ static void gf_poly_div(struct bch_control *bch, struct gf_poly *a,
 static struct gf_poly *gf_poly_gcd(struct bch_control *bch, struct gf_poly *a,
 				   struct gf_poly *b)
 {
-	struct gf_poly *tmp;
-
 	dbg("gcd(%s,%s)=", gf_poly_str(a), gf_poly_str(b));
 
-	if (a->deg < b->deg) {
-		tmp = b;
-		b = a;
-		a = tmp;
-	}
+	if (a->deg < b->deg)
+		swap(a, b);
 
 	while (b->deg > 0) {
 		gf_poly_mod(bch, a, b, NULL);
-		tmp = b;
-		b = a;
-		a = tmp;
+		swap(a, b);
 	}
 
 	dbg("%s\n", gf_poly_str(a));
@@ -1126,7 +1116,7 @@ static void build_mod8_tables(struct bch_control *bch, const uint32_t *g)
 		for (b = 0; b < 4; b++) {
 			/* we want to compute (p(X).X^(8*b+deg(g))) mod g(X) */
 			tab = bch->mod8_tab + (b*256+i)*l;
-			data = i << (8*b);
+			data = (unsigned int)i << (8*b);
 			while (data) {
 				d = deg(data);
 				/* subtract X^d.g(X) from p(X).X^(8*b+deg(g)) */
@@ -1330,7 +1320,7 @@ struct bch_control *bch_init(int m, int t, unsigned int prim_poly,
 	if (prim_poly == 0)
 		prim_poly = prim_poly_tab[m-min_m];
 
-	bch = kzalloc(sizeof(*bch), GFP_KERNEL);
+	bch = kzalloc_obj(*bch);
 	if (bch == NULL)
 		goto fail;
 

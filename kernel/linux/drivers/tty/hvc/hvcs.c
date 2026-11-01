@@ -47,7 +47,7 @@
  * using the 2.6 Linux kernel kref construct.
  *
  * For direction on installation and usage of this driver please reference
- * Documentation/powerpc/hvcs.rst.
+ * Documentation/arch/powerpc/hvcs.rst.
  */
 
 #include <linux/device.h>
@@ -664,7 +664,6 @@ static void hvcs_return_index(int index)
 static void hvcs_destruct_port(struct tty_port *p)
 {
 	struct hvcs_struct *hvcsd = container_of(p, struct hvcs_struct, port);
-	struct vio_dev *vdev;
 	struct completion *comp;
 	unsigned long flags;
 
@@ -686,7 +685,6 @@ static void hvcs_destruct_port(struct tty_port *p)
 	printk(KERN_INFO "HVCS: Destroyed hvcs_struct for vty-server@%X.\n",
 			hvcsd->vdev->unit_address);
 
-	vdev = hvcsd->vdev;
 	hvcsd->vdev = NULL;
 
 	hvcsd->p_unit_address = 0;
@@ -750,7 +748,7 @@ static int hvcs_probe(
 		return -EFAULT;
 	}
 
-	hvcsd = kzalloc(sizeof(*hvcsd), GFP_KERNEL);
+	hvcsd = kzalloc_obj(*hvcsd);
 	if (!hvcsd)
 		return -ENODEV;
 
@@ -1396,8 +1394,7 @@ static int hvcs_alloc_index_list(int n)
 {
 	int i;
 
-	hvcs_index_list = kmalloc_array(n, sizeof(hvcs_index_count),
-					GFP_KERNEL);
+	hvcs_index_list = kmalloc_objs(hvcs_index_count, n);
 	if (!hvcs_index_list)
 		return -ENOMEM;
 	hvcs_index_count = n;

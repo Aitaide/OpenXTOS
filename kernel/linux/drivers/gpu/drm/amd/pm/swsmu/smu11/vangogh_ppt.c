@@ -58,17 +58,27 @@
 #define SMUIO_GFX_MISC_CNTL__SMU_GFX_cold_vs_gfxoff_MASK	0x00000001L
 #define SMUIO_GFX_MISC_CNTL__PWR_GFXOFF_STATUS_MASK		0x00000006L
 
-#define FEATURE_MASK(feature) (1ULL << feature)
-#define SMC_DPM_FEATURE ( \
-	FEATURE_MASK(FEATURE_CCLK_DPM_BIT) | \
-	FEATURE_MASK(FEATURE_VCN_DPM_BIT)	 | \
-	FEATURE_MASK(FEATURE_FCLK_DPM_BIT)	 | \
-	FEATURE_MASK(FEATURE_SOCCLK_DPM_BIT)	 | \
-	FEATURE_MASK(FEATURE_MP0CLK_DPM_BIT)	 | \
-	FEATURE_MASK(FEATURE_LCLK_DPM_BIT)	 | \
-	FEATURE_MASK(FEATURE_SHUBCLK_DPM_BIT)	 | \
-	FEATURE_MASK(FEATURE_DCFCLK_DPM_BIT)| \
-	FEATURE_MASK(FEATURE_GFX_DPM_BIT))
+static int vangogh_init_ppt_limits(struct smu_context *smu);
+
+static const struct smu_feature_bits vangogh_dpm_features = {
+	.bits = {
+		SMU_FEATURE_BIT_INIT(FEATURE_CCLK_DPM_BIT),
+		SMU_FEATURE_BIT_INIT(FEATURE_VCN_DPM_BIT),
+		SMU_FEATURE_BIT_INIT(FEATURE_FCLK_DPM_BIT),
+		SMU_FEATURE_BIT_INIT(FEATURE_SOCCLK_DPM_BIT),
+		SMU_FEATURE_BIT_INIT(FEATURE_MP0CLK_DPM_BIT),
+		SMU_FEATURE_BIT_INIT(FEATURE_LCLK_DPM_BIT),
+		SMU_FEATURE_BIT_INIT(FEATURE_SHUBCLK_DPM_BIT),
+		SMU_FEATURE_BIT_INIT(FEATURE_DCFCLK_DPM_BIT),
+		SMU_FEATURE_BIT_INIT(FEATURE_GFX_DPM_BIT)
+	}
+};
+
+/*
+ * SMU support new GFXOFF residency log interface since version 4.63.62.00,
+ * use this to get live readings of GFXOFF residency
+ */
+#define SUPPORT_LIVE_RESIDENCY_MSG_VERSION 0x043f3e00
 
 static struct cmn2asic_msg_mapping vangogh_message_map[SMU_MSG_MAX_COUNT] = {
 	MSG_MAP(TestMessage,                    PPSMC_MSG_TestMessage,			0),
@@ -140,7 +150,9 @@ static struct cmn2asic_msg_mapping vangogh_message_map[SMU_MSG_MAX_COUNT] = {
 	MSG_MAP(GetSlowPPTLimit,                    PPSMC_MSG_GetSlowPPTLimit,						0),
 	MSG_MAP(GetGfxOffStatus,		    PPSMC_MSG_GetGfxOffStatus,						0),
 	MSG_MAP(GetGfxOffEntryCount,		    PPSMC_MSG_GetGfxOffEntryCount,					0),
-	MSG_MAP(LogGfxOffResidency,		    PPSMC_MSG_LogGfxOffResidency,					0),
+	MSG_MAP(StartGfxOffResidencyLogging,  PPSMC_MSG_StartGfxOffResidencyLogging,	0),
+	MSG_MAP(GfxOffResidencyLogReadSample, PPSMC_MSG_GfxOffResidencyLogReadSample,	0),
+	MSG_MAP(StopGfxOffResidencyLogging,   PPSMC_MSG_StopGfxOffResidencyLogging,		0),
 };
 
 static struct cmn2asic_mapping vangogh_feature_mask_map[SMU_FEATURE_COUNT] = {
@@ -225,14 +237,7 @@ static int vangogh_tables_init(struct smu_context *smu)
 {
 	struct smu_table_context *smu_table = &smu->smu_table;
 	struct smu_table *tables = smu_table->tables;
-	uint32_t if_version;
-	uint32_t smu_version;
-	uint32_t ret = 0;
-
-	ret = smu_cmn_get_smc_version(smu, &if_version, &smu_version);
-	if (ret) {
-		return ret;
-	}
+	int ret;
 
 	SMU_TABLE_INIT(tables, SMU_TABLE_WATERMARKS, sizeof(Watermarks_t),
 		       PAGE_SIZE, AMDGPU_GEM_DOMAIN_VRAM);
@@ -242,33 +247,27 @@ static int vangogh_tables_init(struct smu_context *smu)
 		       PAGE_SIZE, AMDGPU_GEM_DOMAIN_VRAM);
 	SMU_TABLE_INIT(tables, SMU_TABLE_ACTIVITY_MONITOR_COEFF, sizeof(DpmActivityMonitorCoeffExt_t),
 		       PAGE_SIZE, AMDGPU_GEM_DOMAIN_VRAM);
+	SMU_TABLE_INIT(tables, SMU_TABLE_SMU_METRICS, max(sizeof(SmuMetrics_t), sizeof(SmuMetrics_legacy_t)),
+		       PAGE_SIZE, AMDGPU_GEM_DOMAIN_VRAM);
 
-	if (if_version < 0x3) {
-		SMU_TABLE_INIT(tables, SMU_TABLE_SMU_METRICS, sizeof(SmuMetrics_legacy_t),
-				PAGE_SIZE, AMDGPU_GEM_DOMAIN_VRAM);
-		smu_table->metrics_table = kzalloc(sizeof(SmuMetrics_legacy_t), GFP_KERNEL);
-	} else {
-		SMU_TABLE_INIT(tables, SMU_TABLE_SMU_METRICS, sizeof(SmuMetrics_t),
-				PAGE_SIZE, AMDGPU_GEM_DOMAIN_VRAM);
-		smu_table->metrics_table = kzalloc(sizeof(SmuMetrics_t), GFP_KERNEL);
-	}
+	smu_table->metrics_table = kzalloc(max(sizeof(SmuMetrics_t), sizeof(SmuMetrics_legacy_t)), GFP_KERNEL);
 	if (!smu_table->metrics_table)
 		goto err0_out;
 	smu_table->metrics_time = 0;
 
-	if (smu_version >= 0x043F3E00)
-		smu_table->gpu_metrics_table_size = sizeof(struct gpu_metrics_v2_3);
-	else
-		smu_table->gpu_metrics_table_size = sizeof(struct gpu_metrics_v2_2);
-	smu_table->gpu_metrics_table = kzalloc(smu_table->gpu_metrics_table_size, GFP_KERNEL);
-	if (!smu_table->gpu_metrics_table)
+	ret = smu_driver_table_init(smu, SMU_DRIVER_TABLE_GPU_METRICS,
+				    max3(sizeof(struct gpu_metrics_v2_2),
+					 sizeof(struct gpu_metrics_v2_3),
+					 sizeof(struct gpu_metrics_v2_4)),
+				    SMU_GPU_METRICS_CACHE_INTERVAL);
+	if (ret)
 		goto err1_out;
 
-	smu_table->watermarks_table = kzalloc(sizeof(Watermarks_t), GFP_KERNEL);
+	smu_table->watermarks_table = kzalloc_obj(Watermarks_t);
 	if (!smu_table->watermarks_table)
 		goto err2_out;
 
-	smu_table->clocks_table = kzalloc(sizeof(DpmClocks_t), GFP_KERNEL);
+	smu_table->clocks_table = kzalloc_obj(DpmClocks_t);
 	if (!smu_table->clocks_table)
 		goto err3_out;
 
@@ -277,7 +276,7 @@ static int vangogh_tables_init(struct smu_context *smu)
 err3_out:
 	kfree(smu_table->watermarks_table);
 err2_out:
-	kfree(smu_table->gpu_metrics_table);
+	smu_driver_table_fini(smu, SMU_DRIVER_TABLE_GPU_METRICS);
 err1_out:
 	kfree(smu_table->metrics_table);
 err0_out:
@@ -318,11 +317,10 @@ static int vangogh_get_legacy_smu_metrics_data(struct smu_context *smu,
 		*value = metrics->GfxActivity / 100;
 		break;
 	case METRICS_AVERAGE_VCNACTIVITY:
-		*value = metrics->UvdActivity;
+		*value = metrics->UvdActivity / 100;
 		break;
 	case METRICS_AVERAGE_SOCKETPOWER:
-		*value = (metrics->CurrentSocketPower << 8) /
-		1000 ;
+		*value = metrics->CurrentSocketPower;
 		break;
 	case METRICS_TEMPERATURE_EDGE:
 		*value = metrics->GfxTemperature / 100 *
@@ -390,12 +388,10 @@ static int vangogh_get_smu_metrics_data(struct smu_context *smu,
 		*value = metrics->Current.UvdActivity;
 		break;
 	case METRICS_AVERAGE_SOCKETPOWER:
-		*value = (metrics->Average.CurrentSocketPower << 8) /
-		1000;
+		*value = metrics->Average.CurrentSocketPower;
 		break;
 	case METRICS_CURR_SOCKETPOWER:
-		*value = (metrics->Current.CurrentSocketPower << 8) /
-		1000;
+		*value = metrics->Current.CurrentSocketPower;
 		break;
 	case METRICS_TEMPERATURE_EDGE:
 		*value = metrics->Current.GfxTemperature / 100 *
@@ -430,17 +426,9 @@ static int vangogh_common_get_smu_metrics_data(struct smu_context *smu,
 				       MetricsMember_t member,
 				       uint32_t *value)
 {
-	struct amdgpu_device *adev = smu->adev;
-	uint32_t if_version;
 	int ret = 0;
 
-	ret = smu_cmn_get_smc_version(smu, &if_version, NULL);
-	if (ret) {
-		dev_err(adev->dev, "Failed to get smu if version!\n");
-		return ret;
-	}
-
-	if (if_version < 0x3)
+	if (smu->smc_fw_if_version < 0x3)
 		ret = vangogh_get_legacy_smu_metrics_data(smu, member, value);
 	else
 		ret = vangogh_get_smu_metrics_data(smu, member, value);
@@ -452,8 +440,7 @@ static int vangogh_allocate_dpm_context(struct smu_context *smu)
 {
 	struct smu_dpm_context *smu_dpm = &smu->smu_dpm;
 
-	smu_dpm->dpm_context = kzalloc(sizeof(struct smu_11_0_dpm_context),
-				       GFP_KERNEL);
+	smu_dpm->dpm_context = kzalloc_obj(struct smu_11_0_dpm_context);
 	if (!smu_dpm->dpm_context)
 		return -ENOMEM;
 
@@ -476,7 +463,7 @@ static int vangogh_init_smc_tables(struct smu_context *smu)
 
 #ifdef CONFIG_X86
 	/* AMD x86 APU only */
-	smu->cpu_core_num = boot_cpu_data.x86_max_cores;
+	smu->cpu_core_num = topology_num_cores_per_package();
 #else
 	smu->cpu_core_num = 4;
 #endif
@@ -484,7 +471,9 @@ static int vangogh_init_smc_tables(struct smu_context *smu)
 	return smu_v11_0_init_smc_tables(smu);
 }
 
-static int vangogh_dpm_set_vcn_enable(struct smu_context *smu, bool enable)
+static int vangogh_dpm_set_vcn_enable(struct smu_context *smu,
+				       bool enable,
+				       int inst)
 {
 	int ret = 0;
 
@@ -523,7 +512,7 @@ static bool vangogh_is_dpm_running(struct smu_context *smu)
 {
 	struct amdgpu_device *adev = smu->adev;
 	int ret = 0;
-	uint64_t feature_enabled;
+	struct smu_feature_bits feature_enabled;
 
 	/* we need to re-init after suspend so return false */
 	if (adev->in_suspend)
@@ -534,7 +523,8 @@ static bool vangogh_is_dpm_running(struct smu_context *smu)
 	if (ret)
 		return false;
 
-	return !!(feature_enabled & SMC_DPM_FEATURE);
+	return smu_feature_bits_test_mask(&feature_enabled,
+					  vangogh_dpm_features.bits);
 }
 
 static int vangogh_get_dpm_clk_limited(struct smu_context *smu, enum smu_clk_type clk_type,
@@ -580,13 +570,14 @@ static int vangogh_get_dpm_clk_limited(struct smu_context *smu, enum smu_clk_typ
 	return 0;
 }
 
-static int vangogh_print_legacy_clk_levels(struct smu_context *smu,
-			enum smu_clk_type clk_type, char *buf)
+static int vangogh_emit_legacy_clk_levels(struct smu_context *smu,
+					   enum smu_clk_type clk_type, char *buf,
+					   int *offset)
 {
+	int i, idx, size = *offset, ret = 0, start_offset = *offset;
 	DpmClocks_t *clk_table = smu->smu_table.clocks_table;
 	SmuMetrics_legacy_t metrics;
 	struct smu_dpm_context *smu_dpm_ctx = &(smu->smu_dpm);
-	int i, idx, size = 0, ret = 0;
 	uint32_t cur_value = 0, value = 0, count = 0;
 	bool cur_value_match_level = false;
 
@@ -595,8 +586,6 @@ static int vangogh_print_legacy_clk_levels(struct smu_context *smu,
 	ret = smu_cmn_get_metrics_table(smu, &metrics, false);
 	if (ret)
 		return ret;
-
-	smu_cmn_get_sysfs_buf(&buf, &size);
 
 	switch (clk_type) {
 	case SMU_OD_SCLK:
@@ -679,16 +668,18 @@ static int vangogh_print_legacy_clk_levels(struct smu_context *smu,
 		break;
 	}
 
-	return size;
+	*offset += size - start_offset;
+
+	return 0;
 }
 
-static int vangogh_print_clk_levels(struct smu_context *smu,
-			enum smu_clk_type clk_type, char *buf)
+static int vangogh_emit_clk_levels(struct smu_context *smu,
+				    enum smu_clk_type clk_type, char *buf,
+				    int *offset)
 {
+	int i, idx, size = *offset, ret = 0, start_offset = *offset;
 	DpmClocks_t *clk_table = smu->smu_table.clocks_table;
 	SmuMetrics_t metrics;
-	struct smu_dpm_context *smu_dpm_ctx = &(smu->smu_dpm);
-	int i, idx, size = 0, ret = 0;
 	uint32_t cur_value = 0, value = 0, count = 0;
 	bool cur_value_match_level = false;
 	uint32_t min, max;
@@ -699,35 +690,27 @@ static int vangogh_print_clk_levels(struct smu_context *smu,
 	if (ret)
 		return ret;
 
-	smu_cmn_get_sysfs_buf(&buf, &size);
-
 	switch (clk_type) {
 	case SMU_OD_SCLK:
-		if (smu_dpm_ctx->dpm_level == AMD_DPM_FORCED_LEVEL_MANUAL) {
-			size += sysfs_emit_at(buf, size, "%s:\n", "OD_SCLK");
-			size += sysfs_emit_at(buf, size, "0: %10uMhz\n",
-			(smu->gfx_actual_hard_min_freq > 0) ? smu->gfx_actual_hard_min_freq : smu->gfx_default_hard_min_freq);
-			size += sysfs_emit_at(buf, size, "1: %10uMhz\n",
-			(smu->gfx_actual_soft_max_freq > 0) ? smu->gfx_actual_soft_max_freq : smu->gfx_default_soft_max_freq);
-		}
+		size += sysfs_emit_at(buf, size, "%s:\n", "OD_SCLK");
+		size += sysfs_emit_at(buf, size, "0: %10uMhz\n",
+		(smu->gfx_actual_hard_min_freq > 0) ? smu->gfx_actual_hard_min_freq : smu->gfx_default_hard_min_freq);
+		size += sysfs_emit_at(buf, size, "1: %10uMhz\n",
+		(smu->gfx_actual_soft_max_freq > 0) ? smu->gfx_actual_soft_max_freq : smu->gfx_default_soft_max_freq);
 		break;
 	case SMU_OD_CCLK:
-		if (smu_dpm_ctx->dpm_level == AMD_DPM_FORCED_LEVEL_MANUAL) {
-			size += sysfs_emit_at(buf, size, "CCLK_RANGE in Core%d:\n",  smu->cpu_core_id_select);
-			size += sysfs_emit_at(buf, size, "0: %10uMhz\n",
-			(smu->cpu_actual_soft_min_freq > 0) ? smu->cpu_actual_soft_min_freq : smu->cpu_default_soft_min_freq);
-			size += sysfs_emit_at(buf, size, "1: %10uMhz\n",
-			(smu->cpu_actual_soft_max_freq > 0) ? smu->cpu_actual_soft_max_freq : smu->cpu_default_soft_max_freq);
-		}
+		size += sysfs_emit_at(buf, size, "CCLK_RANGE in Core%d:\n",  smu->cpu_core_id_select);
+		size += sysfs_emit_at(buf, size, "0: %10uMhz\n",
+		(smu->cpu_actual_soft_min_freq > 0) ? smu->cpu_actual_soft_min_freq : smu->cpu_default_soft_min_freq);
+		size += sysfs_emit_at(buf, size, "1: %10uMhz\n",
+		(smu->cpu_actual_soft_max_freq > 0) ? smu->cpu_actual_soft_max_freq : smu->cpu_default_soft_max_freq);
 		break;
 	case SMU_OD_RANGE:
-		if (smu_dpm_ctx->dpm_level == AMD_DPM_FORCED_LEVEL_MANUAL) {
-			size += sysfs_emit_at(buf, size, "%s:\n", "OD_RANGE");
-			size += sysfs_emit_at(buf, size, "SCLK: %7uMhz %10uMhz\n",
-				smu->gfx_default_hard_min_freq, smu->gfx_default_soft_max_freq);
-			size += sysfs_emit_at(buf, size, "CCLK: %7uMhz %10uMhz\n",
-				smu->cpu_default_soft_min_freq, smu->cpu_default_soft_max_freq);
-		}
+		size += sysfs_emit_at(buf, size, "%s:\n", "OD_RANGE");
+		size += sysfs_emit_at(buf, size, "SCLK: %7uMhz %10uMhz\n",
+			smu->gfx_default_hard_min_freq, smu->gfx_default_soft_max_freq);
+		size += sysfs_emit_at(buf, size, "CCLK: %7uMhz %10uMhz\n",
+			smu->cpu_default_soft_min_freq, smu->cpu_default_soft_max_freq);
 		break;
 	case SMU_SOCCLK:
 		/* the level 3 ~ 6 of socclk use the same frequency for vangogh */
@@ -807,26 +790,21 @@ static int vangogh_print_clk_levels(struct smu_context *smu,
 		break;
 	}
 
-	return size;
+	*offset += size - start_offset;
+
+	return 0;
 }
 
-static int vangogh_common_print_clk_levels(struct smu_context *smu,
-			enum smu_clk_type clk_type, char *buf)
+static int vangogh_common_emit_clk_levels(struct smu_context *smu,
+					   enum smu_clk_type clk_type, char *buf,
+					   int *offset)
 {
-	struct amdgpu_device *adev = smu->adev;
-	uint32_t if_version;
 	int ret = 0;
 
-	ret = smu_cmn_get_smc_version(smu, &if_version, NULL);
-	if (ret) {
-		dev_err(adev->dev, "Failed to get smu if version!\n");
-		return ret;
-	}
-
-	if (if_version < 0x3)
-		ret = vangogh_print_legacy_clk_levels(smu, clk_type, buf);
+	if (smu->smc_fw_if_version < 0x3)
+		ret = vangogh_emit_legacy_clk_levels(smu, clk_type, buf, offset);
 	else
-		ret = vangogh_print_clk_levels(smu, clk_type, buf);
+		ret = vangogh_emit_clk_levels(smu, clk_type, buf, offset);
 
 	return ret;
 }
@@ -1009,6 +987,18 @@ static int vangogh_get_dpm_ultimate_freq(struct smu_context *smu,
 		}
 	}
 	if (min) {
+		ret = vangogh_get_profiling_clk_mask(smu,
+						     AMD_DPM_FORCED_LEVEL_PROFILE_MIN_MCLK,
+						     NULL,
+						     NULL,
+						     &mclk_mask,
+						     &fclk_mask,
+						     &soc_mask);
+		if (ret)
+			goto failed;
+
+		vclk_mask = dclk_mask = 0;
+
 		switch (clk_type) {
 		case SMU_UCLK:
 		case SMU_MCLK:
@@ -1073,48 +1063,34 @@ static int vangogh_get_power_profile_mode(struct smu_context *smu,
 	return size;
 }
 
-static int vangogh_set_power_profile_mode(struct smu_context *smu, long *input, uint32_t size)
+static int vangogh_set_power_profile_mode(struct smu_context *smu,
+					  u32 workload_mask,
+					  long *custom_params,
+					  u32 custom_params_max_idx)
 {
-	int workload_type, ret;
-	uint32_t profile_mode = input[size];
+	u32 backend_workload_mask = 0;
+	int ret;
 
-	if (profile_mode >= PP_SMC_POWER_PROFILE_COUNT) {
-		dev_err(smu->adev->dev, "Invalid power profile mode %d\n", profile_mode);
-		return -EINVAL;
-	}
-
-	if (profile_mode == PP_SMC_POWER_PROFILE_BOOTUP_DEFAULT ||
-			profile_mode == PP_SMC_POWER_PROFILE_POWERSAVING)
-		return 0;
-
-	/* conv PP_SMC_POWER_PROFILE* to WORKLOAD_PPLIB_*_BIT */
-	workload_type = smu_cmn_to_asic_specific_index(smu,
-						       CMN2ASIC_MAPPING_WORKLOAD,
-						       profile_mode);
-	if (workload_type < 0) {
-		dev_dbg(smu->adev->dev, "Unsupported power profile mode %d on VANGOGH\n",
-					profile_mode);
-		return -EINVAL;
-	}
+	smu_cmn_get_backend_workload_mask(smu, workload_mask,
+					  &backend_workload_mask);
 
 	ret = smu_cmn_send_smc_msg_with_param(smu, SMU_MSG_ActiveProcessNotify,
-				    1 << workload_type,
-				    NULL);
+					      backend_workload_mask,
+					      NULL);
 	if (ret) {
-		dev_err_once(smu->adev->dev, "Fail to set workload type %d\n",
-					workload_type);
+		dev_err_once(smu->adev->dev, "Fail to set workload mask 0x%08x\n",
+			     workload_mask);
 		return ret;
 	}
 
-	smu->power_profile_mode = profile_mode;
-
-	return 0;
+	return ret;
 }
 
 static int vangogh_set_soft_freq_limited_range(struct smu_context *smu,
-					  enum smu_clk_type clk_type,
-					  uint32_t min,
-					  uint32_t max)
+					       enum smu_clk_type clk_type,
+					       uint32_t min,
+					       uint32_t max,
+					       bool automatic)
 {
 	int ret = 0;
 
@@ -1320,7 +1296,7 @@ static int vangogh_force_dpm_limit_value(struct smu_context *smu, bool highest)
 			return ret;
 
 		force_freq = highest ? max_freq : min_freq;
-		ret = vangogh_set_soft_freq_limited_range(smu, clk_type, force_freq, force_freq);
+		ret = vangogh_set_soft_freq_limited_range(smu, clk_type, force_freq, force_freq, false);
 		if (ret)
 			return ret;
 	}
@@ -1356,7 +1332,7 @@ static int vangogh_unforce_dpm_levels(struct smu_context *smu)
 		if (ret)
 			return ret;
 
-		ret = vangogh_set_soft_freq_limited_range(smu, clk_type, min_freq, max_freq);
+		ret = vangogh_set_soft_freq_limited_range(smu, clk_type, min_freq, max_freq, false);
 
 		if (ret)
 			return ret;
@@ -1375,7 +1351,7 @@ static int vangogh_set_peak_clock_by_device(struct smu_context *smu)
 	if (ret)
 		return ret;
 
-	ret = vangogh_set_soft_freq_limited_range(smu, SMU_FCLK, fclk_freq, fclk_freq);
+	ret = vangogh_set_soft_freq_limited_range(smu, SMU_FCLK, fclk_freq, fclk_freq, false);
 	if (ret)
 		return ret;
 
@@ -1383,7 +1359,7 @@ static int vangogh_set_peak_clock_by_device(struct smu_context *smu)
 	if (ret)
 		return ret;
 
-	ret = vangogh_set_soft_freq_limited_range(smu, SMU_SOCCLK, socclk_freq, socclk_freq);
+	ret = vangogh_set_soft_freq_limited_range(smu, SMU_SOCCLK, socclk_freq, socclk_freq, false);
 	if (ret)
 		return ret;
 
@@ -1391,7 +1367,7 @@ static int vangogh_set_peak_clock_by_device(struct smu_context *smu)
 	if (ret)
 		return ret;
 
-	ret = vangogh_set_soft_freq_limited_range(smu, SMU_VCLK, vclk_freq, vclk_freq);
+	ret = vangogh_set_soft_freq_limited_range(smu, SMU_VCLK, vclk_freq, vclk_freq, false);
 	if (ret)
 		return ret;
 
@@ -1399,7 +1375,7 @@ static int vangogh_set_peak_clock_by_device(struct smu_context *smu)
 	if (ret)
 		return ret;
 
-	ret = vangogh_set_soft_freq_limited_range(smu, SMU_DCLK, dclk_freq, dclk_freq);
+	ret = vangogh_set_soft_freq_limited_range(smu, SMU_DCLK, dclk_freq, dclk_freq, false);
 	if (ret)
 		return ret;
 
@@ -1538,6 +1514,12 @@ static int vangogh_read_sensor(struct smu_context *smu,
 		ret = vangogh_common_get_smu_metrics_data(smu,
 						   METRICS_AVERAGE_GFXACTIVITY,
 						   (uint32_t *)data);
+		*size = 4;
+		break;
+	case AMDGPU_PP_SENSOR_VCN_LOAD:
+		ret = vangogh_common_get_smu_metrics_data(smu,
+						METRICS_AVERAGE_VCNACTIVITY,
+						(uint32_t *)data);
 		*size = 4;
 		break;
 	case AMDGPU_PP_SENSOR_GPU_AVG_POWER:
@@ -1682,9 +1664,9 @@ static int vangogh_set_watermarks_table(struct smu_context *smu,
 static ssize_t vangogh_get_legacy_gpu_metrics_v2_3(struct smu_context *smu,
 				      void **table)
 {
-	struct smu_table_context *smu_table = &smu->smu_table;
 	struct gpu_metrics_v2_3 *gpu_metrics =
-		(struct gpu_metrics_v2_3 *)smu_table->gpu_metrics_table;
+		(struct gpu_metrics_v2_3 *)smu_driver_table_ptr(
+			smu, SMU_DRIVER_TABLE_GPU_METRICS);
 	SmuMetrics_legacy_t metrics;
 	int ret = 0;
 
@@ -1733,15 +1715,17 @@ static ssize_t vangogh_get_legacy_gpu_metrics_v2_3(struct smu_context *smu,
 
 	*table = (void *)gpu_metrics;
 
+	smu_driver_table_update_cache_time(smu, SMU_DRIVER_TABLE_GPU_METRICS);
+
 	return sizeof(struct gpu_metrics_v2_3);
 }
 
 static ssize_t vangogh_get_legacy_gpu_metrics(struct smu_context *smu,
 				      void **table)
 {
-	struct smu_table_context *smu_table = &smu->smu_table;
 	struct gpu_metrics_v2_2 *gpu_metrics =
-		(struct gpu_metrics_v2_2 *)smu_table->gpu_metrics_table;
+		(struct gpu_metrics_v2_2 *)smu_driver_table_ptr(
+			smu, SMU_DRIVER_TABLE_GPU_METRICS);
 	SmuMetrics_legacy_t metrics;
 	int ret = 0;
 
@@ -1790,15 +1774,17 @@ static ssize_t vangogh_get_legacy_gpu_metrics(struct smu_context *smu,
 
 	*table = (void *)gpu_metrics;
 
+	smu_driver_table_update_cache_time(smu, SMU_DRIVER_TABLE_GPU_METRICS);
+
 	return sizeof(struct gpu_metrics_v2_2);
 }
 
 static ssize_t vangogh_get_gpu_metrics_v2_3(struct smu_context *smu,
 				      void **table)
 {
-	struct smu_table_context *smu_table = &smu->smu_table;
 	struct gpu_metrics_v2_3 *gpu_metrics =
-		(struct gpu_metrics_v2_3 *)smu_table->gpu_metrics_table;
+		(struct gpu_metrics_v2_3 *)smu_driver_table_ptr(
+			smu, SMU_DRIVER_TABLE_GPU_METRICS);
 	SmuMetrics_t metrics;
 	int ret = 0;
 
@@ -1861,6 +1847,8 @@ static ssize_t vangogh_get_gpu_metrics_v2_3(struct smu_context *smu,
 
 	*table = (void *)gpu_metrics;
 
+	smu_driver_table_update_cache_time(smu, SMU_DRIVER_TABLE_GPU_METRICS);
+
 	return sizeof(struct gpu_metrics_v2_3);
 }
 
@@ -1868,9 +1856,9 @@ static ssize_t vangogh_get_gpu_metrics_v2_4(struct smu_context *smu,
 					    void **table)
 {
 	SmuMetrics_t metrics;
-	struct smu_table_context *smu_table = &smu->smu_table;
 	struct gpu_metrics_v2_4 *gpu_metrics =
-				(struct gpu_metrics_v2_4 *)smu_table->gpu_metrics_table;
+		(struct gpu_metrics_v2_4 *)smu_driver_table_ptr(
+			smu, SMU_DRIVER_TABLE_GPU_METRICS);
 	int ret = 0;
 
 	ret = smu_cmn_get_metrics_table(smu, &metrics, true);
@@ -1893,21 +1881,21 @@ static ssize_t vangogh_get_gpu_metrics_v2_4(struct smu_context *smu,
 	       sizeof(uint16_t) * 4);
 	gpu_metrics->average_temperature_l3[0] = metrics.Average.L3Temperature[0];
 
-	gpu_metrics->average_gfx_activity = metrics.Current.GfxActivity;
-	gpu_metrics->average_mm_activity = metrics.Current.UvdActivity;
+	gpu_metrics->average_gfx_activity = metrics.Average.GfxActivity;
+	gpu_metrics->average_mm_activity = metrics.Average.UvdActivity;
 
-	gpu_metrics->average_socket_power = metrics.Current.CurrentSocketPower;
-	gpu_metrics->average_cpu_power = metrics.Current.Power[0];
-	gpu_metrics->average_soc_power = metrics.Current.Power[1];
-	gpu_metrics->average_gfx_power = metrics.Current.Power[2];
+	gpu_metrics->average_socket_power = metrics.Average.CurrentSocketPower;
+	gpu_metrics->average_cpu_power = metrics.Average.Power[0];
+	gpu_metrics->average_soc_power = metrics.Average.Power[1];
+	gpu_metrics->average_gfx_power = metrics.Average.Power[2];
 
-	gpu_metrics->average_cpu_voltage = metrics.Current.Voltage[0];
-	gpu_metrics->average_soc_voltage = metrics.Current.Voltage[1];
-	gpu_metrics->average_gfx_voltage = metrics.Current.Voltage[2];
+	gpu_metrics->average_cpu_voltage = metrics.Average.Voltage[0];
+	gpu_metrics->average_soc_voltage = metrics.Average.Voltage[1];
+	gpu_metrics->average_gfx_voltage = metrics.Average.Voltage[2];
 
-	gpu_metrics->average_cpu_current = metrics.Current.Current[0];
-	gpu_metrics->average_soc_current = metrics.Current.Current[1];
-	gpu_metrics->average_gfx_current = metrics.Current.Current[2];
+	gpu_metrics->average_cpu_current = metrics.Average.Current[0];
+	gpu_metrics->average_soc_current = metrics.Average.Current[1];
+	gpu_metrics->average_gfx_current = metrics.Average.Current[2];
 
 	memcpy(&gpu_metrics->average_core_power[0],
 	       &metrics.Average.CorePower[0],
@@ -1941,15 +1929,17 @@ static ssize_t vangogh_get_gpu_metrics_v2_4(struct smu_context *smu,
 
 	*table = (void *)gpu_metrics;
 
+	smu_driver_table_update_cache_time(smu, SMU_DRIVER_TABLE_GPU_METRICS);
+
 	return sizeof(struct gpu_metrics_v2_4);
 }
 
 static ssize_t vangogh_get_gpu_metrics(struct smu_context *smu,
 				      void **table)
 {
-	struct smu_table_context *smu_table = &smu->smu_table;
 	struct gpu_metrics_v2_2 *gpu_metrics =
-		(struct gpu_metrics_v2_2 *)smu_table->gpu_metrics_table;
+		(struct gpu_metrics_v2_2 *)smu_driver_table_ptr(
+			smu, SMU_DRIVER_TABLE_GPU_METRICS);
 	SmuMetrics_t metrics;
 	int ret = 0;
 
@@ -2005,24 +1995,20 @@ static ssize_t vangogh_get_gpu_metrics(struct smu_context *smu,
 
 	*table = (void *)gpu_metrics;
 
+	smu_driver_table_update_cache_time(smu, SMU_DRIVER_TABLE_GPU_METRICS);
+
 	return sizeof(struct gpu_metrics_v2_2);
 }
 
 static ssize_t vangogh_common_get_gpu_metrics(struct smu_context *smu,
 				      void **table)
 {
-	uint32_t if_version;
-	uint32_t smu_version;
 	uint32_t smu_program;
 	uint32_t fw_version;
 	int ret = 0;
 
-	ret = smu_cmn_get_smc_version(smu, &if_version, &smu_version);
-	if (ret)
-		return ret;
-
-	smu_program = (smu_version >> 24) & 0xff;
-	fw_version = smu_version & 0xffffff;
+	smu_program = (smu->smc_fw_version >> 24) & 0xff;
+	fw_version = smu->smc_fw_version & 0xffffff;
 	if (smu_program == 6) {
 		if (fw_version >= 0x3F0800)
 			ret = vangogh_get_gpu_metrics_v2_4(smu, table);
@@ -2030,13 +2016,13 @@ static ssize_t vangogh_common_get_gpu_metrics(struct smu_context *smu,
 			ret = vangogh_get_gpu_metrics_v2_3(smu, table);
 
 	} else {
-		if (smu_version >= 0x043F3E00) {
-			if (if_version < 0x3)
+		if (smu->smc_fw_version >= 0x043F3E00) {
+			if (smu->smc_fw_if_version < 0x3)
 				ret = vangogh_get_legacy_gpu_metrics_v2_3(smu, table);
 			else
 				ret = vangogh_get_gpu_metrics_v2_3(smu, table);
 		} else {
-			if (if_version < 0x3)
+			if (smu->smc_fw_if_version < 0x3)
 				ret = vangogh_get_legacy_gpu_metrics(smu, table);
 			else
 				ret = vangogh_get_gpu_metrics(smu, table);
@@ -2067,6 +2053,7 @@ static int vangogh_od_edit_dpm_table(struct smu_context *smu, enum PP_OD_DPM_TAB
 		if (input[0] >= smu->cpu_core_num) {
 			dev_err(smu->adev->dev, "core index is overflow, should be less than %d\n",
 				smu->cpu_core_num);
+			return -EINVAL;
 		}
 		smu->cpu_core_id_select = input[0];
 		if (input[1] == 0) {
@@ -2232,8 +2219,7 @@ static int vangogh_get_dpm_clock_table(struct smu_context *smu, struct dpm_clock
 	return 0;
 }
 
-
-static int vangogh_system_features_control(struct smu_context *smu, bool en)
+static int vangogh_notify_rlc_state(struct smu_context *smu, bool en)
 {
 	struct amdgpu_device *adev = smu->adev;
 	int ret = 0;
@@ -2255,6 +2241,13 @@ static int vangogh_post_smu_init(struct smu_context *smu)
 	uint32_t req_active_wgps = adev->gfx.cu_info.number/2;
 	uint32_t total_cu = adev->gfx.config.max_cu_per_sh *
 		adev->gfx.config.max_sh_per_se * adev->gfx.config.max_shader_engines;
+
+	if (adev->in_s0ix)
+		return 0;
+
+	ret = vangogh_init_ppt_limits(smu);
+	if (ret)
+		return ret;
 
 	/* allow message will be sent after enable message on Vangogh*/
 	if (smu_cmn_feature_is_enabled(smu, SMU_FEATURE_DPM_GFXCLK_BIT) &&
@@ -2293,18 +2286,12 @@ static int vangogh_post_smu_init(struct smu_context *smu)
 
 static int vangogh_mode_reset(struct smu_context *smu, int type)
 {
-	int ret = 0, index = 0;
+	struct smu_msg_ctl *ctl = &smu->msg_ctl;
+	int ret;
 
-	index = smu_cmn_to_asic_specific_index(smu, CMN2ASIC_MAPPING_MSG,
-					       SMU_MSG_GfxDeviceDriverReset);
-	if (index < 0)
-		return index == -EACCES ? 0 : index;
-
-	mutex_lock(&smu->message_lock);
-
-	ret = smu_cmn_send_msg_without_waiting(smu, (uint16_t)index, type);
-
-	mutex_unlock(&smu->message_lock);
+	mutex_lock(&ctl->lock);
+	ret = smu_msg_send_async_locked(ctl, SMU_MSG_GfxDeviceDriverReset, type);
+	mutex_unlock(&ctl->lock);
 
 	mdelay(10);
 
@@ -2341,90 +2328,75 @@ static u32 vangogh_get_gfxoff_status(struct smu_context *smu)
 	return gfxoff_status;
 }
 
-static int vangogh_get_power_limit(struct smu_context *smu,
-				   uint32_t *current_power_limit,
-				   uint32_t *default_power_limit,
-				   uint32_t *max_power_limit)
+static int vangogh_get_ppt_limit(struct smu_context *smu,
+				 enum smu_ppt_limit_type limit_type,
+				 uint32_t *ppt_limit)
 {
-	struct smu_11_5_power_context *power_context =
-								smu->smu_power.power_context;
-	uint32_t ppt_limit;
-	int ret = 0;
+	enum smu_message_type msg;
+	uint32_t raw_limit;
+	int ret;
 
 	if (smu->adev->pm.fw_version < 0x43f1e00)
-		return ret;
-
-	ret = smu_cmn_send_smc_msg(smu, SMU_MSG_GetSlowPPTLimit, &ppt_limit);
-	if (ret) {
-		dev_err(smu->adev->dev, "Get slow PPT limit failed!\n");
-		return ret;
-	}
-	/* convert from milliwatt to watt */
-	if (current_power_limit)
-		*current_power_limit = ppt_limit / 1000;
-	if (default_power_limit)
-		*default_power_limit = ppt_limit / 1000;
-	if (max_power_limit)
-		*max_power_limit = 29;
-
-	ret = smu_cmn_send_smc_msg(smu, SMU_MSG_GetFastPPTLimit, &ppt_limit);
-	if (ret) {
-		dev_err(smu->adev->dev, "Get fast PPT limit failed!\n");
-		return ret;
-	}
-	/* convert from milliwatt to watt */
-	power_context->current_fast_ppt_limit =
-			power_context->default_fast_ppt_limit = ppt_limit / 1000;
-	power_context->max_fast_ppt_limit = 30;
-
-	return ret;
-}
-
-static int vangogh_get_ppt_limit(struct smu_context *smu,
-								uint32_t *ppt_limit,
-								enum smu_ppt_limit_type type,
-								enum smu_ppt_limit_level level)
-{
-	struct smu_11_5_power_context *power_context =
-							smu->smu_power.power_context;
-
-	if (!power_context)
 		return -EOPNOTSUPP;
 
-	if (type == SMU_FAST_PPT_LIMIT) {
-		switch (level) {
-		case SMU_PPT_LIMIT_MAX:
-			*ppt_limit = power_context->max_fast_ppt_limit;
-			break;
-		case SMU_PPT_LIMIT_CURRENT:
-			*ppt_limit = power_context->current_fast_ppt_limit;
-			break;
-		case SMU_PPT_LIMIT_DEFAULT:
-			*ppt_limit = power_context->default_fast_ppt_limit;
-			break;
-		default:
-			break;
+	msg = limit_type == SMU_PPT_LIMIT_PPT1 ?
+		SMU_MSG_GetFastPPTLimit : SMU_MSG_GetSlowPPTLimit;
+	ret = smu_cmn_send_smc_msg(smu, msg, &raw_limit);
+	if (ret) {
+		dev_err(smu->adev->dev, "Get PPT%d limit failed!\n",
+			limit_type);
+		return ret;
+	}
+
+	*ppt_limit = raw_limit / 1000;
+
+	return 0;
+}
+
+static int vangogh_init_ppt_limits(struct smu_context *smu)
+{
+	struct smu_ppt_limit_range *range;
+	uint32_t default_limit;
+	int i, j, ret;
+
+	if (smu->adev->pm.fw_version < 0x43f1e00)
+		return 0;
+
+	for (i = SMU_PPT_LIMIT_PPT0; i < SMU_LIMIT_TYPE_COUNT; i++) {
+		if (smu->ppt_limits.supported_mask & BIT(i))
+			continue;
+
+		ret = vangogh_get_ppt_limit(smu, i, &default_limit);
+		if (ret)
+			return ret;
+
+		for (j = SMU_POWER_SOURCE_AC; j < SMU_POWER_SOURCE_COUNT; j++) {
+			range = &smu->ppt_limits.range[j][i];
+			range->default_value = default_limit;
+			range->min = 0;
+			range->max = i == SMU_PPT_LIMIT_PPT1 ? 30 : 29;
+			range->od_min = range->min;
+			range->od_max = range->max;
 		}
+		smu->ppt_limits.supported_mask |= BIT(i);
 	}
 
 	return 0;
 }
 
-static int vangogh_set_power_limit(struct smu_context *smu,
-				   enum smu_ppt_limit_type limit_type,
-				   uint32_t ppt_limit)
+static int vangogh_set_ppt_limit(struct smu_context *smu,
+				 enum smu_ppt_limit_type limit_type,
+				 uint32_t ppt_limit)
 {
-	struct smu_11_5_power_context *power_context =
-			smu->smu_power.power_context;
 	int ret = 0;
 
 	if (!smu_cmn_feature_is_enabled(smu, SMU_FEATURE_PPT_BIT)) {
-		dev_err(smu->adev->dev, "Setting new power limit is not supported!\n");
+		dev_err(smu->adev->dev, "Setting new PPT limit is not supported!\n");
 		return -EOPNOTSUPP;
 	}
 
 	switch (limit_type) {
-	case SMU_DEFAULT_PPT_LIMIT:
+	case SMU_SLOW_PPT_LIMIT:
 		ret = smu_cmn_send_smc_msg_with_param(smu,
 				SMU_MSG_SetSlowPPTLimit,
 				ppt_limit * 1000, /* convert from watt to milliwatt */
@@ -2432,17 +2404,8 @@ static int vangogh_set_power_limit(struct smu_context *smu,
 		if (ret)
 			return ret;
 
-		smu->current_power_limit = ppt_limit;
 		break;
 	case SMU_FAST_PPT_LIMIT:
-		ppt_limit &= ~(SMU_FAST_PPT_LIMIT << 24);
-		if (ppt_limit > power_context->max_fast_ppt_limit) {
-			dev_err(smu->adev->dev,
-				"New power limit (%d) is over the max allowed %d\n",
-				ppt_limit, power_context->max_fast_ppt_limit);
-			return ret;
-		}
-
 		ret = smu_cmn_send_smc_msg_with_param(smu,
 				SMU_MSG_SetFastPPTLimit,
 				ppt_limit * 1000, /* convert from watt to milliwatt */
@@ -2450,7 +2413,6 @@ static int vangogh_set_power_limit(struct smu_context *smu,
 		if (ret)
 			return ret;
 
-		power_context->current_fast_ppt_limit = ppt_limit;
 		break;
 	default:
 		return -EINVAL;
@@ -2473,17 +2435,32 @@ static int vangogh_set_power_limit(struct smu_context *smu,
 static u32 vangogh_set_gfxoff_residency(struct smu_context *smu, bool start)
 {
 	int ret = 0;
-	u32 residency;
 	struct amdgpu_device *adev = smu->adev;
 
 	if (!(adev->pm.pp_feature & PP_GFXOFF_MASK))
 		return 0;
 
-	ret = smu_cmn_send_smc_msg_with_param(smu, SMU_MSG_LogGfxOffResidency,
-					      start, &residency);
+	if (smu->smc_fw_version < SUPPORT_LIVE_RESIDENCY_MSG_VERSION) {
+		u32 residency;
 
-	if (!start)
-		adev->gfx.gfx_off_residency = residency;
+		ret = smu_cmn_send_smc_msg_with_param(smu, SMU_MSG_GfxOffResidencyLogReadSample,
+							start, &residency);
+		if (ret)
+			return ret;
+
+		if (!start)
+			adev->gfx.gfx_off_residency = residency;
+	} else {
+		if (start) {
+			ret = smu_cmn_send_smc_msg(smu, SMU_MSG_StartGfxOffResidencyLogging, NULL);
+			if (ret)
+				return ret;
+		} else {
+			ret = smu_cmn_send_smc_msg(smu, SMU_MSG_StopGfxOffResidencyLogging, NULL);
+			if (ret)
+				return ret;
+		}
+	}
 
 	return ret;
 }
@@ -2500,11 +2477,20 @@ static u32 vangogh_set_gfxoff_residency(struct smu_context *smu, bool start)
  */
 static u32 vangogh_get_gfxoff_residency(struct smu_context *smu, uint32_t *residency)
 {
+	int ret = 0;
 	struct amdgpu_device *adev = smu->adev;
 
-	*residency = adev->gfx.gfx_off_residency;
+	if (!(adev->pm.pp_feature & PP_GFXOFF_MASK))
+		return 0;
 
-	return 0;
+	if (smu->smc_fw_version < SUPPORT_LIVE_RESIDENCY_MSG_VERSION) {
+		*residency = adev->gfx.gfx_off_residency;
+	} else {
+		ret = smu_cmn_send_smc_msg(smu, SMU_MSG_GfxOffResidencyLogReadSample,
+								residency);
+	}
+
+	return ret;
 }
 
 /**
@@ -2534,15 +2520,13 @@ static u32 vangogh_get_gfxoff_entrycount(struct smu_context *smu, uint64_t *entr
 static const struct pptable_funcs vangogh_ppt_funcs = {
 
 	.check_fw_status = smu_v11_0_check_fw_status,
-	.check_fw_version = smu_v11_0_check_fw_version,
+	.check_fw_version = smu_cmn_check_fw_version,
 	.init_smc_tables = vangogh_init_smc_tables,
 	.fini_smc_tables = smu_v11_0_fini_smc_tables,
 	.init_power = smu_v11_0_init_power,
 	.fini_power = smu_v11_0_fini_power,
 	.register_irq_handler = smu_v11_0_register_irq_handler,
 	.notify_memory_pool_location = smu_v11_0_notify_memory_pool_location,
-	.send_smc_msg_with_param = smu_cmn_send_smc_msg_with_param,
-	.send_smc_msg = smu_cmn_send_smc_msg,
 	.dpm_set_vcn_enable = vangogh_dpm_set_vcn_enable,
 	.dpm_set_jpeg_enable = vangogh_dpm_set_jpeg_enable,
 	.is_dpm_running = vangogh_is_dpm_running,
@@ -2556,10 +2540,10 @@ static const struct pptable_funcs vangogh_ppt_funcs = {
 	.interrupt_work = smu_v11_0_interrupt_work,
 	.get_gpu_metrics = vangogh_common_get_gpu_metrics,
 	.od_edit_dpm_table = vangogh_od_edit_dpm_table,
-	.print_clk_levels = vangogh_common_print_clk_levels,
+	.emit_clk_levels = vangogh_common_emit_clk_levels,
 	.set_default_dpm_table = vangogh_set_default_dpm_tables,
 	.set_fine_grain_gfx_freq_parameters = vangogh_set_fine_grain_gfx_freq_parameters,
-	.system_features_control = vangogh_system_features_control,
+	.notify_rlc_state = vangogh_notify_rlc_state,
 	.feature_is_enabled = smu_cmn_feature_is_enabled,
 	.set_power_profile_mode = vangogh_set_power_profile_mode,
 	.get_power_profile_mode = vangogh_get_power_profile_mode,
@@ -2574,18 +2558,17 @@ static const struct pptable_funcs vangogh_ppt_funcs = {
 	.get_gfx_off_residency = vangogh_get_gfxoff_residency,
 	.set_gfx_off_residency = vangogh_set_gfxoff_residency,
 	.get_ppt_limit = vangogh_get_ppt_limit,
-	.get_power_limit = vangogh_get_power_limit,
-	.set_power_limit = vangogh_set_power_limit,
+	.set_ppt_limit = vangogh_set_ppt_limit,
 	.get_vbios_bootup_values = smu_v11_0_get_vbios_bootup_values,
 };
 
 void vangogh_set_ppt_funcs(struct smu_context *smu)
 {
 	smu->ppt_funcs = &vangogh_ppt_funcs;
-	smu->message_map = vangogh_message_map;
 	smu->feature_map = vangogh_feature_mask_map;
 	smu->table_map = vangogh_table_map;
 	smu->workload_map = vangogh_workload_map;
 	smu->is_apu = true;
-	smu_v11_0_set_smu_mailbox_registers(smu);
+	smu->smc_driver_if_version = SMU13_DRIVER_IF_VERSION;
+	smu_v11_0_init_msg_ctl(smu, vangogh_message_map);
 }

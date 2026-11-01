@@ -12,7 +12,6 @@
 struct muram_info {
 	struct gen_pool *pool;
 	void __iomem *vbase;
-	size_t size;
 	phys_addr_t pbase;
 };
 
@@ -41,7 +40,7 @@ struct muram_info *fman_muram_init(phys_addr_t base, size_t size)
 	void __iomem *vaddr;
 	int ret;
 
-	muram = kzalloc(sizeof(*muram), GFP_KERNEL);
+	muram = kzalloc_obj(*muram);
 	if (!muram)
 		return NULL;
 

@@ -7,6 +7,7 @@
 #include <linux/mod_devicetable.h>
 #include <asm/chpid.h>
 #include <asm/cio.h>
+#include <asm/dma-types.h>
 #include <asm/fcx.h>
 #include <asm/schid.h>
 #include <asm/tpi.h>
@@ -19,7 +20,7 @@ struct pmcw {
 	u32 intparm;		/* interruption parameter */
 	u32 qf	 : 1;		/* qdio facility */
 	u32 w	 : 1;
-	u32 isc  : 3;		/* interruption sublass */
+	u32 isc  : 3;		/* interruption subclass */
 	u32 res5 : 3;		/* reserved zeros */
 	u32 ena  : 1;		/* enabled */
 	u32 lm	 : 2;		/* limit mode */
@@ -49,7 +50,7 @@ struct pmcw {
 
 /* Target SCHIB configuration. */
 struct schib_config {
-	u64 mba;
+	dma64_t mba;
 	u32 intparm;
 	u16 mbi;
 	u32 isc:3;
@@ -66,7 +67,7 @@ struct schib_config {
 struct schib {
 	struct pmcw pmcw;	 /* path management control word */
 	union scsw scsw;	 /* subchannel status word */
-	__u64 mba;               /* measurement block address */
+	dma64_t mba;		 /* measurement block address */
 	__u8 mda[4];		 /* model dependent area */
 } __attribute__ ((packed,aligned(4)));
 
@@ -83,7 +84,7 @@ enum sch_todo {
 /* subchannel data structure used by I/O subroutines */
 struct subchannel {
 	struct subchannel_id schid;
-	spinlock_t *lock;	/* subchannel lock */
+	spinlock_t lock;	/* subchannel lock */
 	struct mutex reg_mutex;
 	enum {
 		SUBCHANNEL_TYPE_IO = 0,
@@ -103,11 +104,6 @@ struct subchannel {
 	struct work_struct todo_work;
 	struct schib_config config;
 	u64 dma_mask;
-	/*
-	 * Driver name to force a match.  Do not set directly, because core
-	 * frees it.  Use driver_set_override() to set or clear it.
-	 */
-	const char *driver_override;
 } __attribute__ ((aligned(8)));
 
 DECLARE_PER_CPU_ALIGNED(struct irb, cio_irb);

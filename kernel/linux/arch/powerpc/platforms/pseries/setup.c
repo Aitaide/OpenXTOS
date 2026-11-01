@@ -42,6 +42,7 @@
 #include <linux/memblock.h>
 #include <linux/swiotlb.h>
 #include <linux/seq_buf.h>
+#include <linux/sched/cputime.h>
 
 #include <asm/mmu.h>
 #include <asm/processor.h>
@@ -76,6 +77,7 @@
 #include <asm/dtl.h>
 #include <asm/hvconsole.h>
 #include <asm/setup.h>
+#include <asm/papr-watchdog.h>
 
 #include "pseries.h"
 
@@ -83,9 +85,6 @@ DEFINE_STATIC_KEY_FALSE(shared_processor);
 EXPORT_SYMBOL(shared_processor);
 
 #ifdef CONFIG_PARAVIRT_TIME_ACCOUNTING
-struct static_key paravirt_steal_enabled;
-struct static_key paravirt_steal_rq_enabled;
-
 static bool steal_acc = true;
 static int __init parse_no_stealacc(char *arg)
 {
@@ -187,14 +186,37 @@ static void __init fwnmi_init(void)
 #endif
 }
 
+static void pseries_crash_stop_watchdogs(void)
+{
+	long rc;
+
+	rc = plpar_hcall_norets_notrace(H_WATCHDOG, PSERIES_WDTF_OP_STOP,
+					PSERIES_WDT_NUM_ALL);
+	if (rc != H_SUCCESS && rc != H_NOOP)
+		pr_warn("Could not stop watchdogs before kdump rc=%ld\n", rc);
+}
+
 /*
  * Affix a device for the first timer to the platform bus if
  * we have firmware support for the H_WATCHDOG hypercall.
  */
 static __init int pseries_wdt_init(void)
 {
-	if (firmware_has_feature(FW_FEATURE_WATCHDOG))
-		platform_device_register_simple("pseries-wdt", 0, NULL, 0);
+	struct platform_device *pdev;
+
+	if (!firmware_has_feature(FW_FEATURE_WATCHDOG))
+		return 0;
+
+	pdev = platform_device_register_simple("pseries-wdt", 0, NULL, 0);
+
+	if (IS_ERR(pdev)) {
+		pr_err("Failed to register pseries-wdt platform device\n");
+		return PTR_ERR(pdev);
+	}
+
+	if (crash_shutdown_register(pseries_crash_stop_watchdogs))
+		pr_warn("Could not register watchdog crash shutdown handler\n");
+
 	return 0;
 }
 machine_subsys_initcall(pseries, pseries_wdt_init);
@@ -343,8 +365,8 @@ static int alloc_dispatch_log_kmem_cache(void)
 {
 	void (*ctor)(void *) = get_dtl_cache_ctor();
 
-	dtl_cache = kmem_cache_create("dtl", DISPATCH_LOG_BYTES,
-						DISPATCH_LOG_BYTES, 0, ctor);
+	dtl_cache = kmem_cache_create_usercopy("dtl", DISPATCH_LOG_BYTES,
+						DISPATCH_LOG_BYTES, 0, 0, DISPATCH_LOG_BYTES, ctor);
 	if (!dtl_cache) {
 		pr_warn("Failed to create dispatch trace log buffer cache\n");
 		pr_warn("Stolen time statistics will be unreliable\n");
@@ -660,7 +682,8 @@ enum get_iov_fw_value_index {
 	WDW_SIZE      = 3     /*  Get Window Size */
 };
 
-static resource_size_t pseries_get_iov_fw_value(struct pci_dev *dev, int resno,
+static resource_size_t pseries_get_iov_fw_value(const struct pci_dev *dev,
+						int resno,
 						enum get_iov_fw_value_index value)
 {
 	const int *indexes;
@@ -790,7 +813,7 @@ static void pseries_pci_fixup_iov_resources(struct pci_dev *pdev)
 		pseries_disable_sriov_resources(pdev);
 }
 
-static resource_size_t pseries_pci_iov_resource_alignment(struct pci_dev *pdev,
+static resource_size_t pseries_pci_iov_resource_alignment(const struct pci_dev *pdev,
 							  int resno)
 {
 	const __be32 *reg;
@@ -1029,9 +1052,11 @@ static void __init pseries_add_hw_description(void)
 		return;
 	}
 
-	if (of_property_read_bool(of_root, "ibm,powervm-partition") ||
-	    of_property_read_bool(of_root, "ibm,fw-net-version"))
+	dn = of_find_node_by_path("/");
+	if (of_property_read_bool(dn, "ibm,powervm-partition") ||
+	    of_property_read_bool(dn, "ibm,fw-net-version"))
 		seq_buf_printf(&ppc_hw_desc, "hv:phyp ");
+	of_node_put(dn);
 }
 
 /*
@@ -1091,7 +1116,11 @@ static void pseries_power_off(void)
 
 static int __init pSeries_probe(void)
 {
-	if (!of_node_is_type(of_root, "chrp"))
+	struct device_node *root = of_find_node_by_path("/");
+	bool ret = of_node_is_type(root, "chrp");
+
+	of_node_put(root);
+	if (!ret)
 		return 0;
 
 	/* Cell blades firmware claims to be chrp while it's not. Until this
@@ -1153,7 +1182,6 @@ define_machine(pseries) {
 	.machine_check_exception = pSeries_machine_check_exception,
 	.machine_check_log_err	= pSeries_machine_check_log_err,
 #ifdef CONFIG_KEXEC_CORE
-	.machine_kexec          = pseries_machine_kexec,
 	.kexec_cpu_down         = pseries_kexec_cpu_down,
 #endif
 #ifdef CONFIG_MEMORY_HOTPLUG

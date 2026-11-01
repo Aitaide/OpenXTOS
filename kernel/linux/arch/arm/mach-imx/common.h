@@ -14,23 +14,16 @@ struct platform_device;
 struct pt_regs;
 struct clk;
 struct device_node;
-enum mxc_cpu_pwr_mode;
-struct of_device_id;
 
 void mx31_map_io(void);
 void mx35_map_io(void);
-void imx21_init_early(void);
 void imx31_init_early(void);
 void imx35_init_early(void);
-void mx31_init_irq(void);
-void mx35_init_irq(void);
 void mxc_set_cpu_type(unsigned int type);
 void mxc_restart(enum reboot_mode, const char *);
 void mxc_arch_reset_init(void __iomem *);
-void imx1_reset_init(void __iomem *);
 void imx_set_aips(void __iomem *);
 void imx_aips_allow_unprivileged_access(const char *compat);
-int mxc_device_init(void);
 void imx_set_soc_revision(unsigned int rev);
 void imx_init_revision_from_anatop(void);
 void imx6_enable_rbc(bool enable);
@@ -98,7 +91,7 @@ extern const u32 imx53_suspend_sz;
 void imx6_suspend(void __iomem *ocram_vbase);
 #else
 static inline void imx53_suspend(void __iomem *ocram_vbase) {}
-static const u32 imx53_suspend_sz;
+static __maybe_unused const u32 imx53_suspend_sz;
 static inline void imx6_suspend(void __iomem *ocram_vbase) {}
 #endif
 

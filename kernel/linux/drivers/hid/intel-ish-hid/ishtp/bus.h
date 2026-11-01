@@ -8,7 +8,7 @@
 #define _LINUX_ISHTP_CL_BUS_H
 
 #include <linux/device.h>
-#include <linux/mod_devicetable.h>
+#include <linux/device-id/ishtp.h>
 #include <linux/intel-ish-client-if.h>
 
 struct ishtp_cl;
@@ -46,7 +46,6 @@ struct ishtp_cl_device {
 };
 
 int	ishtp_bus_new_client(struct ishtp_device *dev);
-void	ishtp_remove_all_clients(struct ishtp_device *dev);
 int	ishtp_cl_device_bind(struct ishtp_cl *cl);
 void	ishtp_cl_bus_rx_event(struct ishtp_cl_device *device);
 

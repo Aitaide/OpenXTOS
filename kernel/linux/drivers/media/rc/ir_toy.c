@@ -12,7 +12,7 @@
  * Copyright (C) 2011 Peter Kooiman <pkooiman@gmail.com>
  */
 
-#include <asm/unaligned.h>
+#include <linux/unaligned.h>
 #include <linux/completion.h>
 #include <linux/kernel.h>
 #include <linux/module.h>
@@ -332,6 +332,7 @@ static int irtoy_tx(struct rc_dev *rc, uint *txbuf, uint count)
 			    sizeof(COMMAND_SMODE_EXIT), STATE_COMMAND_NO_RESP);
 	if (err) {
 		dev_err(irtoy->dev, "exit sample mode: %d\n", err);
+		kfree(buf);
 		return err;
 	}
 
@@ -339,6 +340,7 @@ static int irtoy_tx(struct rc_dev *rc, uint *txbuf, uint count)
 			    sizeof(COMMAND_SMODE_ENTER), STATE_COMMAND);
 	if (err) {
 		dev_err(irtoy->dev, "enter sample mode: %d\n", err);
+		kfree(buf);
 		return err;
 	}
 
@@ -391,35 +393,24 @@ static int irtoy_probe(struct usb_interface *intf,
 {
 	struct usb_host_interface *idesc = intf->cur_altsetting;
 	struct usb_device *usbdev = interface_to_usbdev(intf);
-	struct usb_endpoint_descriptor *ep_in = NULL;
-	struct usb_endpoint_descriptor *ep_out = NULL;
-	struct usb_endpoint_descriptor *ep = NULL;
+	struct usb_endpoint_descriptor *ep_in, *ep_out;
 	struct irtoy *irtoy;
 	struct rc_dev *rc;
 	struct urb *urb;
-	int i, pipe, err = -ENOMEM;
+	int pipe, err;
 
-	for (i = 0; i < idesc->desc.bNumEndpoints; i++) {
-		ep = &idesc->endpoint[i].desc;
-
-		if (!ep_in && usb_endpoint_is_bulk_in(ep) &&
-		    usb_endpoint_maxp(ep) == MAX_PACKET)
-			ep_in = ep;
-
-		if (!ep_out && usb_endpoint_is_bulk_out(ep) &&
-		    usb_endpoint_maxp(ep) == MAX_PACKET)
-			ep_out = ep;
-	}
-
-	if (!ep_in || !ep_out) {
+	err = usb_find_common_endpoints(idesc, &ep_in, &ep_out, NULL, NULL);
+	if (err || usb_endpoint_maxp(ep_in) != MAX_PACKET ||
+	    usb_endpoint_maxp(ep_out) != MAX_PACKET) {
 		dev_err(&intf->dev, "required endpoints not found\n");
 		return -ENODEV;
 	}
 
-	irtoy = kzalloc(sizeof(*irtoy), GFP_KERNEL);
+	irtoy = kzalloc_obj(*irtoy);
 	if (!irtoy)
 		return -ENOMEM;
 
+	err = -ENOMEM;
 	irtoy->in = kmalloc(MAX_PACKET,  GFP_KERNEL);
 	if (!irtoy->in)
 		goto free_irtoy;
@@ -534,6 +525,7 @@ static void irtoy_disconnect(struct usb_interface *intf)
 	usb_free_urb(ir->urb_out);
 	usb_kill_urb(ir->urb_in);
 	usb_free_urb(ir->urb_in);
+	rc_free_device(ir->rc);
 	kfree(ir->in);
 	kfree(ir->out);
 	kfree(ir);

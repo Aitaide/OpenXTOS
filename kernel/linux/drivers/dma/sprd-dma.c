@@ -212,7 +212,7 @@ struct sprd_dma_dev {
 	struct clk		*ashb_clk;
 	int			irq;
 	u32			total_chns;
-	struct sprd_dma_chn	channels[];
+	struct sprd_dma_chn	channels[] __counted_by(total_chns);
 };
 
 static void sprd_dma_free_desc(struct virt_dma_desc *vd);
@@ -572,8 +572,7 @@ static void sprd_dma_stop(struct sprd_dma_chn *schan)
 	schan->cur_desc = NULL;
 }
 
-static bool sprd_dma_check_trans_done(struct sprd_dma_desc *sdesc,
-				      enum sprd_dma_int_type int_type,
+static bool sprd_dma_check_trans_done(enum sprd_dma_int_type int_type,
 				      enum sprd_dma_req_mode req_mode)
 {
 	if (int_type == SPRD_DMA_NO_INT)
@@ -619,8 +618,7 @@ static irqreturn_t dma_irq_handle(int irq, void *dev_id)
 			vchan_cyclic_callback(&sdesc->vd);
 		} else {
 			/* Check if the dma request descriptor is done. */
-			trans_done = sprd_dma_check_trans_done(sdesc, int_type,
-							       req_type);
+			trans_done = sprd_dma_check_trans_done(int_type, req_type);
 			if (trans_done == true) {
 				vchan_cookie_complete(&sdesc->vd);
 				schan->cur_desc = NULL;
@@ -903,7 +901,7 @@ sprd_dma_prep_dma_memcpy(struct dma_chan *chan, dma_addr_t dest, dma_addr_t src,
 	enum sprd_dma_datawidth datawidth;
 	u32 step, temp;
 
-	sdesc = kzalloc(sizeof(*sdesc), GFP_NOWAIT);
+	sdesc = kzalloc_obj(*sdesc, GFP_NOWAIT);
 	if (!sdesc)
 		return NULL;
 
@@ -988,7 +986,7 @@ sprd_dma_prep_slave_sg(struct dma_chan *chan, struct scatterlist *sgl,
 		(flags >> SPRD_DMA_TRG_MODE_SHIFT) & SPRD_DMA_TRG_MODE_MASK;
 	schan->int_type = flags & SPRD_DMA_INT_TYPE_MASK;
 
-	sdesc = kzalloc(sizeof(*sdesc), GFP_NOWAIT);
+	sdesc = kzalloc_obj(*sdesc, GFP_NOWAIT);
 	if (!sdesc)
 		return NULL;
 
@@ -1117,6 +1115,15 @@ static int sprd_dma_probe(struct platform_device *pdev)
 	u32 chn_count;
 	int ret, i;
 
+	ret = dma_set_mask_and_coherent(&pdev->dev, DMA_BIT_MASK(36));
+	if (ret) {
+		ret = dma_set_mask_and_coherent(&pdev->dev, DMA_BIT_MASK(32));
+		if (ret) {
+			dev_err(&pdev->dev, "unable to set coherent mask to 32\n");
+			return ret;
+		}
+	}
+
 	/* Parse new and deprecated dma-channels properties */
 	ret = device_property_read_u32(&pdev->dev, "dma-channels", &chn_count);
 	if (ret)
@@ -1205,7 +1212,7 @@ static int sprd_dma_probe(struct platform_device *pdev)
 
 	ret = pm_runtime_get_sync(&pdev->dev);
 	if (ret < 0)
-		goto err_rpm;
+		goto err_register;
 
 	ret = dma_async_device_register(&sdev->dma_dev);
 	if (ret < 0) {
@@ -1227,12 +1234,11 @@ err_of_register:
 err_register:
 	pm_runtime_put_noidle(&pdev->dev);
 	pm_runtime_disable(&pdev->dev);
-err_rpm:
 	sprd_dma_disable(sdev);
 	return ret;
 }
 
-static int sprd_dma_remove(struct platform_device *pdev)
+static void sprd_dma_remove(struct platform_device *pdev)
 {
 	struct sprd_dma_dev *sdev = platform_get_drvdata(pdev);
 	struct sprd_dma_chn *c, *cn;
@@ -1255,7 +1261,6 @@ static int sprd_dma_remove(struct platform_device *pdev)
 
 	pm_runtime_put_noidle(&pdev->dev);
 	pm_runtime_disable(&pdev->dev);
-	return 0;
 }
 
 static const struct of_device_id sprd_dma_match[] = {
@@ -1305,4 +1310,3 @@ MODULE_LICENSE("GPL v2");
 MODULE_DESCRIPTION("DMA driver for Spreadtrum");
 MODULE_AUTHOR("Baolin Wang <baolin.wang@spreadtrum.com>");
 MODULE_AUTHOR("Eric Long <eric.long@spreadtrum.com>");
-MODULE_ALIAS("platform:sprd-dma");

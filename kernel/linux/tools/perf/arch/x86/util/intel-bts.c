@@ -4,26 +4,30 @@
  * Copyright (c) 2013-2015, Intel Corporation.
  */
 
+#include "../../../util/intel-bts.h"
+
 #include <errno.h>
-#include <linux/kernel.h>
-#include <linux/types.h>
+
 #include <linux/bitops.h>
+#include <linux/kernel.h>
 #include <linux/log2.h>
+#include <linux/types.h>
 #include <linux/zalloc.h>
 
-#include "../../../util/cpumap.h"
-#include "../../../util/event.h"
-#include "../../../util/evsel.h"
-#include "../../../util/evlist.h"
-#include "../../../util/mmap.h"
-#include "../../../util/session.h"
-#include "../../../util/pmus.h"
-#include "../../../util/debug.h"
-#include "../../../util/record.h"
-#include "../../../util/tsc.h"
-#include "../../../util/auxtrace.h"
-#include "../../../util/intel-bts.h"
 #include <internal/lib.h> // page_size
+
+#include "../../../util/auxtrace.h"
+#include "../../../util/cpumap.h"
+#include "../../../util/debug.h"
+#include "../../../util/event.h"
+#include "../../../util/evlist.h"
+#include "../../../util/evsel.h"
+#include "../../../util/mmap.h"
+#include "../../../util/pmu.h"
+#include "../../../util/pmus.h"
+#include "../../../util/record.h"
+#include "../../../util/session.h"
+#include "../../../util/tsc.h"
 
 #define KiB(x) ((x) * 1024)
 #define MiB(x) ((x) * 1024 * 1024)
@@ -75,10 +79,10 @@ static int intel_bts_info_fill(struct auxtrace_record *itr,
 	if (priv_size != INTEL_BTS_AUXTRACE_PRIV_SIZE)
 		return -EINVAL;
 
-	if (!session->evlist->core.nr_mmaps)
+	if (!evlist__core(session->evlist)->nr_mmaps)
 		return -EINVAL;
 
-	pc = session->evlist->mmap[0].core.base;
+	pc = evlist__mmap(session->evlist)[0].core.base;
 	if (pc) {
 		err = perf_read_tsc_conversion(pc, &tc);
 		if (err) {
@@ -110,7 +114,7 @@ static int intel_bts_recording_options(struct auxtrace_record *itr,
 			container_of(itr, struct intel_bts_recording, itr);
 	struct perf_pmu *intel_bts_pmu = btsr->intel_bts_pmu;
 	struct evsel *evsel, *intel_bts_evsel = NULL;
-	const struct perf_cpu_map *cpus = evlist->core.user_requested_cpus;
+	const struct perf_cpu_map *cpus = evlist__core(evlist)->user_requested_cpus;
 	bool privileged = perf_event_paranoid_check(-1);
 
 	if (opts->auxtrace_sample_mode) {
@@ -143,7 +147,7 @@ static int intel_bts_recording_options(struct auxtrace_record *itr,
 	if (!opts->full_auxtrace)
 		return 0;
 
-	if (opts->full_auxtrace && !perf_cpu_map__empty(cpus)) {
+	if (opts->full_auxtrace && !perf_cpu_map__is_any_cpu_or_is_empty(cpus)) {
 		pr_err(INTEL_BTS_PMU_NAME " does not support per-cpu recording\n");
 		return -EINVAL;
 	}
@@ -224,7 +228,7 @@ static int intel_bts_recording_options(struct auxtrace_record *itr,
 		 * In the case of per-cpu mmaps, we need the CPU on the
 		 * AUX event.
 		 */
-		if (!perf_cpu_map__empty(cpus))
+		if (!perf_cpu_map__is_any_cpu_or_is_empty(cpus))
 			evsel__set_sample_bit(intel_bts_evsel, CPU);
 	}
 
@@ -434,7 +438,6 @@ struct auxtrace_record *intel_bts_recording_init(int *err)
 	}
 
 	btsr->intel_bts_pmu = intel_bts_pmu;
-	btsr->itr.pmu = intel_bts_pmu;
 	btsr->itr.recording_options = intel_bts_recording_options;
 	btsr->itr.info_priv_size = intel_bts_info_priv_size;
 	btsr->itr.info_fill = intel_bts_info_fill;

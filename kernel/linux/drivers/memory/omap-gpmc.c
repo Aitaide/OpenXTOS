@@ -9,6 +9,7 @@
  * Copyright (C) 2009 Texas Instruments
  * Added OMAP4 support - Santosh Shilimkar <santosh.shilimkar@ti.com>
  */
+#include <linux/cleanup.h>
 #include <linux/cpu_pm.h>
 #include <linux/irq.h>
 #include <linux/kernel.h>
@@ -357,17 +358,6 @@ static unsigned int gpmc_ps_to_ticks(unsigned int time_ps)
 	return (time_ps + tick_ps - 1) / tick_ps;
 }
 
-static unsigned int gpmc_clk_ticks_to_ns(unsigned int ticks, int cs,
-					 enum gpmc_clk_domain cd)
-{
-	return ticks * gpmc_get_clk_period(cs, cd) / 1000;
-}
-
-unsigned int gpmc_ticks_to_ns(unsigned int ticks)
-{
-	return gpmc_clk_ticks_to_ns(ticks, /* any CS */ 0, GPMC_CD_FCLK);
-}
-
 static unsigned int gpmc_ticks_to_ps(unsigned int ticks)
 {
 	return ticks * gpmc_get_fclk_period();
@@ -414,6 +404,13 @@ static void gpmc_cs_bool_timings(int cs, const struct gpmc_bool_timings *p)
 }
 
 #ifdef CONFIG_OMAP_GPMC_DEBUG
+
+static unsigned int gpmc_clk_ticks_to_ns(unsigned int ticks, int cs,
+					 enum gpmc_clk_domain cd)
+{
+	return ticks * gpmc_get_clk_period(cs, cd) / 1000;
+}
+
 /**
  * get_gpmc_timing_reg - read a timing parameter and print DTS settings for it.
  * @cs:      Chip Select Region
@@ -435,13 +432,9 @@ static void gpmc_cs_bool_timings(int cs, const struct gpmc_bool_timings *p)
  *
  */
 static int get_gpmc_timing_reg(
-	/* timing specifiers */
 	int cs, int reg, int st_bit, int end_bit, int max,
 	const char *name, const enum gpmc_clk_domain cd,
-	/* value transform */
-	int shift,
-	/* format specifiers */
-	bool raw, bool noval)
+	int shift, bool raw, bool noval)
 {
 	u32 l;
 	int nr_bits;
@@ -989,18 +982,18 @@ int gpmc_cs_request(int cs, unsigned long size, unsigned long *base)
 	if (size > (1 << GPMC_SECTION_SHIFT))
 		return -ENOMEM;
 
-	spin_lock(&gpmc_mem_lock);
-	if (gpmc_cs_reserved(cs)) {
-		r = -EBUSY;
-		goto out;
-	}
+	guard(spinlock)(&gpmc_mem_lock);
+
+	if (gpmc_cs_reserved(cs))
+		return -EBUSY;
+
 	if (gpmc_cs_mem_enabled(cs))
 		r = adjust_resource(res, res->start & ~(size - 1), size);
 	if (r < 0)
 		r = allocate_resource(&gpmc_mem_root, res, size, 0, ~0,
 				      size, NULL, NULL);
 	if (r < 0)
-		goto out;
+		return r;
 
 	/* Disable CS while changing base address and size mask */
 	gpmc_cs_disable_mem(cs);
@@ -1008,16 +1001,15 @@ int gpmc_cs_request(int cs, unsigned long size, unsigned long *base)
 	r = gpmc_cs_set_memconf(cs, res->start, resource_size(res));
 	if (r < 0) {
 		release_resource(res);
-		goto out;
+		return r;
 	}
 
 	/* Enable CS */
 	gpmc_cs_enable_mem(cs);
 	*base = res->start;
 	gpmc_cs_set_reserved(cs, 1);
-out:
-	spin_unlock(&gpmc_mem_lock);
-	return r;
+
+	return 0;
 }
 EXPORT_SYMBOL(gpmc_cs_request);
 
@@ -1026,10 +1018,9 @@ void gpmc_cs_free(int cs)
 	struct gpmc_cs_data *gpmc;
 	struct resource *res;
 
-	spin_lock(&gpmc_mem_lock);
+	guard(spinlock)(&gpmc_mem_lock);
 	if (cs >= gpmc_cs_num || cs < 0 || !gpmc_cs_reserved(cs)) {
 		WARN(1, "Trying to free non-reserved GPMC CS%d\n", cs);
-		spin_unlock(&gpmc_mem_lock);
 		return;
 	}
 	gpmc = &gpmc_cs[cs];
@@ -1039,7 +1030,6 @@ void gpmc_cs_free(int cs)
 	if (res->flags)
 		release_resource(res);
 	gpmc_cs_set_reserved(cs, 0);
-	spin_unlock(&gpmc_mem_lock);
 }
 EXPORT_SYMBOL(gpmc_cs_free);
 
@@ -1297,21 +1287,6 @@ int gpmc_omap_onenand_set_timings(struct device *dev, int cs, int freq,
 }
 EXPORT_SYMBOL_GPL(gpmc_omap_onenand_set_timings);
 
-int gpmc_get_client_irq(unsigned int irq_config)
-{
-	if (!gpmc_irq_domain) {
-		pr_warn("%s called before GPMC IRQ domain available\n",
-			__func__);
-		return 0;
-	}
-
-	/* we restrict this to NAND IRQs only */
-	if (irq_config >= GPMC_NR_NAND_IRQS)
-		return 0;
-
-	return irq_create_mapping(gpmc_irq_domain, irq_config);
-}
-
 static int gpmc_irq_endis(unsigned long hwirq, bool endis)
 {
 	u32 regval;
@@ -1476,10 +1451,8 @@ static int gpmc_setup_irq(struct gpmc_device *gpmc)
 	gpmc->irq_chip.irq_unmask = gpmc_irq_unmask;
 	gpmc->irq_chip.irq_set_type = gpmc_irq_set_type;
 
-	gpmc_irq_domain = irq_domain_add_linear(gpmc->dev->of_node,
-						gpmc->nirqs,
-						&gpmc_irq_domain_ops,
-						gpmc);
+	gpmc_irq_domain = irq_domain_create_linear(dev_fwnode(gpmc->dev), gpmc->nirqs,
+						   &gpmc_irq_domain_ops, gpmc);
 	if (!gpmc_irq_domain) {
 		dev_err(gpmc->dev, "IRQ domain add failed\n");
 		return -ENODEV;
@@ -2156,6 +2129,13 @@ static void __maybe_unused gpmc_read_timings_dt(struct device_node *np,
 		of_property_read_bool(np, "gpmc,time-para-granularity");
 }
 
+static int gpmc_child_is_nand(struct device_node *child)
+{
+	/* This has to match drivers/mtd/nand/raw/omap2.c's omap_nand_ids[] */
+	return of_device_is_compatible(child, "ti,omap2-nand") ||
+		of_device_is_compatible(child, "ti,am64-nand");
+}
+
 /**
  * gpmc_probe_generic_child - configures the gpmc for a child device
  * @pdev:	pointer to gpmc platform device
@@ -2247,27 +2227,7 @@ static int gpmc_probe_generic_child(struct platform_device *pdev,
 		goto err;
 	}
 
-	if (of_node_name_eq(child, "nand")) {
-		/* Warn about older DT blobs with no compatible property */
-		if (!of_property_read_bool(child, "compatible")) {
-			dev_warn(&pdev->dev,
-				 "Incompatible NAND node: missing compatible");
-			ret = -EINVAL;
-			goto err;
-		}
-	}
-
-	if (of_node_name_eq(child, "onenand")) {
-		/* Warn about older DT blobs with no compatible property */
-		if (!of_property_read_bool(child, "compatible")) {
-			dev_warn(&pdev->dev,
-				 "Incompatible OneNAND node: missing compatible");
-			ret = -EINVAL;
-			goto err;
-		}
-	}
-
-	if (of_match_node(omap_nand_ids, child)) {
+	if (gpmc_child_is_nand(child)) {
 		/* NAND specific setup */
 		val = 8;
 		of_property_read_u32(child, "nand-bus-width", &val);
@@ -2417,24 +2377,13 @@ static void gpmc_probe_dt_children(struct platform_device *pdev)
 
 static int gpmc_gpio_get_direction(struct gpio_chip *chip, unsigned int offset)
 {
-	return 1;	/* we're input only */
+	return GPIO_LINE_DIRECTION_IN; /* we're input only */
 }
 
 static int gpmc_gpio_direction_input(struct gpio_chip *chip,
 				     unsigned int offset)
 {
 	return 0;	/* we're input only */
-}
-
-static int gpmc_gpio_direction_output(struct gpio_chip *chip,
-				      unsigned int offset, int value)
-{
-	return -EINVAL;	/* we're input only */
-}
-
-static void gpmc_gpio_set(struct gpio_chip *chip, unsigned int offset,
-			  int value)
-{
 }
 
 static int gpmc_gpio_get(struct gpio_chip *chip, unsigned int offset)
@@ -2458,8 +2407,6 @@ static int gpmc_gpio_init(struct gpmc_device *gpmc)
 	gpmc->gpio_chip.ngpio = gpmc_nr_waitpins;
 	gpmc->gpio_chip.get_direction = gpmc_gpio_get_direction;
 	gpmc->gpio_chip.direction_input = gpmc_gpio_direction_input;
-	gpmc->gpio_chip.direction_output = gpmc_gpio_direction_output;
-	gpmc->gpio_chip.set = gpmc_gpio_set;
 	gpmc->gpio_chip.get = gpmc_gpio_get;
 	gpmc->gpio_chip.base = -1;
 
@@ -2690,7 +2637,7 @@ gpio_init_failed:
 	return rc;
 }
 
-static int gpmc_remove(struct platform_device *pdev)
+static void gpmc_remove(struct platform_device *pdev)
 {
 	int i;
 	struct gpmc_device *gpmc = platform_get_drvdata(pdev);
@@ -2702,8 +2649,6 @@ static int gpmc_remove(struct platform_device *pdev)
 	gpmc_mem_exit();
 	pm_runtime_put_sync(&pdev->dev);
 	pm_runtime_disable(&pdev->dev);
-
-	return 0;
 }
 
 #ifdef CONFIG_PM_SLEEP

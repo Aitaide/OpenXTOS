@@ -116,10 +116,10 @@ static struct hl_cb *hl_cb_alloc(struct hl_device *hdev, u32 cb_size,
 	 * and must use GFP_ATOMIC for all memory allocations.
 	 */
 	if (ctx_id == HL_KERNEL_ASID_ID && !hdev->disabled)
-		cb = kzalloc(sizeof(*cb), GFP_ATOMIC);
+		cb = kzalloc_obj(*cb, GFP_ATOMIC);
 
 	if (!cb)
-		cb = kzalloc(sizeof(*cb), GFP_KERNEL);
+		cb = kzalloc_obj(*cb);
 
 	if (!cb)
 		return NULL;
@@ -361,10 +361,11 @@ out:
 	return rc;
 }
 
-int hl_cb_ioctl(struct hl_fpriv *hpriv, void *data)
+int hl_cb_ioctl(struct drm_device *ddev, void *data, struct drm_file *file_priv)
 {
-	union hl_cb_args *args = data;
+	struct hl_fpriv *hpriv = file_priv->driver_priv;
 	struct hl_device *hdev = hpriv->hdev;
+	union hl_cb_args *args = data;
 	u64 handle = 0, device_va = 0;
 	enum hl_device_status status;
 	u32 usage_cnt = 0;

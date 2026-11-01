@@ -89,8 +89,6 @@ struct nubus_driver {
 	void (*remove)(struct nubus_board *board);
 };
 
-extern struct bus_type nubus_bus_type;
-
 /* Generic NuBus interface functions, modelled after the PCI interface */
 #ifdef CONFIG_PROC_FS
 extern bool nubus_populate_procfs;
@@ -164,8 +162,7 @@ void nubus_seq_write_rsrc_mem(struct seq_file *m,
 unsigned char *nubus_dirptr(const struct nubus_dirent *nd);
 
 /* Declarations relating to driver model objects */
-int nubus_parent_device_register(void);
-int nubus_device_register(struct nubus_board *board);
+int nubus_device_register(struct device *parent, struct nubus_board *board);
 int nubus_driver_register(struct nubus_driver *ndrv);
 void nubus_driver_unregister(struct nubus_driver *ndrv);
 int nubus_proc_show(struct seq_file *m, void *data);

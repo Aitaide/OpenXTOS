@@ -7,6 +7,7 @@
 #include <linux/workqueue.h>
 #include <linux/blk-mq.h>
 #include <scsi/scsi.h>
+#include <scsi/scsi_common.h>
 #include <linux/atomic.h>
 #include <linux/sbitmap.h>
 
@@ -100,10 +101,6 @@ struct scsi_vpd {
 	unsigned char	data[];
 };
 
-enum scsi_vpd_parameters {
-	SCSI_VPD_HEADER_SIZE = 4,
-};
-
 struct scsi_device {
 	struct Scsi_Host *host;
 	struct request_queue *request_queue;
@@ -141,9 +138,9 @@ struct scsi_device {
 	struct mutex inquiry_mutex;
 	unsigned char inquiry_len;	/* valid bytes in 'inquiry' */
 	unsigned char * inquiry;	/* INQUIRY response data */
-	const char * vendor;		/* [back_compat] point into 'inquiry' ... */
-	const char * model;		/* ... after scan; point to static string */
-	const char * rev;		/* ... "nullnullnullnull" before scan */
+	char vendor[INQUIRY_VENDOR_LEN + 1];
+	char model[INQUIRY_MODEL_LEN + 1];
+	char rev[INQUIRY_REVISION_LEN + 1];
 
 #define SCSI_DEFAULT_VPD_LEN	255	/* default SCSI VPD page size (max) */
 	struct scsi_vpd __rcu *vpd_pg0;
@@ -153,12 +150,13 @@ struct scsi_device {
 	struct scsi_vpd __rcu *vpd_pgb0;
 	struct scsi_vpd __rcu *vpd_pgb1;
 	struct scsi_vpd __rcu *vpd_pgb2;
+	struct scsi_vpd __rcu *vpd_pgb7;
 
 	struct scsi_target      *sdev_target;
 
 	blist_flags_t		sdev_bflags; /* black/white flags as also found in
 				 * scsi_devinfo.[hc]. For now used only to
-				 * pass settings from slave_alloc to scsi
+				 * pass settings from sdev_init to scsi
 				 * core. */
 	unsigned int eh_timeout; /* Error handling timeout */
 
@@ -167,19 +165,36 @@ struct scsi_device {
 	 * power state for system suspend/resume (suspend to RAM and
 	 * hibernation) operations.
 	 */
-	bool manage_system_start_stop;
+	unsigned manage_system_start_stop:1;
 
 	/*
 	 * If true, let the high-level device driver (sd) manage the device
 	 * power state for runtime device suspand and resume operations.
 	 */
-	bool manage_runtime_start_stop;
+	unsigned manage_runtime_start_stop:1;
 
 	/*
 	 * If true, let the high-level device driver (sd) manage the device
 	 * power state for system shutdown (power off) operations.
 	 */
-	bool manage_shutdown;
+	unsigned manage_shutdown:1;
+
+	/*
+	 * If true, let the high-level device driver (sd) manage the device
+	 * power state for system restart (reboot) operations.
+	 */
+	unsigned manage_restart:1;
+
+	/*
+	 * If set and if the device is runtime suspended, ask the high-level
+	 * device driver (sd) to force a runtime resume of the device.
+	 */
+	unsigned force_runtime_start_on_system_start:1;
+
+	/*
+	 * Set if the device is an ATA device.
+	 */
+	unsigned is_ata:1;
 
 	unsigned removable:1;
 	unsigned changed:1;	/* Data invalid due to media change */
@@ -202,6 +217,7 @@ struct scsi_device {
 	unsigned use_10_for_rw:1; /* first try 10-byte read / write */
 	unsigned use_10_for_ms:1; /* first try 10-byte mode sense/select */
 	unsigned set_dbd_for_ms:1; /* Set "DBD" field in mode sense */
+	unsigned read_before_ms:1;	/* perform a READ before MODE SENSE */
 	unsigned no_report_opcodes:1;	/* no REPORT SUPPORTED OPERATION CODES */
 	unsigned no_write_same:1;	/* no WRITE SAME command */
 	unsigned use_16_for_rw:1; /* Use read/write(16) over read/write(10) */
@@ -213,7 +229,6 @@ struct scsi_device {
 	unsigned use_192_bytes_for_3f:1; /* ask for 192 bytes from page 0x3f */
 	unsigned no_start_on_add:1;	/* do not issue start on add */
 	unsigned allow_restart:1; /* issue START_UNIT in error handler */
-	unsigned no_start_on_resume:1; /* Do not issue START_STOP_UNIT on resume */
 	unsigned start_stop_pwr_cond:1;	/* Set power cond. in START_STOP_UNIT */
 	unsigned no_uld_attach:1; /* disable connecting to upper level drivers */
 	unsigned select_no_atn:1;
@@ -243,6 +258,9 @@ struct scsi_device {
 
 	unsigned int queue_stopped;	/* request queue is quiesced */
 	bool offline_already;		/* Device offline message logged */
+
+	atomic_t ua_new_media_ctr;	/* Counter for New Media UNIT ATTENTIONs */
+	atomic_t ua_por_ctr;		/* Counter for Power On / Reset UAs */
 
 	atomic_t disk_events_disable_depth; /* disable depth for disk events */
 
@@ -302,8 +320,8 @@ sdev_prefix_printk(const char *, const struct scsi_device *, const char *,
 #define sdev_printk(l, sdev, fmt, a...)				\
 	sdev_prefix_printk(l, sdev, NULL, fmt, ##a)
 
-__printf(3, 4) void
-scmd_printk(const char *, const struct scsi_cmnd *, const char *, ...);
+__printf(3, 4) void scmd_printk(const char *, struct scsi_cmnd *, const char *,
+				...);
 
 #define scmd_dbg(scmd, fmt, a...)					\
 	do {								\
@@ -354,7 +372,7 @@ struct scsi_target {
 	atomic_t		target_blocked;
 
 	/*
-	 * LLDs should set this in the slave_alloc host template callout.
+	 * LLDs should set this in the sdev_init host template callout.
 	 * If set to zero then there is not limit.
 	 */
 	unsigned int		can_queue;
@@ -390,7 +408,6 @@ void scsi_attach_vpd(struct scsi_device *sdev);
 void scsi_cdl_check(struct scsi_device *sdev);
 int scsi_cdl_enable(struct scsi_device *sdev, bool enable);
 
-extern struct scsi_device *scsi_device_from_queue(struct request_queue *q);
 extern int __must_check scsi_device_get(struct scsi_device *);
 extern void scsi_device_put(struct scsi_device *);
 extern struct scsi_device *scsi_device_lookup(struct Scsi_Host *,
@@ -484,6 +501,52 @@ extern int scsi_is_sdev_device(const struct device *);
 extern int scsi_is_target_device(const struct device *);
 extern void scsi_sanitize_inquiry_string(unsigned char *s, int len);
 
+/*
+ * scsi_execute_cmd users can set scsi_failure.result to have
+ * scsi_check_passthrough fail/retry a command. scsi_failure.result can be a
+ * specific host byte or message code, or SCMD_FAILURE_RESULT_ANY can be used
+ * to match any host or message code.
+ */
+#define SCMD_FAILURE_RESULT_ANY	0x7fffffff
+/*
+ * Set scsi_failure.result to SCMD_FAILURE_STAT_ANY to fail/retry any failure
+ * scsi_status_is_good returns false for.
+ */
+#define SCMD_FAILURE_STAT_ANY	0xff
+/*
+ * The following can be set to the scsi_failure sense, asc and ascq fields to
+ * match on any sense, ASC, or ASCQ value.
+ */
+#define SCMD_FAILURE_SENSE_ANY	0xff
+#define SCMD_FAILURE_ASC_ANY	0xff
+#define SCMD_FAILURE_ASCQ_ANY	0xff
+/* Always retry a matching failure. */
+#define SCMD_FAILURE_NO_LIMIT	-1
+
+struct scsi_failure {
+	int result;
+	u8 sense;
+	u8 asc;
+	u8 ascq;
+	/*
+	 * Number of times scsi_execute_cmd will retry the failure. It does
+	 * not count for the total_allowed.
+	 */
+	s8 allowed;
+	/* Number of times the failure has been retried. */
+	s8 retries;
+};
+
+struct scsi_failures {
+	/*
+	 * If a scsi_failure does not have a retry limit setup this limit will
+	 * be used.
+	 */
+	int total_allowed;
+	int total_retries;
+	struct scsi_failure *failure_definitions;
+};
+
 /* Optional arguments to scsi_execute_cmd */
 struct scsi_exec_args {
 	unsigned char *sense;		/* sense buffer */
@@ -492,16 +555,23 @@ struct scsi_exec_args {
 	blk_mq_req_flags_t req_flags;	/* BLK_MQ_REQ flags */
 	int scmd_flags;			/* SCMD flags */
 	int *resid;			/* residual length */
+	struct scsi_failures *failures;	/* failures to retry */
 };
 
 int scsi_execute_cmd(struct scsi_device *sdev, const unsigned char *cmd,
 		     blk_opf_t opf, void *buffer, unsigned int bufflen,
 		     int timeout, int retries,
 		     const struct scsi_exec_args *args);
+void scsi_failures_reset_retries(struct scsi_failures *failures);
 
+struct scsi_cmnd *scsi_get_internal_cmd(struct scsi_device *sdev,
+					enum dma_data_direction data_direction,
+					blk_mq_req_flags_t flags);
+void scsi_put_internal_cmd(struct scsi_cmnd *scmd);
 extern void sdev_disable_disk_events(struct scsi_device *sdev);
 extern void sdev_enable_disk_events(struct scsi_device *sdev);
 extern int scsi_vpd_lun_id(struct scsi_device *, char *, size_t);
+extern int scsi_vpd_lun_serial(struct scsi_device *, char *, size_t);
 extern int scsi_vpd_tpg_id(struct scsi_device *, int *);
 
 #ifdef CONFIG_PM
@@ -529,6 +599,22 @@ static inline unsigned int sdev_id(struct scsi_device *sdev)
 
 #define scmd_id(scmd) sdev_id((scmd)->device)
 #define scmd_channel(scmd) sdev_channel((scmd)->device)
+
+/**
+ * scsi_device_is_pseudo_dev() - Whether a device is a pseudo SCSI device.
+ * @sdev: SCSI device to examine
+ *
+ * A pseudo SCSI device can be used to allocate SCSI commands but does not show
+ * up in sysfs. Additionally, the logical unit information in *@sdev is made up.
+ *
+ * This function tests the LUN number instead of comparing @sdev with
+ * @sdev->host->pseudo_sdev because this function may be called before
+ * @sdev->host->pseudo_sdev has been initialized.
+ */
+static inline bool scsi_device_is_pseudo_dev(struct scsi_device *sdev)
+{
+	return sdev->lun == U64_MAX;
+}
 
 /*
  * checks for positions of the SCSI state machine
@@ -632,6 +718,10 @@ static inline int scsi_device_busy(struct scsi_device *sdev)
 {
 	return sbitmap_weight(&sdev->budget_map);
 }
+
+/* Macros to access the UNIT ATTENTION counters */
+#define scsi_get_ua_new_media_ctr(sdev)	atomic_read(&sdev->ua_new_media_ctr)
+#define scsi_get_ua_por_ctr(sdev)	atomic_read(&sdev->ua_por_ctr)
 
 #define MODULE_ALIAS_SCSI_DEVICE(type) \
 	MODULE_ALIAS("scsi:t-" __stringify(type) "*")

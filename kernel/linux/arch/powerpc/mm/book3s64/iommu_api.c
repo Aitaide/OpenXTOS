@@ -70,7 +70,7 @@ static long mm_iommu_do_alloc(struct mm_struct *mm, unsigned long ua,
 		locked_entries = entries;
 	}
 
-	mem = kzalloc(sizeof(*mem), GFP_KERNEL);
+	mem = kzalloc_obj(*mem);
 	if (!mem) {
 		ret = -ENOMEM;
 		goto unlock_exit;
@@ -97,7 +97,7 @@ static long mm_iommu_do_alloc(struct mm_struct *mm, unsigned long ua,
 	}
 
 	mmap_read_lock(mm);
-	chunk = (1UL << (PAGE_SHIFT + MAX_ORDER)) /
+	chunk = (1UL << (PAGE_SHIFT + MAX_PAGE_ORDER)) /
 			sizeof(struct vm_area_struct *);
 	chunk = min(chunk, entries);
 	for (entry = 0; entry < entries; entry += chunk) {

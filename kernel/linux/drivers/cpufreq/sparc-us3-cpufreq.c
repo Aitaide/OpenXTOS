@@ -140,10 +140,9 @@ static int us3_freq_cpu_init(struct cpufreq_policy *policy)
 	return 0;
 }
 
-static int us3_freq_cpu_exit(struct cpufreq_policy *policy)
+static void us3_freq_cpu_exit(struct cpufreq_policy *policy)
 {
 	us3_freq_target(policy, 0);
-	return 0;
 }
 
 static struct cpufreq_driver cpufreq_us3_driver = {
@@ -172,8 +171,7 @@ static int __init us3_freq_init(void)
 	     impl == CHEETAH_PLUS_IMPL ||
 	     impl == JAGUAR_IMPL ||
 	     impl == PANTHER_IMPL)) {
-		us3_freq_table = kzalloc(NR_CPUS * sizeof(*us3_freq_table),
-					 GFP_KERNEL);
+		us3_freq_table = kzalloc_objs(*us3_freq_table, NR_CPUS);
 		if (!us3_freq_table)
 			return -ENOMEM;
 

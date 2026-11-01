@@ -26,16 +26,7 @@
 
 #include "dc_trace.h"
 
-#if defined(CONFIG_X86)
-#include <asm/fpu/api.h>
-#elif defined(CONFIG_PPC64)
-#include <asm/switch_to.h>
-#include <asm/cputable.h>
-#elif defined(CONFIG_ARM64)
-#include <asm/neon.h>
-#elif defined(CONFIG_LOONGARCH)
-#include <asm/fpu.h>
-#endif
+#include <linux/fpu.h>
 
 /**
  * DOC: DC FPU manipulation overview
@@ -62,9 +53,28 @@ inline void dc_assert_fp_enabled(void)
 {
 	int depth;
 
-	depth = __this_cpu_read(fpu_recursion_depth);
+	depth = this_cpu_read(fpu_recursion_depth);
 
 	ASSERT(depth >= 1);
+}
+
+/**
+ * dc_is_fp_enabled - Check if FPU protection is enabled
+ *
+ * This function tells if the code is already under FPU protection or not. A
+ * function that works as an API for a set of FPU operations can use this
+ * function for checking if the caller invoked it after DC_FP_START(). For
+ * example, take a look at dcn20_fpu.c file.
+ *
+ * Similar to dc_assert_fp_enabled, but does not assert, returns status instead.
+ */
+inline bool dc_is_fp_enabled(void)
+{
+	int depth;
+
+	depth = this_cpu_read(fpu_recursion_depth);
+
+	return (depth >= 1);
 }
 
 /**
@@ -86,21 +96,10 @@ void dc_fpu_begin(const char *function_name, const int line)
 
 	WARN_ON_ONCE(!in_task());
 	preempt_disable();
-	depth = __this_cpu_inc_return(fpu_recursion_depth);
-
+	depth = this_cpu_inc_return(fpu_recursion_depth);
 	if (depth == 1) {
-#if defined(CONFIG_X86) || defined(CONFIG_LOONGARCH)
+		BUG_ON(!kernel_fpu_available());
 		kernel_fpu_begin();
-#elif defined(CONFIG_PPC64)
-		if (cpu_has_feature(CPU_FTR_VSX_COMP))
-			enable_kernel_vsx();
-		else if (cpu_has_feature(CPU_FTR_ALTIVEC_COMP))
-			enable_kernel_altivec();
-		else if (!cpu_has_feature(CPU_FTR_FPU_UNAVAILABLE))
-			enable_kernel_fp();
-#elif defined(CONFIG_ARM64)
-		kernel_neon_begin();
-#endif
 	}
 
 	TRACE_DCN_FPU(true, function_name, line, depth);
@@ -120,20 +119,9 @@ void dc_fpu_end(const char *function_name, const int line)
 {
 	int depth;
 
-	depth = __this_cpu_dec_return(fpu_recursion_depth);
+	depth = this_cpu_dec_return(fpu_recursion_depth);
 	if (depth == 0) {
-#if defined(CONFIG_X86) || defined(CONFIG_LOONGARCH)
 		kernel_fpu_end();
-#elif defined(CONFIG_PPC64)
-		if (cpu_has_feature(CPU_FTR_VSX_COMP))
-			disable_kernel_vsx();
-		else if (cpu_has_feature(CPU_FTR_ALTIVEC_COMP))
-			disable_kernel_altivec();
-		else if (!cpu_has_feature(CPU_FTR_FPU_UNAVAILABLE))
-			disable_kernel_fp();
-#elif defined(CONFIG_ARM64)
-		kernel_neon_end();
-#endif
 	} else {
 		WARN_ON_ONCE(depth < 0);
 	}

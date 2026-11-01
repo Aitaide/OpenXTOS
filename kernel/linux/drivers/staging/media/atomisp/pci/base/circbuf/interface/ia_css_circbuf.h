@@ -2,15 +2,6 @@
 /*
  * Support for Intel Camera Imaging ISP subsystem.
  * Copyright (c) 2015, Intel Corporation.
- *
- * This program is free software; you can redistribute it and/or modify it
- * under the terms and conditions of the GNU General Public License,
- * version 2, as published by the Free Software Foundation.
- *
- * This program is distributed in the hope it will be useful, but WITHOUT
- * ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
- * FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License for
- * more details.
  */
 
 #ifndef _IA_CSS_CIRCBUF_H
@@ -29,7 +20,7 @@
  * Data structures.
  *
  ****************************************************************/
-/**
+/*
  * @brief Data structure for the circular buffer.
  */
 typedef struct ia_css_circbuf_s ia_css_circbuf_t;
@@ -38,7 +29,7 @@ struct ia_css_circbuf_s {
 	ia_css_circbuf_elem_t *elems;	/* an array of elements    */
 };
 
-/**
+/*
  * @brief Create the circular buffer.
  *
  * @param cb	The pointer to the circular buffer.
@@ -50,7 +41,7 @@ void ia_css_circbuf_create(
     ia_css_circbuf_elem_t *elems,
     ia_css_circbuf_desc_t *desc);
 
-/**
+/*
  * @brief Destroy the circular buffer.
  *
  * @param cb The pointer to the circular buffer.
@@ -58,7 +49,7 @@ void ia_css_circbuf_create(
 void ia_css_circbuf_destroy(
     ia_css_circbuf_t *cb);
 
-/**
+/*
  * @brief Pop a value out of the circular buffer.
  * Get a value at the head of the circular buffer.
  * The user should call "ia_css_circbuf_is_empty()"
@@ -71,9 +62,9 @@ void ia_css_circbuf_destroy(
 uint32_t ia_css_circbuf_pop(
     ia_css_circbuf_t *cb);
 
-/**
+/*
  * @brief Extract a value out of the circular buffer.
- * Get a value at an arbitrary poistion in the circular
+ * Get a value at an arbitrary position in the circular
  * buffer. The user should call "ia_css_circbuf_is_empty()"
  * to avoid accessing to an empty buffer.
  *
@@ -91,7 +82,7 @@ uint32_t ia_css_circbuf_extract(
  * Inline functions.
  *
  ****************************************************************/
-/**
+/*
  * @brief Set the "val" field in the element.
  *
  * @param elem The pointer to the element.
@@ -106,7 +97,7 @@ static inline void ia_css_circbuf_elem_set_val(
 	elem->val = val;
 }
 
-/**
+/*
  * @brief Initialize the element.
  *
  * @param elem The pointer to the element.
@@ -118,7 +109,7 @@ static inline void ia_css_circbuf_elem_init(
 	ia_css_circbuf_elem_set_val(elem, 0);
 }
 
-/**
+/*
  * @brief Copy an element.
  *
  * @param src  The element as the copy source.
@@ -134,7 +125,7 @@ static inline void ia_css_circbuf_elem_cpy(
 	ia_css_circbuf_elem_set_val(dest, src->val);
 }
 
-/**
+/*
  * @brief Get position in the circular buffer.
  *
  * @param cb		The pointer to the circular buffer.
@@ -148,24 +139,19 @@ static inline uint8_t ia_css_circbuf_get_pos_at_offset(
     u32 base,
     int offset)
 {
-	u8 dest;
-
 	OP___assert(cb);
 	OP___assert(cb->desc);
 	OP___assert(cb->desc->size > 0);
 
 	/* step 1: adjudst the offset  */
-	while (offset < 0) {
+	while (offset < 0)
 		offset += cb->desc->size;
-	}
 
 	/* step 2: shift and round by the upper limit */
-	dest = OP_std_modadd(base, offset, cb->desc->size);
-
-	return dest;
+	return (base + offset) % cb->desc->size;
 }
 
-/**
+/*
  * @brief Get the offset between two positions in the circular buffer.
  * Get the offset from the source position to the terminal position,
  * along the direction in which the new elements come in.
@@ -192,7 +178,7 @@ static inline int ia_css_circbuf_get_offset(
 	return offset;
 }
 
-/**
+/*
  * @brief Get the maximum number of elements.
  *
  * @param cb The pointer to the circular buffer.
@@ -210,7 +196,7 @@ static inline uint32_t ia_css_circbuf_get_size(
 	return cb->desc->size;
 }
 
-/**
+/*
  * @brief Get the number of available elements.
  *
  * @param cb The pointer to the circular buffer.
@@ -230,7 +216,7 @@ static inline uint32_t ia_css_circbuf_get_num_elems(
 	return (uint32_t)num;
 }
 
-/**
+/*
  * @brief Test if the circular buffer is empty.
  *
  * @param cb	The pointer to the circular buffer.
@@ -248,7 +234,7 @@ static inline bool ia_css_circbuf_is_empty(
 	return ia_css_circbuf_desc_is_empty(cb->desc);
 }
 
-/**
+/*
  * @brief Test if the circular buffer is full.
  *
  * @param cb	The pointer to the circular buffer.
@@ -265,7 +251,7 @@ static inline bool ia_css_circbuf_is_full(ia_css_circbuf_t *cb)
 	return ia_css_circbuf_desc_is_full(cb->desc);
 }
 
-/**
+/*
  * @brief Write a new element into the circular buffer.
  * Write a new element WITHOUT checking whether the
  * circular buffer is full or not. So it also overwrites
@@ -289,7 +275,7 @@ static inline void ia_css_circbuf_write(
 	cb->desc->end = ia_css_circbuf_get_pos_at_offset(cb, cb->desc->end, 1);
 }
 
-/**
+/*
  * @brief Push a value in the circular buffer.
  * Put a new value at the tail of the circular buffer.
  * The user should call "ia_css_circbuf_is_full()"
@@ -314,7 +300,7 @@ static inline void ia_css_circbuf_push(
 	ia_css_circbuf_write(cb, elem);
 }
 
-/**
+/*
  * @brief Get the number of free elements.
  *
  * @param cb The pointer to the circular buffer.
@@ -330,7 +316,7 @@ static inline uint32_t ia_css_circbuf_get_free_elems(
 	return ia_css_circbuf_desc_get_free_elems(cb->desc);
 }
 
-/**
+/*
  * @brief Peek an element in Circular Buffer.
  *
  * @param cb	 The pointer to the circular buffer.
@@ -342,7 +328,7 @@ uint32_t ia_css_circbuf_peek(
     ia_css_circbuf_t *cb,
     int offset);
 
-/**
+/*
  * @brief Get an element in Circular Buffer.
  *
  * @param cb	 The pointer to the circular buffer.
@@ -354,7 +340,7 @@ uint32_t ia_css_circbuf_peek_from_start(
     ia_css_circbuf_t *cb,
     int offset);
 
-/**
+/*
  * @brief Increase Size of a Circular Buffer.
  * Use 'CAUTION' before using this function, This was added to
  * support / fix issue with increasing size for tagger only

@@ -17,8 +17,14 @@ properties:
   compatible:
     oneOf:
       - items:
+          - const: toradex,ecgpiol16
+          - const: nxp,pcal6416
+      - items:
           - const: diodes,pi4ioe5v6534q
           - const: nxp,pcal6534
+      - items:
+          - const: kinetic,kts1622
+          - const: ti,tcal6416
       - items:
           - enum:
               - exar,xra1202
@@ -65,10 +71,14 @@ properties:
               - ti,pca9536
               - ti,tca6408
               - ti,tca6416
+              - ti,tca6418
               - ti,tca6424
+              - ti,tca9535
               - ti,tca9538
               - ti,tca9539
               - ti,tca9554
+              - ti,tcal6408
+              - ti,tcal6416
 
   reg:
     maxItems: 1
@@ -106,19 +116,8 @@ properties:
 patternProperties:
   "^(hog-[0-9]+|.+-hog(-[0-9]+)?)$":
     type: object
-    properties:
-      gpio-hog: true
-      gpios: true
-      input: true
-      output-high: true
-      output-low: true
-      line-name: true
-
     required:
       - gpio-hog
-      - gpios
-
-    additionalProperties: false
 
 required:
   - compatible
@@ -142,6 +141,7 @@ allOf:
               - maxim,max7325
               - maxim,max7326
               - maxim,max7327
+              - toradex,ecgpiol16
     then:
       properties:
         reset-gpios: false

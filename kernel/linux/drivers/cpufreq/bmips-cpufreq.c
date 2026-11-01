@@ -71,7 +71,7 @@ bmips_cpufreq_get_freq_table(const struct cpufreq_policy *policy)
 
 	cpu_freq = htp_freq_to_cpu_freq(priv->clk_mult);
 
-	table = kmalloc_array(priv->max_freqs + 1, sizeof(*table), GFP_KERNEL);
+	table = kmalloc_objs(*table, priv->max_freqs + 1);
 	if (!table)
 		return ERR_PTR(-ENOMEM);
 
@@ -121,11 +121,9 @@ static int bmips_cpufreq_target_index(struct cpufreq_policy *policy,
 	return 0;
 }
 
-static int bmips_cpufreq_exit(struct cpufreq_policy *policy)
+static void bmips_cpufreq_exit(struct cpufreq_policy *policy)
 {
 	kfree(policy->freq_table);
-
-	return 0;
 }
 
 static int bmips_cpufreq_init(struct cpufreq_policy *policy)
@@ -152,7 +150,6 @@ static struct cpufreq_driver bmips_cpufreq_driver = {
 	.get		= bmips_cpufreq_get,
 	.init		= bmips_cpufreq_init,
 	.exit		= bmips_cpufreq_exit,
-	.attr		= cpufreq_generic_attr,
 	.name		= BMIPS_CPUFREQ_PREFIX,
 };
 

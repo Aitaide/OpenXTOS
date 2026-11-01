@@ -1192,8 +1192,6 @@ static void w83781d_remove_files(struct device *dev)
 	sysfs_remove_group(&dev->kobj, &w83781d_group_other);
 }
 
-static const struct i2c_device_id w83781d_ids[];
-
 static int w83781d_probe(struct i2c_client *client)
 {
 	struct device *dev = &client->dev;
@@ -1208,7 +1206,7 @@ static int w83781d_probe(struct i2c_client *client)
 	mutex_init(&data->lock);
 	mutex_init(&data->update_lock);
 
-	data->type = i2c_match_id(w83781d_ids, client)->driver_data;
+	data->type = (uintptr_t)i2c_get_match_data(client);
 	data->client = client;
 
 	/* attach secondary i2c lm75-like clients */
@@ -1561,10 +1559,10 @@ static struct w83781d_data *w83781d_update_device(struct device *dev)
 }
 
 static const struct i2c_device_id w83781d_ids[] = {
-	{ "w83781d", w83781d, },
-	{ "w83782d", w83782d, },
-	{ "w83783s", w83783s, },
-	{ "as99127f", as99127f },
+	{ .name = "w83781d", .driver_data = w83781d },
+	{ .name = "w83782d", .driver_data = w83782d },
+	{ .name = "w83783s", .driver_data = w83783s },
+	{ .name = "as99127f", .driver_data = as99127f },
 	{ /* LIST END */ }
 };
 MODULE_DEVICE_TABLE(i2c, w83781d_ids);
@@ -1816,16 +1814,13 @@ w83781d_isa_probe(struct platform_device *pdev)
 	return err;
 }
 
-static int
-w83781d_isa_remove(struct platform_device *pdev)
+static void w83781d_isa_remove(struct platform_device *pdev)
 {
 	struct w83781d_data *data = platform_get_drvdata(pdev);
 
 	hwmon_device_unregister(data->hwmon_dev);
 	w83781d_remove_files(&pdev->dev);
 	device_remove_file(&pdev->dev, &dev_attr_name);
-
-	return 0;
 }
 
 static struct platform_driver w83781d_isa_driver = {
@@ -1855,10 +1850,12 @@ w83781d_isa_found(unsigned short address)
 		}
 	}
 
-#define REALLY_SLOW_IO
 	/*
 	 * We need the timeouts for at least some W83781D-like
 	 * chips. But only if we read 'undefined' registers.
+	 * There used to be a "#define REALLY_SLOW_IO" to enforce that, but
+	 * this has been without any effect since more than a decade, so it
+	 * has been dropped.
 	 */
 	val = inb_p(address + 1);
 	if (inb_p(address + 2) != val
@@ -1867,7 +1864,6 @@ w83781d_isa_found(unsigned short address)
 		pr_debug("Detection failed at step %d\n", 1);
 		goto release;
 	}
-#undef REALLY_SLOW_IO
 
 	/*
 	 * We should be able to change the 7 LSB of the address port. The

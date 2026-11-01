@@ -60,9 +60,11 @@
 #include <linux/stackprotector.h>
 #include <linux/cpuhotplug.h>
 #include <linux/mc146818rtc.h>
+#include <linux/acpi.h>
 
 #include <asm/acpi.h>
 #include <asm/cacheinfo.h>
+#include <asm/cpuid/api.h>
 #include <asm/desc.h>
 #include <asm/nmi.h>
 #include <asm/irq.h>
@@ -87,6 +89,7 @@
 #include <asm/hw_irq.h>
 #include <asm/stackprotector.h>
 #include <asm/sev.h>
+#include <asm/spec-ctrl.h>
 
 /* representing HT siblings of each logical CPU */
 DEFINE_PER_CPU_READ_MOSTLY(cpumask_var_t, cpu_sibling_map);
@@ -99,13 +102,6 @@ EXPORT_PER_CPU_SYMBOL(cpu_core_map);
 /* representing HT, core, and die siblings of each logical CPU */
 DEFINE_PER_CPU_READ_MOSTLY(cpumask_var_t, cpu_die_map);
 EXPORT_PER_CPU_SYMBOL(cpu_die_map);
-
-/* Per CPU bogomips and other parameters */
-DEFINE_PER_CPU_READ_MOSTLY(struct cpuinfo_x86, cpu_info);
-EXPORT_PER_CPU_SYMBOL(cpu_info);
-
-/* CPUs which are the primary SMT threads */
-struct cpumask __cpu_primary_thread_mask __read_mostly;
 
 /* Representing CPUs for which sibling maps can be computed */
 static cpumask_var_t cpu_sibling_setup_mask;
@@ -123,12 +119,6 @@ struct mwait_cpu_dead {
  * that it's unlikely to be touched by other CPUs.
  */
 static DEFINE_PER_CPU_ALIGNED(struct mwait_cpu_dead, mwait_cpu_dead);
-
-/* Logical package management. We might want to allocate that dynamically */
-unsigned int __max_logical_packages __read_mostly;
-EXPORT_SYMBOL(__max_logical_packages);
-static unsigned int logical_packages __read_mostly;
-static unsigned int logical_die __read_mostly;
 
 /* Maximum number of SMT threads on any online core */
 int __read_mostly __max_smt_threads = 1;
@@ -197,7 +187,7 @@ static void ap_starting(void)
 	apic_ap_setup();
 
 	/* Save the processor parameters. */
-	smp_store_cpu_info(cpuid);
+	identify_secondary_cpu(cpuid);
 
 	/*
 	 * The topology information must be up to date before
@@ -222,7 +212,7 @@ static void ap_calibrate_delay(void)
 {
 	/*
 	 * Calibrate the delay loop and update loops_per_jiffy in cpu_data.
-	 * smp_store_cpu_info() stored a value that is close but not as
+	 * identify_secondary_cpu() stored a value that is close but not as
 	 * accurate as the value just calculated.
 	 *
 	 * As this is invoked after the TSC synchronization check,
@@ -236,7 +226,7 @@ static void ap_calibrate_delay(void)
 /*
  * Activate a secondary processor.
  */
-static void notrace start_secondary(void *unused)
+static void notrace __noendbr start_secondary(void *unused)
 {
 	/*
 	 * Don't put *anything* except direct CPU state initialization
@@ -255,15 +245,12 @@ static void notrace start_secondary(void *unused)
 		__flush_tlb_all();
 	}
 
-	cpu_init_exception_handling();
+	cpu_init_exception_handling(false);
 
 	/*
-	 * 32-bit systems load the microcode from the ASM startup code for
-	 * historical reasons.
-	 *
-	 * On 64-bit systems load it before reaching the AP alive
-	 * synchronization point below so it is not part of the full per
-	 * CPU serialized bringup part when "parallel" bringup is enabled.
+	 * Load the microcode before reaching the AP alive synchronization
+	 * point below so it is not part of the full per CPU serialized
+	 * bringup part when "parallel" bringup is enabled.
 	 *
 	 * That's even safe when hyperthreading is enabled in the CPU as
 	 * the core code starts the primary threads first and leaves the
@@ -276,8 +263,7 @@ static void notrace start_secondary(void *unused)
 	 * CPUID, MSRs etc. must be strictly serialized to maintain
 	 * software state correctness.
 	 */
-	if (IS_ENABLED(CONFIG_X86_64))
-		load_ucode_ap();
+	load_ucode_ap();
 
 	/*
 	 * Synchronization point with the hotplug core. Sets this CPUs
@@ -288,7 +274,7 @@ static void notrace start_secondary(void *unused)
 
 	cpu_init();
 	fpu__init_cpu();
-	rcu_cpu_starting(raw_smp_processor_id());
+	rcutree_report_cpu_starting(raw_smp_processor_id());
 	x86_cpuinit.early_percpu_clock_init();
 
 	ap_starting();
@@ -325,126 +311,7 @@ static void notrace start_secondary(void *unused)
 	wmb();
 	cpu_startup_entry(CPUHP_AP_ONLINE_IDLE);
 }
-
-/**
- * topology_phys_to_logical_pkg - Map a physical package id to a logical
- * @phys_pkg:	The physical package id to map
- *
- * Returns logical package id or -1 if not found
- */
-int topology_phys_to_logical_pkg(unsigned int phys_pkg)
-{
-	int cpu;
-
-	for_each_possible_cpu(cpu) {
-		struct cpuinfo_x86 *c = &cpu_data(cpu);
-
-		if (c->initialized && c->phys_proc_id == phys_pkg)
-			return c->logical_proc_id;
-	}
-	return -1;
-}
-EXPORT_SYMBOL(topology_phys_to_logical_pkg);
-
-/**
- * topology_phys_to_logical_die - Map a physical die id to logical
- * @die_id:	The physical die id to map
- * @cur_cpu:	The CPU for which the mapping is done
- *
- * Returns logical die id or -1 if not found
- */
-static int topology_phys_to_logical_die(unsigned int die_id, unsigned int cur_cpu)
-{
-	int cpu, proc_id = cpu_data(cur_cpu).phys_proc_id;
-
-	for_each_possible_cpu(cpu) {
-		struct cpuinfo_x86 *c = &cpu_data(cpu);
-
-		if (c->initialized && c->cpu_die_id == die_id &&
-		    c->phys_proc_id == proc_id)
-			return c->logical_die_id;
-	}
-	return -1;
-}
-
-/**
- * topology_update_package_map - Update the physical to logical package map
- * @pkg:	The physical package id as retrieved via CPUID
- * @cpu:	The cpu for which this is updated
- */
-int topology_update_package_map(unsigned int pkg, unsigned int cpu)
-{
-	int new;
-
-	/* Already available somewhere? */
-	new = topology_phys_to_logical_pkg(pkg);
-	if (new >= 0)
-		goto found;
-
-	new = logical_packages++;
-	if (new != pkg) {
-		pr_info("CPU %u Converting physical %u to logical package %u\n",
-			cpu, pkg, new);
-	}
-found:
-	cpu_data(cpu).logical_proc_id = new;
-	return 0;
-}
-/**
- * topology_update_die_map - Update the physical to logical die map
- * @die:	The die id as retrieved via CPUID
- * @cpu:	The cpu for which this is updated
- */
-int topology_update_die_map(unsigned int die, unsigned int cpu)
-{
-	int new;
-
-	/* Already available somewhere? */
-	new = topology_phys_to_logical_die(die, cpu);
-	if (new >= 0)
-		goto found;
-
-	new = logical_die++;
-	if (new != die) {
-		pr_info("CPU %u Converting physical %u to logical die %u\n",
-			cpu, die, new);
-	}
-found:
-	cpu_data(cpu).logical_die_id = new;
-	return 0;
-}
-
-static void __init smp_store_boot_cpu_info(void)
-{
-	int id = 0; /* CPU 0 */
-	struct cpuinfo_x86 *c = &cpu_data(id);
-
-	*c = boot_cpu_data;
-	c->cpu_index = id;
-	topology_update_package_map(c->phys_proc_id, id);
-	topology_update_die_map(c->cpu_die_id, id);
-	c->initialized = true;
-}
-
-/*
- * The bootstrap kernel entry code has set these up. Save them for
- * a given CPU
- */
-void smp_store_cpu_info(int id)
-{
-	struct cpuinfo_x86 *c = &cpu_data(id);
-
-	/* Copy boot_cpu_data only on the first bringup */
-	if (!c->initialized)
-		*c = boot_cpu_data;
-	c->cpu_index = id;
-	/*
-	 * During boot time, CPU0 has this setup already. Save the info when
-	 * bringing up an AP.
-	 */
-	identify_secondary_cpu(c);
-	c->initialized = true;
-}
+ANNOTATE_NOENDBR_SYM(start_secondary);
 
 static bool
 topology_same_node(struct cpuinfo_x86 *c, struct cpuinfo_x86 *o)
@@ -476,21 +343,22 @@ static bool match_smt(struct cpuinfo_x86 *c, struct cpuinfo_x86 *o)
 	if (boot_cpu_has(X86_FEATURE_TOPOEXT)) {
 		int cpu1 = c->cpu_index, cpu2 = o->cpu_index;
 
-		if (c->phys_proc_id == o->phys_proc_id &&
-		    c->cpu_die_id == o->cpu_die_id &&
-		    per_cpu(cpu_llc_id, cpu1) == per_cpu(cpu_llc_id, cpu2)) {
-			if (c->cpu_core_id == o->cpu_core_id)
+		if (c->topo.pkg_id == o->topo.pkg_id &&
+		    c->topo.die_id == o->topo.die_id &&
+		    c->topo.amd_node_id == o->topo.amd_node_id &&
+		    per_cpu_llc_id(cpu1) == per_cpu_llc_id(cpu2)) {
+			if (c->topo.core_id == o->topo.core_id)
 				return topology_sane(c, o, "smt");
 
-			if ((c->cu_id != 0xff) &&
-			    (o->cu_id != 0xff) &&
-			    (c->cu_id == o->cu_id))
+			if ((c->topo.cu_id != 0xff) &&
+			    (o->topo.cu_id != 0xff) &&
+			    (c->topo.cu_id == o->topo.cu_id))
 				return topology_sane(c, o, "smt");
 		}
 
-	} else if (c->phys_proc_id == o->phys_proc_id &&
-		   c->cpu_die_id == o->cpu_die_id &&
-		   c->cpu_core_id == o->cpu_core_id) {
+	} else if (c->topo.pkg_id == o->topo.pkg_id &&
+		   c->topo.die_id == o->topo.die_id &&
+		   c->topo.core_id == o->topo.core_id) {
 		return topology_sane(c, o, "smt");
 	}
 
@@ -499,10 +367,13 @@ static bool match_smt(struct cpuinfo_x86 *c, struct cpuinfo_x86 *o)
 
 static bool match_die(struct cpuinfo_x86 *c, struct cpuinfo_x86 *o)
 {
-	if (c->phys_proc_id == o->phys_proc_id &&
-	    c->cpu_die_id == o->cpu_die_id)
-		return true;
-	return false;
+	if (c->topo.pkg_id != o->topo.pkg_id || c->topo.die_id != o->topo.die_id)
+		return false;
+
+	if (cpu_feature_enabled(X86_FEATURE_TOPOEXT) && topology_amd_nodes_per_pkg() > 1)
+		return c->topo.amd_node_id == o->topo.amd_node_id;
+
+	return true;
 }
 
 static bool match_l2c(struct cpuinfo_x86 *c, struct cpuinfo_x86 *o)
@@ -510,11 +381,11 @@ static bool match_l2c(struct cpuinfo_x86 *c, struct cpuinfo_x86 *o)
 	int cpu1 = c->cpu_index, cpu2 = o->cpu_index;
 
 	/* If the arch didn't set up l2c_id, fall back to SMT */
-	if (per_cpu(cpu_l2c_id, cpu1) == BAD_APICID)
+	if (per_cpu_l2c_id(cpu1) == BAD_APICID)
 		return match_smt(c, o);
 
 	/* Do not match if L2 cache id does not match: */
-	if (per_cpu(cpu_l2c_id, cpu1) != per_cpu(cpu_l2c_id, cpu2))
+	if (per_cpu_l2c_id(cpu1) != per_cpu_l2c_id(cpu2))
 		return false;
 
 	return topology_sane(c, o, "l2c");
@@ -527,7 +398,7 @@ static bool match_l2c(struct cpuinfo_x86 *c, struct cpuinfo_x86 *o)
  */
 static bool match_pkg(struct cpuinfo_x86 *c, struct cpuinfo_x86 *o)
 {
-	if (c->phys_proc_id == o->phys_proc_id)
+	if (c->topo.pkg_id == o->topo.pkg_id)
 		return true;
 	return false;
 }
@@ -547,11 +418,26 @@ static bool match_pkg(struct cpuinfo_x86 *c, struct cpuinfo_x86 *o)
  */
 
 static const struct x86_cpu_id intel_cod_cpu[] = {
-	X86_MATCH_INTEL_FAM6_MODEL(HASWELL_X, 0),	/* COD */
-	X86_MATCH_INTEL_FAM6_MODEL(BROADWELL_X, 0),	/* COD */
-	X86_MATCH_INTEL_FAM6_MODEL(ANY, 1),		/* SNC */
+	X86_MATCH_VFM(INTEL_HASWELL_X,	 0),	/* COD */
+	X86_MATCH_VFM(INTEL_BROADWELL_X, 0),	/* COD */
+	X86_MATCH_VFM(INTEL_ANY,	 1),	/* SNC */
 	{}
 };
+
+/*
+ * Allows splitting the LLC by matching 'core_id % split_llc'.
+ *
+ * This is mostly a debug hack to emulate systems with multiple LLCs per node
+ * on systems that do not naturally have this.
+ */
+static unsigned int split_llc = 0;
+
+static int __init split_llc_setup(char *str)
+{
+	get_option(&str, &split_llc);
+	return 0;
+}
+early_param("split_llc", split_llc_setup);
 
 static bool match_llc(struct cpuinfo_x86 *c, struct cpuinfo_x86 *o)
 {
@@ -560,11 +446,16 @@ static bool match_llc(struct cpuinfo_x86 *c, struct cpuinfo_x86 *o)
 	bool intel_snc = id && id->driver_data;
 
 	/* Do not match if we do not have a valid APICID for cpu: */
-	if (per_cpu(cpu_llc_id, cpu1) == BAD_APICID)
+	if (per_cpu_llc_id(cpu1) == BAD_APICID)
 		return false;
 
 	/* Do not match if LLC id does not match: */
-	if (per_cpu(cpu_llc_id, cpu1) != per_cpu(cpu_llc_id, cpu2))
+	if (per_cpu_llc_id(cpu1) != per_cpu_llc_id(cpu2))
+		return false;
+
+	if (split_llc &&
+	    (per_cpu_core_id(cpu1) % split_llc) !=
+	    (per_cpu_core_id(cpu2) % split_llc))
 		return false;
 
 	/*
@@ -590,12 +481,6 @@ static int x86_core_flags(void)
 	return cpu_core_flags() | x86_sched_itmt_flags();
 }
 #endif
-#ifdef CONFIG_SCHED_SMT
-static int x86_smt_flags(void)
-{
-	return cpu_smt_flags();
-}
-#endif
 #ifdef CONFIG_SCHED_CLUSTER
 static int x86_cluster_flags(void)
 {
@@ -603,65 +488,213 @@ static int x86_cluster_flags(void)
 }
 #endif
 
-static int x86_die_flags(void)
-{
-	if (cpu_feature_enabled(X86_FEATURE_HYBRID_CPU))
-	       return x86_sched_itmt_flags();
-
-	return 0;
-}
-
-/*
- * Set if a package/die has multiple NUMA nodes inside.
- * AMD Magny-Cours, Intel Cluster-on-Die, and Intel
- * Sub-NUMA Clustering have this.
- */
-static bool x86_has_numa_in_package;
-
-static struct sched_domain_topology_level x86_topology[6];
+static struct sched_domain_topology_level x86_topology[] = {
+	SDTL_INIT(tl_smt_mask, cpu_smt_flags, SMT),
+#ifdef CONFIG_SCHED_CLUSTER
+	SDTL_INIT(tl_cls_mask, x86_cluster_flags, CLS),
+#endif
+#ifdef CONFIG_SCHED_MC
+	SDTL_INIT(tl_mc_mask, x86_core_flags, MC),
+#endif
+	SDTL_INIT(tl_pkg_mask, x86_sched_itmt_flags, PKG),
+	{ NULL },
+};
 
 static void __init build_sched_topology(void)
 {
-	int i = 0;
+	struct sched_domain_topology_level *topology = x86_topology;
 
-#ifdef CONFIG_SCHED_SMT
-	x86_topology[i++] = (struct sched_domain_topology_level){
-		cpu_smt_mask, x86_smt_flags, SD_INIT_NAME(SMT)
-	};
-#endif
-#ifdef CONFIG_SCHED_CLUSTER
-	x86_topology[i++] = (struct sched_domain_topology_level){
-		cpu_clustergroup_mask, x86_cluster_flags, SD_INIT_NAME(CLS)
-	};
-#endif
-#ifdef CONFIG_SCHED_MC
-	x86_topology[i++] = (struct sched_domain_topology_level){
-		cpu_coregroup_mask, x86_core_flags, SD_INIT_NAME(MC)
-	};
-#endif
 	/*
-	 * When there is NUMA topology inside the package skip the DIE domain
-	 * since the NUMA domains will auto-magically create the right spanning
-	 * domains based on the SLIT.
+	 * When there is NUMA topology inside the package invalidate the
+	 * PKG domain since the NUMA domains will auto-magically create the
+	 * right spanning domains based on the SLIT.
 	 */
-	if (!x86_has_numa_in_package) {
-		x86_topology[i++] = (struct sched_domain_topology_level){
-			cpu_cpu_mask, x86_die_flags, SD_INIT_NAME(DIE)
-		};
+	if (topology_num_nodes_per_package() > 1) {
+		unsigned int pkgdom = ARRAY_SIZE(x86_topology) - 2;
+
+		memset(&x86_topology[pkgdom], 0, sizeof(x86_topology[pkgdom]));
 	}
 
 	/*
-	 * There must be one trailing NULL entry left.
+	 * Drop the SMT domains if there is only one thread per-core
+	 * since it'll get degenerated by the scheduler anyways.
 	 */
-	BUG_ON(i >= ARRAY_SIZE(x86_topology)-1);
+	if (cpu_smt_num_threads <= 1)
+		++topology;
 
-	set_sched_topology(x86_topology);
+	set_sched_topology(topology);
 }
+
+#ifdef CONFIG_NUMA
+/*
+ * Test if the on-trace cluster at (N,N) is symmetric.
+ * Uses upper triangle iteration to avoid obvious duplicates.
+ */
+static bool slit_cluster_symmetric(int N)
+{
+	int u = topology_num_nodes_per_package();
+
+	for (int k = 0; k < u; k++) {
+		for (int l = k; l < u; l++) {
+			if (node_distance(N + k, N + l) !=
+			    node_distance(N + l, N + k))
+				return false;
+		}
+	}
+
+	return true;
+}
+
+/*
+ * Return the package-id of the cluster, or ~0 if indeterminate.
+ * Each node in the on-trace cluster should have the same package-id.
+ */
+static u32 slit_cluster_package(int N)
+{
+	int u = topology_num_nodes_per_package();
+	u32 pkg_id = ~0;
+
+	for (int n = 0; n < u; n++) {
+		const struct cpumask *cpus = cpumask_of_node(N + n);
+		int cpu;
+
+		for_each_cpu(cpu, cpus) {
+			u32 id = topology_logical_package_id(cpu);
+
+			if (pkg_id == ~0)
+				pkg_id = id;
+			if (pkg_id != id)
+				return ~0;
+		}
+	}
+
+	return pkg_id;
+}
+
+/*
+ * Validate the SLIT table is of the form expected for SNC, specifically:
+ *
+ *  - each on-trace cluster should be symmetric,
+ *  - each on-trace cluster should have a unique package-id.
+ *
+ * If you NUMA_EMU on top of SNC, you get to keep the pieces.
+ */
+static bool slit_validate(void)
+{
+	int u = topology_num_nodes_per_package();
+	u32 pkg_id, prev_pkg_id = ~0;
+
+	for (int pkg = 0; pkg < topology_max_packages(); pkg++) {
+		int n = pkg * u;
+
+		/*
+		 * Ensure the on-trace cluster is symmetric and each cluster
+		 * has a different package id.
+		 */
+		if (!slit_cluster_symmetric(n))
+			return false;
+		pkg_id = slit_cluster_package(n);
+		if (pkg_id == ~0)
+			return false;
+		if (pkg && pkg_id == prev_pkg_id)
+			return false;
+
+		prev_pkg_id = pkg_id;
+	}
+
+	return true;
+}
+
+/*
+ * Compute a sanitized SLIT table for SNC; notably SNC-3 can end up with
+ * asymmetric off-trace clusters, reflecting physical assymmetries. However
+ * this leads to 'unfortunate' sched_domain configurations.
+ *
+ * For example dual socket GNR with SNC-3:
+ *
+ * node distances:
+ * node     0    1    2    3    4    5
+ *     0:   10   15   17   21   28   26
+ *     1:   15   10   15   23   26   23
+ *     2:   17   15   10   26   23   21
+ *     3:   21   28   26   10   15   17
+ *     4:   23   26   23   15   10   15
+ *     5:   26   23   21   17   15   10
+ *
+ * Fix things up by averaging out the off-trace clusters; resulting in:
+ *
+ * node     0    1    2    3    4    5
+ *     0:   10   15   17   24   24   24
+ *     1:   15   10   15   24   24   24
+ *     2:   17   15   10   24   24   24
+ *     3:   24   24   24   10   15   17
+ *     4:   24   24   24   15   10   15
+ *     5:   24   24   24   17   15   10
+ */
+static int slit_cluster_distance(int i, int j)
+{
+	static int slit_valid = -1;
+	int u = topology_num_nodes_per_package();
+	long d = 0;
+	int x, y;
+
+	if (slit_valid < 0) {
+		slit_valid = slit_validate();
+		if (!slit_valid)
+			pr_err(FW_BUG "SLIT table doesn't have the expected form for SNC -- fixup disabled!\n");
+		else
+			pr_info("Fixing up SNC SLIT table.\n");
+	}
+
+	/*
+	 * Is this a unit cluster on the trace?
+	 */
+	if ((i / u) == (j / u) || !slit_valid)
+		return node_distance(i, j);
+
+	/*
+	 * Off-trace cluster.
+	 *
+	 * Notably average out the symmetric pair of off-trace clusters to
+	 * ensure the resulting SLIT table is symmetric.
+	 */
+	x = i - (i % u);
+	y = j - (j % u);
+
+	for (i = x; i < x + u; i++) {
+		for (j = y; j < y + u; j++) {
+			d += node_distance(i, j);
+			d += node_distance(j, i);
+		}
+	}
+
+	return d / (2*u*u);
+}
+
+int arch_sched_node_distance(int from, int to)
+{
+	int d = node_distance(from, to);
+
+	switch (boot_cpu_data.x86_vfm) {
+	case INTEL_GRANITERAPIDS_X:
+	case INTEL_ATOM_DARKMONT_X:
+		if (topology_max_packages() == 1 ||
+		    topology_num_nodes_per_package() < 3)
+			return d;
+
+		/*
+		 * Handle SNC-3 asymmetries.
+		 */
+		return slit_cluster_distance(from, to);
+	}
+	return d;
+}
+#endif /* CONFIG_NUMA */
 
 void set_cpu_sibling_map(int cpu)
 {
-	bool has_smt = smp_num_siblings > 1;
-	bool has_mp = has_smt || boot_cpu_data.x86_max_cores > 1;
+	bool has_smt = __max_threads_per_core > 1;
+	bool has_mp = has_smt || topology_num_cores_per_package() > 1;
 	struct cpuinfo_x86 *c = &cpu_data(cpu);
 	struct cpuinfo_x86 *o;
 	int i, threads;
@@ -682,7 +715,7 @@ void set_cpu_sibling_map(int cpu)
 		o = &cpu_data(i);
 
 		if (match_pkg(c, o) && !topology_same_node(c, o))
-			x86_has_numa_in_package = true;
+			WARN_ON_ONCE(topology_num_nodes_per_package() == 1);
 
 		if ((i == cpu) || (has_smt && match_smt(c, o)))
 			link_mask(topology_sibling_cpumask, cpu, i);
@@ -747,6 +780,7 @@ const struct cpumask *cpu_clustergroup_mask(int cpu)
 {
 	return cpu_l2c_shared_mask(cpu);
 }
+EXPORT_SYMBOL_GPL(cpu_clustergroup_mask);
 
 static void impress_friends(void)
 {
@@ -774,10 +808,9 @@ static void impress_friends(void)
  * But that slows boot and resume on modern processors, which include
  * many cores and don't require that delay.
  *
- * Cmdline "init_cpu_udelay=" is available to over-ride this delay.
- * Modern processor families are quirked to remove the delay entirely.
+ * Cmdline "cpu_init_udelay=" is available to override this delay.
  */
-#define UDELAY_10MS_DEFAULT 10000
+#define UDELAY_10MS_LEGACY 10000
 
 static unsigned int init_udelay = UINT_MAX;
 
@@ -789,27 +822,27 @@ static int __init cpu_init_udelay(char *str)
 }
 early_param("cpu_init_udelay", cpu_init_udelay);
 
-static void __init smp_quirk_init_udelay(void)
+static void __init smp_set_init_udelay(void)
 {
 	/* if cmdline changed it from default, leave it alone */
 	if (init_udelay != UINT_MAX)
 		return;
 
 	/* if modern processor, use no delay */
-	if (((boot_cpu_data.x86_vendor == X86_VENDOR_INTEL) && (boot_cpu_data.x86 == 6)) ||
-	    ((boot_cpu_data.x86_vendor == X86_VENDOR_HYGON) && (boot_cpu_data.x86 >= 0x18)) ||
-	    ((boot_cpu_data.x86_vendor == X86_VENDOR_AMD) && (boot_cpu_data.x86 >= 0xF))) {
+	if ((boot_cpu_data.x86_vendor == X86_VENDOR_INTEL && boot_cpu_data.x86_vfm >= INTEL_PENTIUM_PRO) ||
+	    (boot_cpu_data.x86_vendor == X86_VENDOR_HYGON && boot_cpu_data.x86 >= 0x18) ||
+	    (boot_cpu_data.x86_vendor == X86_VENDOR_AMD   && boot_cpu_data.x86 >= 0xF)) {
 		init_udelay = 0;
 		return;
 	}
 	/* else, use legacy delay */
-	init_udelay = UDELAY_10MS_DEFAULT;
+	init_udelay = UDELAY_10MS_LEGACY;
 }
 
 /*
  * Wake up AP by INIT, INIT, STARTUP sequence.
  */
-static void send_init_sequence(int phys_apicid)
+static void send_init_sequence(u32 phys_apicid)
 {
 	int maxlvt = lapic_get_maxlvt();
 
@@ -835,7 +868,7 @@ static void send_init_sequence(int phys_apicid)
 /*
  * Wake up AP by INIT, INIT, STARTUP sequence.
  */
-static int wakeup_secondary_cpu_via_init(int phys_apicid, unsigned long start_eip)
+static int wakeup_secondary_cpu_via_init(u32 phys_apicid, unsigned long start_eip, unsigned int cpu)
 {
 	unsigned long send_status = 0, accept_status = 0;
 	int num_starts, j, maxlvt;
@@ -958,10 +991,7 @@ int common_cpu_up(unsigned int cpu, struct task_struct *idle)
 {
 	int ret;
 
-	/* Just in case we booted with a single CPU. */
-	alternatives_enable_smp();
-
-	per_cpu(pcpu_hot.current_task, cpu) = idle;
+	per_cpu(current_task, cpu) = idle;
 	cpu_init_stack_canary(cpu, idle);
 
 	/* Initialize the interrupt stack(s) */
@@ -971,7 +1001,7 @@ int common_cpu_up(unsigned int cpu, struct task_struct *idle)
 
 #ifdef CONFIG_X86_32
 	/* Stack for startup_32 can be just as for start_secondary onwards */
-	per_cpu(pcpu_hot.top_of_stack, cpu) = task_top_of_stack(idle);
+	per_cpu(cpu_current_top_of_stack, cpu) = task_top_of_stack(idle);
 #endif
 	return 0;
 }
@@ -982,7 +1012,7 @@ int common_cpu_up(unsigned int cpu, struct task_struct *idle)
  * Returns zero if startup was successfully sent, else error code from
  * ->wakeup_secondary_cpu.
  */
-static int do_boot_cpu(int apicid, int cpu, struct task_struct *idle)
+static int do_boot_cpu(u32 apicid, unsigned int cpu, struct task_struct *idle)
 {
 	unsigned long start_ip = real_mode_header->trampoline_start;
 	int ret;
@@ -1036,11 +1066,11 @@ static int do_boot_cpu(int apicid, int cpu, struct task_struct *idle)
 	 * - Use an INIT boot APIC message
 	 */
 	if (apic->wakeup_secondary_cpu_64)
-		ret = apic->wakeup_secondary_cpu_64(apicid, start_ip);
+		ret = apic->wakeup_secondary_cpu_64(apicid, start_ip, cpu);
 	else if (apic->wakeup_secondary_cpu)
-		ret = apic->wakeup_secondary_cpu(apicid, start_ip);
+		ret = apic->wakeup_secondary_cpu(apicid, start_ip, cpu);
 	else
-		ret = wakeup_secondary_cpu_via_init(apicid, start_ip);
+		ret = wakeup_secondary_cpu_via_init(apicid, start_ip, cpu);
 
 	/* If the wakeup mechanism failed, cleanup the warm reset vector */
 	if (ret)
@@ -1050,16 +1080,20 @@ static int do_boot_cpu(int apicid, int cpu, struct task_struct *idle)
 
 int native_kick_ap(unsigned int cpu, struct task_struct *tidle)
 {
-	int apicid = apic->cpu_present_to_apicid(cpu);
+	u32 apicid = apic->cpu_present_to_apicid(cpu);
 	int err;
 
 	lockdep_assert_irqs_enabled();
 
 	pr_debug("++++++++++++++++++++=_---CPU UP  %u\n", cpu);
 
-	if (apicid == BAD_APICID || !physid_isset(apicid, phys_cpu_present_map) ||
-	    !apic_id_valid(apicid)) {
-		pr_err("%s: bad cpu %d\n", __func__, cpu);
+	if (apicid == BAD_APICID || !apic_id_valid(apicid)) {
+		pr_err("CPU %u has invalid APIC ID %x. Aborting bringup\n", cpu, apicid);
+		return -EINVAL;
+	}
+
+	if (!test_bit(apicid, phys_cpu_present_map)) {
+		pr_err("CPU %u APIC ID %x is not present. Aborting bringup\n", cpu, apicid);
 		return -EINVAL;
 	}
 
@@ -1128,52 +1162,39 @@ static __init void disable_smp(void)
 	pr_info("SMP disabled\n");
 
 	disable_ioapic_support();
+	topology_reset_possible_cpus_up();
 
-	init_cpu_present(cpumask_of(0));
-	init_cpu_possible(cpumask_of(0));
-
-	if (smp_found_config)
-		physid_set_mask_of_physid(boot_cpu_physical_apicid, &phys_cpu_present_map);
-	else
-		physid_set_mask_of_physid(0, &phys_cpu_present_map);
 	cpumask_set_cpu(0, topology_sibling_cpumask(0));
 	cpumask_set_cpu(0, topology_core_cpumask(0));
 	cpumask_set_cpu(0, topology_die_cpumask(0));
 }
 
-static void __init smp_cpu_index_default(void)
-{
-	int i;
-	struct cpuinfo_x86 *c;
-
-	for_each_possible_cpu(i) {
-		c = &cpu_data(i);
-		/* mark all to hotplug */
-		c->cpu_index = nr_cpu_ids;
-	}
-}
-
 void __init smp_prepare_cpus_common(void)
 {
-	unsigned int i;
+	unsigned int cpu, node;
 
-	smp_cpu_index_default();
+	/* Mark all except the boot CPU as hotpluggable */
+	for_each_possible_cpu(cpu) {
+		if (cpu)
+			per_cpu(cpu_info.cpu_index, cpu) = nr_cpu_ids;
+	}
 
-	/*
-	 * Setup boot CPU information
-	 */
-	smp_store_boot_cpu_info(); /* Final full version of the data */
-	mb();
+	for_each_possible_cpu(cpu) {
+		node = cpu_to_node(cpu);
 
-	for_each_possible_cpu(i) {
-		zalloc_cpumask_var(&per_cpu(cpu_sibling_map, i), GFP_KERNEL);
-		zalloc_cpumask_var(&per_cpu(cpu_core_map, i), GFP_KERNEL);
-		zalloc_cpumask_var(&per_cpu(cpu_die_map, i), GFP_KERNEL);
-		zalloc_cpumask_var(&per_cpu(cpu_llc_shared_map, i), GFP_KERNEL);
-		zalloc_cpumask_var(&per_cpu(cpu_l2c_shared_map, i), GFP_KERNEL);
+		zalloc_cpumask_var_node(&per_cpu(cpu_sibling_map,    cpu), GFP_KERNEL, node);
+		zalloc_cpumask_var_node(&per_cpu(cpu_core_map,       cpu), GFP_KERNEL, node);
+		zalloc_cpumask_var_node(&per_cpu(cpu_die_map,        cpu), GFP_KERNEL, node);
+		zalloc_cpumask_var_node(&per_cpu(cpu_llc_shared_map, cpu), GFP_KERNEL, node);
+		zalloc_cpumask_var_node(&per_cpu(cpu_l2c_shared_map, cpu), GFP_KERNEL, node);
 	}
 
 	set_cpu_sibling_map(0);
+}
+
+void __init smp_prepare_boot_cpu(void)
+{
+	smp_ops.smp_prepare_boot_cpu();
 }
 
 #ifdef CONFIG_X86_64
@@ -1223,7 +1244,7 @@ void __init native_smp_prepare_cpus(unsigned int max_cpus)
 
 	uv_system_init();
 
-	smp_quirk_init_udelay();
+	smp_set_init_udelay();
 
 	speculative_store_bypass_ht_init();
 
@@ -1254,100 +1275,14 @@ void __init native_smp_prepare_boot_cpu(void)
 	native_pv_lock_init();
 }
 
-void __init calculate_max_logical_packages(void)
-{
-	int ncpus;
-
-	/*
-	 * Today neither Intel nor AMD support heterogeneous systems so
-	 * extrapolate the boot cpu's data to all packages.
-	 */
-	ncpus = cpu_data(0).booted_cores * topology_max_smt_threads();
-	__max_logical_packages = DIV_ROUND_UP(total_cpus, ncpus);
-	pr_info("Max logical packages: %u\n", __max_logical_packages);
-}
-
 void __init native_smp_cpus_done(unsigned int max_cpus)
 {
 	pr_debug("Boot done\n");
 
-	calculate_max_logical_packages();
 	build_sched_topology();
 	nmi_selftest();
 	impress_friends();
 	cache_aps_init();
-}
-
-static int __initdata setup_possible_cpus = -1;
-static int __init _setup_possible_cpus(char *str)
-{
-	get_option(&str, &setup_possible_cpus);
-	return 0;
-}
-early_param("possible_cpus", _setup_possible_cpus);
-
-
-/*
- * cpu_possible_mask should be static, it cannot change as cpu's
- * are onlined, or offlined. The reason is per-cpu data-structures
- * are allocated by some modules at init time, and don't expect to
- * do this dynamically on cpu arrival/departure.
- * cpu_present_mask on the other hand can change dynamically.
- * In case when cpu_hotplug is not compiled, then we resort to current
- * behaviour, which is cpu_possible == cpu_present.
- * - Ashok Raj
- *
- * Three ways to find out the number of additional hotplug CPUs:
- * - If the BIOS specified disabled CPUs in ACPI/mptables use that.
- * - The user can overwrite it with possible_cpus=NUM
- * - Otherwise don't reserve additional CPUs.
- * We do this because additional CPUs waste a lot of memory.
- * -AK
- */
-__init void prefill_possible_map(void)
-{
-	int i, possible;
-
-	i = setup_max_cpus ?: 1;
-	if (setup_possible_cpus == -1) {
-		possible = num_processors;
-#ifdef CONFIG_HOTPLUG_CPU
-		if (setup_max_cpus)
-			possible += disabled_cpus;
-#else
-		if (possible > i)
-			possible = i;
-#endif
-	} else
-		possible = setup_possible_cpus;
-
-	total_cpus = max_t(int, possible, num_processors + disabled_cpus);
-
-	/* nr_cpu_ids could be reduced via nr_cpus= */
-	if (possible > nr_cpu_ids) {
-		pr_warn("%d Processors exceeds NR_CPUS limit of %u\n",
-			possible, nr_cpu_ids);
-		possible = nr_cpu_ids;
-	}
-
-#ifdef CONFIG_HOTPLUG_CPU
-	if (!setup_max_cpus)
-#endif
-	if (possible > i) {
-		pr_warn("%d Processors exceeds max_cpus limit of %u\n",
-			possible, setup_max_cpus);
-		possible = i;
-	}
-
-	set_nr_cpu_ids(possible);
-
-	pr_info("Allowing %d CPUs, %d hotplug CPUs\n",
-		possible, max_t(int, possible - num_processors, 0));
-
-	reset_cpu_possible_mask();
-
-	for (i = 0; i < possible; i++)
-		set_cpu_possible(i, true);
 }
 
 /* correctly size the local cpu masks */
@@ -1405,7 +1340,7 @@ static void remove_siblinginfo(int cpu)
 	cpumask_clear(topology_sibling_cpumask(cpu));
 	cpumask_clear(topology_core_cpumask(cpu));
 	cpumask_clear(topology_die_cpumask(cpu));
-	c->cpu_core_id = 0;
+	c->topo.core_id = 0;
 	c->booted_cores = 0;
 	cpumask_clear_cpu(cpu, cpu_sibling_setup_mask);
 	recompute_smt_state();
@@ -1422,6 +1357,12 @@ void cpu_disable_common(void)
 	int cpu = smp_processor_id();
 
 	remove_siblinginfo(cpu);
+
+	/*
+	 * Stop allowing kernel-mode FPU. This is needed so that if the CPU is
+	 * brought online again, the initial state is not allowed:
+	 */
+	this_cpu_write(kernel_fpu_allowed, false);
 
 	/* It's now safe to remove this processor from the online map */
 	lock_vector_lock();
@@ -1477,45 +1418,9 @@ void play_dead_common(void)
  * We need to flush the caches before going to sleep, lest we have
  * dirty data in our caches when we come back up.
  */
-static inline void mwait_play_dead(void)
+void __noreturn mwait_play_dead(unsigned int eax_hint)
 {
 	struct mwait_cpu_dead *md = this_cpu_ptr(&mwait_cpu_dead);
-	unsigned int eax, ebx, ecx, edx;
-	unsigned int highest_cstate = 0;
-	unsigned int highest_subcstate = 0;
-	int i;
-
-	if (boot_cpu_data.x86_vendor == X86_VENDOR_AMD ||
-	    boot_cpu_data.x86_vendor == X86_VENDOR_HYGON)
-		return;
-	if (!this_cpu_has(X86_FEATURE_MWAIT))
-		return;
-	if (!this_cpu_has(X86_FEATURE_CLFLUSH))
-		return;
-	if (__this_cpu_read(cpu_info.cpuid_level) < CPUID_MWAIT_LEAF)
-		return;
-
-	eax = CPUID_MWAIT_LEAF;
-	ecx = 0;
-	native_cpuid(&eax, &ebx, &ecx, &edx);
-
-	/*
-	 * eax will be 0 if EDX enumeration is not valid.
-	 * Initialized below to cstate, sub_cstate value when EDX is valid.
-	 */
-	if (!(ecx & CPUID5_ECX_EXTENSIONS_SUPPORTED)) {
-		eax = 0;
-	} else {
-		edx >>= MWAIT_SUBSTATE_SIZE;
-		for (i = 0; i < 7 && edx; i++, edx >>= MWAIT_SUBSTATE_SIZE) {
-			if (edx & MWAIT_SUBSTATE_MASK) {
-				highest_cstate = i;
-				highest_subcstate = edx & MWAIT_SUBSTATE_MASK;
-			}
-		}
-		eax = (highest_cstate << MWAIT_SUBSTATE_SIZE) |
-			(highest_subcstate - 1);
-	}
 
 	/* Set up state for the kexec() hack below */
 	md->status = CPUDEAD_MWAIT_WAIT;
@@ -1536,7 +1441,7 @@ static inline void mwait_play_dead(void)
 		mb();
 		__monitor(md, 0, 0);
 		mb();
-		__mwait(eax, 0);
+		__mwait(eax_hint, 0);
 
 		if (READ_ONCE(md->control) == CPUDEAD_MWAIT_KEXEC_HLT) {
 			/*
@@ -1596,14 +1501,17 @@ void __noreturn hlt_play_dead(void)
 		native_halt();
 }
 
-void native_play_dead(void)
+void __noreturn native_play_dead(void)
 {
+	if (cpu_feature_enabled(X86_FEATURE_KERNEL_IBRS))
+		__update_spec_ctrl(0);
+
 	play_dead_common();
 	tboot_shutdown(TB_SHUTDOWN_WFS);
 
-	mwait_play_dead();
-	if (cpuidle_play_dead())
-		hlt_play_dead();
+	/* Below returns only on error. */
+	cpuidle_play_dead();
+	hlt_play_dead();
 }
 
 #else /* ... !CONFIG_HOTPLUG_CPU */
@@ -1612,7 +1520,7 @@ int native_cpu_disable(void)
 	return -ENOSYS;
 }
 
-void native_play_dead(void)
+void __noreturn native_play_dead(void)
 {
 	BUG();
 }

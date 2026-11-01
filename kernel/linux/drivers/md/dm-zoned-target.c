@@ -545,7 +545,7 @@ static int dmz_queue_chunk_work(struct dmz_target *dmz, struct bio *bio)
 		dmz_get_chunk_work(cw);
 	} else {
 		/* Create a new chunk work */
-		cw = kmalloc(sizeof(struct dm_chunk_work), GFP_NOIO);
+		cw = kmalloc_obj(struct dm_chunk_work, GFP_NOIO);
 		if (unlikely(!cw)) {
 			ret = -ENOMEM;
 			goto out;
@@ -702,7 +702,7 @@ static int dmz_get_zoned_device(struct dm_target *ti, char *path,
 	}
 
 	bdev = ddev->bdev;
-	if (bdev_zoned_model(bdev) == BLK_ZONED_NONE) {
+	if (!bdev_is_zoned(bdev)) {
 		if (nr_devs == 1) {
 			ti->error = "Invalid regular device";
 			goto err;
@@ -838,18 +838,18 @@ static int dmz_ctr(struct dm_target *ti, unsigned int argc, char **argv)
 	}
 
 	/* Allocate and initialize the target descriptor */
-	dmz = kzalloc(sizeof(struct dmz_target), GFP_KERNEL);
+	dmz = kzalloc_obj(struct dmz_target);
 	if (!dmz) {
 		ti->error = "Unable to allocate the zoned target descriptor";
 		return -ENOMEM;
 	}
-	dmz->dev = kcalloc(argc, sizeof(struct dmz_dev), GFP_KERNEL);
+	dmz->dev = kzalloc_objs(struct dmz_dev, argc);
 	if (!dmz->dev) {
 		ti->error = "Unable to allocate the zoned device descriptors";
 		kfree(dmz);
 		return -ENOMEM;
 	}
-	dmz->ddev = kcalloc(argc, sizeof(struct dm_dev *), GFP_KERNEL);
+	dmz->ddev = kzalloc_objs(struct dm_dev *, argc);
 	if (!dmz->ddev) {
 		ti->error = "Unable to allocate the dm device descriptors";
 		ret = -ENOMEM;
@@ -996,12 +996,11 @@ static void dmz_io_hints(struct dm_target *ti, struct queue_limits *limits)
 	limits->logical_block_size = DMZ_BLOCK_SIZE;
 	limits->physical_block_size = DMZ_BLOCK_SIZE;
 
-	blk_limits_io_min(limits, DMZ_BLOCK_SIZE);
-	blk_limits_io_opt(limits, DMZ_BLOCK_SIZE);
+	limits->io_min = DMZ_BLOCK_SIZE;
+	limits->io_opt = DMZ_BLOCK_SIZE;
 
 	limits->discard_alignment = 0;
 	limits->discard_granularity = DMZ_BLOCK_SIZE;
-	limits->max_discard_sectors = chunk_sectors;
 	limits->max_hw_discard_sectors = chunk_sectors;
 	limits->max_write_zeroes_sectors = chunk_sectors;
 
@@ -1010,13 +1009,14 @@ static void dmz_io_hints(struct dm_target *ti, struct queue_limits *limits)
 	limits->max_sectors = chunk_sectors;
 
 	/* We are exposing a drive-managed zoned block device */
-	limits->zoned = BLK_ZONED_NONE;
+	limits->features &= ~BLK_FEAT_ZONED;
 }
 
 /*
  * Pass on ioctl to the backend device.
  */
-static int dmz_prepare_ioctl(struct dm_target *ti, struct block_device **bdev)
+static int dmz_prepare_ioctl(struct dm_target *ti, struct block_device **bdev,
+			     unsigned int cmd, unsigned long arg, bool *forward)
 {
 	struct dmz_target *dmz = ti->private;
 	struct dmz_dev *dev = &dmz->dev[0];
@@ -1062,7 +1062,7 @@ static int dmz_iterate_devices(struct dm_target *ti,
 	struct dmz_target *dmz = ti->private;
 	unsigned int zone_nr_sectors = dmz_zone_nr_sectors(dmz->metadata);
 	sector_t capacity;
-	int i, r;
+	int i, r = 0;
 
 	for (i = 0; i < dmz->nr_ddevs; i++) {
 		capacity = dmz->dev[i].capacity & ~(zone_nr_sectors - 1);

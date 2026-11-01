@@ -16,6 +16,7 @@
 #include <linux/pm_runtime.h>
 #include <linux/debugfs.h>
 
+#include <drm/clients/drm_client_setup.h>
 #include <drm/drm_atomic.h>
 #include <drm/drm_atomic_helper.h>
 #include <drm/drm_crtc.h>
@@ -28,6 +29,7 @@
 #include <drm/drm_modeset_helper.h>
 #include <drm/drm_module.h>
 #include <drm/drm_of.h>
+#include <drm/drm_print.h>
 #include <drm/drm_probe_helper.h>
 #include <drm/drm_vblank.h>
 
@@ -188,7 +190,7 @@ static int malidp_set_and_wait_config_valid(struct drm_device *drm)
 	return (ret > 0) ? 0 : -ETIMEDOUT;
 }
 
-static void malidp_atomic_commit_hw_done(struct drm_atomic_state *state)
+static void malidp_atomic_commit_hw_done(struct drm_atomic_commit *state)
 {
 	struct drm_device *drm = state->dev;
 	struct malidp_drm *malidp = drm_to_malidp(drm);
@@ -229,7 +231,7 @@ static void malidp_atomic_commit_hw_done(struct drm_atomic_state *state)
 	drm_atomic_helper_commit_hw_done(state);
 }
 
-static void malidp_atomic_commit_tail(struct drm_atomic_state *state)
+static void malidp_atomic_commit_tail(struct drm_atomic_commit *state)
 {
 	struct drm_device *drm = state->dev;
 	struct malidp_drm *malidp = drm_to_malidp(drm);
@@ -305,10 +307,10 @@ malidp_verify_afbc_framebuffer_caps(struct drm_device *dev,
 static bool
 malidp_verify_afbc_framebuffer_size(struct drm_device *dev,
 				    struct drm_file *file,
+				    const struct drm_format_info *info,
 				    const struct drm_mode_fb_cmd2 *mode_cmd)
 {
 	int n_superblocks = 0;
-	const struct drm_format_info *info;
 	struct drm_gem_object *objs = NULL;
 	u32 afbc_superblock_size = 0, afbc_superblock_height = 0;
 	u32 afbc_superblock_width = 0, afbc_size = 0;
@@ -323,8 +325,6 @@ malidp_verify_afbc_framebuffer_size(struct drm_device *dev,
 		DRM_DEBUG_KMS("AFBC superblock size is not supported\n");
 		return false;
 	}
-
-	info = drm_get_format_info(dev, mode_cmd);
 
 	n_superblocks = (mode_cmd->width / afbc_superblock_width) *
 		(mode_cmd->height / afbc_superblock_height);
@@ -365,24 +365,26 @@ malidp_verify_afbc_framebuffer_size(struct drm_device *dev,
 
 static bool
 malidp_verify_afbc_framebuffer(struct drm_device *dev, struct drm_file *file,
+			       const struct drm_format_info *info,
 			       const struct drm_mode_fb_cmd2 *mode_cmd)
 {
 	if (malidp_verify_afbc_framebuffer_caps(dev, mode_cmd))
-		return malidp_verify_afbc_framebuffer_size(dev, file, mode_cmd);
+		return malidp_verify_afbc_framebuffer_size(dev, file, info, mode_cmd);
 
 	return false;
 }
 
 static struct drm_framebuffer *
 malidp_fb_create(struct drm_device *dev, struct drm_file *file,
+		 const struct drm_format_info *info,
 		 const struct drm_mode_fb_cmd2 *mode_cmd)
 {
 	if (mode_cmd->modifier[0]) {
-		if (!malidp_verify_afbc_framebuffer(dev, file, mode_cmd))
+		if (!malidp_verify_afbc_framebuffer(dev, file, info, mode_cmd))
 			return ERR_PTR(-EINVAL);
 	}
 
-	return drm_gem_fb_create(dev, file, mode_cmd);
+	return drm_gem_fb_create(dev, file, info, mode_cmd);
 }
 
 static const struct drm_mode_config_funcs malidp_mode_config_funcs = {
@@ -562,13 +564,13 @@ static void malidp_debugfs_init(struct drm_minor *minor)
 static const struct drm_driver malidp_driver = {
 	.driver_features = DRIVER_GEM | DRIVER_MODESET | DRIVER_ATOMIC,
 	DRM_GEM_DMA_DRIVER_OPS_WITH_DUMB_CREATE(malidp_dumb_create),
+	DRM_FBDEV_DMA_DRIVER_OPS,
 #ifdef CONFIG_DEBUG_FS
 	.debugfs_init = malidp_debugfs_init,
 #endif
 	.fops = &fops,
 	.name = "mali-dp",
 	.desc = "ARM Mali Display Processor driver",
-	.date = "20160106",
 	.major = 1,
 	.minor = 0,
 };
@@ -668,6 +670,11 @@ static int malidp_runtime_pm_suspend(struct device *dev)
 	struct drm_device *drm = dev_get_drvdata(dev);
 	struct malidp_drm *malidp = drm_to_malidp(drm);
 	struct malidp_hw_device *hwdev = malidp->dev;
+	struct clk_bulk_data clks[] = {
+		{ .clk = hwdev->pclk },
+		{ .clk = hwdev->aclk },
+		{ .clk = hwdev->mclk },
+	};
 
 	/* we can only suspend if the hardware is in config mode */
 	WARN_ON(!hwdev->hw->in_config_mode(hwdev));
@@ -675,9 +682,7 @@ static int malidp_runtime_pm_suspend(struct device *dev)
 	malidp_se_irq_fini(hwdev);
 	malidp_de_irq_fini(hwdev);
 	hwdev->pm_suspended = true;
-	clk_disable_unprepare(hwdev->mclk);
-	clk_disable_unprepare(hwdev->aclk);
-	clk_disable_unprepare(hwdev->pclk);
+	clk_bulk_disable_unprepare(ARRAY_SIZE(clks), clks);
 
 	return 0;
 }
@@ -687,10 +692,17 @@ static int malidp_runtime_pm_resume(struct device *dev)
 	struct drm_device *drm = dev_get_drvdata(dev);
 	struct malidp_drm *malidp = drm_to_malidp(drm);
 	struct malidp_hw_device *hwdev = malidp->dev;
+	struct clk_bulk_data clks[] = {
+		{ .clk = hwdev->pclk },
+		{ .clk = hwdev->aclk },
+		{ .clk = hwdev->mclk },
+	};
+	int err;
 
-	clk_prepare_enable(hwdev->pclk);
-	clk_prepare_enable(hwdev->aclk);
-	clk_prepare_enable(hwdev->mclk);
+	err = clk_bulk_prepare_enable(ARRAY_SIZE(clks), clks);
+	if (err)
+		return err;
+
 	hwdev->pm_suspended = false;
 	malidp_de_irq_hw_init(hwdev);
 	malidp_se_irq_hw_init(hwdev);
@@ -852,7 +864,7 @@ static int malidp_bind(struct device *dev)
 	if (ret)
 		goto register_fail;
 
-	drm_fbdev_dma_setup(drm, 32);
+	drm_client_setup(drm, NULL);
 
 	return 0;
 
@@ -941,6 +953,11 @@ static void malidp_platform_remove(struct platform_device *pdev)
 	component_master_del(&pdev->dev, &malidp_master_ops);
 }
 
+static void malidp_platform_shutdown(struct platform_device *pdev)
+{
+	drm_atomic_helper_shutdown(platform_get_drvdata(pdev));
+}
+
 static int __maybe_unused malidp_pm_suspend(struct device *dev)
 {
 	struct drm_device *drm = dev_get_drvdata(dev);
@@ -981,7 +998,8 @@ static const struct dev_pm_ops malidp_pm_ops = {
 
 static struct platform_driver malidp_platform_driver = {
 	.probe		= malidp_platform_probe,
-	.remove_new	= malidp_platform_remove,
+	.remove		= malidp_platform_remove,
+	.shutdown	= malidp_platform_shutdown,
 	.driver	= {
 		.name = "mali-dp",
 		.pm = &malidp_pm_ops,

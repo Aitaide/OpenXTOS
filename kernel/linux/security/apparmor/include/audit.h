@@ -21,13 +21,14 @@
 #include "label.h"
 
 extern const char *const audit_mode_names[];
-#define AUDIT_MAX_INDEX 5
 enum audit_mode {
 	AUDIT_NORMAL,		/* follow normal auditing of accesses */
 	AUDIT_QUIET_DENIED,	/* quiet all denied access messages */
+	AUDIT_QUIET_ALLOWED,	/* quiet all allowed access messages */
 	AUDIT_QUIET,		/* quiet all messages */
 	AUDIT_NOQUIET,		/* do not quiet audit messages */
-	AUDIT_ALL		/* audit all accesses */
+	AUDIT_ALL,		/* audit all accesses */
+	AUDIT_MODE_NAMES_COUNT	/* Must be last entry */
 };
 
 enum audit_type {
@@ -103,17 +104,24 @@ enum audit_type {
 #define OP_PROF_LOAD "profile_load"
 #define OP_PROF_RM "profile_remove"
 
+#define OP_USERNS_CREATE "userns_create"
+
+#define OP_URING_OVERRIDE "uring_override"
+#define OP_URING_SQPOLL "uring_sqpoll"
 
 struct apparmor_audit_data {
 	int error;
 	int type;
 	u16 class;
 	const char *op;
-	struct aa_label *label;
+	const struct cred *subj_cred;
+	struct aa_label *subj_label;
 	const char *name;
 	const char *info;
 	u32 request;
 	u32 denied;
+	u32 tags;
+
 	union {
 		/* these entries require a custom callback fn */
 		struct {
@@ -133,9 +141,12 @@ struct apparmor_audit_data {
 				};
 				struct {
 					int type, protocol;
-					struct sock *peer_sk;
 					void *addr;
 					int addrlen;
+					struct {
+						void *addr;
+						int addrlen;
+					} peer;
 				} net;
 			};
 		};
@@ -151,36 +162,46 @@ struct apparmor_audit_data {
 			const char *data;
 			unsigned long flags;
 		} mnt;
+		struct {
+			struct aa_label *target;
+		} uring;
 	};
+
+	struct common_audit_data common;
 };
 
 /* macros for dealing with  apparmor_audit_data structure */
-#define aad(SA) ((SA)->apparmor_audit_data)
+#define aad(SA) (container_of(SA, struct apparmor_audit_data, common))
+#define aad_of_va(VA) aad((struct common_audit_data *)(VA))
+
 #define DEFINE_AUDIT_DATA(NAME, T, C, X)				\
 	/* TODO: cleanup audit init so we don't need _aad = {0,} */	\
-	struct apparmor_audit_data NAME ## _aad = {                     \
+	struct apparmor_audit_data NAME = {				\
 		.class = (C),						\
 		.op = (X),                                              \
-	};                                                              \
-	struct common_audit_data NAME =					\
-	{								\
-	.type = (T),							\
-	.u.tsk = NULL,							\
-	};								\
-	NAME.apparmor_audit_data = &(NAME ## _aad)
+		.common.type = (T),					\
+		.common.u.tsk = NULL,					\
+		.common.apparmor_audit_data = &NAME,			\
+	};
 
-void aa_audit_msg(int type, struct common_audit_data *sa,
+int aa_select_audit_type(u32 denied, const struct aa_perms *perms);
+
+void aa_audit_msg(int type, struct apparmor_audit_data *ad,
 		  void (*cb) (struct audit_buffer *, void *));
-int aa_audit(int type, struct aa_profile *profile, struct common_audit_data *sa,
+int aa_audit(int type, struct aa_profile *profile,
+	     struct apparmor_audit_data *ad,
 	     void (*cb) (struct audit_buffer *, void *));
 
-#define aa_audit_error(ERROR, SA, CB)				\
+#define aa_audit_error(ERROR, AD, CB)				\
 ({								\
-	aad((SA))->error = (ERROR);				\
-	aa_audit_msg(AUDIT_APPARMOR_ERROR, (SA), (CB));		\
-	aad((SA))->error;					\
+	(AD)->error = (ERROR);					\
+	aa_audit_msg(AUDIT_APPARMOR_ERROR, (AD), (CB));		\
+	(AD)->error;					\
 })
 
+int aa_audit_perm_error(struct aa_label *label, u32 request, int error,
+			struct apparmor_audit_data *ad,
+			void (*cb)(struct audit_buffer *, void *));
 
 static inline int complain_error(int error)
 {
@@ -190,8 +211,8 @@ static inline int complain_error(int error)
 }
 
 void aa_audit_rule_free(void *vrule);
-int aa_audit_rule_init(u32 field, u32 op, char *rulestr, void **vrule);
+int aa_audit_rule_init(u32 field, u32 op, char *rulestr, void **vrule, gfp_t gfp);
 int aa_audit_rule_known(struct audit_krule *rule);
-int aa_audit_rule_match(u32 sid, u32 field, u32 op, void *vrule);
+int aa_audit_rule_match(struct lsm_prop *prop, u32 field, u32 op, void *vrule);
 
 #endif /* __AA_AUDIT_H */

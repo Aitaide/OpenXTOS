@@ -8,6 +8,7 @@
 #include <linux/netfilter.h>
 #include <linux/netfilter/nf_tables.h>
 #include <net/dst.h>
+#include <net/dst_metadata.h>
 #include <net/ip6_route.h>
 #include <net/route.h>
 #include <net/netfilter/nf_tables.h>
@@ -59,9 +60,10 @@ void nft_rt_get_eval(const struct nft_expr *expr,
 	u32 *dest = &regs->data[priv->dreg];
 	const struct dst_entry *dst;
 
-	dst = skb_dst(skb);
-	if (!dst)
+	if (!skb_valid_dst(skb))
 		goto err;
+
+	dst = skb_dst(skb);
 
 	switch (priv->key) {
 #ifdef CONFIG_IP_ROUTE_CLASSID
@@ -73,14 +75,14 @@ void nft_rt_get_eval(const struct nft_expr *expr,
 		if (nft_pf(pkt) != NFPROTO_IPV4)
 			goto err;
 
-		*dest = (__force u32)rt_nexthop((const struct rtable *)dst,
+		*dest = (__force u32)rt_nexthop(dst_rtable(dst),
 						ip_hdr(skb)->daddr);
 		break;
 	case NFT_RT_NEXTHOP6:
 		if (nft_pf(pkt) != NFPROTO_IPV6)
 			goto err;
 
-		memcpy(dest, rt6_nexthop((struct rt6_info *)dst,
+		memcpy(dest, rt6_nexthop(dst_rt6_info(dst),
 					 &ipv6_hdr(skb)->daddr),
 		       sizeof(struct in6_addr));
 		break;
@@ -93,7 +95,7 @@ void nft_rt_get_eval(const struct nft_expr *expr,
 		break;
 #endif
 	default:
-		WARN_ON(1);
+		DEBUG_NET_WARN_ON_ONCE(1);
 		goto err;
 	}
 	return;
@@ -103,7 +105,7 @@ err:
 }
 
 static const struct nla_policy nft_rt_policy[NFTA_RT_MAX + 1] = {
-	[NFTA_RT_DREG]		= { .type = NLA_U32 },
+	[NFTA_RT_DREG]		= NLA_POLICY_MAX(NLA_BE32, NFT_REG32_MAX),
 	[NFTA_RT_KEY]		= NLA_POLICY_MAX(NLA_BE32, 255),
 };
 
@@ -160,11 +162,15 @@ nla_put_failure:
 	return -1;
 }
 
-static int nft_rt_validate(const struct nft_ctx *ctx, const struct nft_expr *expr,
-			   const struct nft_data **data)
+static int nft_rt_validate(const struct nft_ctx *ctx, const struct nft_expr *expr)
 {
 	const struct nft_rt *priv = nft_expr_priv(expr);
 	unsigned int hooks;
+
+	if (ctx->family != NFPROTO_IPV4 &&
+	    ctx->family != NFPROTO_IPV6 &&
+	    ctx->family != NFPROTO_INET)
+		return -EOPNOTSUPP;
 
 	switch (priv->key) {
 	case NFT_RT_NEXTHOP4:
@@ -191,7 +197,6 @@ static const struct nft_expr_ops nft_rt_get_ops = {
 	.init		= nft_rt_get_init,
 	.dump		= nft_rt_get_dump,
 	.validate	= nft_rt_validate,
-	.reduce		= NFT_REDUCE_READONLY,
 };
 
 struct nft_expr_type nft_rt_type __read_mostly = {

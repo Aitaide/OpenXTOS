@@ -89,6 +89,7 @@ struct snd_rawmidi_substream {
 	unsigned int framing;		/* whether to frame input data */
 	unsigned int clock_type;	/* clock source to use for input framing */
 	int use_count;			/* use counter (for output) */
+	bool inactive;			/* inactive substream (for UMP legacy) */
 	size_t bytes;
 	spinlock_t lock;
 	struct snd_rawmidi *rmidi;
@@ -118,6 +119,7 @@ struct snd_rawmidi {
 	struct list_head list;
 	unsigned int device;		/* device number */
 	unsigned int info_flags;	/* SNDRV_RAWMIDI_INFO_XXXX */
+	unsigned int tied_device;
 	char id[64];
 	char name[80];
 
@@ -174,9 +176,11 @@ int snd_rawmidi_proceed(struct snd_rawmidi_substream *substream);
 /* main midi functions */
 
 int snd_rawmidi_info_select(struct snd_card *card, struct snd_rawmidi_info *info);
-int snd_rawmidi_kernel_open(struct snd_rawmidi *rmidi, int subdevice,
-			    int mode, struct snd_rawmidi_file *rfile);
-int snd_rawmidi_kernel_release(struct snd_rawmidi_file *rfile);
+int snd_rawmidi_kernel_open_nested(struct snd_rawmidi *rmidi, int subdevice,
+				   int mode, struct snd_rawmidi_file *rfile,
+				   int depth);
+int snd_rawmidi_kernel_release_nested(struct snd_rawmidi_file *rfile,
+				      int depth);
 int snd_rawmidi_output_params(struct snd_rawmidi_substream *substream,
 			      struct snd_rawmidi_params *params);
 int snd_rawmidi_input_params(struct snd_rawmidi_substream *substream,
@@ -188,5 +192,28 @@ long snd_rawmidi_kernel_read(struct snd_rawmidi_substream *substream,
 			     unsigned char *buf, long count);
 long snd_rawmidi_kernel_write(struct snd_rawmidi_substream *substream,
 			      const unsigned char *buf, long count);
+
+/* non-nested version */
+static inline int snd_rawmidi_kernel_open(struct snd_rawmidi *rmidi,
+					  int subdevice,
+					  int mode,
+					  struct snd_rawmidi_file *rfile)
+{
+	return snd_rawmidi_kernel_open_nested(rmidi, subdevice, mode, rfile, 0);
+}
+
+static inline int snd_rawmidi_kernel_release(struct snd_rawmidi_file *rfile)
+{
+	return snd_rawmidi_kernel_release_nested(rfile, 0);
+}
+
+/* set up the tied devices */
+static inline void snd_rawmidi_tie_devices(struct snd_rawmidi *r1,
+					   struct snd_rawmidi *r2)
+{
+	/* tied_device field keeps the device+1 (so that 0 being unknown) */
+	r1->tied_device = r2->device + 1;
+	r2->tied_device = r1->device + 1;
+}
 
 #endif /* __SOUND_RAWMIDI_H */

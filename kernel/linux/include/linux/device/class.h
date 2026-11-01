@@ -34,14 +34,12 @@ struct fwnode_handle;
  * @class_release: Called to release this class.
  * @dev_release: Called to release the device.
  * @shutdown_pre: Called at shut-down time before driver shutdown.
- * @ns_type:	Callbacks so sysfs can detemine namespaces.
+ * @ns_type:	Callbacks so sysfs can determine namespaces.
  * @namespace:	Namespace of the device belongs to this class.
  * @get_ownership: Allows class to specify uid/gid of the sysfs directories
  *		for the devices belonging to the class. Usually tied to
  *		device's namespace.
  * @pm:		The default device power management operations of this class.
- * @p:		The private data of the driver core, no one other than the
- *		driver core can touch this.
  *
  * A class is a higher-level view of a device that abstracts out low-level
  * implementation details. Drivers may see a SCSI disk or an ATA disk, but,
@@ -52,8 +50,8 @@ struct fwnode_handle;
 struct class {
 	const char		*name;
 
-	const struct attribute_group	**class_groups;
-	const struct attribute_group	**dev_groups;
+	const struct attribute_group	*const *class_groups;
+	const struct attribute_group	*const *dev_groups;
 
 	int (*dev_uevent)(const struct device *dev, struct kobj_uevent_env *env);
 	char *(*devnode)(const struct device *dev, umode_t *mode);
@@ -64,7 +62,7 @@ struct class {
 	int (*shutdown_pre)(struct device *dev);
 
 	const struct kobj_ns_type_operations *ns_type;
-	const void *(*namespace)(const struct device *dev);
+	const struct ns_common *(*namespace)(const struct device *dev);
 
 	void (*get_ownership)(const struct device *dev, kuid_t *uid, kgid_t *gid);
 
@@ -84,20 +82,18 @@ bool class_is_registered(const struct class *class);
 struct class_compat;
 struct class_compat *class_compat_register(const char *name);
 void class_compat_unregister(struct class_compat *cls);
-int class_compat_create_link(struct class_compat *cls, struct device *dev,
-			     struct device *device_link);
-void class_compat_remove_link(struct class_compat *cls, struct device *dev,
-			      struct device *device_link);
+int class_compat_create_link(struct class_compat *cls, struct device *dev);
+void class_compat_remove_link(struct class_compat *cls, struct device *dev);
 
 void class_dev_iter_init(struct class_dev_iter *iter, const struct class *class,
 			 const struct device *start, const struct device_type *type);
 struct device *class_dev_iter_next(struct class_dev_iter *iter);
 void class_dev_iter_exit(struct class_dev_iter *iter);
 
-int class_for_each_device(const struct class *class, const struct device *start, void *data,
-			  int (*fn)(struct device *dev, void *data));
+int class_for_each_device(const struct class *class, const struct device *start,
+			  void *data, device_iter_t fn);
 struct device *class_find_device(const struct class *class, const struct device *start,
-				 const void *data, int (*match)(struct device *, const void *));
+				 const void *data, device_match_t match);
 
 /**
  * class_find_device_by_name - device iterator for locating a particular device
@@ -184,9 +180,9 @@ struct class_attribute {
 	struct class_attribute class_attr_##_name = __ATTR_WO(_name)
 
 int __must_check class_create_file_ns(const struct class *class, const struct class_attribute *attr,
-				      const void *ns);
+				      const struct ns_common *ns);
 void class_remove_file_ns(const struct class *class, const struct class_attribute *attr,
-			  const void *ns);
+			  const struct ns_common *ns);
 
 static inline int __must_check class_create_file(const struct class *class,
 						 const struct class_attribute *attr)
@@ -197,7 +193,7 @@ static inline int __must_check class_create_file(const struct class *class,
 static inline void class_remove_file(const struct class *class,
 				     const struct class_attribute *attr)
 {
-	return class_remove_file_ns(class, attr, NULL);
+	class_remove_file_ns(class, attr, NULL);
 }
 
 /* Simple class attribute that is just a static string */

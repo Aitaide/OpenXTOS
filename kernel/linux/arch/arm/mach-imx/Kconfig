@@ -40,16 +40,20 @@ if ARCH_MULTI_V6
 comment "ARM1136 platforms"
 
 config SOC_IMX31
-	bool "i.MX31 support"
-	select CPU_V6
+	bool "i.MX31 support (DEPRECATED)"
+	depends on !SMP
+	select CPU_ARM1136R0
 	select MXC_AVIC
 	help
 	  This enables support for Freescale i.MX31 processor
 
+	  This SoC is scheduled for removal in early 2027,
+	  since it uses the ARM1136r0 CPU revision.
+
 config SOC_IMX35
 	bool "i.MX35 support"
+	select CPU_ARM1136R1
 	select MXC_AVIC
-	select PINCTRL_IMX35
 	help
 	  This enables support for Freescale i.MX35 processor
 
@@ -61,7 +65,6 @@ config SOC_IMX1
 	bool "i.MX1 support"
 	select CPU_ARM920T
 	select MXC_AVIC
-	select PINCTRL_IMX1
 	help
 	  This enables support for Freescale i.MX1 processor
 
@@ -73,7 +76,6 @@ config SOC_IMX25
 	bool "i.MX25 support"
 	select CPU_ARM926T
 	select MXC_AVIC
-	select PINCTRL_IMX25
 	help
 	  This enables support for Freescale i.MX25 processor
 
@@ -81,7 +83,6 @@ config SOC_IMX27
 	bool "i.MX27 support"
 	select CPU_ARM926T
 	select MXC_AVIC
-	select PINCTRL_IMX27
 	help
 	  This enables support for Freescale i.MX27 processor
 
@@ -98,7 +99,6 @@ config SOC_IMX5
 
 config SOC_IMX50
 	bool "i.MX50 support"
-	select PINCTRL_IMX50
 	select SOC_IMX5
 
 	help
@@ -106,14 +106,12 @@ config SOC_IMX50
 
 config SOC_IMX51
 	bool "i.MX51 support"
-	select PINCTRL_IMX51
 	select SOC_IMX5
 	help
 	  This enables support for Freescale i.MX51 processor
 
 config SOC_IMX53
 	bool "i.MX53 support"
-	select PINCTRL_IMX53
 	select SOC_IMX5
 
 	help
@@ -137,7 +135,6 @@ config SOC_IMX6Q
 	select ARM_ERRATA_775420
 	select HAVE_ARM_SCU if SMP
 	select HAVE_ARM_TWD
-	select PINCTRL_IMX6Q
 	select SOC_IMX6
 
 	help
@@ -147,7 +144,6 @@ config SOC_IMX6SL
 	bool "i.MX6 SoloLite support"
 	select ARM_ERRATA_754322
 	select ARM_ERRATA_775420
-	select PINCTRL_IMX6SL
 	select SOC_IMX6
 
 	help
@@ -157,7 +153,6 @@ config SOC_IMX6SLL
 	bool "i.MX6 SoloLiteLite support"
 	select ARM_ERRATA_754322
 	select ARM_ERRATA_775420
-	select PINCTRL_IMX6SLL
 	select SOC_IMX6
 
 	help
@@ -167,7 +162,6 @@ config SOC_IMX6SX
 	bool "i.MX6 SoloX support"
 	select ARM_ERRATA_754322
 	select ARM_ERRATA_775420
-	select PINCTRL_IMX6SX
 	select SOC_IMX6
 
 	help
@@ -175,7 +169,6 @@ config SOC_IMX6SX
 
 config SOC_IMX6UL
 	bool "i.MX6 UltraLite support"
-	select PINCTRL_IMX6UL
 	select SOC_IMX6
 	select ARM_ERRATA_814220
 
@@ -211,7 +204,6 @@ config SOC_IMX7D_CM4
 
 config SOC_IMX7D
 	bool "i.MX7 Dual support"
-	select PINCTRL_IMX7D
 	select SOC_IMX7D_CA7 if ARCH_MULTI_V7
 	select SOC_IMX7D_CM4 if ARM_SINGLE_ARMV7M
 	select ARM_ERRATA_814220 if ARCH_MULTI_V7
@@ -221,47 +213,26 @@ config SOC_IMX7D
 config SOC_IMX7ULP
 	bool "i.MX7ULP support"
 	select CLKSRC_IMX_TPM
-	select PINCTRL_IMX7ULP
 	select SOC_IMX7D_CA7 if ARCH_MULTI_V7
 	select SOC_IMX7D_CM4 if ARM_SINGLE_ARMV7M
 	help
 	  This enables support for Freescale i.MX7 Ultra Low Power processor.
 
 config SOC_IMXRT
-	bool "i.MXRT support"
+	bool "i.MXRT support (DEPRECATED)"
 	depends on ARM_SINGLE_ARMV7M
 	select ARMV7M_SYSTICK if ARM_SINGLE_ARMV7M
 	help
 	  This enables support for Freescale i.MXRT Crossover processor.
 
+	  This platform is scheduled for removal in early 2027
+
 config SOC_VF610
 	bool "Vybrid Family VF610 support"
 	select ARM_GIC if ARCH_MULTI_V7
-	select PINCTRL_VF610
 
 	help
 	  This enables support for Freescale Vybrid VF610 processor.
-
-choice
-	prompt "Clocksource for scheduler clock"
-	depends on SOC_VF610
-	default VF_USE_ARM_GLOBAL_TIMER
-
-	config VF_USE_ARM_GLOBAL_TIMER
-		bool "Use ARM Global Timer"
-		depends on ARCH_MULTI_V7
-		select ARM_GLOBAL_TIMER
-		select CLKSRC_ARM_GLOBAL_TIMER_SCHED_CLOCK
-		help
-		  Use the ARM Global Timer as clocksource
-
-	config VF_USE_PIT_TIMER
-		bool "Use PIT timer"
-		select VF_PIT_TIMER
-		help
-		  Use SoC Periodic Interrupt Timer (PIT) as clocksource
-
-endchoice
 
 endif
 

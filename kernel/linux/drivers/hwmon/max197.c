@@ -10,7 +10,6 @@
 
 #include <linux/kernel.h>
 #include <linux/module.h>
-#include <linux/mod_devicetable.h>
 #include <linux/init.h>
 #include <linux/err.h>
 #include <linux/slab.h>
@@ -312,19 +311,17 @@ error:
 	return ret;
 }
 
-static int max197_remove(struct platform_device *pdev)
+static void max197_remove(struct platform_device *pdev)
 {
 	struct max197_data *data = platform_get_drvdata(pdev);
 
 	hwmon_device_unregister(data->hwmon_dev);
 	sysfs_remove_group(&pdev->dev.kobj, &max197_sysfs_group);
-
-	return 0;
 }
 
 static const struct platform_device_id max197_device_ids[] = {
-	{ "max197", max197 },
-	{ "max199", max199 },
+	{ .name = "max197", .driver_data = max197 },
+	{ .name = "max199", .driver_data = max199 },
 	{ }
 };
 MODULE_DEVICE_TABLE(platform, max197_device_ids);

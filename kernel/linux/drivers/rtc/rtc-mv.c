@@ -219,17 +219,15 @@ static int __init mv_rtc_probe(struct platform_device *pdev)
 	if (IS_ERR(pdata->ioaddr))
 		return PTR_ERR(pdata->ioaddr);
 
-	pdata->clk = devm_clk_get(&pdev->dev, NULL);
-	/* Not all SoCs require a clock.*/
-	if (!IS_ERR(pdata->clk))
-		clk_prepare_enable(pdata->clk);
+	pdata->clk = devm_clk_get_optional_prepared(&pdev->dev, NULL);
+	if (IS_ERR(pdata->clk))
+		return PTR_ERR(pdata->clk);
 
 	/* make sure the 24 hour mode is enabled */
 	rtc_time = readl(pdata->ioaddr + RTC_TIME_REG_OFFS);
 	if (rtc_time & RTC_HOURS_12H_MODE) {
 		dev_err(&pdev->dev, "12 Hour mode is enabled but not supported.\n");
-		ret = -EINVAL;
-		goto out;
+		return  -EINVAL;
 	}
 
 	/* make sure it is actually functional */
@@ -238,8 +236,7 @@ static int __init mv_rtc_probe(struct platform_device *pdev)
 		rtc_time = readl(pdata->ioaddr + RTC_TIME_REG_OFFS);
 		if (rtc_time == 0x01000000) {
 			dev_err(&pdev->dev, "internal RTC not ticking\n");
-			ret = -ENODEV;
-			goto out;
+			return -ENODEV;
 		}
 	}
 
@@ -249,8 +246,7 @@ static int __init mv_rtc_probe(struct platform_device *pdev)
 
 	pdata->rtc = devm_rtc_allocate_device(&pdev->dev);
 	if (IS_ERR(pdata->rtc)) {
-		ret = PTR_ERR(pdata->rtc);
-		goto out;
+		return PTR_ERR(pdata->rtc);
 	}
 
 	if (pdata->irq >= 0) {
@@ -264,7 +260,7 @@ static int __init mv_rtc_probe(struct platform_device *pdev)
 	}
 
 	if (pdata->irq >= 0)
-		device_init_wakeup(&pdev->dev, 1);
+		devm_device_init_wakeup(&pdev->dev);
 	else
 		clear_bit(RTC_FEATURE_ALARM, pdata->rtc->features);
 
@@ -275,24 +271,8 @@ static int __init mv_rtc_probe(struct platform_device *pdev)
 	ret = devm_rtc_register_device(pdata->rtc);
 	if (!ret)
 		return 0;
-out:
-	if (!IS_ERR(pdata->clk))
-		clk_disable_unprepare(pdata->clk);
 
 	return ret;
-}
-
-static int __exit mv_rtc_remove(struct platform_device *pdev)
-{
-	struct rtc_plat_data *pdata = platform_get_drvdata(pdev);
-
-	if (pdata->irq >= 0)
-		device_init_wakeup(&pdev->dev, 0);
-
-	if (!IS_ERR(pdata->clk))
-		clk_disable_unprepare(pdata->clk);
-
-	return 0;
 }
 
 #ifdef CONFIG_OF
@@ -303,11 +283,33 @@ static const struct of_device_id rtc_mv_of_match_table[] = {
 MODULE_DEVICE_TABLE(of, rtc_mv_of_match_table);
 #endif
 
+#ifdef CONFIG_PM_SLEEP
+static int mv_rtc_suspend(struct device *dev)
+{
+	struct rtc_plat_data *pdata = dev_get_drvdata(dev);
+
+	if (device_may_wakeup(dev) && pdata->irq >= 0)
+		enable_irq_wake(pdata->irq);
+	return 0;
+}
+
+static int mv_rtc_resume(struct device *dev)
+{
+	struct rtc_plat_data *pdata = dev_get_drvdata(dev);
+
+	if (device_may_wakeup(dev) && pdata->irq >= 0)
+		disable_irq_wake(pdata->irq);
+	return 0;
+}
+#endif
+
+static SIMPLE_DEV_PM_OPS(mv_rtc_pm_ops, mv_rtc_suspend, mv_rtc_resume);
+
 static struct platform_driver mv_rtc_driver = {
-	.remove		= __exit_p(mv_rtc_remove),
 	.driver		= {
 		.name	= "rtc-mv",
 		.of_match_table = of_match_ptr(rtc_mv_of_match_table),
+		.pm	= &mv_rtc_pm_ops,
 	},
 };
 

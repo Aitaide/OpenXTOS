@@ -6,7 +6,6 @@
  */
 
 #include <linux/err.h>
-#include <linux/mod_devicetable.h>
 #include <linux/module.h>
 #include <linux/regmap.h>
 #include <linux/spi/spi.h>
@@ -40,7 +39,7 @@ static void fxas21002c_spi_remove(struct spi_device *spi)
 }
 
 static const struct spi_device_id fxas21002c_spi_id[] = {
-	{ "fxas21002c", 0 },
+	{ .name = "fxas21002c" },
 	{ }
 };
 MODULE_DEVICE_TABLE(spi, fxas21002c_spi_id);
@@ -66,4 +65,4 @@ module_spi_driver(fxas21002c_spi_driver);
 MODULE_AUTHOR("Rui Miguel Silva <rui.silva@linaro.org>");
 MODULE_LICENSE("GPL v2");
 MODULE_DESCRIPTION("FXAS21002C SPI Gyro driver");
-MODULE_IMPORT_NS(IIO_FXAS21002C);
+MODULE_IMPORT_NS("IIO_FXAS21002C");

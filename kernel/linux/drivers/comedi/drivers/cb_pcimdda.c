@@ -154,7 +154,7 @@ static int cb_pcimdda_auto_attach(struct comedi_device *dev,
 
 	s = &dev->subdevices[1];
 	/* digital i/o subdevice */
-	return subdev_8255_init(dev, s, NULL, PCIMDDA_8255_BASE_REG);
+	return subdev_8255_io_init(dev, s, PCIMDDA_8255_BASE_REG);
 }
 
 static struct comedi_driver cb_pcimdda_driver = {
@@ -172,8 +172,8 @@ static int cb_pcimdda_pci_probe(struct pci_dev *dev,
 }
 
 static const struct pci_device_id cb_pcimdda_pci_table[] = {
-	{ PCI_DEVICE(PCI_VENDOR_ID_CB, PCI_ID_PCIM_DDA06_16) },
-	{ 0 }
+	{ PCI_VDEVICE(CB, PCI_ID_PCIM_DDA06_16) },
+	{ }
 };
 MODULE_DEVICE_TABLE(pci, cb_pcimdda_pci_table);
 

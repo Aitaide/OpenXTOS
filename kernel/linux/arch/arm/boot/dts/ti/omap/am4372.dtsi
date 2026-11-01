@@ -92,7 +92,7 @@
 			opp-supported-hw = <0xFF 0x08>;
 		};
 
-		opp-800000000{
+		opp-800000000 {
 			/* OPP Turbo */
 			opp-hz = /bits/ 64 <800000000>;
 			opp-microvolt = <1260000 1234800 1285200>;
@@ -321,7 +321,6 @@
 
 			mmc3: mmc@0 {
 				compatible = "ti,am437-sdhci";
-				ti,needs-special-reset;
 				interrupts = <GIC_SPI 29 IRQ_TYPE_LEVEL_HIGH>;
 				reg = <0x0 0x1000>;
 				status = "disabled";
@@ -475,6 +474,17 @@
 				pruss1_mii_rt: mii-rt@32000 {
 					compatible = "ti,pruss-mii", "syscon";
 					reg = <0x32000 0x58>;
+				};
+
+				pruss1_iep: iep@2e000 {
+					compatible = "ti,am4376-icss-iep";
+					reg = <0x2e000 0x31c>;
+					clocks = <&pruss1_iepclk_mux>;
+				};
+
+				pruss1_ecap: ecap@30000 {
+					compatible = "ti,pruss-ecap";
+					reg = <0x30000 0x60>;
 				};
 
 				pruss1_intc: interrupt-controller@20000 {
@@ -719,6 +729,12 @@
 			#address-cells = <1>;
 			#size-cells = <1>;
 			ranges = <0 0x56000000 0x1000000>;
+
+			gpu@0 {
+				compatible = "ti,omap3630-gpu", "img,powervr-sgx530";
+				reg = <0x0 0x10000>; /* 64kB */
+				interrupts = <GIC_SPI 37 IRQ_TYPE_LEVEL_HIGH>;
+			};
 		};
 	};
 };

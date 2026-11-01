@@ -7,24 +7,30 @@
  * Copyright (c) 2010, NVIDIA Corporation.
  */
 
-#include <linux/module.h>
-#include <linux/mod_devicetable.h>
-#include <linux/kernel.h>
-#include <linux/slab.h>
+#include <linux/array_size.h>
+#include <linux/bitops.h>
+#include <linux/delay.h>
+#include <linux/dev_printk.h>
+#include <linux/err.h>
+#include <linux/gpio/consumer.h>
 #include <linux/i2c.h>
 #include <linux/interrupt.h>
-#include <linux/err.h>
+#include <linux/iopoll.h>
+#include <linux/jiffies.h>
+#include <linux/minmax.h>
+#include <linux/module.h>
 #include <linux/mutex.h>
-#include <linux/delay.h>
-#include <linux/bitops.h>
-#include <linux/gpio/consumer.h>
-#include <linux/regulator/consumer.h>
 #include <linux/pm_runtime.h>
+#include <linux/property.h>
+#include <linux/regulator/consumer.h>
+#include <linux/time.h>
+#include <linux/types.h>
+#include <linux/wait.h>
 
-#include <linux/iio/iio.h>
-#include <linux/iio/sysfs.h>
+#include <asm/byteorder.h>
+
 #include <linux/iio/buffer.h>
-#include <linux/iio/trigger.h>
+#include <linux/iio/iio.h>
 #include <linux/iio/trigger_consumer.h>
 #include <linux/iio/triggered_buffer.h>
 
@@ -78,6 +84,7 @@
  */
 #define AK09912_REG_WIA1		0x00
 #define AK09912_REG_WIA2		0x01
+#define AK09918_DEVICE_ID		0x0C
 #define AK09916_DEVICE_ID		0x09
 #define AK09912_DEVICE_ID		0x04
 #define AK09911_DEVICE_ID		0x05
@@ -125,13 +132,6 @@
 #define AK09912_REG_ASAZ		0x62
 
 #define AK09912_MAX_REGS		AK09912_REG_ASAZ
-
-/*
- * Miscellaneous values.
- */
-#define AK8975_MAX_CONVERSION_TIMEOUT	500
-#define AK8975_CONVERSION_DONE_POLL_TIME 10
-#define AK8975_DATA_READY_TIMEOUT	((100*HZ)/1000)
 
 /*
  * Precalculate scale factor (in Gauss units) for each axis and
@@ -204,12 +204,12 @@ static long ak09912_raw_to_gauss(u16 data)
 
 /* Compatible Asahi Kasei Compass parts */
 enum asahi_compass_chipset {
-	AKXXXX		= 0,
 	AK8975,
 	AK8963,
 	AK09911,
 	AK09912,
 	AK09916,
+	AK09918,
 };
 
 enum ak_ctrl_reg_addr {
@@ -248,7 +248,7 @@ struct ak_def {
 };
 
 static const struct ak_def ak_def_array[] = {
-	{
+	[AK8975] = {
 		.type = AK8975,
 		.raw_to_gauss = ak8975_raw_to_gauss,
 		.range = 4096,
@@ -273,7 +273,7 @@ static const struct ak_def ak_def_array[] = {
 			AK8975_REG_HYL,
 			AK8975_REG_HZL},
 	},
-	{
+	[AK8963] = {
 		.type = AK8963,
 		.raw_to_gauss = ak8963_09911_raw_to_gauss,
 		.range = 8190,
@@ -298,7 +298,7 @@ static const struct ak_def ak_def_array[] = {
 			AK8975_REG_HYL,
 			AK8975_REG_HZL},
 	},
-	{
+	[AK09911] = {
 		.type = AK09911,
 		.raw_to_gauss = ak8963_09911_raw_to_gauss,
 		.range = 8192,
@@ -323,7 +323,7 @@ static const struct ak_def ak_def_array[] = {
 			AK09912_REG_HYL,
 			AK09912_REG_HZL},
 	},
-	{
+	[AK09912] = {
 		.type = AK09912,
 		.raw_to_gauss = ak09912_raw_to_gauss,
 		.range = 32752,
@@ -348,8 +348,36 @@ static const struct ak_def ak_def_array[] = {
 			AK09912_REG_HYL,
 			AK09912_REG_HZL},
 	},
-	{
+	[AK09916] = {
 		.type = AK09916,
+		.raw_to_gauss = ak09912_raw_to_gauss,
+		.range = 32752,
+		.ctrl_regs = {
+			AK09912_REG_ST1,
+			AK09912_REG_ST2,
+			AK09912_REG_CNTL2,
+			AK09912_REG_ASAX,
+			AK09912_MAX_REGS},
+		.ctrl_masks = {
+			AK09912_REG_ST1_DRDY_MASK,
+			AK09912_REG_ST2_HOFL_MASK,
+			0,
+			AK09912_REG_CNTL2_MODE_MASK},
+		.ctrl_modes = {
+			AK09912_REG_CNTL_MODE_POWER_DOWN,
+			AK09912_REG_CNTL_MODE_ONCE,
+			AK09912_REG_CNTL_MODE_SELF_TEST,
+			AK09912_REG_CNTL_MODE_FUSE_ROM},
+		.data_regs = {
+			AK09912_REG_HXL,
+			AK09912_REG_HYL,
+			AK09912_REG_HZL},
+	},
+	[AK09918] = {
+		/* ak09918 is register compatible with ak09912 this is for avoid
+		 * unknown id messages.
+		 */
+		.type = AK09918,
 		.raw_to_gauss = ak09912_raw_to_gauss,
 		.range = 32752,
 		.ctrl_regs = {
@@ -397,7 +425,7 @@ struct ak8975_data {
 	/* Ensure natural alignment of timestamp */
 	struct {
 		s16 channels[3];
-		s64 ts __aligned(8);
+		aligned_s64 ts;
 	} scan;
 };
 
@@ -427,7 +455,8 @@ static int ak8975_power_on(const struct ak8975_data *data)
 	 * and the minimum wait time before mode setting is 100us, in
 	 * total 300us. Add some margin and say minimum 500us here.
 	 */
-	usleep_range(500, 1000);
+	fsleep(500);
+
 	return 0;
 }
 
@@ -444,26 +473,34 @@ static void ak8975_power_off(const struct ak8975_data *data)
  * Return 0 if the i2c device is the one we expect.
  * return a negative error number otherwise
  */
-static int ak8975_who_i_am(struct i2c_client *client,
+static int ak8975_who_i_am(const struct ak8975_data *data,
 			   enum asahi_compass_chipset type)
 {
+	struct i2c_client *client = data->client;
 	u8 wia_val[2];
 	int ret;
 
 	/*
 	 * Signature for each device:
 	 * Device   |  WIA1      |  WIA2
+	 * AK09918  |  DEVICE_ID_|  AK09918_DEVICE_ID
 	 * AK09916  |  DEVICE_ID_|  AK09916_DEVICE_ID
 	 * AK09912  |  DEVICE_ID |  AK09912_DEVICE_ID
 	 * AK09911  |  DEVICE_ID |  AK09911_DEVICE_ID
 	 * AK8975   |  DEVICE_ID |  NA
 	 * AK8963   |  DEVICE_ID |  NA
 	 */
-	ret = i2c_smbus_read_i2c_block_data_or_emulated(
-			client, AK09912_REG_WIA1, 2, wia_val);
+	ret = i2c_smbus_read_i2c_block_data_or_emulated(client,
+							AK09912_REG_WIA1,
+							sizeof(wia_val),
+							wia_val);
 	if (ret < 0) {
 		dev_err(&client->dev, "Error reading WIA\n");
 		return ret;
+	}
+	if (ret != sizeof(wia_val)) {
+		dev_err(&client->dev, "Error reading WIA\n");
+		return -EIO;
 	}
 
 	if (wia_val[0] != AK8975_DEVICE_ID)
@@ -485,10 +522,18 @@ static int ak8975_who_i_am(struct i2c_client *client,
 		if (wia_val[1] == AK09916_DEVICE_ID)
 			return 0;
 		break;
-	default:
-		dev_err(&client->dev, "Type %d unknown\n", type);
+	case AK09918:
+		if (wia_val[1] == AK09918_DEVICE_ID)
+			return 0;
+		break;
 	}
-	return -ENODEV;
+
+	dev_info(&client->dev, "Device ID %x is unknown.\n", wia_val[1]);
+	/*
+	 * Let driver to probe on unknown id for support more register
+	 * compatible variants.
+	 */
+	return 0;
 }
 
 /*
@@ -503,12 +548,12 @@ static int ak8975_set_mode(struct ak8975_data *data, enum ak_ctrl_mode mode)
 		 data->def->ctrl_modes[mode];
 	ret = i2c_smbus_write_byte_data(data->client,
 					data->def->ctrl_regs[CNTL], regval);
-	if (ret < 0) {
+	if (ret < 0)
 		return ret;
-	}
+
 	data->cntl_cache = regval;
-	/* After mode change wait atleast 100us */
-	usleep_range(100, 500);
+	/* After mode change wait at least 100us */
+	fsleep(100);
 
 	return 0;
 }
@@ -532,8 +577,8 @@ static irqreturn_t ak8975_irq_handler(int irq, void *data)
 static int ak8975_setup_irq(struct ak8975_data *data)
 {
 	struct i2c_client *client = data->client;
-	int rc;
 	int irq;
+	int ret;
 
 	init_waitqueue_head(&data->data_ready_queue);
 	clear_bit(0, &data->flags);
@@ -542,28 +587,24 @@ static int ak8975_setup_irq(struct ak8975_data *data)
 	else
 		irq = gpiod_to_irq(data->eoc_gpiod);
 
-	rc = devm_request_irq(&client->dev, irq, ak8975_irq_handler,
-			      IRQF_TRIGGER_RISING | IRQF_ONESHOT,
-			      dev_name(&client->dev), data);
-	if (rc < 0) {
-		dev_err(&client->dev, "irq %d request failed: %d\n", irq, rc);
-		return rc;
-	}
+	ret = devm_request_irq(&client->dev, irq, ak8975_irq_handler,
+			       IRQF_TRIGGER_RISING,
+			       dev_name(&client->dev), data);
+	if (ret)
+		return ret;
 
 	data->eoc_irq = irq;
 
-	return rc;
+	return 0;
 }
-
 
 /*
  * Perform some start-of-day setup, including reading the asa calibration
  * values and caching them.
  */
-static int ak8975_setup(struct i2c_client *client)
+static int ak8975_setup(struct ak8975_data *data)
 {
-	struct iio_dev *indio_dev = i2c_get_clientdata(client);
-	struct ak8975_data *data = iio_priv(indio_dev);
+	struct i2c_client *client = data->client;
 	int ret;
 
 	/* Write the fused rom access mode. */
@@ -574,12 +615,17 @@ static int ak8975_setup(struct i2c_client *client)
 	}
 
 	/* Get asa data and store in the device data. */
-	ret = i2c_smbus_read_i2c_block_data_or_emulated(
-			client, data->def->ctrl_regs[ASA_BASE],
-			3, data->asa);
+	ret = i2c_smbus_read_i2c_block_data_or_emulated(client,
+							data->def->ctrl_regs[ASA_BASE],
+							sizeof(data->asa),
+							data->asa);
 	if (ret < 0) {
 		dev_err(&client->dev, "Not able to read asa data\n");
 		return ret;
+	}
+	if (ret != sizeof(data->asa)) {
+		dev_err(&client->dev, "Error reading asa data\n");
+		return -EIO;
 	}
 
 	/* After reading fuse ROM data set power-down mode */
@@ -605,22 +651,23 @@ static int ak8975_setup(struct i2c_client *client)
 	return 0;
 }
 
-static int wait_conversion_complete_gpio(struct ak8975_data *data)
+static int wait_conversion_complete_gpio(struct ak8975_data *data,
+					 unsigned int poll_ms,
+					 unsigned int timeout_ms)
 {
 	struct i2c_client *client = data->client;
-	u32 timeout_ms = AK8975_MAX_CONVERSION_TIMEOUT;
 	int ret;
+	int val;
 
 	/* Wait for the conversion to complete. */
-	while (timeout_ms) {
-		msleep(AK8975_CONVERSION_DONE_POLL_TIME);
-		if (gpiod_get_value(data->eoc_gpiod))
-			break;
-		timeout_ms -= AK8975_CONVERSION_DONE_POLL_TIME;
-	}
-	if (!timeout_ms) {
-		dev_err(&client->dev, "Conversion timeout happened\n");
-		return -EINVAL;
+	ret = readx_poll_timeout(gpiod_get_value, data->eoc_gpiod, val, val != 0,
+				 poll_ms * USEC_PER_MSEC,
+				 timeout_ms * USEC_PER_MSEC);
+	if (ret)
+		return ret;
+	if (val < 0) {
+		dev_err(&client->dev, "Error in reading GPIOD\n");
+		return val;
 	}
 
 	ret = i2c_smbus_read_byte_data(client, data->def->ctrl_regs[ST1]);
@@ -630,54 +677,49 @@ static int wait_conversion_complete_gpio(struct ak8975_data *data)
 	return ret;
 }
 
-static int wait_conversion_complete_polled(struct ak8975_data *data)
+static int wait_conversion_complete_polled(struct ak8975_data *data,
+					   unsigned int poll_ms,
+					   unsigned int timeout_ms)
 {
 	struct i2c_client *client = data->client;
-	u8 read_status;
-	u32 timeout_ms = AK8975_MAX_CONVERSION_TIMEOUT;
 	int ret;
+	int val;
 
 	/* Wait for the conversion to complete. */
-	while (timeout_ms) {
-		msleep(AK8975_CONVERSION_DONE_POLL_TIME);
-		ret = i2c_smbus_read_byte_data(client,
-					       data->def->ctrl_regs[ST1]);
-		if (ret < 0) {
-			dev_err(&client->dev, "Error in reading ST1\n");
-			return ret;
-		}
-		read_status = ret;
-		if (read_status)
-			break;
-		timeout_ms -= AK8975_CONVERSION_DONE_POLL_TIME;
-	}
-	if (!timeout_ms) {
-		dev_err(&client->dev, "Conversion timeout happened\n");
-		return -EINVAL;
-	}
+	ret = read_poll_timeout(i2c_smbus_read_byte_data, val, val != 0,
+				poll_ms * USEC_PER_MSEC,
+				timeout_ms * USEC_PER_MSEC,
+				true,
+				client, data->def->ctrl_regs[ST1]);
+	if (ret)
+		return ret;
+	if (val < 0)
+		dev_err(&client->dev, "Error in reading ST1\n");
 
-	return read_status;
+	return val;
 }
 
-/* Returns 0 if the end of conversion interrupt occured or -ETIME otherwise */
-static int wait_conversion_complete_interrupt(struct ak8975_data *data)
+/* Returns 0 if the end of conversion interrupt occurred or -ETIMEDOUT otherwise */
+static int wait_conversion_complete_interrupt(struct ak8975_data *data,
+					      unsigned int timeout_ms)
 {
 	int ret;
 
 	ret = wait_event_timeout(data->data_ready_queue,
 				 test_bit(0, &data->flags),
-				 AK8975_DATA_READY_TIMEOUT);
+				 msecs_to_jiffies(timeout_ms));
 	clear_bit(0, &data->flags);
 
-	return ret > 0 ? 0 : -ETIME;
+	return ret > 0 ? 0 : -ETIMEDOUT;
 }
 
-static int ak8975_start_read_axis(struct ak8975_data *data,
-				  const struct i2c_client *client)
+static int ak8975_start_read_axis(struct ak8975_data *data)
 {
-	/* Set up the device for taking a sample. */
-	int ret = ak8975_set_mode(data, MODE_ONCE);
+	struct i2c_client *client = data->client;
+	int ret;
 
+	/* Set up the device for taking a sample. */
+	ret = ak8975_set_mode(data, MODE_ONCE);
 	if (ret < 0) {
 		dev_err(&client->dev, "Error in setting operating mode\n");
 		return ret;
@@ -685,30 +727,16 @@ static int ak8975_start_read_axis(struct ak8975_data *data,
 
 	/* Wait for the conversion to complete. */
 	if (data->eoc_irq)
-		ret = wait_conversion_complete_interrupt(data);
+		ret = wait_conversion_complete_interrupt(data, 100);
 	else if (data->eoc_gpiod)
-		ret = wait_conversion_complete_gpio(data);
+		ret = wait_conversion_complete_gpio(data, 10, 500);
 	else
-		ret = wait_conversion_complete_polled(data);
+		ret = wait_conversion_complete_polled(data, 10, 500);
 	if (ret < 0)
 		return ret;
 
-	/* This will be executed only for non-interrupt based waiting case */
-	if (ret & data->def->ctrl_masks[ST1_DRDY]) {
-		ret = i2c_smbus_read_byte_data(client,
-					       data->def->ctrl_regs[ST2]);
-		if (ret < 0) {
-			dev_err(&client->dev, "Error in reading ST2\n");
-			return ret;
-		}
-		if (ret & (data->def->ctrl_masks[ST2_DERR] |
-			   data->def->ctrl_masks[ST2_HOFL])) {
-			dev_err(&client->dev, "ST2 status error 0x%x\n", ret);
-			return -EINVAL;
-		}
-	}
-
-	return 0;
+	/* Return with zero if the data is ready. */
+	return !data->def->ctrl_regs[ST1_DRDY];
 }
 
 /* Retrieve raw flux value for one of the x, y, or z axis.  */
@@ -718,35 +746,53 @@ static int ak8975_read_axis(struct iio_dev *indio_dev, int index, int *val)
 	const struct i2c_client *client = data->client;
 	const struct ak_def *def = data->def;
 	__le16 rval;
-	u16 buff;
 	int ret;
 
 	pm_runtime_get_sync(&data->client->dev);
 
 	mutex_lock(&data->lock);
 
-	ret = ak8975_start_read_axis(data, client);
+	ret = ak8975_start_read_axis(data);
 	if (ret)
 		goto exit;
 
-	ret = i2c_smbus_read_i2c_block_data_or_emulated(
-			client, def->data_regs[index],
-			sizeof(rval), (u8*)&rval);
+	ret = i2c_smbus_read_i2c_block_data_or_emulated(client,
+							def->data_regs[index],
+							sizeof(rval),
+							(u8 *)&rval);
 	if (ret < 0)
 		goto exit;
+	if (ret != sizeof(rval)) {
+		ret = -EIO;
+		goto exit;
+	}
+
+	/* Read out ST2 for release lock on measurement data. */
+	ret = i2c_smbus_read_byte_data(client, data->def->ctrl_regs[ST2]);
+	if (ret < 0) {
+		dev_err(&client->dev, "Error in reading ST2\n");
+		goto exit;
+	}
+
+	if (ret & (data->def->ctrl_masks[ST2_DERR] |
+		   data->def->ctrl_masks[ST2_HOFL])) {
+		dev_err(&client->dev, "ST2 status error 0x%x\n", ret);
+		ret = -EINVAL;
+		goto exit;
+	}
 
 	mutex_unlock(&data->lock);
 
-	pm_runtime_mark_last_busy(&data->client->dev);
 	pm_runtime_put_autosuspend(&data->client->dev);
 
 	/* Swap bytes and convert to valid range. */
-	buff = le16_to_cpu(rval);
-	*val = clamp_t(s16, buff, -def->range, def->range);
+	*val = clamp_t(s16, le16_to_cpu(rval), -def->range, def->range);
+
 	return IIO_VAL_INT;
 
 exit:
 	mutex_unlock(&data->lock);
+	pm_runtime_put_autosuspend(&data->client->dev);
 	dev_err(&client->dev, "Error in reading axis\n");
 	return ret;
 }
@@ -812,18 +858,6 @@ static const struct iio_info ak8975_info = {
 	.read_raw = &ak8975_read_raw,
 };
 
-static const struct acpi_device_id ak_acpi_match[] = {
-	{"AK8975", AK8975},
-	{"AK8963", AK8963},
-	{"INVN6500", AK8963},
-	{"AK009911", AK09911},
-	{"AK09911", AK09911},
-	{"AKM9911", AK09911},
-	{"AK09912", AK09912},
-	{ }
-};
-MODULE_DEVICE_TABLE(acpi, ak_acpi_match);
-
 static void ak8975_fill_buffer(struct iio_dev *indio_dev)
 {
 	struct ak8975_data *data = iio_priv(indio_dev);
@@ -834,7 +868,7 @@ static void ak8975_fill_buffer(struct iio_dev *indio_dev)
 
 	mutex_lock(&data->lock);
 
-	ret = ak8975_start_read_axis(data, client);
+	ret = ak8975_start_read_axis(data);
 	if (ret)
 		goto unlock;
 
@@ -844,9 +878,11 @@ static void ak8975_fill_buffer(struct iio_dev *indio_dev)
 	 */
 	ret = i2c_smbus_read_i2c_block_data_or_emulated(client,
 							def->data_regs[0],
-							3 * sizeof(fval[0]),
+							sizeof(fval),
 							(u8 *)fval);
 	if (ret < 0)
+		goto unlock;
+	if (ret != sizeof(fval))
 		goto unlock;
 
 	mutex_unlock(&data->lock);
@@ -856,8 +892,8 @@ static void ak8975_fill_buffer(struct iio_dev *indio_dev)
 	data->scan.channels[1] = clamp_t(s16, le16_to_cpu(fval[1]), -def->range, def->range);
 	data->scan.channels[2] = clamp_t(s16, le16_to_cpu(fval[2]), -def->range, def->range);
 
-	iio_push_to_buffers_with_timestamp(indio_dev, &data->scan,
-					   iio_get_time_ns(indio_dev));
+	iio_push_to_buffers_with_ts(indio_dev, &data->scan, sizeof(data->scan),
+				    iio_get_time_ns(indio_dev));
 
 	return;
 
@@ -876,6 +912,28 @@ static irqreturn_t ak8975_handle_trigger(int irq, void *p)
 	return IRQ_HANDLED;
 }
 
+static int ak8975_buffer_preenable(struct iio_dev *indio_dev)
+{
+	struct ak8975_data *data = iio_priv(indio_dev);
+	struct device *dev = &data->client->dev;
+
+	return pm_runtime_resume_and_get(dev);
+}
+
+static int ak8975_buffer_postdisable(struct iio_dev *indio_dev)
+{
+	struct ak8975_data *data = iio_priv(indio_dev);
+	struct device *dev = &data->client->dev;
+
+	pm_runtime_put_autosuspend(dev);
+
+	return 0;
+}
+
+static const struct iio_buffer_setup_ops ak8975_buffer_setup_ops = {
+	.preenable = ak8975_buffer_preenable,
+	.postdisable = ak8975_buffer_postdisable,
+};
 static int ak8975_probe(struct i2c_client *client)
 {
 	const struct i2c_device_id *id = i2c_client_get_device_id(client);
@@ -883,11 +941,8 @@ static int ak8975_probe(struct i2c_client *client)
 	struct iio_dev *indio_dev;
 	struct gpio_desc *eoc_gpiod;
 	struct gpio_desc *reset_gpiod;
-	const void *match;
-	unsigned int i;
-	int err;
-	enum asahi_compass_chipset chipset;
 	const char *name = NULL;
+	int ret;
 
 	/*
 	 * Grab and set up the supplied GPIO.
@@ -897,8 +952,7 @@ static int ak8975_probe(struct i2c_client *client)
 	eoc_gpiod = devm_gpiod_get_optional(&client->dev, NULL, GPIOD_IN);
 	if (IS_ERR(eoc_gpiod))
 		return PTR_ERR(eoc_gpiod);
-	if (eoc_gpiod)
-		gpiod_set_consumer_name(eoc_gpiod, "ak_8975");
+	gpiod_set_consumer_name(eoc_gpiod, "ak_8975");
 
 	/*
 	 * According to AK09911 datasheet, if reset GPIO is provided then
@@ -923,32 +977,20 @@ static int ak8975_probe(struct i2c_client *client)
 	data->reset_gpiod = reset_gpiod;
 	data->eoc_irq = 0;
 
-	err = iio_read_mount_matrix(&client->dev, &data->orientation);
-	if (err)
-		return err;
+	ret = iio_read_mount_matrix(&client->dev, &data->orientation);
+	if (ret)
+		return ret;
 
 	/* id will be NULL when enumerated via ACPI */
-	match = device_get_match_data(&client->dev);
-	if (match) {
-		chipset = (uintptr_t)match;
-		name = dev_name(&client->dev);
-	} else if (id) {
-		chipset = (enum asahi_compass_chipset)(id->driver_data);
-		name = id->name;
-	} else
-		return -ENOSYS;
-
-	for (i = 0; i < ARRAY_SIZE(ak_def_array); i++)
-		if (ak_def_array[i].type == chipset)
-			break;
-
-	if (i == ARRAY_SIZE(ak_def_array)) {
-		dev_err(&client->dev, "AKM device type unsupported: %d\n",
-			chipset);
+	data->def = i2c_get_match_data(client);
+	if (!data->def)
 		return -ENODEV;
-	}
 
-	data->def = &ak_def_array[i];
+	/* If enumerated via firmware node, fix the ABI */
+	if (dev_fwnode(&client->dev))
+		name = dev_name(&client->dev);
+	else
+		name = id->name;
 
 	/* Fetch the regulators */
 	data->vdd = devm_regulator_get(&client->dev, "vdd");
@@ -958,20 +1000,20 @@ static int ak8975_probe(struct i2c_client *client)
 	if (IS_ERR(data->vid))
 		return PTR_ERR(data->vid);
 
-	err = ak8975_power_on(data);
-	if (err)
-		return err;
+	ret = ak8975_power_on(data);
+	if (ret)
+		return ret;
 
-	err = ak8975_who_i_am(client, data->def->type);
-	if (err < 0) {
+	ret = ak8975_who_i_am(data, data->def->type);
+	if (ret) {
 		dev_err(&client->dev, "Unexpected device\n");
 		goto power_off;
 	}
 	dev_dbg(&client->dev, "Asahi compass chip %s\n", name);
 
 	/* Perform some basic start-of-day setup of the device. */
-	err = ak8975_setup(client);
-	if (err < 0) {
+	ret = ak8975_setup(data);
+	if (ret) {
 		dev_err(&client->dev, "%s initialization fails\n", name);
 		goto power_off;
 	}
@@ -984,15 +1026,15 @@ static int ak8975_probe(struct i2c_client *client)
 	indio_dev->modes = INDIO_DIRECT_MODE;
 	indio_dev->name = name;
 
-	err = iio_triggered_buffer_setup(indio_dev, NULL, ak8975_handle_trigger,
-					 NULL);
-	if (err) {
+	ret = iio_triggered_buffer_setup(indio_dev, NULL, ak8975_handle_trigger,
+					 &ak8975_buffer_setup_ops);
+	if (ret) {
 		dev_err(&client->dev, "triggered buffer setup failed\n");
 		goto power_off;
 	}
 
-	err = iio_device_register(indio_dev);
-	if (err) {
+	ret = iio_device_register(indio_dev);
+	if (ret) {
 		dev_err(&client->dev, "device register failed\n");
 		goto cleanup_buffer;
 	}
@@ -1015,7 +1057,7 @@ cleanup_buffer:
 	iio_triggered_buffer_cleanup(indio_dev);
 power_off:
 	ak8975_power_off(data);
-	return err;
+	return ret;
 }
 
 static void ak8975_remove(struct i2c_client *client)
@@ -1076,30 +1118,42 @@ static int ak8975_runtime_resume(struct device *dev)
 static DEFINE_RUNTIME_DEV_PM_OPS(ak8975_dev_pm_ops, ak8975_runtime_suspend,
 				 ak8975_runtime_resume, NULL);
 
-static const struct i2c_device_id ak8975_id[] = {
-	{"ak8975", AK8975},
-	{"ak8963", AK8963},
-	{"AK8963", AK8963},
-	{"ak09911", AK09911},
-	{"ak09912", AK09912},
-	{"ak09916", AK09916},
-	{}
+static const struct acpi_device_id ak_acpi_match[] = {
+	{"AK8963", (kernel_ulong_t)&ak_def_array[AK8963] },
+	{"AK8975", (kernel_ulong_t)&ak_def_array[AK8975] },
+	{"AK009911", (kernel_ulong_t)&ak_def_array[AK09911] },
+	{"AK09911", (kernel_ulong_t)&ak_def_array[AK09911] },
+	{"AK09912", (kernel_ulong_t)&ak_def_array[AK09912] },
+	{"AKM9911", (kernel_ulong_t)&ak_def_array[AK09911] },
+	{"INVN6500", (kernel_ulong_t)&ak_def_array[AK8963] },
+	{ }
 };
+MODULE_DEVICE_TABLE(acpi, ak_acpi_match);
 
+static const struct i2c_device_id ak8975_id[] = {
+	{ .name = "AK8963", .driver_data = (kernel_ulong_t)&ak_def_array[AK8963] },
+	{ .name = "ak8963", .driver_data = (kernel_ulong_t)&ak_def_array[AK8963] },
+	{ .name = "ak8975", .driver_data = (kernel_ulong_t)&ak_def_array[AK8975] },
+	{ .name = "ak09911", .driver_data = (kernel_ulong_t)&ak_def_array[AK09911] },
+	{ .name = "ak09912", .driver_data = (kernel_ulong_t)&ak_def_array[AK09912] },
+	{ .name = "ak09916", .driver_data = (kernel_ulong_t)&ak_def_array[AK09916] },
+	{ .name = "ak09918", .driver_data = (kernel_ulong_t)&ak_def_array[AK09918] },
+	{ }
+};
 MODULE_DEVICE_TABLE(i2c, ak8975_id);
 
 static const struct of_device_id ak8975_of_match[] = {
-	{ .compatible = "asahi-kasei,ak8975", },
-	{ .compatible = "ak8975", },
-	{ .compatible = "asahi-kasei,ak8963", },
-	{ .compatible = "ak8963", },
-	{ .compatible = "asahi-kasei,ak09911", },
-	{ .compatible = "ak09911", },
-	{ .compatible = "asahi-kasei,ak09912", },
-	{ .compatible = "ak09912", },
-	{ .compatible = "asahi-kasei,ak09916", },
-	{ .compatible = "ak09916", },
-	{}
+	{ .compatible = "asahi-kasei,ak8975", .data = &ak_def_array[AK8975] },
+	{ .compatible = "ak8975", .data = &ak_def_array[AK8975] },
+	{ .compatible = "asahi-kasei,ak8963", .data = &ak_def_array[AK8963] },
+	{ .compatible = "ak8963", .data = &ak_def_array[AK8963] },
+	{ .compatible = "asahi-kasei,ak09911", .data = &ak_def_array[AK09911] },
+	{ .compatible = "ak09911", .data = &ak_def_array[AK09911] },
+	{ .compatible = "asahi-kasei,ak09912", .data = &ak_def_array[AK09912] },
+	{ .compatible = "ak09912", .data = &ak_def_array[AK09912] },
+	{ .compatible = "asahi-kasei,ak09916", .data = &ak_def_array[AK09916] },
+	{ .compatible = "asahi-kasei,ak09918", .data = &ak_def_array[AK09918] },
+	{ }
 };
 MODULE_DEVICE_TABLE(of, ak8975_of_match);
 

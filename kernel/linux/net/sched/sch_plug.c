@@ -89,7 +89,7 @@ static int plug_enqueue(struct sk_buff *skb, struct Qdisc *sch,
 {
 	struct plug_sched_data *q = qdisc_priv(sch);
 
-	if (likely(sch->qstats.backlog + skb->len <= q->limit)) {
+	if (likely((u64)sch->qstats.backlog + skb->len <= q->limit)) {
 		if (!q->unplug_indefinite)
 			q->pkts_current_epoch++;
 		return qdisc_enqueue_tail(skb, sch);
@@ -213,6 +213,7 @@ static struct Qdisc_ops plug_qdisc_ops __read_mostly = {
 	.reset       =	     qdisc_reset_queue,
 	.owner       =       THIS_MODULE,
 };
+MODULE_ALIAS_NET_SCH("plug");
 
 static int __init plug_module_init(void)
 {
@@ -226,3 +227,4 @@ static void __exit plug_module_exit(void)
 module_init(plug_module_init)
 module_exit(plug_module_exit)
 MODULE_LICENSE("GPL");
+MODULE_DESCRIPTION("Qdisc to plug and unplug traffic via netlink control");

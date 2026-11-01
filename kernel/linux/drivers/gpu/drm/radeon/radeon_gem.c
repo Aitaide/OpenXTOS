@@ -26,7 +26,9 @@
  *          Jerome Glisse
  */
 
+#include <linux/debugfs.h>
 #include <linux/iosys-map.h>
+#include <linux/overflow.h>
 #include <linux/pci.h>
 
 #include <drm/drm_device.h>
@@ -42,8 +44,6 @@ struct dma_buf *radeon_gem_prime_export(struct drm_gem_object *gobj,
 struct sg_table *radeon_gem_prime_get_sg_table(struct drm_gem_object *obj);
 int radeon_gem_prime_pin(struct drm_gem_object *obj);
 void radeon_gem_prime_unpin(struct drm_gem_object *obj);
-
-const struct drm_gem_object_funcs radeon_gem_object_funcs;
 
 static vm_fault_t radeon_gem_fault(struct vm_fault *vmf)
 {
@@ -87,7 +87,7 @@ static void radeon_gem_object_free(struct drm_gem_object *gobj)
 
 	if (robj) {
 		radeon_mn_unregister(robj);
-		radeon_bo_unref(&robj);
+		ttm_bo_fini(&robj->tbo);
 	}
 }
 
@@ -111,7 +111,7 @@ int radeon_gem_object_create(struct radeon_device *rdev, unsigned long size,
 	 */
 	max_size = rdev->mc.gtt_size - rdev->gart_pin_size;
 	if (size > max_size) {
-		DRM_DEBUG("Allocation size %ldMb bigger than %ldMb limit\n",
+		DRM_DEBUG("Allocation size %luMb bigger than %luMb limit\n",
 			  size >> 20, max_size >> 20);
 		return -ENOMEM;
 	}
@@ -131,7 +131,6 @@ retry:
 		return r;
 	}
 	*obj = &robj->tbo.base;
-	(*obj)->funcs = &radeon_gem_object_funcs;
 	robj->pid = task_pid_nr(current);
 
 	mutex_lock(&rdev->gem.mutex);
@@ -309,22 +308,6 @@ int radeon_gem_info_ioctl(struct drm_device *dev, void *data,
 	args->gart_size -= rdev->gart_pin_size;
 
 	return 0;
-}
-
-int radeon_gem_pread_ioctl(struct drm_device *dev, void *data,
-			   struct drm_file *filp)
-{
-	/* TODO: implement */
-	DRM_ERROR("unimplemented %s\n", __func__);
-	return -EOPNOTSUPP;
-}
-
-int radeon_gem_pwrite_ioctl(struct drm_device *dev, void *data,
-			    struct drm_file *filp)
-{
-	/* TODO: implement */
-	DRM_ERROR("unimplemented %s\n", __func__);
-	return -EOPNOTSUPP;
 }
 
 int radeon_gem_create_ioctl(struct drm_device *dev, void *data,
@@ -578,7 +561,7 @@ int radeon_gem_set_tiling_ioctl(struct drm_device *dev, void *data,
 	struct radeon_bo *robj;
 	int r = 0;
 
-	DRM_DEBUG("%d \n", args->handle);
+	DRM_DEBUG("%u \n", args->handle);
 	gobj = drm_gem_object_lookup(filp, args->handle);
 	if (gobj == NULL)
 		return -ENOENT;
@@ -623,33 +606,40 @@ out:
 static void radeon_gem_va_update_vm(struct radeon_device *rdev,
 				    struct radeon_bo_va *bo_va)
 {
-	struct ttm_validate_buffer tv, *entry;
-	struct radeon_bo_list *vm_bos;
-	struct ww_acquire_ctx ticket;
+	struct radeon_bo_list *vm_bos, *entry;
 	struct list_head list;
+	struct drm_exec exec;
 	unsigned domain;
 	int r;
 
 	INIT_LIST_HEAD(&list);
 
-	tv.bo = &bo_va->bo->tbo;
-	tv.num_shared = 1;
-	list_add(&tv.head, &list);
-
 	vm_bos = radeon_vm_get_bos(rdev, bo_va->vm, &list);
 	if (!vm_bos)
 		return;
 
-	r = ttm_eu_reserve_buffers(&ticket, &list, true, NULL);
-	if (r)
-		goto error_free;
+	drm_exec_init(&exec, DRM_EXEC_INTERRUPTIBLE_WAIT, 0);
+	drm_exec_until_all_locked(&exec) {
+		list_for_each_entry(entry, &list, list) {
+			r = drm_exec_prepare_obj(&exec, &entry->robj->tbo.base,
+						 1);
+			drm_exec_retry_on_contention(&exec);
+			if (unlikely(r))
+				goto error_cleanup;
+		}
 
-	list_for_each_entry(entry, &list, head) {
-		domain = radeon_mem_type_to_domain(entry->bo->resource->mem_type);
+		r = drm_exec_prepare_obj(&exec, &bo_va->bo->tbo.base, 1);
+		drm_exec_retry_on_contention(&exec);
+		if (unlikely(r))
+			goto error_cleanup;
+	}
+
+	list_for_each_entry(entry, &list, list) {
+		domain = radeon_mem_type_to_domain(entry->robj->tbo.resource->mem_type);
 		/* if anything is swapped out don't swap it in here,
 		   just abort and wait for the next CS */
 		if (domain == RADEON_GEM_DOMAIN_CPU)
-			goto error_unreserve;
+			goto error_cleanup;
 	}
 
 	mutex_lock(&bo_va->vm->mutex);
@@ -657,16 +647,14 @@ static void radeon_gem_va_update_vm(struct radeon_device *rdev,
 	if (r)
 		goto error_unlock;
 
-	if (bo_va->it.start)
+	if (bo_va->it.start && bo_va->bo)
 		r = radeon_vm_bo_update(rdev, bo_va, bo_va->bo->tbo.resource);
 
 error_unlock:
 	mutex_unlock(&bo_va->vm->mutex);
 
-error_unreserve:
-	ttm_eu_backoff_reservation(&ticket, &list);
-
-error_free:
+error_cleanup:
+	drm_exec_fini(&exec);
 	kvfree(vm_bos);
 
 	if (r && r != -ERESTARTSYS)
@@ -825,6 +813,7 @@ int radeon_align_pitch(struct radeon_device *rdev, int width, int cpp, bool tile
 	int aligned = width;
 	int align_large = (ASIC_IS_AVIVO(rdev)) || tiled;
 	int pitch_mask = 0;
+	int pitch;
 
 	switch (cpp) {
 	case 1:
@@ -839,9 +828,12 @@ int radeon_align_pitch(struct radeon_device *rdev, int width, int cpp, bool tile
 		break;
 	}
 
-	aligned += pitch_mask;
+	if (check_add_overflow(aligned, pitch_mask, &aligned))
+		return 0;
 	aligned &= ~pitch_mask;
-	return aligned * cpp;
+	if (check_mul_overflow(aligned, cpp, &pitch))
+		return 0;
+	return pitch;
 }
 
 int radeon_mode_dumb_create(struct drm_file *file_priv,
@@ -855,8 +847,12 @@ int radeon_mode_dumb_create(struct drm_file *file_priv,
 
 	args->pitch = radeon_align_pitch(rdev, args->width,
 					 DIV_ROUND_UP(args->bpp, 8), 0);
+	if (!args->pitch)
+		return -EINVAL;
 	args->size = (u64)args->pitch * args->height;
 	args->size = ALIGN(args->size, PAGE_SIZE);
+	if (!args->size)
+		return -EINVAL;
 
 	r = radeon_gem_object_create(rdev, args->size, 0,
 				     RADEON_GEM_DOMAIN_VRAM, 0,
@@ -899,7 +895,7 @@ static int radeon_debugfs_gem_info_show(struct seq_file *m, void *unused)
 			placement = " CPU";
 			break;
 		}
-		seq_printf(m, "bo[0x%08x] %8ldkB %8ldMB %s pid %8ld\n",
+		seq_printf(m, "bo[0x%08x] %8lukB %8luMB %s pid %8lu\n",
 			   i, radeon_bo_size(rbo) >> 10, radeon_bo_size(rbo) >> 20,
 			   placement, (unsigned long)rbo->pid);
 		i++;
@@ -914,7 +910,7 @@ DEFINE_SHOW_ATTRIBUTE(radeon_debugfs_gem_info);
 void radeon_gem_debugfs_init(struct radeon_device *rdev)
 {
 #if defined(CONFIG_DEBUG_FS)
-	struct dentry *root = rdev->ddev->primary->debugfs_root;
+	struct dentry *root = rdev_to_drm(rdev)->primary->debugfs_root;
 
 	debugfs_create_file("radeon_gem_info", 0444, root, rdev,
 			    &radeon_debugfs_gem_info_fops);

@@ -19,14 +19,6 @@
 #include <asm/cpu-type.h>
 
 /*
- * This is the clock rate of the i8253 PIT.  A MIPS system may not have
- * a PIT by the symbol is used all over the kernel including some APIs.
- * So keeping it defined to the number for the PIT is the only sane thing
- * for now.
- */
-#define CLOCK_TICK_RATE 1193182
-
-/*
  * Standard way to access the cycle counter.
  * Currently only used on SMP for scheduling.
  *
@@ -46,7 +38,7 @@ typedef unsigned int cycles_t;
  *
  * There is a suggested workaround and also the erratum can't strike if
  * the compare interrupt isn't being used as the clock source device.
- * However for now the implementaton of this function doesn't get these
+ * However for now the implementation of this function doesn't get these
  * fine details right.
  */
 static inline int can_use_mips_counter(unsigned int prid)

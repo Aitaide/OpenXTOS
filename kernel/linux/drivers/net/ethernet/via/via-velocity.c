@@ -1631,8 +1631,8 @@ static int velocity_init_rd_ring(struct velocity_info *vptr)
 {
 	int ret = -ENOMEM;
 
-	vptr->rx.info = kcalloc(vptr->options.numrx,
-				sizeof(struct velocity_rd_info), GFP_KERNEL);
+	vptr->rx.info = kzalloc_objs(struct velocity_rd_info,
+				     vptr->options.numrx);
 	if (!vptr->rx.info)
 		goto out;
 
@@ -1664,9 +1664,8 @@ static int velocity_init_td_ring(struct velocity_info *vptr)
 	/* Init the TD ring entries */
 	for (j = 0; j < vptr->tx.numq; j++) {
 
-		vptr->tx.infos[j] = kcalloc(vptr->options.numtx,
-					    sizeof(struct velocity_td_info),
-					    GFP_KERNEL);
+		vptr->tx.infos[j] = kzalloc_objs(struct velocity_td_info,
+						 vptr->options.numtx);
 		if (!vptr->tx.infos[j])	{
 			while (--j >= 0)
 				kfree(vptr->tx.infos[j]);
@@ -2294,7 +2293,7 @@ static int velocity_change_mtu(struct net_device *dev, int new_mtu)
 	int ret = 0;
 
 	if (!netif_running(dev)) {
-		dev->mtu = new_mtu;
+		WRITE_ONCE(dev->mtu, new_mtu);
 		goto out_0;
 	}
 
@@ -2304,7 +2303,7 @@ static int velocity_change_mtu(struct net_device *dev, int new_mtu)
 		struct rx_info rx;
 		struct tx_info tx;
 
-		tmp_vptr = kzalloc(sizeof(*tmp_vptr), GFP_KERNEL);
+		tmp_vptr = kzalloc_obj(*tmp_vptr);
 		if (!tmp_vptr) {
 			ret = -ENOMEM;
 			goto out_0;
@@ -2320,7 +2319,8 @@ static int velocity_change_mtu(struct net_device *dev, int new_mtu)
 		if (ret < 0)
 			goto out_free_tmp_vptr_1;
 
-		napi_disable(&vptr->napi);
+		netdev_lock(dev);
+		napi_disable_locked(&vptr->napi);
 
 		spin_lock_irqsave(&vptr->lock, flags);
 
@@ -2336,18 +2336,19 @@ static int velocity_change_mtu(struct net_device *dev, int new_mtu)
 		tmp_vptr->rx = rx;
 		tmp_vptr->tx = tx;
 
-		dev->mtu = new_mtu;
+		WRITE_ONCE(dev->mtu, new_mtu);
 
 		velocity_init_registers(vptr, VELOCITY_INIT_COLD);
 
 		velocity_give_many_rx_descs(vptr);
 
-		napi_enable(&vptr->napi);
+		napi_enable_locked(&vptr->napi);
 
 		mac_enable_int(vptr->mac_regs);
 		netif_start_queue(dev);
 
 		spin_unlock_irqrestore(&vptr->lock, flags);
+		netdev_unlock(dev);
 
 		velocity_free_rings(tmp_vptr);
 
@@ -2957,11 +2958,9 @@ static int velocity_platform_probe(struct platform_device *pdev)
 	return velocity_probe(&pdev->dev, irq, info, BUS_PLATFORM);
 }
 
-static int velocity_platform_remove(struct platform_device *pdev)
+static void velocity_platform_remove(struct platform_device *pdev)
 {
 	velocity_remove(&pdev->dev);
-
-	return 0;
 }
 
 #ifdef CONFIG_PM_SLEEP

@@ -1,11 +1,8 @@
+// SPDX-License-Identifier: GPL-2.0
 /*
    BlueZ - Bluetooth protocol stack for Linux
 
    Copyright (C) 2014 Intel Corporation
-
-   This program is free software; you can redistribute it and/or modify
-   it under the terms of the GNU General Public License version 2 as
-   published by the Free Software Foundation;
 
    THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS
    OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
@@ -28,7 +25,6 @@
 #include <net/bluetooth/hci_core.h>
 
 #include "smp.h"
-#include "hci_request.h"
 #include "hci_debugfs.h"
 
 #define DEFINE_QUIRK_ATTRIBUTE(__name, __quirk)				      \
@@ -39,7 +35,7 @@ static ssize_t __name ## _read(struct file *file,			      \
 	struct hci_dev *hdev = file->private_data;			      \
 	char buf[3];							      \
 									      \
-	buf[0] = test_bit(__quirk, &hdev->quirks) ? 'Y' : 'N';		      \
+	buf[0] = test_bit(__quirk, hdev->quirk_flags) ? 'Y' : 'N';	      \
 	buf[1] = '\n';							      \
 	buf[2] = '\0';							      \
 	return simple_read_from_buffer(user_buf, count, ppos, buf, 2);	      \
@@ -60,10 +56,10 @@ static ssize_t __name ## _write(struct file *file,			      \
 	if (err)							      \
 		return err;						      \
 									      \
-	if (enable == test_bit(__quirk, &hdev->quirks))			      \
+	if (enable == test_bit(__quirk, hdev->quirk_flags))		      \
 		return -EALREADY;					      \
 									      \
-	change_bit(__quirk, &hdev->quirks);				      \
+	change_bit(__quirk, hdev->quirk_flags);				      \
 									      \
 	return count;							      \
 }									      \
@@ -218,10 +214,12 @@ static int conn_info_min_age_set(void *data, u64 val)
 {
 	struct hci_dev *hdev = data;
 
-	if (val == 0 || val > hdev->conn_info_max_age)
-		return -EINVAL;
-
 	hci_dev_lock(hdev);
+	if (val == 0 || val > hdev->conn_info_max_age) {
+		hci_dev_unlock(hdev);
+		return -EINVAL;
+	}
+
 	hdev->conn_info_min_age = val;
 	hci_dev_unlock(hdev);
 
@@ -246,10 +244,12 @@ static int conn_info_max_age_set(void *data, u64 val)
 {
 	struct hci_dev *hdev = data;
 
-	if (val == 0 || val < hdev->conn_info_min_age)
-		return -EINVAL;
-
 	hci_dev_lock(hdev);
+	if (val == 0 || val < hdev->conn_info_min_age) {
+		hci_dev_unlock(hdev);
+		return -EINVAL;
+	}
+
 	hdev->conn_info_max_age = val;
 	hci_dev_unlock(hdev);
 
@@ -364,7 +364,7 @@ static int inquiry_cache_show(struct seq_file *f, void *p)
 
 	list_for_each_entry(e, &cache->all, all) {
 		struct inquiry_data *data = &e->data;
-		seq_printf(f, "%pMR %d %d %d 0x%.2x%.2x%.2x 0x%.4x %d %d %u\n",
+		seq_printf(f, "%pMR %d %d %d 0x%.2x%.2x%.2x 0x%.4x %d %d %lu\n",
 			   &data->bdaddr,
 			   data->pscan_rep_mode, data->pscan_period_mode,
 			   data->pscan_mode, data->dev_class[2],
@@ -567,10 +567,12 @@ static int sniff_min_interval_set(void *data, u64 val)
 {
 	struct hci_dev *hdev = data;
 
-	if (val == 0 || val % 2 || val > hdev->sniff_max_interval)
-		return -EINVAL;
-
 	hci_dev_lock(hdev);
+	if (val == 0 || val % 2 || val > hdev->sniff_max_interval) {
+		hci_dev_unlock(hdev);
+		return -EINVAL;
+	}
+
 	hdev->sniff_min_interval = val;
 	hci_dev_unlock(hdev);
 
@@ -595,10 +597,12 @@ static int sniff_max_interval_set(void *data, u64 val)
 {
 	struct hci_dev *hdev = data;
 
-	if (val == 0 || val % 2 || val < hdev->sniff_min_interval)
-		return -EINVAL;
-
 	hci_dev_lock(hdev);
+	if (val == 0 || val % 2 || val < hdev->sniff_min_interval) {
+		hci_dev_unlock(hdev);
+		return -EINVAL;
+	}
+
 	hdev->sniff_max_interval = val;
 	hci_dev_unlock(hdev);
 
@@ -850,10 +854,12 @@ static int conn_min_interval_set(void *data, u64 val)
 {
 	struct hci_dev *hdev = data;
 
-	if (val < 0x0006 || val > 0x0c80 || val > hdev->le_conn_max_interval)
-		return -EINVAL;
-
 	hci_dev_lock(hdev);
+	if (val < 0x0006 || val > 0x0c80 || val > hdev->le_conn_max_interval) {
+		hci_dev_unlock(hdev);
+		return -EINVAL;
+	}
+
 	hdev->le_conn_min_interval = val;
 	hci_dev_unlock(hdev);
 
@@ -878,10 +884,12 @@ static int conn_max_interval_set(void *data, u64 val)
 {
 	struct hci_dev *hdev = data;
 
-	if (val < 0x0006 || val > 0x0c80 || val < hdev->le_conn_min_interval)
-		return -EINVAL;
-
 	hci_dev_lock(hdev);
+	if (val < 0x0006 || val > 0x0c80 || val < hdev->le_conn_min_interval) {
+		hci_dev_unlock(hdev);
+		return -EINVAL;
+	}
+
 	hdev->le_conn_max_interval = val;
 	hci_dev_unlock(hdev);
 
@@ -990,10 +998,12 @@ static int adv_min_interval_set(void *data, u64 val)
 {
 	struct hci_dev *hdev = data;
 
-	if (val < 0x0020 || val > 0x4000 || val > hdev->le_adv_max_interval)
-		return -EINVAL;
-
 	hci_dev_lock(hdev);
+	if (val < 0x0020 || val > 0x4000 || val > hdev->le_adv_max_interval) {
+		hci_dev_unlock(hdev);
+		return -EINVAL;
+	}
+
 	hdev->le_adv_min_interval = val;
 	hci_dev_unlock(hdev);
 
@@ -1018,10 +1028,12 @@ static int adv_max_interval_set(void *data, u64 val)
 {
 	struct hci_dev *hdev = data;
 
-	if (val < 0x0020 || val > 0x4000 || val < hdev->le_adv_min_interval)
-		return -EINVAL;
-
 	hci_dev_lock(hdev);
+	if (val < 0x0020 || val > 0x4000 || val < hdev->le_adv_min_interval) {
+		hci_dev_unlock(hdev);
+		return -EINVAL;
+	}
+
 	hdev->le_adv_max_interval = val;
 	hci_dev_unlock(hdev);
 
@@ -1046,10 +1058,12 @@ static int min_key_size_set(void *data, u64 val)
 {
 	struct hci_dev *hdev = data;
 
-	if (val > hdev->le_max_key_size || val < SMP_MIN_ENC_KEY_SIZE)
-		return -EINVAL;
-
 	hci_dev_lock(hdev);
+	if (val > hdev->le_max_key_size || val < SMP_MIN_ENC_KEY_SIZE) {
+		hci_dev_unlock(hdev);
+		return -EINVAL;
+	}
+
 	hdev->le_min_key_size = val;
 	hci_dev_unlock(hdev);
 
@@ -1074,10 +1088,12 @@ static int max_key_size_set(void *data, u64 val)
 {
 	struct hci_dev *hdev = data;
 
-	if (val > SMP_MAX_ENC_KEY_SIZE || val < hdev->le_min_key_size)
-		return -EINVAL;
-
 	hci_dev_lock(hdev);
+	if (val > SMP_MAX_ENC_KEY_SIZE || val < hdev->le_min_key_size) {
+		hci_dev_unlock(hdev);
+		return -EINVAL;
+	}
+
 	hdev->le_max_key_size = val;
 	hci_dev_unlock(hdev);
 
@@ -1145,16 +1161,12 @@ static ssize_t force_no_mitm_write(struct file *file,
 				   size_t count, loff_t *ppos)
 {
 	struct hci_dev *hdev = file->private_data;
-	char buf[32];
-	size_t buf_size = min(count, (sizeof(buf) - 1));
 	bool enable;
+	int err;
 
-	if (copy_from_user(buf, user_buf, buf_size))
-		return -EFAULT;
-
-	buf[buf_size] = '\0';
-	if (kstrtobool(buf, &enable))
-		return -EINVAL;
+	err = kstrtobool_from_user(user_buf, count, &enable);
+	if (err)
+		return err;
 
 	if (enable == hci_dev_test_flag(hdev, HCI_FORCE_NO_MITM))
 		return -EALREADY;
@@ -1337,7 +1349,7 @@ static ssize_t vendor_diag_write(struct file *file, const char __user *user_buf,
 	 * for the vendor callback. Instead just store the desired value and
 	 * the setting will be programmed when the controller gets powered on.
 	 */
-	if (test_bit(HCI_QUIRK_NON_PERSISTENT_DIAG, &hdev->quirks) &&
+	if (hci_test_quirk(hdev, HCI_QUIRK_NON_PERSISTENT_DIAG) &&
 	    (!test_bit(HCI_RUNNING, &hdev->flags) ||
 	     hci_dev_test_flag(hdev, HCI_USER_CHANNEL)))
 		goto done;

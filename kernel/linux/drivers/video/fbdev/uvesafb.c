@@ -258,9 +258,9 @@ static struct uvesafb_ktask *uvesafb_prep(void)
 {
 	struct uvesafb_ktask *task;
 
-	task = kzalloc(sizeof(*task), GFP_KERNEL);
+	task = kzalloc_obj(*task);
 	if (task) {
-		task->done = kzalloc(sizeof(*task->done), GFP_KERNEL);
+		task->done = kzalloc_obj(*task->done);
 		if (!task->done) {
 			kfree(task);
 			task = NULL;
@@ -487,9 +487,7 @@ static int uvesafb_vbe_getmodes(struct uvesafb_ktask *task,
 		mode++;
 	}
 
-	par->vbe_modes = kcalloc(par->vbe_modes_cnt,
-				 sizeof(struct vbe_mode_ib),
-				 GFP_KERNEL);
+	par->vbe_modes = kzalloc_objs(struct vbe_mode_ib, par->vbe_modes_cnt);
 	if (!par->vbe_modes)
 		return -ENOMEM;
 
@@ -862,7 +860,7 @@ static int uvesafb_vbe_init_mode(struct fb_info *info)
 	 * Convert the modelist into a modedb so that we can use it with
 	 * fb_find_mode().
 	 */
-	mode = kcalloc(i, sizeof(*mode), GFP_KERNEL);
+	mode = kzalloc_objs(*mode, i);
 	if (mode) {
 		i = 0;
 		list_for_each(pos, &info->modelist) {
@@ -1048,8 +1046,7 @@ static int uvesafb_setcmap(struct fb_cmap *cmap, struct fb_info *info)
 		    info->cmap.len || cmap->start < info->cmap.start)
 			return -EINVAL;
 
-		entries = kmalloc_array(cmap->len, sizeof(*entries),
-					GFP_KERNEL);
+		entries = kmalloc_objs(*entries, cmap->len);
 		if (!entries)
 			return -ENOMEM;
 
@@ -1243,7 +1240,7 @@ setmode:
 	    info->var.pixclock != 0) {
 		task->t.regs.ebx |= 0x0800;		/* use CRTC data */
 		task->t.flags = TF_BUF_ESDI;
-		crtc = kzalloc(sizeof(struct vbe_crtc_ib), GFP_KERNEL);
+		crtc = kzalloc_obj(struct vbe_crtc_ib);
 		if (!crtc) {
 			err = -ENOMEM;
 			goto out;
@@ -1546,7 +1543,7 @@ static ssize_t uvesafb_show_vbe_ver(struct device *dev,
 	struct fb_info *info = dev_get_drvdata(dev);
 	struct uvesafb_par *par = info->par;
 
-	return snprintf(buf, PAGE_SIZE, "%.4x\n", par->vbe_ib.vbe_version);
+	return sysfs_emit(buf, "%.4x\n", par->vbe_ib.vbe_version);
 }
 
 static DEVICE_ATTR(vbe_version, S_IRUGO, uvesafb_show_vbe_ver, NULL);
@@ -1697,14 +1694,14 @@ static int uvesafb_probe(struct platform_device *dev)
 	i = uvesafb_vbe_init_mode(info);
 	if (i < 0) {
 		err = -EINVAL;
-		goto out;
+		goto out_mode;
 	} else {
 		mode = &par->vbe_modes[i];
 	}
 
 	if (fb_alloc_cmap(&info->cmap, 256, 0) < 0) {
 		err = -ENXIO;
-		goto out;
+		goto out_mode;
 	}
 
 	uvesafb_init_info(info, mode);
@@ -1794,7 +1791,7 @@ static void uvesafb_remove(struct platform_device *dev)
 
 static struct platform_driver uvesafb_driver = {
 	.probe  = uvesafb_probe,
-	.remove_new = uvesafb_remove,
+	.remove = uvesafb_remove,
 	.driver = {
 		.name = "uvesafb",
 	},
@@ -1867,7 +1864,7 @@ static ssize_t v86d_show(struct device_driver *dev, char *buf)
 static ssize_t v86d_store(struct device_driver *dev, const char *buf,
 		size_t count)
 {
-	strncpy(v86d_path, buf, PATH_MAX - 1);
+	strscpy_pad(v86d_path, buf);
 	return count;
 }
 static DRIVER_ATTR_RW(v86d);
@@ -1910,6 +1907,8 @@ static int uvesafb_init(void)
 			err = 0;
 		}
 	}
+	if (err)
+		cn_del_callback(&uvesafb_cn_id);
 	return err;
 }
 

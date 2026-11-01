@@ -20,8 +20,7 @@
 #undef DEBUGDATA
 #undef DEBUGCCW
 
-#define KMSG_COMPONENT "ctcm"
-#define pr_fmt(fmt) KMSG_COMPONENT ": " fmt
+#define pr_fmt(fmt) "ctcm: " fmt
 
 #include <linux/module.h>
 #include <linux/init.h>
@@ -200,13 +199,13 @@ static void channel_free(struct channel *ch)
 static void channel_remove(struct channel *ch)
 {
 	struct channel **c = &channels;
-	char chid[CTCM_ID_SIZE+1];
+	char chid[CTCM_ID_SIZE];
 	int ok = 0;
 
 	if (ch == NULL)
 		return;
 	else
-		strncpy(chid, ch->id, CTCM_ID_SIZE);
+		strscpy(chid, ch->id, sizeof(chid));
 
 	channel_free(ch);
 	while (*c) {
@@ -996,7 +995,7 @@ static int ctcm_change_mtu(struct net_device *dev, int new_mtu)
 			return -EINVAL;
 		dev->hard_header_len = LL_HEADER_LENGTH + 2;
 	}
-	dev->mtu = new_mtu;
+	WRITE_ONCE(dev->mtu, new_mtu);
 	return 0;
 }
 
@@ -1269,7 +1268,7 @@ static int ctcm_probe_device(struct ccwgroup_device *cgdev)
 	if (!get_device(&cgdev->dev))
 		return -ENODEV;
 
-	priv = kzalloc(sizeof(struct ctcm_priv), GFP_KERNEL);
+	priv = kzalloc_obj(struct ctcm_priv);
 	if (!priv) {
 		CTCM_DBF_TEXT_(ERROR, CTC_DBF_ERROR,
 			"%s: memory allocation failure",
@@ -1308,7 +1307,7 @@ static int add_channel(struct ccw_device *cdev, enum ctcm_channel_types type,
 		"%s(%s), type %d, proto %d",
 			__func__, dev_name(&cdev->dev),	type, priv->protocol);
 
-	ch = kzalloc(sizeof(struct channel), GFP_KERNEL);
+	ch = kzalloc_obj(struct channel);
 	if (ch == NULL)
 		return -ENOMEM;
 
@@ -1328,7 +1327,7 @@ static int add_channel(struct ccw_device *cdev, enum ctcm_channel_types type,
 	} else
 		ccw_num = 8;
 
-	ch->ccw = kcalloc(ccw_num, sizeof(struct ccw1), GFP_KERNEL | GFP_DMA);
+	ch->ccw = kzalloc_objs(struct ccw1, ccw_num, GFP_KERNEL | GFP_DMA);
 	if (ch->ccw == NULL)
 					goto nomem_return;
 
@@ -1389,7 +1388,7 @@ static int add_channel(struct ccw_device *cdev, enum ctcm_channel_types type,
 		ch->ccw[15].cmd_code = CCW_CMD_WRITE;
 		ch->ccw[15].flags    = CCW_FLAG_SLI | CCW_FLAG_CC;
 		ch->ccw[15].count    = TH_HEADER_LENGTH;
-		ch->ccw[15].cda      = virt_to_phys(ch->discontact_th);
+		ch->ccw[15].cda      = virt_to_dma32(ch->discontact_th);
 
 		ch->ccw[16].cmd_code = CCW_CMD_NOOP;
 		ch->ccw[16].flags    = CCW_FLAG_SLI;
@@ -1409,7 +1408,7 @@ static int add_channel(struct ccw_device *cdev, enum ctcm_channel_types type,
 
 	fsm_newstate(ch->fsm, CTC_STATE_IDLE);
 
-	ch->irb = kzalloc(sizeof(struct irb), GFP_KERNEL);
+	ch->irb = kzalloc_obj(struct irb);
 	if (ch->irb == NULL)
 				goto nomem_return;
 

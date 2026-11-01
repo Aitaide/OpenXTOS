@@ -16,6 +16,7 @@
 #include <linux/of.h>
 #include <linux/platform_device.h>
 #include <linux/thermal.h>
+#include <linux/units.h>
 
 #include "../thermal_hwmon.h"
 
@@ -76,7 +77,6 @@
 
 /* Constants */
 #define ADJUST			100
-#define ONE_MHZ			1000000
 #define POLL_TIMEOUT		5000
 #define STARTUP_TIME		40
 #define TS1_T0_VAL0		30000  /* 30 celsius */
@@ -205,7 +205,7 @@ static int stm_thermal_calibration(struct stm_thermal_sensor *sensor)
 		return -EINVAL;
 
 	prescaler = 0;
-	clk_freq /= ONE_MHZ;
+	clk_freq /= HZ_PER_MHZ;
 	if (clk_freq) {
 		while (prescaler <= clk_freq)
 			prescaler++;
@@ -390,11 +390,8 @@ static int stm_register_irq(struct stm_thermal_sensor *sensor)
 					stm_thermal_irq_handler,
 					IRQF_ONESHOT,
 					dev->driver->name, sensor);
-	if (ret) {
-		dev_err(dev, "%s: Failed to register IRQ %d\n", __func__,
-			sensor->irq);
+	if (ret)
 		return ret;
-	}
 
 	dev_dbg(dev, "%s: thermal IRQ registered", __func__);
 
@@ -440,7 +437,6 @@ thermal_unprepare:
 	return ret;
 }
 
-#ifdef CONFIG_PM_SLEEP
 static int stm_thermal_suspend(struct device *dev)
 {
 	struct stm_thermal_sensor *sensor = dev_get_drvdata(dev);
@@ -466,10 +462,9 @@ static int stm_thermal_resume(struct device *dev)
 
 	return 0;
 }
-#endif /* CONFIG_PM_SLEEP */
 
-static SIMPLE_DEV_PM_OPS(stm_thermal_pm_ops,
-			 stm_thermal_suspend, stm_thermal_resume);
+static DEFINE_SIMPLE_DEV_PM_OPS(stm_thermal_pm_ops,
+				stm_thermal_suspend, stm_thermal_resume);
 
 static const struct thermal_zone_device_ops stm_tz_ops = {
 	.get_temp	= stm_thermal_get_temp,
@@ -569,20 +564,18 @@ err_tz:
 	return ret;
 }
 
-static int stm_thermal_remove(struct platform_device *pdev)
+static void stm_thermal_remove(struct platform_device *pdev)
 {
 	struct stm_thermal_sensor *sensor = platform_get_drvdata(pdev);
 
 	stm_thermal_sensor_off(sensor);
 	thermal_remove_hwmon_sysfs(sensor->th_dev);
-
-	return 0;
 }
 
 static struct platform_driver stm_thermal_driver = {
 	.driver = {
 		.name	= "stm_thermal",
-		.pm     = &stm_thermal_pm_ops,
+		.pm     = pm_sleep_ptr(&stm_thermal_pm_ops),
 		.of_match_table = stm_thermal_of_match,
 	},
 	.probe		= stm_thermal_probe,

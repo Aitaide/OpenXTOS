@@ -54,25 +54,15 @@ void mlxsw_sp_pgt_mid_free(struct mlxsw_sp *mlxsw_sp, u16 mid_base)
 	mutex_unlock(&mlxsw_sp->pgt->lock);
 }
 
-int
-mlxsw_sp_pgt_mid_alloc_range(struct mlxsw_sp *mlxsw_sp, u16 mid_base, u16 count)
+int mlxsw_sp_pgt_mid_alloc_range(struct mlxsw_sp *mlxsw_sp, u16 *p_mid_base,
+				 u16 count)
 {
-	unsigned int idr_cursor;
+	unsigned int mid_base;
 	int i, err;
 
 	mutex_lock(&mlxsw_sp->pgt->lock);
 
-	/* This function is supposed to be called several times as part of
-	 * driver init, in specific order. Verify that the mid_index is the
-	 * first free index in the idr, to be able to free the indexes in case
-	 * of error.
-	 */
-	idr_cursor = idr_get_cursor(&mlxsw_sp->pgt->pgt_idr);
-	if (WARN_ON(idr_cursor != mid_base)) {
-		err = -EINVAL;
-		goto err_idr_cursor;
-	}
-
+	mid_base = idr_get_cursor(&mlxsw_sp->pgt->pgt_idr);
 	for (i = 0; i < count; i++) {
 		err = idr_alloc_cyclic(&mlxsw_sp->pgt->pgt_idr, NULL,
 				       mid_base, mid_base + count, GFP_KERNEL);
@@ -81,12 +71,12 @@ mlxsw_sp_pgt_mid_alloc_range(struct mlxsw_sp *mlxsw_sp, u16 mid_base, u16 count)
 	}
 
 	mutex_unlock(&mlxsw_sp->pgt->lock);
+	*p_mid_base = mid_base;
 	return 0;
 
 err_idr_alloc_cyclic:
 	for (i--; i >= 0; i--)
 		idr_remove(&mlxsw_sp->pgt->pgt_idr, mid_base + i);
-err_idr_cursor:
 	mutex_unlock(&mlxsw_sp->pgt->lock);
 	return err;
 }
@@ -126,7 +116,7 @@ mlxsw_sp_pgt_entry_create(struct mlxsw_sp_pgt *pgt, u16 mid, u16 smpe)
 	void *ret;
 	int err;
 
-	pgt_entry = kzalloc(sizeof(*pgt_entry), GFP_KERNEL);
+	pgt_entry = kzalloc_obj(*pgt_entry);
 	if (!pgt_entry)
 		return ERR_PTR(-ENOMEM);
 
@@ -221,7 +211,7 @@ mlxsw_sp_pgt_entry_port_create(struct mlxsw_sp *mlxsw_sp,
 	struct mlxsw_sp_pgt_entry_port *pgt_entry_port;
 	int err;
 
-	pgt_entry_port = kzalloc(sizeof(*pgt_entry_port), GFP_KERNEL);
+	pgt_entry_port = kzalloc_obj(*pgt_entry_port);
 	if (!pgt_entry_port)
 		return ERR_PTR(-ENOMEM);
 
@@ -325,7 +315,7 @@ int mlxsw_sp_pgt_init(struct mlxsw_sp *mlxsw_sp)
 	if (!MLXSW_CORE_RES_VALID(mlxsw_sp->core, PGT_SIZE))
 		return -EIO;
 
-	pgt = kzalloc(sizeof(*mlxsw_sp->pgt), GFP_KERNEL);
+	pgt = kzalloc_obj(*mlxsw_sp->pgt);
 	if (!pgt)
 		return -ENOMEM;
 

@@ -23,7 +23,7 @@ static void *msu_sink_assign(struct device *dev, int *mode)
 {
 	struct msu_sink_private *priv;
 
-	priv = kzalloc(sizeof(*priv), GFP_KERNEL);
+	priv = kzalloc_obj(*priv);
 	if (!priv)
 		return NULL;
 
@@ -116,4 +116,5 @@ static const struct msu_buffer sink_mbuf = {
 
 module_intel_th_msu_buffer(sink_mbuf);
 
+MODULE_DESCRIPTION("example software sink buffer for Intel TH MSU");
 MODULE_LICENSE("GPL v2");

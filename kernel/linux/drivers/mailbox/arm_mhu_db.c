@@ -318,7 +318,6 @@ static int mhu_db_probe(struct amba_device *adev, const struct amba_id *id)
 						mhu_db_mbox_rx_handler,
 						IRQF_ONESHOT, "mhu_db_link", mhu);
 		if (err) {
-			dev_err(dev, "Can't claim IRQ %d\n", irq);
 			mbox_controller_unregister(&mhu->mbox);
 			return err;
 		}
@@ -328,7 +327,7 @@ static int mhu_db_probe(struct amba_device *adev, const struct amba_id *id)
 	return 0;
 }
 
-static struct amba_id mhu_ids[] = {
+static const struct amba_id mhu_ids[] = {
 	{
 		.id	= 0x1bb098,
 		.mask	= 0xffffff,

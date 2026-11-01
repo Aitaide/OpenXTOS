@@ -47,7 +47,7 @@ static inline struct ipu_crtc *to_ipu_crtc(struct drm_crtc *crtc)
 }
 
 static void ipu_crtc_atomic_enable(struct drm_crtc *crtc,
-				   struct drm_atomic_state *state)
+				   struct drm_atomic_commit *state)
 {
 	struct ipu_crtc *ipu_crtc = to_ipu_crtc(crtc);
 	struct ipu_soc *ipu = dev_get_drvdata(ipu_crtc->dev->parent);
@@ -79,7 +79,7 @@ static void ipu_crtc_disable_planes(struct ipu_crtc *ipu_crtc,
 }
 
 static void ipu_crtc_atomic_disable(struct drm_crtc *crtc,
-				    struct drm_atomic_state *state)
+				    struct drm_atomic_commit *state)
 {
 	struct drm_crtc_state *old_crtc_state = drm_atomic_get_old_crtc_state(state,
 									      crtc);
@@ -117,7 +117,7 @@ static void imx_drm_crtc_reset(struct drm_crtc *crtc)
 	kfree(to_imx_crtc_state(crtc->state));
 	crtc->state = NULL;
 
-	state = kzalloc(sizeof(*state), GFP_KERNEL);
+	state = kzalloc_obj(*state);
 	if (state)
 		__drm_atomic_helper_crtc_reset(crtc, &state->base);
 }
@@ -126,7 +126,7 @@ static struct drm_crtc_state *imx_drm_crtc_duplicate_state(struct drm_crtc *crtc
 {
 	struct imx_crtc_state *state;
 
-	state = kzalloc(sizeof(*state), GFP_KERNEL);
+	state = kzalloc_obj(*state);
 	if (!state)
 		return NULL;
 
@@ -226,7 +226,7 @@ static bool ipu_crtc_mode_fixup(struct drm_crtc *crtc,
 }
 
 static int ipu_crtc_atomic_check(struct drm_crtc *crtc,
-				 struct drm_atomic_state *state)
+				 struct drm_atomic_commit *state)
 {
 	struct drm_crtc_state *crtc_state = drm_atomic_get_new_crtc_state(state,
 									  crtc);
@@ -239,13 +239,13 @@ static int ipu_crtc_atomic_check(struct drm_crtc *crtc,
 }
 
 static void ipu_crtc_atomic_begin(struct drm_crtc *crtc,
-				  struct drm_atomic_state *state)
+				  struct drm_atomic_commit *state)
 {
 	drm_crtc_vblank_on(crtc);
 }
 
 static void ipu_crtc_atomic_flush(struct drm_crtc *crtc,
-				  struct drm_atomic_state *state)
+				  struct drm_atomic_commit *state)
 {
 	spin_lock_irq(&crtc->dev->event_lock);
 	if (crtc->state->event) {
@@ -410,14 +410,12 @@ static int ipu_drm_bind(struct device *dev, struct device *master, void *data)
 	}
 
 	ipu_crtc->irq = ipu_plane_irq(ipu_crtc->plane[0]);
-	ret = devm_request_irq(ipu_crtc->dev, ipu_crtc->irq, ipu_irq_handler, 0,
-			"imx_drm", ipu_crtc);
+	ret = devm_request_irq(ipu_crtc->dev, ipu_crtc->irq, ipu_irq_handler,
+			       IRQF_NO_AUTOEN, "imx_drm", ipu_crtc);
 	if (ret < 0) {
 		dev_err(ipu_crtc->dev, "irq request failed with %d.\n", ret);
 		return ret;
 	}
-	/* Only enable IRQ when we actually need it to trigger work. */
-	disable_irq(ipu_crtc->irq);
 
 	return 0;
 }
@@ -441,10 +439,9 @@ static int ipu_drm_probe(struct platform_device *pdev)
 	return component_add(dev, &ipu_crtc_ops);
 }
 
-static int ipu_drm_remove(struct platform_device *pdev)
+static void ipu_drm_remove(struct platform_device *pdev)
 {
 	component_del(&pdev->dev, &ipu_crtc_ops);
-	return 0;
 }
 
 struct platform_driver ipu_drm_driver = {

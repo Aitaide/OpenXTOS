@@ -76,22 +76,25 @@ case "${TXMODE}" in
 esac
 
 # Start of state changes: install cleanup handler
-save_sysctl_mem="$(sysctl -n ${path_sysctl_mem})"
 
+old_io_uring_disabled=0
 cleanup() {
 	ip netns del "${NS2}"
 	ip netns del "${NS1}"
-	sysctl -w -q "${path_sysctl_mem}=${save_sysctl_mem}"
+	if [ "$old_io_uring_disabled" -ne 0 ]; then
+		sysctl -w -q kernel.io_uring_disabled="$old_io_uring_disabled" 2>/dev/null || true
+	fi
 }
 
 trap cleanup EXIT
 
-# Configure system settings
-sysctl -w -q "${path_sysctl_mem}=1000000"
-
 # Create virtual ethernet pair between network namespaces
 ip netns add "${NS1}"
 ip netns add "${NS2}"
+
+# Configure system settings
+ip netns exec "${NS1}" sysctl -w -q "${path_sysctl_mem}=1000000"
+ip netns exec "${NS2}" sysctl -w -q "${path_sysctl_mem}=1000000"
 
 ip link add "${DEV}" mtu "${DEV_MTU}" netns "${NS1}" type veth \
   peer name "${DEV}" mtu "${DEV_MTU}" netns "${NS2}"
@@ -122,6 +125,11 @@ do_test() {
 	ip netns exec "${NS1}" "${BIN_TX}" "-${IP}" -t 1 -D "${DADDR}" ${ARGS} "${TXMODE}"
 	wait
 }
+
+old_io_uring_disabled=$(sysctl -n kernel.io_uring_disabled 2>/dev/null || echo "0")
+if [ "$old_io_uring_disabled" -ne 0 ]; then
+	sysctl -w -q kernel.io_uring_disabled=0
+fi
 
 do_test "${EXTRA_ARGS}"
 echo ok

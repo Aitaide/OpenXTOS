@@ -34,21 +34,46 @@ struct acpi_gtdt_descriptor {
 	void *platform_timer;
 };
 
+struct gtdt_v3 {
+	struct acpi_table_gtdt	gtdt_v2;
+	struct acpi_gtdt_el2	el2_vtimer;
+};
+
 static struct acpi_gtdt_descriptor acpi_gtdt_desc __initdata;
 
-static inline __init void *next_platform_timer(void *platform_timer)
+static __init struct acpi_gtdt_el2 *gtdt_to_el2_vtimer(struct acpi_table_gtdt *gtdt)
+{
+	if (gtdt->header.revision < 3)
+		return NULL;
+
+	return &container_of(gtdt, struct gtdt_v3, gtdt_v2)->el2_vtimer;
+}
+
+static __init bool platform_timer_valid(void *platform_timer)
+{
+	struct acpi_gtdt_header *gh = platform_timer;
+	void *platform_timer_begin;
+
+	if (acpi_gtdt_desc.gtdt->header.revision >= 3)
+		platform_timer_begin = container_of(acpi_gtdt_desc.gtdt, struct gtdt_v3, gtdt_v2) + 1;
+	else
+		platform_timer_begin = acpi_gtdt_desc.gtdt + 1;
+
+	return (platform_timer >= platform_timer_begin &&
+		platform_timer + sizeof(*gh) <= acpi_gtdt_desc.gtdt_end &&
+		gh->length != 0 &&
+		platform_timer + gh->length <= acpi_gtdt_desc.gtdt_end);
+}
+
+static __init void *next_platform_timer(void *platform_timer)
 {
 	struct acpi_gtdt_header *gh = platform_timer;
 
-	platform_timer += gh->length;
-	if (platform_timer < acpi_gtdt_desc.gtdt_end)
-		return platform_timer;
-
-	return NULL;
+	return platform_timer + gh->length;
 }
 
 #define for_each_platform_timer(_g)				\
-	for (_g = acpi_gtdt_desc.platform_timer; _g;	\
+	for (_g = acpi_gtdt_desc.platform_timer; platform_timer_valid(_g);\
 	     _g = next_platform_timer(_g))
 
 static inline bool is_timer_block(void *platform_timer)
@@ -95,6 +120,7 @@ static int __init map_gt_gsi(u32 interrupt, u32 flags)
 int __init acpi_gtdt_map_ppi(int type)
 {
 	struct acpi_table_gtdt *gtdt = acpi_gtdt_desc.gtdt;
+	struct acpi_gtdt_el2 *el2_vtimer = gtdt_to_el2_vtimer(gtdt);
 
 	switch (type) {
 	case ARCH_TIMER_PHYS_NONSECURE_PPI:
@@ -107,6 +133,12 @@ int __init acpi_gtdt_map_ppi(int type)
 	case ARCH_TIMER_HYP_PPI:
 		return map_gt_gsi(gtdt->non_secure_el2_interrupt,
 				  gtdt->non_secure_el2_flags);
+	case ARCH_TIMER_HYP_VIRT_PPI:
+		if (el2_vtimer && el2_vtimer->virtual_el2_timer_gsiv)
+			return map_gt_gsi(el2_vtimer->virtual_el2_timer_gsiv,
+					  el2_vtimer->virtual_el2_timer_flags);
+
+		return 0;
 	default:
 		pr_err("Failed to map timer interrupt: invalid type.\n");
 	}
@@ -124,6 +156,7 @@ int __init acpi_gtdt_map_ppi(int type)
 bool __init acpi_gtdt_c3stop(int type)
 {
 	struct acpi_table_gtdt *gtdt = acpi_gtdt_desc.gtdt;
+	struct acpi_gtdt_el2 *el2_vtimer = gtdt_to_el2_vtimer(gtdt);
 
 	switch (type) {
 	case ARCH_TIMER_PHYS_NONSECURE_PPI:
@@ -134,6 +167,10 @@ bool __init acpi_gtdt_c3stop(int type)
 
 	case ARCH_TIMER_HYP_PPI:
 		return !(gtdt->non_secure_el2_flags & ACPI_GTDT_ALWAYS_ON);
+
+	case ARCH_TIMER_HYP_VIRT_PPI:
+		return el2_vtimer && el2_vtimer->virtual_el2_timer_gsiv &&
+		       !(el2_vtimer->virtual_el2_timer_flags & ACPI_GTDT_ALWAYS_ON);
 
 	default:
 		pr_err("Failed to get c3stop info: invalid type.\n");
@@ -157,8 +194,16 @@ int __init acpi_gtdt_init(struct acpi_table_header *table,
 {
 	void *platform_timer;
 	struct acpi_table_gtdt *gtdt;
+	u32 cnt = 0;
 
 	gtdt = container_of(table, struct acpi_table_gtdt, header);
+
+	if ((gtdt->header.revision >= 3 && gtdt->header.length < sizeof(struct gtdt_v3)) ||
+	    (gtdt->header.revision == 2 && gtdt->header.length < sizeof(*gtdt))) {
+		pr_err(FW_BUG "GTDT with invalid size %d\n", gtdt->header.length);
+		return -EINVAL;
+	}
+
 	acpi_gtdt_desc.gtdt = gtdt;
 	acpi_gtdt_desc.gtdt_end = (void *)table + table->length;
 	acpi_gtdt_desc.platform_timer = NULL;
@@ -176,14 +221,22 @@ int __init acpi_gtdt_init(struct acpi_table_header *table,
 		return 0;
 	}
 
-	platform_timer = (void *)gtdt + gtdt->platform_timer_offset;
-	if (platform_timer < (void *)table + sizeof(struct acpi_table_gtdt)) {
-		pr_err(FW_BUG "invalid timer data.\n");
-		return -EINVAL;
+	acpi_gtdt_desc.platform_timer = (void *)gtdt + gtdt->platform_timer_offset;
+	for_each_platform_timer(platform_timer)
+		cnt++;
+
+	if (cnt != gtdt->platform_timer_count) {
+		cnt = min(cnt, gtdt->platform_timer_count);
+		pr_err(FW_BUG "limiting Platform Timer count to %d\n", cnt);
 	}
-	acpi_gtdt_desc.platform_timer = platform_timer;
+
+	if (!cnt) {
+		acpi_gtdt_desc.platform_timer = NULL;
+		return 0;
+	}
+
 	if (platform_timer_count)
-		*platform_timer_count = gtdt->platform_timer_count;
+		*platform_timer_count = cnt;
 
 	return 0;
 }
@@ -283,43 +336,9 @@ error:
 		if (frame->virt_irq > 0)
 			acpi_unregister_gsi(gtdt_frame->virtual_timer_interrupt);
 		frame->virt_irq = 0;
-	} while (i-- >= 0 && gtdt_frame--);
+	} while (i-- > 0 && gtdt_frame--);
 
 	return -EINVAL;
-}
-
-/**
- * acpi_arch_timer_mem_init() - Get the info of all GT blocks in GTDT table.
- * @timer_mem:	The pointer to the array of struct arch_timer_mem for returning
- *		the result of parsing. The element number of this array should
- *		be platform_timer_count(the total number of platform timers).
- * @timer_count: It points to a integer variable which is used for storing the
- *		number of GT blocks we have parsed.
- *
- * Return: 0 if success, -EINVAL/-ENODEV if error.
- */
-int __init acpi_arch_timer_mem_init(struct arch_timer_mem *timer_mem,
-				    int *timer_count)
-{
-	int ret;
-	void *platform_timer;
-
-	*timer_count = 0;
-	for_each_platform_timer(platform_timer) {
-		if (is_timer_block(platform_timer)) {
-			ret = gtdt_parse_timer_block(platform_timer, timer_mem);
-			if (ret)
-				return ret;
-			timer_mem++;
-			(*timer_count)++;
-		}
-	}
-
-	if (*timer_count)
-		pr_info("found %d memory-mapped timer block(s).\n",
-			*timer_count);
-
-	return 0;
 }
 
 /*
@@ -352,7 +371,7 @@ static int __init gtdt_import_sbsa_gwdt(struct acpi_gtdt_watchdog *wd,
 	}
 
 	irq = map_gt_gsi(wd->timer_interrupt, wd->timer_flags);
-	res[2] = (struct resource)DEFINE_RES_IRQ(irq);
+	res[2] = DEFINE_RES_IRQ(irq);
 	if (irq <= 0) {
 		pr_warn("failed to map the Watchdog interrupt.\n");
 		nr_res--;
@@ -373,11 +392,11 @@ static int __init gtdt_import_sbsa_gwdt(struct acpi_gtdt_watchdog *wd,
 	return 0;
 }
 
-static int __init gtdt_sbsa_gwdt_init(void)
+static int __init gtdt_platform_timer_init(void)
 {
 	void *platform_timer;
 	struct acpi_table_header *table;
-	int ret, timer_count, gwdt_count = 0;
+	int ret, timer_count, gwdt_count = 0, mmio_timer_count = 0;
 
 	if (acpi_disabled)
 		return 0;
@@ -399,20 +418,41 @@ static int __init gtdt_sbsa_gwdt_init(void)
 		goto out_put_gtdt;
 
 	for_each_platform_timer(platform_timer) {
+		ret = 0;
+
 		if (is_non_secure_watchdog(platform_timer)) {
 			ret = gtdt_import_sbsa_gwdt(platform_timer, gwdt_count);
 			if (ret)
-				break;
+				continue;
 			gwdt_count++;
+		} else 	if (is_timer_block(platform_timer)) {
+			struct arch_timer_mem atm = {};
+			struct platform_device *pdev;
+
+			ret = gtdt_parse_timer_block(platform_timer, &atm);
+			if (ret)
+				continue;
+
+			pdev = platform_device_register_data(NULL, "gtdt-arm-mmio-timer",
+							     mmio_timer_count, &atm,
+							     sizeof(atm));
+			if (IS_ERR(pdev)) {
+				pr_err("Can't register timer %d\n", mmio_timer_count);
+				continue;
+			}
+
+			mmio_timer_count++;
 		}
 	}
 
 	if (gwdt_count)
 		pr_info("found %d SBSA generic Watchdog(s).\n", gwdt_count);
+	if (mmio_timer_count)
+		pr_info("found %d Generic MMIO timer(s).\n", mmio_timer_count);
 
 out_put_gtdt:
 	acpi_put_table(table);
 	return ret;
 }
 
-device_initcall(gtdt_sbsa_gwdt_init);
+device_initcall(gtdt_platform_timer_init);

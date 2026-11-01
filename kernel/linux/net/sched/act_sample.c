@@ -66,7 +66,7 @@ static int tcf_sample_init(struct net *net, struct nlattr *nla,
 		return err;
 	exists = err;
 	if (exists && bind)
-		return 0;
+		return ACT_P_BOUND;
 
 	if (!exists) {
 		ret = tcf_idr_create(tn, index, est, a,
@@ -167,7 +167,9 @@ TC_INDIRECT_SCOPE int tcf_sample_act(struct sk_buff *skb,
 {
 	struct tcf_sample *s = to_sample(a);
 	struct psample_group *psample_group;
+	u8 cookie_data[TC_COOKIE_MAX_SIZE];
 	struct psample_metadata md = {};
+	struct tc_cookie *user_cookie;
 	int retval;
 
 	tcf_lastuse_update(&s->tcf_tm);
@@ -188,6 +190,16 @@ TC_INDIRECT_SCOPE int tcf_sample_act(struct sk_buff *skb,
 		/* on ingress, the mac header gets popped, so push it back */
 		if (skb_at_tc_ingress(skb) && tcf_sample_dev_ok_push(skb->dev))
 			skb_push(skb, skb->mac_len);
+
+		rcu_read_lock();
+		user_cookie = rcu_dereference(a->user_cookie);
+		if (user_cookie) {
+			memcpy(cookie_data, user_cookie->data,
+			       user_cookie->len);
+			md.user_cookie = cookie_data;
+			md.user_cookie_len = user_cookie->len;
+		}
+		rcu_read_unlock();
 
 		md.trunc_size = s->truncate ? s->trunc_size : skb->len;
 		psample_sample_packet(psample_group, skb, s->rate, &md);
@@ -303,6 +315,14 @@ static int tcf_sample_offload_act_setup(struct tc_action *act, void *entry_data,
 	return 0;
 }
 
+static size_t tcf_sample_get_fill_size(const struct tc_action *act)
+{
+	return nla_total_size(sizeof(struct tc_sample)) /* TCA_SAMPLE_PARMS */
+		+ nla_total_size(sizeof(u32)) /* TCA_SAMPLE_RATE */
+		+ nla_total_size(sizeof(u32)) /* TCA_SAMPLE_TRUNC_SIZE */
+		+ nla_total_size(sizeof(u32)); /* TCA_SAMPLE_PSAMPLE_GROUP */
+}
+
 static struct tc_action_ops act_sample_ops = {
 	.kind	  = "sample",
 	.id	  = TCA_ID_SAMPLE,
@@ -312,10 +332,12 @@ static struct tc_action_ops act_sample_ops = {
 	.dump	  = tcf_sample_dump,
 	.init	  = tcf_sample_init,
 	.cleanup  = tcf_sample_cleanup,
+	.get_fill_size = tcf_sample_get_fill_size,
 	.get_psample_group = tcf_sample_get_group,
 	.offload_act_setup    = tcf_sample_offload_act_setup,
 	.size	  = sizeof(struct tcf_sample),
 };
+MODULE_ALIAS_NET_ACT("sample");
 
 static __net_init int sample_init_net(struct net *net)
 {

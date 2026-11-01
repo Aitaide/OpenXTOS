@@ -1,15 +1,9 @@
+/* SPDX-License-Identifier: GPL-2.0 */
 #ifndef LLC_PDU_H
 #define LLC_PDU_H
 /*
  * Copyright (c) 1997 by Procom Technology,Inc.
  * 		 2001-2003 by Arnaldo Carvalho de Melo <acme@conectiva.com.br>
- *
- * This program can be redistributed or modified under the terms of the
- * GNU General Public License as published by the Free Software Foundation.
- * This program is distributed without any warranty or implied warranty
- * of merchantability or fitness for a particular purpose.
- *
- * See the GNU General Public License for more details.
  */
 
 #include <linux/if_ether.h>
@@ -254,7 +248,7 @@ static inline void llc_pdu_header_init(struct sk_buff *skb, u8 type,
 }
 
 /**
- *	llc_pdu_decode_sa - extracs source address (MAC) of input frame
+ *	llc_pdu_decode_sa - extracts, source address (MAC) of input frame
  *	@skb: input skb that source address must be extracted from it.
  *	@sa: pointer to source address (6 byte array).
  *
@@ -262,8 +256,7 @@ static inline void llc_pdu_header_init(struct sk_buff *skb, u8 type,
  */
 static inline void llc_pdu_decode_sa(struct sk_buff *skb, u8 *sa)
 {
-	if (skb->protocol == htons(ETH_P_802_2))
-		memcpy(sa, eth_hdr(skb)->h_source, ETH_ALEN);
+	memcpy(sa, eth_hdr(skb)->h_source, ETH_ALEN);
 }
 
 /**
@@ -275,8 +268,7 @@ static inline void llc_pdu_decode_sa(struct sk_buff *skb, u8 *sa)
  */
 static inline void llc_pdu_decode_da(struct sk_buff *skb, u8 *da)
 {
-	if (skb->protocol == htons(ETH_P_802_2))
-		memcpy(da, eth_hdr(skb)->h_dest, ETH_ALEN);
+	memcpy(da, eth_hdr(skb)->h_dest, ETH_ALEN);
 }
 
 /**

@@ -7,7 +7,6 @@
  * https://edit.wpgdadawant.com/uploads/news_file/program/2019/30184/tech_files/program_30184_suggest_other_file.pdf
  */
 
-#include <linux/acpi.h>
 #include <linux/bits.h>
 #include <linux/bitfield.h>
 #include <linux/delay.h>
@@ -15,7 +14,6 @@
 #include <linux/interrupt.h>
 #include <linux/kernel.h>
 #include <linux/log2.h>
-#include <linux/mod_devicetable.h>
 #include <linux/module.h>
 #include <linux/pm.h>
 #include <linux/property.h>
@@ -326,20 +324,18 @@ static int sx9360_read_raw(struct iio_dev *indio_dev,
 
 	switch (mask) {
 	case IIO_CHAN_INFO_RAW:
-		ret = iio_device_claim_direct_mode(indio_dev);
-		if (ret)
-			return ret;
+		if (!iio_device_claim_direct(indio_dev))
+			return -EBUSY;
 
 		ret = sx_common_read_proximity(data, chan, val);
-		iio_device_release_direct_mode(indio_dev);
+		iio_device_release_direct(indio_dev);
 		return ret;
 	case IIO_CHAN_INFO_HARDWAREGAIN:
-		ret = iio_device_claim_direct_mode(indio_dev);
-		if (ret)
-			return ret;
+		if (!iio_device_claim_direct(indio_dev))
+			return -EBUSY;
 
 		ret = sx9360_read_gain(data, chan, val);
-		iio_device_release_direct_mode(indio_dev);
+		iio_device_release_direct(indio_dev);
 		return ret;
 	case IIO_CHAN_INFO_SAMP_FREQ:
 		return sx9360_read_samp_freq(data, val, val2);
@@ -387,19 +383,15 @@ static int sx9360_read_avail(struct iio_dev *indio_dev,
 static int sx9360_set_samp_freq(struct sx_common_data *data,
 				int val, int val2)
 {
-	int ret, reg;
+	int reg;
 	__be16 buf;
 
 	reg = val * 8192 / SX9360_FOSC_HZ + val2 * 8192 / (SX9360_FOSC_MHZ);
 	buf = cpu_to_be16(reg);
-	mutex_lock(&data->mutex);
+	guard(mutex)(&data->mutex);
 
-	ret = regmap_bulk_write(data->regmap, SX9360_REG_GNRL_CTRL1, &buf,
-				sizeof(buf));
-
-	mutex_unlock(&data->mutex);
-
-	return ret;
+	return regmap_bulk_write(data->regmap, SX9360_REG_GNRL_CTRL1, &buf,
+				 sizeof(buf));
 }
 
 static int sx9360_read_thresh(struct sx_common_data *data, int *val)
@@ -510,7 +502,6 @@ static int sx9360_read_event_val(struct iio_dev *indio_dev,
 static int sx9360_write_thresh(struct sx_common_data *data, int _val)
 {
 	unsigned int val = _val;
-	int ret;
 
 	if (val >= 1)
 		val = int_sqrt(2 * val);
@@ -518,11 +509,8 @@ static int sx9360_write_thresh(struct sx_common_data *data, int _val)
 	if (val > 0xff)
 		return -EINVAL;
 
-	mutex_lock(&data->mutex);
-	ret = regmap_write(data->regmap, SX9360_REG_PROX_CTRL5, val);
-	mutex_unlock(&data->mutex);
-
-	return ret;
+	guard(mutex)(&data->mutex);
+	return regmap_write(data->regmap, SX9360_REG_PROX_CTRL5, val);
 }
 
 static int sx9360_write_hysteresis(struct sx_common_data *data, int _val)
@@ -546,18 +534,14 @@ static int sx9360_write_hysteresis(struct sx_common_data *data, int _val)
 		return -EINVAL;
 
 	hyst = FIELD_PREP(SX9360_REG_PROX_CTRL4_HYST_MASK, hyst);
-	mutex_lock(&data->mutex);
-	ret = regmap_update_bits(data->regmap, SX9360_REG_PROX_CTRL4,
-				 SX9360_REG_PROX_CTRL4_HYST_MASK, hyst);
-	mutex_unlock(&data->mutex);
-
-	return ret;
+	guard(mutex)(&data->mutex);
+	return regmap_update_bits(data->regmap, SX9360_REG_PROX_CTRL4,
+				  SX9360_REG_PROX_CTRL4_HYST_MASK, hyst);
 }
 
 static int sx9360_write_far_debounce(struct sx_common_data *data, int _val)
 {
 	unsigned int regval, val = _val;
-	int ret;
 
 	if (val > 0)
 		val = ilog2(val);
@@ -566,19 +550,15 @@ static int sx9360_write_far_debounce(struct sx_common_data *data, int _val)
 
 	regval = FIELD_PREP(SX9360_REG_PROX_CTRL4_FAR_DEBOUNCE_MASK, val);
 
-	mutex_lock(&data->mutex);
-	ret = regmap_update_bits(data->regmap, SX9360_REG_PROX_CTRL4,
-				 SX9360_REG_PROX_CTRL4_FAR_DEBOUNCE_MASK,
-				 regval);
-	mutex_unlock(&data->mutex);
-
-	return ret;
+	guard(mutex)(&data->mutex);
+	return regmap_update_bits(data->regmap, SX9360_REG_PROX_CTRL4,
+				  SX9360_REG_PROX_CTRL4_FAR_DEBOUNCE_MASK,
+				  regval);
 }
 
 static int sx9360_write_close_debounce(struct sx_common_data *data, int _val)
 {
 	unsigned int regval, val = _val;
-	int ret;
 
 	if (val > 0)
 		val = ilog2(val);
@@ -587,13 +567,10 @@ static int sx9360_write_close_debounce(struct sx_common_data *data, int _val)
 
 	regval = FIELD_PREP(SX9360_REG_PROX_CTRL4_CLOSE_DEBOUNCE_MASK, val);
 
-	mutex_lock(&data->mutex);
-	ret = regmap_update_bits(data->regmap, SX9360_REG_PROX_CTRL4,
-				 SX9360_REG_PROX_CTRL4_CLOSE_DEBOUNCE_MASK,
-				 regval);
-	mutex_unlock(&data->mutex);
-
-	return ret;
+	guard(mutex)(&data->mutex);
+	return regmap_update_bits(data->regmap, SX9360_REG_PROX_CTRL4,
+				  SX9360_REG_PROX_CTRL4_CLOSE_DEBOUNCE_MASK,
+				  regval);
 }
 
 static int sx9360_write_event_val(struct iio_dev *indio_dev,
@@ -630,19 +607,15 @@ static int sx9360_write_gain(struct sx_common_data *data,
 			     const struct iio_chan_spec *chan, int val)
 {
 	unsigned int gain, reg;
-	int ret;
 
 	gain = ilog2(val);
 	reg = SX9360_REG_PROX_CTRL0_PHR + chan->channel;
 	gain = FIELD_PREP(SX9360_REG_PROX_CTRL0_GAIN_MASK, gain);
 
-	mutex_lock(&data->mutex);
-	ret = regmap_update_bits(data->regmap, reg,
-				 SX9360_REG_PROX_CTRL0_GAIN_MASK,
-				 gain);
-	mutex_unlock(&data->mutex);
-
-	return ret;
+	guard(mutex)(&data->mutex);
+	return regmap_update_bits(data->regmap, reg,
+				  SX9360_REG_PROX_CTRL0_GAIN_MASK,
+				  gain);
 }
 
 static int sx9360_write_raw(struct iio_dev *indio_dev,
@@ -704,9 +677,8 @@ static int sx9360_init_compensation(struct iio_dev *indio_dev)
 	int ret;
 
 	/* run the compensation phase on all channels */
-	ret = regmap_update_bits(data->regmap, SX9360_REG_STAT,
-				 SX9360_REG_STAT_COMPSTAT_MASK,
-				 SX9360_REG_STAT_COMPSTAT_MASK);
+	ret = regmap_set_bits(data->regmap, SX9360_REG_STAT,
+			      SX9360_REG_STAT_COMPSTAT_MASK);
 	if (ret)
 		return ret;
 
@@ -827,36 +799,31 @@ static int sx9360_suspend(struct device *dev)
 
 	disable_irq_nosync(data->client->irq);
 
-	mutex_lock(&data->mutex);
+	guard(mutex)(&data->mutex);
 	ret = regmap_read(data->regmap, SX9360_REG_GNRL_CTRL0, &regval);
+	if (ret < 0)
+		return ret;
 
 	data->suspend_ctrl =
 		FIELD_GET(SX9360_REG_GNRL_CTRL0_PHEN_MASK, regval);
 
-	if (ret < 0)
-		goto out;
 
 	/* Disable all phases, send the device to sleep. */
-	ret = regmap_write(data->regmap, SX9360_REG_GNRL_CTRL0, 0);
-
-out:
-	mutex_unlock(&data->mutex);
-	return ret;
+	return regmap_write(data->regmap, SX9360_REG_GNRL_CTRL0, 0);
 }
 
 static int sx9360_resume(struct device *dev)
 {
 	struct sx_common_data *data = iio_priv(dev_get_drvdata(dev));
-	int ret;
 
-	mutex_lock(&data->mutex);
-	ret = regmap_update_bits(data->regmap, SX9360_REG_GNRL_CTRL0,
-				 SX9360_REG_GNRL_CTRL0_PHEN_MASK,
-				 data->suspend_ctrl);
-	mutex_unlock(&data->mutex);
-	if (ret)
-		return ret;
-
+	scoped_guard(mutex, &data->mutex) {
+		int ret = regmap_update_bits(data->regmap,
+					     SX9360_REG_GNRL_CTRL0,
+					     SX9360_REG_GNRL_CTRL0_PHEN_MASK,
+					     data->suspend_ctrl);
+		if (ret)
+			return ret;
+	}
 	enable_irq(data->client->irq);
 	return 0;
 }
@@ -864,20 +831,20 @@ static int sx9360_resume(struct device *dev)
 static DEFINE_SIMPLE_DEV_PM_OPS(sx9360_pm_ops, sx9360_suspend, sx9360_resume);
 
 static const struct acpi_device_id sx9360_acpi_match[] = {
-	{ "STH9360", SX9360_WHOAMI_VALUE },
-	{ "SAMM0208", SX9360_WHOAMI_VALUE },
+	{ .id = "STH9360" },
+	{ .id = "SAMM0208" },
 	{ }
 };
 MODULE_DEVICE_TABLE(acpi, sx9360_acpi_match);
 
 static const struct of_device_id sx9360_of_match[] = {
-	{ .compatible = "semtech,sx9360", (void *)SX9360_WHOAMI_VALUE },
+	{ .compatible = "semtech,sx9360" },
 	{ }
 };
 MODULE_DEVICE_TABLE(of, sx9360_of_match);
 
 static const struct i2c_device_id sx9360_id[] = {
-	{"sx9360", SX9360_WHOAMI_VALUE },
+	{ .name = "sx9360" },
 	{ }
 };
 MODULE_DEVICE_TABLE(i2c, sx9360_id);
@@ -904,4 +871,4 @@ module_i2c_driver(sx9360_driver);
 MODULE_AUTHOR("Gwendal Grignou <gwendal@chromium.org>");
 MODULE_DESCRIPTION("Driver for Semtech SX9360 proximity sensor");
 MODULE_LICENSE("GPL v2");
-MODULE_IMPORT_NS(SEMTECH_PROX);
+MODULE_IMPORT_NS("SEMTECH_PROX");

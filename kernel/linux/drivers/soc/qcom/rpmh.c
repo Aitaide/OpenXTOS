@@ -121,7 +121,7 @@ static struct cache_req *cache_rpm_request(struct rpmh_ctrlr *ctrlr,
 	if (req)
 		goto existing;
 
-	req = kzalloc(sizeof(*req), GFP_ATOMIC);
+	req = kzalloc_obj(*req, GFP_ATOMIC);
 	if (!req) {
 		req = ERR_PTR(-ENOMEM);
 		goto unlock;
@@ -175,6 +175,9 @@ static int __rpmh_write(const struct device *dev, enum rpmh_state state,
 	struct cache_req *req;
 	int i;
 
+	if (rpm_msg->msg.is_read)
+		goto send_data;
+
 	/* Cache the request in our store and link the payload */
 	for (i = 0; i < rpm_msg->msg.num_cmds; i++) {
 		req = cache_rpm_request(ctrlr, state, &rpm_msg->msg.cmds[i]);
@@ -182,8 +185,8 @@ static int __rpmh_write(const struct device *dev, enum rpmh_state state,
 			return PTR_ERR(req);
 	}
 
+send_data:
 	if (state == RPMH_ACTIVE_ONLY_STATE) {
-		WARN_ON(irqs_disabled());
 		ret = rpmh_rsc_send_data(ctrlr_to_drv(ctrlr), &rpm_msg->msg);
 	} else {
 		/* Clean up our call by spoofing tx_done */
@@ -195,7 +198,7 @@ static int __rpmh_write(const struct device *dev, enum rpmh_state state,
 }
 
 static int __fill_rpmh_msg(struct rpmh_request *req, enum rpmh_state state,
-		const struct tcs_cmd *cmd, u32 n)
+		const struct tcs_cmd *cmd, u32 n, bool is_read)
 {
 	if (!cmd || !n || n > MAX_RPMH_PAYLOAD)
 		return -EINVAL;
@@ -205,9 +208,44 @@ static int __fill_rpmh_msg(struct rpmh_request *req, enum rpmh_state state,
 	req->msg.state = state;
 	req->msg.cmds = req->cmd;
 	req->msg.num_cmds = n;
+	req->msg.is_read = is_read;
 
 	return 0;
 }
+
+/**
+ * rpmh_read: Read a resource value
+ *
+ * @dev: The device making the request
+ * @cmd: The payload having address of resource to read
+ *
+ * Reads the value for the resource address given in tcs_cmd->addr
+ * and returns the tcs_cmd->data filled with same.
+ *
+ * Context: May sleep. Do not call from atomic contexts.
+ *
+ * Return: 0 on success, negative errno on failure
+ */
+int rpmh_read(const struct device *dev, struct tcs_cmd *cmd)
+{
+	DECLARE_COMPLETION_ONSTACK(compl);
+	DEFINE_RPMH_MSG_ONSTACK(dev, RPMH_ACTIVE_ONLY_STATE, &compl, rpm_msg);
+	int ret;
+
+	ret = __fill_rpmh_msg(&rpm_msg, RPMH_ACTIVE_ONLY_STATE, cmd, 1, true);
+	if (ret)
+		return ret;
+
+	ret = __rpmh_write(dev, RPMH_ACTIVE_ONLY_STATE, &rpm_msg);
+	if (ret)
+		return ret;
+
+	ret = wait_for_completion_timeout(&compl, RPMH_TIMEOUT_MS);
+	cmd[0].data = rpm_msg.cmd[0].data;
+
+	return (ret > 0) ? 0 : -ETIMEDOUT;
+}
+EXPORT_SYMBOL_GPL(rpmh_read);
 
 /**
  * rpmh_write_async: Write a set of RPMH commands
@@ -226,12 +264,12 @@ int rpmh_write_async(const struct device *dev, enum rpmh_state state,
 	struct rpmh_request *rpm_msg;
 	int ret;
 
-	rpm_msg = kzalloc(sizeof(*rpm_msg), GFP_ATOMIC);
+	rpm_msg = kzalloc_obj(*rpm_msg, GFP_ATOMIC);
 	if (!rpm_msg)
 		return -ENOMEM;
 	rpm_msg->needs_free = true;
 
-	ret = __fill_rpmh_msg(rpm_msg, state, cmd, n);
+	ret = __fill_rpmh_msg(rpm_msg, state, cmd, n, false);
 	if (ret) {
 		kfree(rpm_msg);
 		return ret;
@@ -239,7 +277,7 @@ int rpmh_write_async(const struct device *dev, enum rpmh_state state,
 
 	return __rpmh_write(dev, state, rpm_msg);
 }
-EXPORT_SYMBOL(rpmh_write_async);
+EXPORT_SYMBOL_GPL(rpmh_write_async);
 
 /**
  * rpmh_write: Write a set of RPMH commands and block until response
@@ -258,7 +296,7 @@ int rpmh_write(const struct device *dev, enum rpmh_state state,
 	DEFINE_RPMH_MSG_ONSTACK(dev, state, &compl, rpm_msg);
 	int ret;
 
-	ret = __fill_rpmh_msg(&rpm_msg, state, cmd, n);
+	ret = __fill_rpmh_msg(&rpm_msg, state, cmd, n, false);
 	if (ret)
 		return ret;
 
@@ -270,7 +308,7 @@ int rpmh_write(const struct device *dev, enum rpmh_state state,
 	WARN_ON(!ret);
 	return (ret > 0) ? 0 : -ETIMEDOUT;
 }
-EXPORT_SYMBOL(rpmh_write);
+EXPORT_SYMBOL_GPL(rpmh_write);
 
 static void cache_batch(struct rpmh_ctrlr *ctrlr, struct batch_cache_req *req)
 {
@@ -353,7 +391,7 @@ int rpmh_write_batch(const struct device *dev, enum rpmh_state state,
 	rpm_msgs = req->rpm_msgs;
 
 	for (i = 0; i < count; i++) {
-		__fill_rpmh_msg(rpm_msgs + i, state, cmd, n[i]);
+		__fill_rpmh_msg(rpm_msgs + i, state, cmd, n[i], false);
 		cmd += n[i];
 	}
 
@@ -395,7 +433,7 @@ exit:
 
 	return ret;
 }
-EXPORT_SYMBOL(rpmh_write_batch);
+EXPORT_SYMBOL_GPL(rpmh_write_batch);
 
 static int is_req_valid(struct cache_req *req)
 {
@@ -500,4 +538,4 @@ void rpmh_invalidate(const struct device *dev)
 	ctrlr->dirty = true;
 	spin_unlock_irqrestore(&ctrlr->cache_lock, flags);
 }
-EXPORT_SYMBOL(rpmh_invalidate);
+EXPORT_SYMBOL_GPL(rpmh_invalidate);

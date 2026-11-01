@@ -1,6 +1,7 @@
 /*
  * Copyright (c) 2004-2011 Atheros Communications Inc.
  * Copyright (c) 2011-2012 Qualcomm Atheros, Inc.
+ * Copyright (c) Qualcomm Technologies, Inc. and/or its subsidiaries.
  *
  * Permission to use, copy, modify, and/or distribute this software for any
  * purpose with or without fee is hereby granted, provided that the above
@@ -149,7 +150,7 @@ static bool __ath6kl_cfg80211_sscan_stop(struct ath6kl_vif *vif)
 	if (!test_and_clear_bit(SCHED_SCANNING, &vif->flags))
 		return false;
 
-	del_timer_sync(&vif->sched_scan_timer);
+	timer_delete_sync(&vif->sched_scan_timer);
 
 	if (ar->state == ATH6KL_STATE_RECOVERY)
 		return true;
@@ -753,6 +754,11 @@ void ath6kl_cfg80211_connect_event(struct ath6kl_vif *vif, u16 channel,
 	u8 *assoc_resp_ie = assoc_info + beacon_ie_len + assoc_req_len +
 	    assoc_resp_ie_offset;
 
+	if (assoc_req_len < assoc_req_ie_offset)
+		assoc_req_len = assoc_req_ie_offset;
+	if (assoc_resp_len < assoc_resp_ie_offset)
+		assoc_resp_len = assoc_resp_ie_offset;
+
 	assoc_req_len -= assoc_req_ie_offset;
 	assoc_resp_len -= assoc_resp_ie_offset;
 
@@ -1118,18 +1124,18 @@ void ath6kl_cfg80211_ch_switch_notify(struct ath6kl_vif *vif, int freq,
 				 ath6kl_band_2ghz.ht_cap.ht_supported) ?
 					NL80211_CHAN_HT20 : NL80211_CHAN_NO_HT);
 
-	mutex_lock(&vif->wdev.mtx);
-	cfg80211_ch_switch_notify(vif->ndev, &chandef, 0, 0);
-	mutex_unlock(&vif->wdev.mtx);
+	wiphy_lock(vif->ar->wiphy);
+	cfg80211_ch_switch_notify(vif->ndev, &chandef, 0);
+	wiphy_unlock(vif->ar->wiphy);
 }
 
-static int ath6kl_cfg80211_add_key(struct wiphy *wiphy, struct net_device *ndev,
+static int ath6kl_cfg80211_add_key(struct wiphy *wiphy, struct wireless_dev *wdev,
 				   int link_id, u8 key_index, bool pairwise,
 				   const u8 *mac_addr,
 				   struct key_params *params)
 {
-	struct ath6kl *ar = ath6kl_priv(ndev);
-	struct ath6kl_vif *vif = netdev_priv(ndev);
+	struct ath6kl *ar = ath6kl_priv(wdev->netdev);
+	struct ath6kl_vif *vif = netdev_priv(wdev->netdev);
 	struct ath6kl_key *key = NULL;
 	int seq_len;
 	u8 key_usage;
@@ -1200,7 +1206,7 @@ static int ath6kl_cfg80211_add_key(struct wiphy *wiphy, struct net_device *ndev,
 	if (((vif->auth_mode == WPA_PSK_AUTH) ||
 	     (vif->auth_mode == WPA2_PSK_AUTH)) &&
 	    (key_usage & GROUP_USAGE))
-		del_timer(&vif->disconnect_timer);
+		timer_delete(&vif->disconnect_timer);
 
 	ath6kl_dbg(ATH6KL_DBG_WLAN_CFG,
 		   "%s: index %d, key_len %d, key_type 0x%x, key_usage 0x%x, seq_len %d\n",
@@ -1248,12 +1254,12 @@ static int ath6kl_cfg80211_add_key(struct wiphy *wiphy, struct net_device *ndev,
 				     (u8 *) mac_addr, SYNC_BOTH_WMIFLAG);
 }
 
-static int ath6kl_cfg80211_del_key(struct wiphy *wiphy, struct net_device *ndev,
+static int ath6kl_cfg80211_del_key(struct wiphy *wiphy, struct wireless_dev *wdev,
 				   int link_id, u8 key_index, bool pairwise,
 				   const u8 *mac_addr)
 {
-	struct ath6kl *ar = ath6kl_priv(ndev);
-	struct ath6kl_vif *vif = netdev_priv(ndev);
+	struct ath6kl *ar = ath6kl_priv(wdev->netdev);
+	struct ath6kl_vif *vif = netdev_priv(wdev->netdev);
 
 	ath6kl_dbg(ATH6KL_DBG_WLAN_CFG, "%s: index %d\n", __func__, key_index);
 
@@ -1278,13 +1284,13 @@ static int ath6kl_cfg80211_del_key(struct wiphy *wiphy, struct net_device *ndev,
 	return ath6kl_wmi_deletekey_cmd(ar->wmi, vif->fw_vif_idx, key_index);
 }
 
-static int ath6kl_cfg80211_get_key(struct wiphy *wiphy, struct net_device *ndev,
+static int ath6kl_cfg80211_get_key(struct wiphy *wiphy, struct wireless_dev *wdev,
 				   int link_id, u8 key_index, bool pairwise,
 				   const u8 *mac_addr, void *cookie,
 				   void (*callback) (void *cookie,
 						     struct key_params *))
 {
-	struct ath6kl_vif *vif = netdev_priv(ndev);
+	struct ath6kl_vif *vif = netdev_priv(wdev->netdev);
 	struct ath6kl_key *key = NULL;
 	struct key_params params;
 
@@ -1376,7 +1382,8 @@ void ath6kl_cfg80211_tkip_micerr_event(struct ath6kl_vif *vif, u8 keyid,
 				     GFP_KERNEL);
 }
 
-static int ath6kl_cfg80211_set_wiphy_params(struct wiphy *wiphy, u32 changed)
+static int ath6kl_cfg80211_set_wiphy_params(struct wiphy *wiphy, int radio_idx,
+					    u32 changed)
 {
 	struct ath6kl *ar = (struct ath6kl *)wiphy_priv(wiphy);
 	struct ath6kl_vif *vif;
@@ -1405,6 +1412,7 @@ static int ath6kl_cfg80211_set_wiphy_params(struct wiphy *wiphy, u32 changed)
 
 static int ath6kl_cfg80211_set_txpower(struct wiphy *wiphy,
 				       struct wireless_dev *wdev,
+				       int radio_idx,
 				       enum nl80211_tx_power_setting type,
 				       int mbm)
 {
@@ -1441,6 +1449,8 @@ static int ath6kl_cfg80211_set_txpower(struct wiphy *wiphy,
 
 static int ath6kl_cfg80211_get_txpower(struct wiphy *wiphy,
 				       struct wireless_dev *wdev,
+				       int radio_idx,
+				       unsigned int link_id,
 				       int *dbm)
 {
 	struct ath6kl *ar = (struct ath6kl *)wiphy_priv(wiphy);
@@ -1771,9 +1781,10 @@ static bool is_rate_ht40(s32 rate, u8 *mcs, bool *sgi)
 	return false;
 }
 
-static int ath6kl_get_station(struct wiphy *wiphy, struct net_device *dev,
+static int ath6kl_get_station(struct wiphy *wiphy, struct wireless_dev *wdev,
 			      const u8 *mac, struct station_info *sinfo)
 {
+	struct net_device *dev = wdev->netdev;
 	struct ath6kl *ar = ath6kl_priv(dev);
 	struct ath6kl_vif *vif = netdev_priv(dev);
 	long left;
@@ -2954,7 +2965,7 @@ static int ath6kl_start_ap(struct wiphy *wiphy, struct net_device *dev,
 }
 
 static int ath6kl_change_beacon(struct wiphy *wiphy, struct net_device *dev,
-				struct cfg80211_beacon_data *beacon)
+				struct cfg80211_ap_update *params)
 {
 	struct ath6kl_vif *vif = netdev_priv(dev);
 
@@ -2964,7 +2975,7 @@ static int ath6kl_change_beacon(struct wiphy *wiphy, struct net_device *dev,
 	if (vif->next_mode != AP_NETWORK)
 		return -EOPNOTSUPP;
 
-	return ath6kl_set_ies(vif, beacon);
+	return ath6kl_set_ies(vif, &params->beacon);
 }
 
 static int ath6kl_stop_ap(struct wiphy *wiphy, struct net_device *dev,
@@ -2988,9 +2999,10 @@ static int ath6kl_stop_ap(struct wiphy *wiphy, struct net_device *dev,
 
 static const u8 bcast_addr[ETH_ALEN] = { 0xff, 0xff, 0xff, 0xff, 0xff, 0xff };
 
-static int ath6kl_del_station(struct wiphy *wiphy, struct net_device *dev,
+static int ath6kl_del_station(struct wiphy *wiphy, struct wireless_dev *wdev,
 			      struct station_del_parameters *params)
 {
+	struct net_device *dev = wdev->netdev;
 	struct ath6kl *ar = ath6kl_priv(dev);
 	struct ath6kl_vif *vif = netdev_priv(dev);
 	const u8 *addr = params->mac ? params->mac : bcast_addr;
@@ -2999,10 +3011,11 @@ static int ath6kl_del_station(struct wiphy *wiphy, struct net_device *dev,
 				      addr, WLAN_REASON_PREV_AUTH_NOT_VALID);
 }
 
-static int ath6kl_change_station(struct wiphy *wiphy, struct net_device *dev,
+static int ath6kl_change_station(struct wiphy *wiphy, struct wireless_dev *wdev,
 				 const u8 *mac,
 				 struct station_parameters *params)
 {
+	struct net_device *dev = wdev->netdev;
 	struct ath6kl *ar = ath6kl_priv(dev);
 	struct ath6kl_vif *vif = netdev_priv(dev);
 	int err;
@@ -3026,20 +3039,14 @@ static int ath6kl_remain_on_channel(struct wiphy *wiphy,
 				    struct wireless_dev *wdev,
 				    struct ieee80211_channel *chan,
 				    unsigned int duration,
-				    u64 *cookie)
+				    u64 cookie, const u8 *rx_addr)
 {
 	struct ath6kl_vif *vif = ath6kl_vif_from_wdev(wdev);
 	struct ath6kl *ar = ath6kl_priv(vif->ndev);
-	u32 id;
 
 	/* TODO: if already pending or ongoing remain-on-channel,
 	 * return -EBUSY */
-	id = ++vif->last_roc_id;
-	if (id == 0) {
-		/* Do not use 0 as the cookie value */
-		id = ++vif->last_roc_id;
-	}
-	*cookie = id;
+	vif->last_roc_id = cookie;
 
 	return ath6kl_wmi_remain_on_chnl_cmd(ar->wmi, vif->fw_vif_idx,
 					     chan->center_freq, duration);
@@ -3098,6 +3105,7 @@ static int ath6kl_send_go_probe_resp(struct ath6kl_vif *vif,
 
 static bool ath6kl_mgmt_powersave_ap(struct ath6kl_vif *vif,
 				     u32 id,
+				     u64 cookie,
 				     u32 freq,
 				     u32 wait,
 				     const u8 *buf,
@@ -3130,6 +3138,7 @@ static bool ath6kl_mgmt_powersave_ap(struct ath6kl_vif *vif,
 
 			INIT_LIST_HEAD(&mgmt_buf->list);
 			mgmt_buf->id = id;
+			mgmt_buf->cookie = cookie;
 			mgmt_buf->freq = freq;
 			mgmt_buf->wait = wait;
 			mgmt_buf->len = len;
@@ -3182,7 +3191,7 @@ static bool ath6kl_is_p2p_go_ssid(const u8 *buf, size_t len)
 }
 
 static int ath6kl_mgmt_tx(struct wiphy *wiphy, struct wireless_dev *wdev,
-			  struct cfg80211_mgmt_tx_params *params, u64 *cookie)
+			  struct cfg80211_mgmt_tx_params *params, u64 cookie)
 {
 	struct ath6kl_vif *vif = ath6kl_vif_from_wdev(wdev);
 	struct ath6kl *ar = ath6kl_priv(vif->ndev);
@@ -3214,7 +3223,6 @@ static int ath6kl_mgmt_tx(struct wiphy *wiphy, struct wireless_dev *wdev,
 		 * Send Probe Response frame in GO mode using a separate WMI
 		 * command to allow the target to fill in the generic IEs.
 		 */
-		*cookie = 0; /* TX status not supported */
 		return ath6kl_send_go_probe_resp(vif, buf, len, freq);
 	}
 
@@ -3227,21 +3235,20 @@ static int ath6kl_mgmt_tx(struct wiphy *wiphy, struct wireless_dev *wdev,
 		id = vif->send_action_id++;
 	}
 
-	*cookie = id;
-
 	/* AP mode Power saving processing */
 	if (vif->nw_type == AP_NETWORK) {
-		queued = ath6kl_mgmt_powersave_ap(vif, id, freq, wait, buf, len,
-						  &more_data, no_cck);
+		queued = ath6kl_mgmt_powersave_ap(vif, id, cookie, freq, wait,
+						  buf, len, &more_data, no_cck);
 		if (queued)
 			return 0;
 	}
 
+	ar->wmi->last_mgmt_tx_cookie = cookie;
 	return ath6kl_wmi_send_mgmt_cmd(ar->wmi, vif->fw_vif_idx, id, freq,
 					wait, buf, len, no_cck);
 }
 
-static int ath6kl_get_antenna(struct wiphy *wiphy,
+static int ath6kl_get_antenna(struct wiphy *wiphy, int radio_idx,
 			      u32 *tx_ant, u32 *rx_ant)
 {
 	struct ath6kl *ar = wiphy_priv(wiphy);
@@ -3429,7 +3436,7 @@ ath6kl_mgmt_stypes[NUM_NL80211_IFTYPES] = {
 	},
 };
 
-static struct cfg80211_ops ath6kl_cfg80211_ops = {
+static const struct cfg80211_ops ath6kl_cfg80211_ops = {
 	.add_virtual_intf = ath6kl_cfg80211_add_iface,
 	.del_virtual_intf = ath6kl_cfg80211_del_iface,
 	.change_virtual_intf = ath6kl_cfg80211_change_iface,
@@ -3611,7 +3618,7 @@ void ath6kl_cfg80211_vif_stop(struct ath6kl_vif *vif, bool wmi_ready)
 		discon_issued = test_bit(CONNECTED, &vif->flags) ||
 				test_bit(CONNECT_PEND, &vif->flags);
 		ath6kl_disconnect(vif);
-		del_timer(&vif->disconnect_timer);
+		timer_delete(&vif->disconnect_timer);
 
 		if (discon_issued)
 			ath6kl_disconnect_event(vif, DISCONNECT_CMD,

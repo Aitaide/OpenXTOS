@@ -6,9 +6,9 @@
 //
 //
 
+#include <linux/cleanup.h>
 #include <linux/delay.h>
 #include <linux/device.h>
-#include <linux/mod_devicetable.h>
 #include <linux/soundwire/sdw_registers.h>
 #include <linux/module.h>
 #include <linux/pm_runtime.h>
@@ -225,6 +225,14 @@ static int rt711_sdca_read_prop(struct sdw_slave *slave)
 		j++;
 	}
 
+	prop->dp0_prop = devm_kzalloc(&slave->dev, sizeof(*prop->dp0_prop),
+				      GFP_KERNEL);
+	if (!prop->dp0_prop)
+		return -ENOMEM;
+
+	prop->dp0_prop->simple_ch_prep_sm = true;
+	prop->dp0_prop->ch_prep_timeout = 10;
+
 	/* set the timeout values */
 	prop->clk_stop_timeout = 700;
 
@@ -357,7 +365,7 @@ static int rt711_sdca_sdw_probe(struct sdw_slave *slave,
 	return rt711_sdca_init(&slave->dev, regmap, mbq_regmap, slave);
 }
 
-static int rt711_sdca_sdw_remove(struct sdw_slave *slave)
+static void rt711_sdca_sdw_remove(struct sdw_slave *slave)
 {
 	struct rt711_sdca_priv *rt711 = dev_get_drvdata(&slave->dev);
 
@@ -370,8 +378,6 @@ static int rt711_sdca_sdw_remove(struct sdw_slave *slave)
 
 	mutex_destroy(&rt711->calibrate_mutex);
 	mutex_destroy(&rt711->disable_irq_lock);
-
-	return 0;
 }
 
 static const struct sdw_device_id rt711_sdca_id[] = {
@@ -380,7 +386,7 @@ static const struct sdw_device_id rt711_sdca_id[] = {
 };
 MODULE_DEVICE_TABLE(sdw, rt711_sdca_id);
 
-static int __maybe_unused rt711_sdca_dev_suspend(struct device *dev)
+static int rt711_sdca_dev_suspend(struct device *dev)
 {
 	struct rt711_sdca_priv *rt711 = dev_get_drvdata(dev);
 
@@ -396,7 +402,7 @@ static int __maybe_unused rt711_sdca_dev_suspend(struct device *dev)
 	return 0;
 }
 
-static int __maybe_unused rt711_sdca_dev_system_suspend(struct device *dev)
+static int rt711_sdca_dev_system_suspend(struct device *dev)
 {
 	struct rt711_sdca_priv *rt711_sdca = dev_get_drvdata(dev);
 	struct sdw_slave *slave = dev_to_sdw_dev(dev);
@@ -410,13 +416,13 @@ static int __maybe_unused rt711_sdca_dev_system_suspend(struct device *dev)
 	 * deferred work completes and before the parent disables
 	 * interrupts on the link
 	 */
-	mutex_lock(&rt711_sdca->disable_irq_lock);
-	rt711_sdca->disable_irq = true;
-	ret1 = sdw_update_no_pm(slave, SDW_SCP_SDCA_INTMASK1,
-				SDW_SCP_SDCA_INTMASK_SDCA_0, 0);
-	ret2 = sdw_update_no_pm(slave, SDW_SCP_SDCA_INTMASK2,
-				SDW_SCP_SDCA_INTMASK_SDCA_8, 0);
-	mutex_unlock(&rt711_sdca->disable_irq_lock);
+	scoped_guard(mutex, &rt711_sdca->disable_irq_lock) {
+		rt711_sdca->disable_irq = true;
+		ret1 = sdw_update_no_pm(slave, SDW_SCP_SDCA_INTMASK1,
+					SDW_SCP_SDCA_INTMASK_SDCA_0, 0);
+		ret2 = sdw_update_no_pm(slave, SDW_SCP_SDCA_INTMASK2,
+					SDW_SCP_SDCA_INTMASK_SDCA_8, 0);
+	}
 
 	if (ret1 < 0 || ret2 < 0) {
 		/* log but don't prevent suspend from happening */
@@ -428,37 +434,33 @@ static int __maybe_unused rt711_sdca_dev_system_suspend(struct device *dev)
 
 #define RT711_PROBE_TIMEOUT 5000
 
-static int __maybe_unused rt711_sdca_dev_resume(struct device *dev)
+static int rt711_sdca_dev_resume(struct device *dev)
 {
 	struct sdw_slave *slave = dev_to_sdw_dev(dev);
 	struct rt711_sdca_priv *rt711 = dev_get_drvdata(dev);
-	unsigned long time;
+	int ret;
 
 	if (!rt711->first_hw_init)
 		return 0;
 
 	if (!slave->unattach_request) {
-		if (rt711->disable_irq == true) {
-			mutex_lock(&rt711->disable_irq_lock);
-			sdw_write_no_pm(slave, SDW_SCP_SDCA_INTMASK1, SDW_SCP_SDCA_INTMASK_SDCA_0);
-			sdw_write_no_pm(slave, SDW_SCP_SDCA_INTMASK2, SDW_SCP_SDCA_INTMASK_SDCA_8);
-			rt711->disable_irq = false;
-			mutex_unlock(&rt711->disable_irq_lock);
+		scoped_guard(mutex, &rt711->disable_irq_lock) {
+			if (rt711->disable_irq) {
+				sdw_write_no_pm(slave, SDW_SCP_SDCA_INTMASK1,
+						SDW_SCP_SDCA_INTMASK_SDCA_0);
+				sdw_write_no_pm(slave, SDW_SCP_SDCA_INTMASK2,
+						SDW_SCP_SDCA_INTMASK_SDCA_8);
+				rt711->disable_irq = false;
+			}
 		}
-		goto regmap_sync;
 	}
 
-	time = wait_for_completion_timeout(&slave->initialization_complete,
-				msecs_to_jiffies(RT711_PROBE_TIMEOUT));
-	if (!time) {
-		dev_err(&slave->dev, "Initialization not complete, timed out\n");
+	ret = sdw_slave_wait_for_init(slave, RT711_PROBE_TIMEOUT);
+	if (ret) {
 		sdw_show_ping_status(slave->bus, true);
-
-		return -ETIMEDOUT;
+		return ret;
 	}
 
-regmap_sync:
-	slave->unattach_request = 0;
 	regcache_cache_only(rt711->regmap, false);
 	regcache_sync(rt711->regmap);
 	regcache_cache_only(rt711->mbq_regmap, false);
@@ -467,15 +469,14 @@ regmap_sync:
 }
 
 static const struct dev_pm_ops rt711_sdca_pm = {
-	SET_SYSTEM_SLEEP_PM_OPS(rt711_sdca_dev_system_suspend, rt711_sdca_dev_resume)
-	SET_RUNTIME_PM_OPS(rt711_sdca_dev_suspend, rt711_sdca_dev_resume, NULL)
+	SYSTEM_SLEEP_PM_OPS(rt711_sdca_dev_system_suspend, rt711_sdca_dev_resume)
+	RUNTIME_PM_OPS(rt711_sdca_dev_suspend, rt711_sdca_dev_resume, NULL)
 };
 
 static struct sdw_driver rt711_sdca_sdw_driver = {
 	.driver = {
 		.name = "rt711-sdca",
-		.owner = THIS_MODULE,
-		.pm = &rt711_sdca_pm,
+		.pm = pm_ptr(&rt711_sdca_pm),
 	},
 	.probe = rt711_sdca_sdw_probe,
 	.remove = rt711_sdca_sdw_remove,

@@ -202,10 +202,10 @@ static bool __init dmtimer_is_preferred(struct device_node *np)
 
 	/* Secure gptimer12 is always clocked with a fixed source */
 	if (!of_property_read_bool(np, "ti,timer-secure")) {
-		if (!of_property_read_bool(np, "assigned-clocks"))
+		if (!of_property_present(np, "assigned-clocks"))
 			return false;
 
-		if (!of_property_read_bool(np, "assigned-clock-parents"))
+		if (!of_property_present(np, "assigned-clock-parents"))
 			return false;
 	}
 
@@ -226,7 +226,7 @@ static bool __init dmtimer_is_preferred(struct device_node *np)
  * Some omap3 boards with unreliable oscillator must not use the counter_32k
  * or dmtimer1 with 32 KiHz source. Additionally, the boards with unreliable
  * oscillator should really set counter_32k as disabled, and delete dmtimer1
- * ti,always-on property, but let's not count on it. For these quirky cases,
+ * ti,timer-alwon property, but let's not count on it. For these quirky cases,
  * we prefer using the always-on secure dmtimer12 with the internal 32 KiHz
  * clock as the clocksource, and any available dmtimer as clockevent.
  *
@@ -600,7 +600,7 @@ static int __init dmtimer_clockevent_init(struct device_node *np)
 	struct dmtimer_clockevent *clkevt;
 	int error;
 
-	clkevt = kzalloc(sizeof(*clkevt), GFP_KERNEL);
+	clkevt = kzalloc_obj(*clkevt);
 	if (!clkevt)
 		return -ENOMEM;
 
@@ -686,9 +686,9 @@ subsys_initcall(dmtimer_percpu_timer_startup);
 
 static int __init dmtimer_percpu_quirk_init(struct device_node *np, u32 pa)
 {
-	struct device_node *arm_timer;
+	struct device_node *arm_timer __free(device_node) =
+		of_find_compatible_node(NULL, NULL, "arm,armv7-timer");
 
-	arm_timer = of_find_compatible_node(NULL, NULL, "arm,armv7-timer");
 	if (of_device_is_available(arm_timer)) {
 		pr_warn_once("ARM architected timer wrap issue i940 detected\n");
 		return 0;
@@ -757,7 +757,7 @@ static int __init dmtimer_clocksource_init(struct device_node *np)
 	struct clocksource *dev;
 	int error;
 
-	clksrc = kzalloc(sizeof(*clksrc), GFP_KERNEL);
+	clksrc = kzalloc_obj(*clksrc);
 	if (!clksrc)
 		return -ENOMEM;
 

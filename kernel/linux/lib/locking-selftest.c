@@ -202,7 +202,7 @@ static void init_shared_classes(void)
 	local_irq_disable();			\
 	__irq_enter();				\
 	lockdep_hardirq_threaded();		\
-	WARN_ON(!in_irq());
+	WARN_ON(!in_hardirq());
 
 #define HARDIRQ_EXIT()				\
 	__irq_exit();				\
@@ -1429,12 +1429,11 @@ static int unexpected_testcase_failures;
 
 static void dotest(void (*testcase_fn)(void), int expected, int lockclass_mask)
 {
-	int saved_preempt_count = preempt_count();
+	long saved_preempt_count = preempt_count();
 #ifdef CONFIG_PREEMPT_RT
-#ifdef CONFIG_SMP
 	int saved_mgd_count = current->migration_disabled;
-#endif
 	int saved_rcu_count = current->rcu_read_lock_nesting;
+	int saved_sched_rt_mutex = current->sched_rt_mutex;
 #endif
 
 	WARN_ON(irqs_disabled());
@@ -1471,10 +1470,10 @@ static void dotest(void (*testcase_fn)(void), int expected, int lockclass_mask)
 	preempt_count_set(saved_preempt_count);
 
 #ifdef CONFIG_PREEMPT_RT
-#ifdef CONFIG_SMP
+	current->sched_rt_mutex = saved_sched_rt_mutex;
+
 	while (current->migration_disabled > saved_mgd_count)
 		migrate_enable();
-#endif
 
 	while (current->rcu_read_lock_nesting > saved_rcu_count)
 		rcu_read_unlock();
@@ -1720,8 +1719,6 @@ static void ww_test_normal(void)
 {
 	int ret;
 
-	WWAI(&t);
-
 	/*
 	 * None of the ww_mutex codepaths should be taken in the 'normal'
 	 * mutex calls. The easiest way to verify this is by using the
@@ -1769,6 +1766,8 @@ static void ww_test_normal(void)
 	WARN_ON(ret);
 	ww_mutex_base_unlock(&o.base);
 	WARN_ON(o.ctx != (void *)~0UL);
+
+	WWAI(&t);
 
 	/* nest_lock */
 	o.ctx = (void *)~0UL;
@@ -2512,7 +2511,7 @@ DEFINE_LOCK_GUARD_0(NOTTHREADED_HARDIRQ,
 	do {
 		local_irq_disable();
 		__irq_enter();
-		WARN_ON(!in_irq());
+		WARN_ON(!in_hardirq());
 	} while(0), HARDIRQ_EXIT())
 DEFINE_LOCK_GUARD_0(SOFTIRQ, SOFTIRQ_ENTER(), SOFTIRQ_EXIT())
 
@@ -2708,6 +2707,43 @@ static void local_lock_3B(void)
 	spin_unlock(&lock_A);
 	HARDIRQ_DISABLE();
 
+}
+
+#ifdef CONFIG_DEBUG_LOCK_ALLOC
+static inline const char *rw_semaphore_lockdep_name(struct rw_semaphore *rwsem)
+{
+	return rwsem->dep_map.name;
+}
+#else
+static inline const char *rw_semaphore_lockdep_name(struct rw_semaphore *rwsem)
+{
+	return NULL;
+}
+#endif
+
+static void test_lockdep_set_subclass_name(void)
+{
+	const char *name_before = rw_semaphore_lockdep_name(&rwsem_X1);
+	const char *name_after;
+
+	lockdep_set_subclass(&rwsem_X1, 1);
+	name_after = rw_semaphore_lockdep_name(&rwsem_X1);
+	DEBUG_LOCKS_WARN_ON(name_before != name_after);
+}
+
+/*
+ * lockdep_set_subclass() should reuse the existing lock class name instead
+ * of creating a new one.
+ */
+static void lockdep_set_subclass_name_test(void)
+{
+	printk("  --------------------------------------------------------------------------\n");
+	printk("  | lockdep_set_subclass() name test|\n");
+	printk("  -----------------------------------\n");
+
+	print_testname("compare name before and after");
+	dotest(test_lockdep_set_subclass_name, SUCCESS, LOCKTYPE_RWSEM);
+	pr_cont("\n");
 }
 
 static void local_lock_tests(void)
@@ -2919,6 +2955,8 @@ void locking_selftest(void)
 	print_testname("hardirq_unsafe_softirq_safe");
 	dotest(hardirq_deadlock_softirq_not_deadlock, FAILURE, LOCKTYPE_SPECIAL);
 	pr_cont("\n");
+
+	lockdep_set_subclass_name_test();
 
 	if (unexpected_testcase_failures) {
 		printk("-----------------------------------------------------------------\n");

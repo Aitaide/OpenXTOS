@@ -11,6 +11,7 @@
 #include "net_driver.h"
 #include <linux/module.h>
 #include <linux/iommu.h>
+#include <net/rps.h>
 #include "efx.h"
 #include "nic.h"
 #include "rx_common.h"
@@ -137,8 +138,7 @@ static void efx_init_rx_recycle_ring(struct efx_rx_queue *rx_queue)
 	bufs_in_recycle_ring = efx_rx_recycle_ring_size(efx);
 	page_ring_size = roundup_pow_of_two(bufs_in_recycle_ring /
 					    efx->rx_bufs_per_page);
-	rx_queue->page_ring = kcalloc(page_ring_size,
-				      sizeof(*rx_queue->page_ring), GFP_KERNEL);
+	rx_queue->page_ring = kzalloc_objs(*rx_queue->page_ring, page_ring_size);
 	if (!rx_queue->page_ring)
 		rx_queue->page_ptr_mask = 0;
 	else
@@ -203,8 +203,7 @@ int efx_probe_rx_queue(struct efx_rx_queue *rx_queue)
 		  rx_queue->ptr_mask);
 
 	/* Allocate RX buffers */
-	rx_queue->buffer = kcalloc(entries, sizeof(*rx_queue->buffer),
-				   GFP_KERNEL);
+	rx_queue->buffer = kzalloc_objs(*rx_queue->buffer, entries);
 	if (!rx_queue->buffer)
 		return -ENOMEM;
 
@@ -240,6 +239,9 @@ void efx_init_rx_queue(struct efx_rx_queue *rx_queue)
 	rx_queue->page_recycle_failed = 0;
 	rx_queue->page_recycle_full = 0;
 
+	rx_queue->old_rx_packets = rx_queue->rx_packets;
+	rx_queue->old_rx_bytes = rx_queue->rx_bytes;
+
 	/* Initialise limit fields */
 	max_fill = efx->rxq_entries - EFX_RXD_HEAD_ROOM;
 	max_trigger =
@@ -265,8 +267,6 @@ void efx_init_rx_queue(struct efx_rx_queue *rx_queue)
 			  "Failure to initialise XDP queue information rc=%d\n",
 			  rc);
 		efx->xdp_rxq_info_failed = true;
-	} else {
-		rx_queue->xdp_rxq_info_valid = true;
 	}
 
 	/* Set up RX descriptor ring */
@@ -281,7 +281,7 @@ void efx_fini_rx_queue(struct efx_rx_queue *rx_queue)
 	netif_dbg(rx_queue->efx, drv, rx_queue->efx->net_dev,
 		  "shutting down RX queue %d\n", efx_rx_queue_index(rx_queue));
 
-	del_timer_sync(&rx_queue->slow_fill);
+	timer_delete_sync(&rx_queue->slow_fill);
 	if (rx_queue->grant_credits)
 		flush_work(&rx_queue->grant_work);
 
@@ -298,10 +298,8 @@ void efx_fini_rx_queue(struct efx_rx_queue *rx_queue)
 
 	efx_fini_rx_recycle_ring(rx_queue);
 
-	if (rx_queue->xdp_rxq_info_valid)
+	if (xdp_rxq_info_is_reg(&rx_queue->xdp_rxq_info))
 		xdp_rxq_info_unreg(&rx_queue->xdp_rxq_info);
-
-	rx_queue->xdp_rxq_info_valid = false;
 }
 
 void efx_remove_rx_queue(struct efx_rx_queue *rx_queue)
@@ -348,7 +346,8 @@ void efx_free_rx_buffers(struct efx_rx_queue *rx_queue,
 
 void efx_rx_slow_fill(struct timer_list *t)
 {
-	struct efx_rx_queue *rx_queue = from_timer(rx_queue, t, slow_fill);
+	struct efx_rx_queue *rx_queue = timer_container_of(rx_queue, t,
+							   slow_fill);
 
 	/* Post an event to cause NAPI to run and refill the queue */
 	efx_nic_generate_fill_event(rx_queue);
@@ -556,69 +555,25 @@ efx_rx_packet_gro(struct efx_channel *channel, struct efx_rx_buffer *rx_buf,
 	napi_gro_frags(napi);
 }
 
-/* RSS contexts.  We're using linked lists and crappy O(n) algorithms, because
- * (a) this is an infrequent control-plane operation and (b) n is small (max 64)
- */
-struct efx_rss_context *efx_alloc_rss_context_entry(struct efx_nic *efx)
+struct efx_rss_context_priv *efx_find_rss_context_entry(struct efx_nic *efx,
+							u32 id)
 {
-	struct list_head *head = &efx->rss_context.list;
-	struct efx_rss_context *ctx, *new;
-	u32 id = 1; /* Don't use zero, that refers to the master RSS context */
+	struct ethtool_rxfh_context *ctx;
 
-	WARN_ON(!mutex_is_locked(&efx->rss_lock));
+	WARN_ON(!mutex_is_locked(&efx->net_dev->ethtool->rss_lock));
 
-	/* Search for first gap in the numbering */
-	list_for_each_entry(ctx, head, list) {
-		if (ctx->user_id != id)
-			break;
-		id++;
-		/* Check for wrap.  If this happens, we have nearly 2^32
-		 * allocated RSS contexts, which seems unlikely.
-		 */
-		if (WARN_ON_ONCE(!id))
-			return NULL;
-	}
-
-	/* Create the new entry */
-	new = kmalloc(sizeof(*new), GFP_KERNEL);
-	if (!new)
+	ctx = xa_load(&efx->net_dev->ethtool->rss_ctx, id);
+	if (!ctx)
 		return NULL;
-	new->context_id = EFX_MCDI_RSS_CONTEXT_INVALID;
-	new->rx_hash_udp_4tuple = false;
-
-	/* Insert the new entry into the gap */
-	new->user_id = id;
-	list_add_tail(&new->list, &ctx->list);
-	return new;
+	return ethtool_rxfh_context_priv(ctx);
 }
 
-struct efx_rss_context *efx_find_rss_context_entry(struct efx_nic *efx, u32 id)
-{
-	struct list_head *head = &efx->rss_context.list;
-	struct efx_rss_context *ctx;
-
-	WARN_ON(!mutex_is_locked(&efx->rss_lock));
-
-	list_for_each_entry(ctx, head, list)
-		if (ctx->user_id == id)
-			return ctx;
-	return NULL;
-}
-
-void efx_free_rss_context_entry(struct efx_rss_context *ctx)
-{
-	list_del(&ctx->list);
-	kfree(ctx);
-}
-
-void efx_set_default_rx_indir_table(struct efx_nic *efx,
-				    struct efx_rss_context *ctx)
+void efx_set_default_rx_indir_table(struct efx_nic *efx, u32 *indir)
 {
 	size_t i;
 
-	for (i = 0; i < ARRAY_SIZE(ctx->rx_indir_table); i++)
-		ctx->rx_indir_table[i] =
-			ethtool_rxfh_indir_default(i, efx->rss_spread);
+	for (i = 0; i < ARRAY_SIZE(efx->rss_context.rx_indir_table); i++)
+		indir[i] = ethtool_rxfh_indir_default(i, efx->rss_spread);
 }
 
 /**
@@ -752,7 +707,7 @@ struct efx_arfs_rule *efx_rps_hash_add(struct efx_nic *efx,
 			return rule;
 		}
 	}
-	rule = kmalloc(sizeof(*rule), GFP_ATOMIC);
+	rule = kmalloc_obj(*rule, GFP_ATOMIC);
 	*new = true;
 	if (rule) {
 		memcpy(&rule->spec, spec, sizeof(rule->spec));
@@ -823,8 +778,10 @@ int efx_probe_filters(struct efx_nic *efx)
 		}
 
 		if (!success) {
-			efx_for_each_channel(channel, efx)
+			efx_for_each_channel(channel, efx) {
 				kfree(channel->rps_flow_id);
+				channel->rps_flow_id = NULL;
+			}
 			efx->type->filter_table_remove(efx);
 			rc = -ENOMEM;
 			goto out_unlock;
@@ -935,7 +892,7 @@ static void efx_filter_rfs_work(struct work_struct *data)
 
 	/* Release references */
 	clear_bit(slot_idx, &efx->rps_slot_map);
-	dev_put(req->net_dev);
+	netdev_put(req->net_dev, &req->net_dev_tracker);
 }
 
 int efx_filter_rfs(struct net_device *net_dev, const struct sk_buff *skb,
@@ -1027,7 +984,8 @@ int efx_filter_rfs(struct net_device *net_dev, const struct sk_buff *skb,
 	}
 
 	/* Queue the request */
-	dev_hold(req->net_dev = net_dev);
+	req->net_dev = net_dev;
+	netdev_hold(req->net_dev, &req->net_dev_tracker, GFP_ATOMIC);
 	INIT_WORK(&req->work, efx_filter_rfs_work);
 	req->rxq_index = rxq_index;
 	req->flow_id = flow_id;

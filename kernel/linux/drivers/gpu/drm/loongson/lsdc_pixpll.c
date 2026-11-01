@@ -6,6 +6,7 @@
 #include <linux/delay.h>
 
 #include <drm/drm_managed.h>
+#include <drm/drm_print.h>
 
 #include "lsdc_drv.h"
 
@@ -120,12 +121,14 @@ static int lsdc_pixel_pll_setup(struct lsdc_pixpll * const this)
 	struct lsdc_pixpll_parms *pparms;
 
 	this->mmio = ioremap(this->reg_base, this->reg_size);
-	if (IS_ERR_OR_NULL(this->mmio))
+	if (!this->mmio)
 		return -ENOMEM;
 
-	pparms = kzalloc(sizeof(*pparms), GFP_KERNEL);
-	if (IS_ERR_OR_NULL(pparms))
+	pparms = kzalloc_obj(*pparms);
+	if (!pparms) {
+		iounmap(this->mmio);
 		return -ENOMEM;
+	}
 
 	pparms->ref_clock = LSDC_PLL_REF_CLK_KHZ;
 

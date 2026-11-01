@@ -17,7 +17,7 @@
 #include <linux/firmware.h>
 #include <linux/gpio/consumer.h>
 
-#include <asm/unaligned.h>
+#include <linux/unaligned.h>
 
 #include <net/nfc/hci.h>
 #include <net/nfc/llc.h>
@@ -44,17 +44,15 @@
 					 PN544_HCI_I2C_LLC_MAX_PAYLOAD)
 
 static const struct i2c_device_id pn544_hci_i2c_id_table[] = {
-	{"pn544", 0},
-	{}
+	{ .name = "pn544" },
+	{ }
 };
-
 MODULE_DEVICE_TABLE(i2c, pn544_hci_i2c_id_table);
 
-static const struct acpi_device_id pn544_hci_i2c_acpi_match[] __maybe_unused = {
-	{"NXP5440", 0},
-	{}
+static const struct acpi_device_id pn544_hci_i2c_acpi_match[] = {
+	{ .id = "NXP5440" },
+	{ }
 };
-
 MODULE_DEVICE_TABLE(acpi, pn544_hci_i2c_acpi_match);
 
 #define PN544_HCI_I2C_DRIVER_NAME "pn544_hci_i2c"
@@ -125,8 +123,6 @@ struct pn544_i2c_fw_secure_blob {
 #define PN544_FW_CMD_RESULT_WRITE_FAILED 0x74
 #define PN544_FW_CMD_RESULT_COMMAND_REJECTED 0xE0
 #define PN544_FW_CMD_RESULT_CHUNK_ERROR 0xE6
-
-#define MIN(X, Y) ((X) < (Y) ? (X) : (Y))
 
 #define PN544_FW_WRITE_BUFFER_MAX_LEN 0x9f7
 #define PN544_FW_I2C_MAX_PAYLOAD PN544_HCI_I2C_LLC_MAX_SIZE
@@ -528,7 +524,7 @@ static int pn544_hci_i2c_fw_download(void *phy_id, const char *firmware_name,
 
 	pr_info("Starting Firmware Download (%s)\n", firmware_name);
 
-	strcpy(phy->firmware_name, firmware_name);
+	strscpy(phy->firmware_name, firmware_name);
 
 	phy->hw_variant = hw_variant;
 	phy->fw_work_state = FW_WORK_STATE_START;
@@ -941,9 +937,9 @@ static void pn544_hci_i2c_remove(struct i2c_client *client)
 		pn544_hci_i2c_disable(phy);
 }
 
-static const struct of_device_id of_pn544_i2c_match[] __maybe_unused = {
-	{ .compatible = "nxp,pn544-i2c", },
-	{},
+static const struct of_device_id of_pn544_i2c_match[] = {
+	{ .compatible = "nxp,pn544-i2c" },
+	{ }
 };
 MODULE_DEVICE_TABLE(of, of_pn544_i2c_match);
 

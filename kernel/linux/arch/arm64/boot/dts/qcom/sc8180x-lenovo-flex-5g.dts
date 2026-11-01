@@ -6,6 +6,7 @@
 
 /dts-v1/;
 
+#include <dt-bindings/firmware/qcom,scm.h>
 #include <dt-bindings/gpio/gpio.h>
 #include <dt-bindings/input/gpio-keys.h>
 #include <dt-bindings/input/input.h>
@@ -25,6 +26,7 @@
 		compatible = "pwm-backlight";
 		pwms = <&pmc8180c_lpg 4 1000000>;
 		enable-gpios = <&pmc8180c_gpios 8 GPIO_ACTIVE_HIGH>;
+		power-supply = <&vled_bl_pw>;
 
 		pinctrl-0 = <&bl_pwm_default>;
 		pinctrl-names = "default";
@@ -50,6 +52,8 @@
 
 		#address-cells = <1>;
 		#size-cells = <0>;
+		orientation-gpios = <&tlmm 38 GPIO_ACTIVE_HIGH>,
+				    <&tlmm 58 GPIO_ACTIVE_HIGH>;
 
 		connector@0 {
 			compatible = "usb-c-connector";
@@ -65,7 +69,7 @@
 					reg = <0>;
 
 					pmic_glink_con0_hs: endpoint {
-						remote-endpoint = <&usb_prim_role_switch>;
+						remote-endpoint = <&usb_prim_dwc3_hs>;
 					};
 				};
 
@@ -100,7 +104,7 @@
 					reg = <0>;
 
 					pmic_glink_con1_hs: endpoint {
-						remote-endpoint = <&usb_sec_role_switch>;
+						remote-endpoint = <&usb_sec_dwc3_hs>;
 					};
 				};
 
@@ -130,7 +134,7 @@
 			no-map;
 
 			qcom,client-id = <1>;
-			qcom,vmid = <15>;
+			qcom,vmid = <QCOM_SCM_VMID_MSS_MSA>;
 		};
 
 		wlan_mem: wlan-region@8bc00000 {
@@ -148,25 +152,45 @@
 			no-map;
 		};
 
-		gpu_mem: gpu-region@98715000 {
-			reg = <0x0 0x98715000 0x0 0x2000>;
-			no-map;
-		};
-
 		cdsp_mem: cdsp-region@98900000 {
 			reg = <0x0 0x98900000 0x0 0x1400000>;
 			no-map;
 		};
 	};
 
-	vph_pwr: vph-pwr-regulator {
+	vled_bl_pw: regulator-vled-bl-pw {
 		compatible = "regulator-fixed";
-		regulator-name = "vph_pwr";
-		regulator-min-microvolt = <3700000>;
-		regulator-max-microvolt = <3700000>;
+
+		regulator-name = "VLED_BL_PW";
+		regulator-min-microvolt = <3300000>;
+		regulator-max-microvolt = <3300000>;
+
+		gpio = <&pmc8180_2_gpios 1 GPIO_ACTIVE_HIGH>;
+		enable-active-high;
+
+		pinctrl-0 = <&bl_pwr_en>;
+		pinctrl-names = "default";
+
+		regulator-boot-on;
 	};
 
-	vreg_s4a_1p8: pm8150-s4-regulator {
+	vreg_lcm_3v3: regulator-edp-3p3 {
+		compatible = "regulator-fixed";
+
+		regulator-name = "VREG_LCM_3V3";
+		regulator-min-microvolt = <3300000>;
+		regulator-max-microvolt = <3300000>;
+
+		gpio = <&tlmm 130 GPIO_ACTIVE_HIGH>;
+		enable-active-high;
+
+		pinctrl-0 = <&lcm_3v3_en>;
+		pinctrl-names = "default";
+
+		regulator-boot-on;
+	};
+
+	vreg_s4a_1p8: regulator-pm8150-s4 {
 		compatible = "regulator-fixed";
 		regulator-name = "vreg_s4a_1p8";
 
@@ -177,6 +201,13 @@
 		regulator-boot-on;
 
 		vin-supply = <&vph_pwr>;
+	};
+
+	vph_pwr: regulator-vph-pwr {
+		compatible = "regulator-fixed";
+		regulator-name = "vph_pwr";
+		regulator-min-microvolt = <3700000>;
+		regulator-max-microvolt = <3700000>;
 	};
 
 	usbprim-sbu-mux {
@@ -328,12 +359,18 @@
 			regulator-min-microvolt = <1800000>;
 			regulator-max-microvolt = <1800000>;
 			regulator-initial-mode = <RPMH_REGULATOR_MODE_HPM>;
+			regulator-allowed-modes = <RPMH_REGULATOR_MODE_LPM
+						   RPMH_REGULATOR_MODE_HPM>;
+			regulator-allow-set-load;
 		};
 
 		vreg_l10e_2p9: ldo10 {
 			regulator-min-microvolt = <2904000>;
 			regulator-max-microvolt = <2904000>;
 			regulator-initial-mode = <RPMH_REGULATOR_MODE_HPM>;
+			regulator-allowed-modes = <RPMH_REGULATOR_MODE_LPM
+						   RPMH_REGULATOR_MODE_HPM>;
+			regulator-allow-set-load;
 		};
 
 		vreg_l16e_3p0: ldo16 {
@@ -346,52 +383,60 @@
 
 &gpu {
 	status = "okay";
+};
 
-	zap-shader {
-		memory-region = <&gpu_mem>;
-		firmware-name = "qcom/sc8180x/qcdxkmsuc8180.mbn";
-	};
+&gpu_zap_shader {
+	firmware-name = "qcom/sc8180x/LENOVO/82AK/qcdxkmsuc8180.mbn";
 };
 
 &i2c1 {
 	clock-frequency = <100000>;
 
-	pinctrl-0 = <&i2c1_active>, <&i2c1_hid_active>;
+	pinctrl-0 = <&i2c1_active>;
 	pinctrl-names = "default";
 
 	status = "okay";
 
-	hid@10 {
+	touchscreen@10 {
 		compatible = "hid-over-i2c";
 		reg = <0x10>;
 		hid-descr-addr = <0x1>;
 
 		interrupts-extended = <&tlmm 122 IRQ_TYPE_LEVEL_LOW>;
+
+		pinctrl-0 = <&ts_int_default>;
+		pinctrl-names = "default";
 	};
 };
 
 &i2c7 {
-	clock-frequency = <100000>;
+	clock-frequency = <1000000>;
 
-	pinctrl-0 = <&i2c7_active>, <&i2c7_hid_active>;
+	pinctrl-0 = <&i2c7_active>;
 	pinctrl-names = "default";
 
 	status = "okay";
 
-	hid@5 {
+	keyboard@5 {
 		compatible = "hid-over-i2c";
 		reg = <0x5>;
 		hid-descr-addr = <0x20>;
 
 		interrupts-extended = <&tlmm 37 IRQ_TYPE_LEVEL_LOW>;
+
+		pinctrl-0 = <&kb_int_default>;
+		pinctrl-names = "default";
 	};
 
-	hid@2c {
+	touchpad@2c {
 		compatible = "hid-over-i2c";
 		reg = <0x2c>;
 		hid-descr-addr = <0x20>;
 
 		interrupts-extended = <&tlmm 24 IRQ_TYPE_LEVEL_LOW>;
+
+		pinctrl-0 = <&tp_int_default>;
+		pinctrl-names = "default";
 	};
 };
 
@@ -418,8 +463,6 @@
 };
 
 &mdss_edp {
-	data-lanes = <0 1 2 3>;
-
 	pinctrl-0 = <&edp_hpd_active>;
 	pinctrl-names = "default";
 
@@ -428,6 +471,7 @@
 	aux-bus {
 		panel {
 			compatible = "edp-panel";
+			power-supply = <&vreg_lcm_3v3>;
 			no-hpd;
 
 			backlight = <&backlight>;
@@ -439,20 +483,16 @@
 			};
 		};
 	};
+};
 
-	ports {
-		port@1 {
-			reg = <1>;
-			mdss_edp_out: endpoint {
-				remote-endpoint = <&auo_b140han06_in>;
-			};
-		};
-	};
+&mdss_edp_out {
+	data-lanes = <0 1 2 3>;
+	remote-endpoint = <&auo_b140han06_in>;
 };
 
 &pcie3 {
-	perst-gpio = <&tlmm 178 GPIO_ACTIVE_LOW>;
-	wake-gpio = <&tlmm 180 GPIO_ACTIVE_HIGH>;
+	perst-gpios = <&tlmm 178 GPIO_ACTIVE_LOW>;
+	wake-gpios = <&tlmm 180 GPIO_ACTIVE_HIGH>;
 	pinctrl-0 = <&pcie3_default_state>;
 	pinctrl-names = "default";
 
@@ -463,6 +503,17 @@
 	vdda-phy-supply = <&vreg_l5e_0p88>;
 	vdda-pll-supply = <&vreg_l3c_1p2>;
 
+	status = "okay";
+};
+
+&pmc8180_2_gpios {
+	bl_pwr_en: bl-pwr-en-state {
+		pins = "gpio1";
+		function = "normal";
+	};
+};
+
+&pmc8180_pwrkey {
 	status = "okay";
 };
 
@@ -539,6 +590,40 @@
 	status = "okay";
 };
 
+&usb_mp {
+	status = "okay";
+};
+
+&usb_mp_hsphy0 {
+	vdda-pll-supply = <&vreg_l5e_0p88>;
+	vdda18-supply = <&vreg_l12a_1p8>;
+	vdda33-supply = <&vreg_l16e_3p0>;
+
+	status = "okay";
+};
+
+&usb_mp_hsphy1 {
+	vdda-pll-supply = <&vreg_l5e_0p88>;
+	vdda18-supply = <&vreg_l12a_1p8>;
+	vdda33-supply = <&vreg_l16e_3p0>;
+
+	status = "okay";
+};
+
+&usb_mp_qmpphy0 {
+	vdda-phy-supply = <&vreg_l5e_0p88>;
+	vdda-pll-supply = <&vreg_l3c_1p2>;
+
+	status = "okay";
+};
+
+&usb_mp_qmpphy1 {
+	vdda-phy-supply = <&vreg_l5e_0p88>;
+	vdda-pll-supply = <&vreg_l3c_1p2>;
+
+	status = "okay";
+};
+
 &usb_prim_hsphy {
 	vdda-pll-supply = <&vreg_l5e_0p88>;
 	vdda18-supply = <&vreg_l12a_1p8>;
@@ -548,8 +633,8 @@
 };
 
 &usb_prim_qmpphy {
-	vdda-phy-supply = <&vreg_l3c_1p2>;
-	vdda-pll-supply = <&vreg_l5e_0p88>;
+	vdda-phy-supply = <&vreg_l5e_0p88>;
+	vdda-pll-supply = <&vreg_l3c_1p2>;
 
 	orientation-switch;
 
@@ -564,6 +649,10 @@
 	dr_mode = "host";
 };
 
+&usb_prim_dwc3_hs {
+	remote-endpoint = <&pmic_glink_con0_hs>;
+};
+
 &usb_prim_qmpphy_dp_in {
 	remote-endpoint = <&mdss_dp0_out>;
 };
@@ -572,8 +661,8 @@
 	remote-endpoint = <&pmic_glink_con0_ss>;
 };
 
-&usb_prim_role_switch {
-	remote-endpoint = <&pmic_glink_con0_hs>;
+&usb_sec_dwc3_hs {
+	remote-endpoint = <&pmic_glink_con1_hs>;
 };
 
 &usb_sec_hsphy {
@@ -585,8 +674,8 @@
 };
 
 &usb_sec_qmpphy {
-	vdda-phy-supply = <&vreg_l3c_1p2>;
-	vdda-pll-supply = <&vreg_l5e_0p88>;
+	vdda-phy-supply = <&vreg_l5e_0p88>;
+	vdda-pll-supply = <&vreg_l3c_1p2>;
 
 	orientation-switch;
 
@@ -599,10 +688,6 @@
 
 &usb_sec_qmpphy_out {
 	remote-endpoint = <&pmic_glink_con1_ss>;
-};
-
-&usb_sec_role_switch {
-	remote-endpoint = <&pmic_glink_con1_hs>;
 };
 
 &usb_sec {
@@ -623,10 +708,6 @@
 	vdd-3.3-ch1-supply = <&vreg_l10c_3p3>;
 
 	status = "okay";
-};
-
-&xo_board_clk {
-	clock-frequency = <38400000>;
 };
 
 /* PINCTRL */
@@ -668,14 +749,6 @@
 		drive-strength = <2>;
 	};
 
-	i2c1_hid_active: i2c1-hid-active-state {
-		pins = "gpio122";
-		function = "gpio";
-
-		bias-pull-up;
-		drive-strength = <2>;
-	};
-
 	i2c7_active: i2c7-active-state {
 		pins = "gpio98", "gpio99";
 		function = "qup7";
@@ -684,8 +757,8 @@
 		drive-strength = <2>;
 	};
 
-	i2c7_hid_active: i2c7-hid-active-state {
-		pins = "gpio37", "gpio24";
+	kb_int_default: kb-int-default-state {
+		pins = "gpio37";
 		function = "gpio";
 
 		bias-pull-up;
@@ -715,6 +788,28 @@
 			drive-strength = <2>;
 			bias-pull-up;
 		};
+	};
+
+	tp_int_default: tp-int-default-state {
+		pins = "gpio24";
+		function = "gpio";
+
+		bias-pull-up;
+		drive-strength = <2>;
+	};
+
+	ts_int_default: ts-int-default-state {
+		pins = "gpio122";
+		function = "gpio";
+
+		bias-pull-up;
+		drive-strength = <2>;
+	};
+
+	lcm_3v3_en: lcm-3v3-en-state {
+		pins = "gpio130";
+		function = "gpio";
+		bias-disable;
 	};
 
 	usbprim_sbu_default: usbprim-sbu-state {

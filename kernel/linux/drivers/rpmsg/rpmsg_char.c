@@ -52,8 +52,8 @@ static DEFINE_IDA(rpmsg_minor_ida);
  * @readq:	wait object for incoming queue
  * @default_ept: set to channel default endpoint if the default endpoint should be re-used
  *              on device open to prevent endpoint address update.
- * remote_flow_restricted: to indicate if the remote has requested for flow to be limited
- * remote_flow_updated: to indicate if the flow control has been requested
+ * @remote_flow_restricted: to indicate if the remote has requested for flow to be limited
+ * @remote_flow_updated: to indicate if the flow control has been requested
  */
 struct rpmsg_eptdev {
 	struct device dev;
@@ -79,6 +79,11 @@ int rpmsg_chrdev_eptdev_destroy(struct device *dev, void *data)
 	struct rpmsg_eptdev *eptdev = dev_to_eptdev(dev);
 
 	mutex_lock(&eptdev->ept_lock);
+	if (!eptdev->rpdev) {
+		mutex_unlock(&eptdev->ept_lock);
+		return 0;
+	}
+
 	eptdev->rpdev = NULL;
 	if (eptdev->ept) {
 		/* The default endpoint is released by the rpmsg core */
@@ -104,6 +109,9 @@ static int rpmsg_ept_cb(struct rpmsg_device *rpdev, void *buf, int len,
 	struct rpmsg_eptdev *eptdev = priv;
 	struct sk_buff *skb;
 
+	if (!eptdev)
+		return 0;
+
 	skb = alloc_skb(len, GFP_ATOMIC);
 	if (!skb)
 		return -ENOMEM;
@@ -123,6 +131,9 @@ static int rpmsg_ept_cb(struct rpmsg_device *rpdev, void *buf, int len,
 static int rpmsg_ept_flow_cb(struct rpmsg_device *rpdev, void *priv, bool enable)
 {
 	struct rpmsg_eptdev *eptdev = priv;
+
+	if (!eptdev)
+		return 0;
 
 	eptdev->remote_flow_restricted = enable;
 	eptdev->remote_flow_updated = true;
@@ -365,7 +376,7 @@ static ssize_t name_show(struct device *dev, struct device_attribute *attr,
 {
 	struct rpmsg_eptdev *eptdev = dev_get_drvdata(dev);
 
-	return sprintf(buf, "%s\n", eptdev->chinfo.name);
+	return sysfs_emit(buf, "%s\n", eptdev->chinfo.name);
 }
 static DEVICE_ATTR_RO(name);
 
@@ -374,7 +385,7 @@ static ssize_t src_show(struct device *dev, struct device_attribute *attr,
 {
 	struct rpmsg_eptdev *eptdev = dev_get_drvdata(dev);
 
-	return sprintf(buf, "%d\n", eptdev->chinfo.src);
+	return sysfs_emit(buf, "%d\n", eptdev->chinfo.src);
 }
 static DEVICE_ATTR_RO(src);
 
@@ -383,7 +394,7 @@ static ssize_t dst_show(struct device *dev, struct device_attribute *attr,
 {
 	struct rpmsg_eptdev *eptdev = dev_get_drvdata(dev);
 
-	return sprintf(buf, "%d\n", eptdev->chinfo.dst);
+	return sysfs_emit(buf, "%d\n", eptdev->chinfo.dst);
 }
 static DEVICE_ATTR_RO(dst);
 
@@ -399,8 +410,8 @@ static void rpmsg_eptdev_release_device(struct device *dev)
 {
 	struct rpmsg_eptdev *eptdev = dev_to_eptdev(dev);
 
-	ida_simple_remove(&rpmsg_ept_ida, dev->id);
-	ida_simple_remove(&rpmsg_minor_ida, MINOR(eptdev->dev.devt));
+	ida_free(&rpmsg_ept_ida, dev->id);
+	ida_free(&rpmsg_minor_ida, MINOR(eptdev->dev.devt));
 	kfree(eptdev);
 }
 
@@ -410,7 +421,7 @@ static struct rpmsg_eptdev *rpmsg_chrdev_eptdev_alloc(struct rpmsg_device *rpdev
 	struct rpmsg_eptdev *eptdev;
 	struct device *dev;
 
-	eptdev = kzalloc(sizeof(*eptdev), GFP_KERNEL);
+	eptdev = kzalloc_obj(*eptdev);
 	if (!eptdev)
 		return ERR_PTR(-ENOMEM);
 
@@ -423,7 +434,7 @@ static struct rpmsg_eptdev *rpmsg_chrdev_eptdev_alloc(struct rpmsg_device *rpdev
 	init_waitqueue_head(&eptdev->readq);
 
 	device_initialize(dev);
-	dev->class = rpmsg_class;
+	dev->class = &rpmsg_class;
 	dev->parent = parent;
 	dev->groups = rpmsg_eptdev_groups;
 	dev_set_drvdata(dev, eptdev);
@@ -441,12 +452,12 @@ static int rpmsg_chrdev_eptdev_add(struct rpmsg_eptdev *eptdev, struct rpmsg_cha
 
 	eptdev->chinfo = chinfo;
 
-	ret = ida_simple_get(&rpmsg_minor_ida, 0, RPMSG_DEV_MAX, GFP_KERNEL);
+	ret = ida_alloc_max(&rpmsg_minor_ida, RPMSG_DEV_MAX - 1, GFP_KERNEL);
 	if (ret < 0)
 		goto free_eptdev;
 	dev->devt = MKDEV(MAJOR(rpmsg_major), ret);
 
-	ret = ida_simple_get(&rpmsg_ept_ida, 0, 0, GFP_KERNEL);
+	ret = ida_alloc(&rpmsg_ept_ida, GFP_KERNEL);
 	if (ret < 0)
 		goto free_minor_ida;
 	dev->id = ret;
@@ -462,9 +473,9 @@ static int rpmsg_chrdev_eptdev_add(struct rpmsg_eptdev *eptdev, struct rpmsg_cha
 	return ret;
 
 free_ept_ida:
-	ida_simple_remove(&rpmsg_ept_ida, dev->id);
+	ida_free(&rpmsg_ept_ida, dev->id);
 free_minor_ida:
-	ida_simple_remove(&rpmsg_minor_ida, MINOR(dev->devt));
+	ida_free(&rpmsg_minor_ida, MINOR(dev->devt));
 free_eptdev:
 	put_device(dev);
 	kfree(eptdev);
@@ -490,6 +501,7 @@ static int rpmsg_chrdev_probe(struct rpmsg_device *rpdev)
 	struct rpmsg_channel_info chinfo;
 	struct rpmsg_eptdev *eptdev;
 	struct device *dev = &rpdev->dev;
+	int ret;
 
 	memcpy(chinfo.name, rpdev->id.name, RPMSG_NAME_SIZE);
 	chinfo.src = rpdev->src;
@@ -502,13 +514,17 @@ static int rpmsg_chrdev_probe(struct rpmsg_device *rpdev)
 	/* Set the default_ept to the rpmsg device endpoint */
 	eptdev->default_ept = rpdev->ept;
 
+	ret = rpmsg_chrdev_eptdev_add(eptdev, chinfo);
+
+	if (ret)
+		return ret;
 	/*
 	 * The rpmsg_ept_cb uses *priv parameter to get its rpmsg_eptdev context.
-	 * Storedit in default_ept *priv field.
+	 * Stored it in default_ept *priv field.
 	 */
 	eptdev->default_ept->priv = eptdev;
 
-	return rpmsg_chrdev_eptdev_add(eptdev, chinfo);
+	return 0;
 }
 
 static void rpmsg_chrdev_remove(struct rpmsg_device *rpdev)
@@ -522,8 +538,10 @@ static void rpmsg_chrdev_remove(struct rpmsg_device *rpdev)
 
 static struct rpmsg_device_id rpmsg_chrdev_id_table[] = {
 	{ .name	= "rpmsg-raw" },
+	{ .name	= "rpmsg_chrdev" },
 	{ },
 };
+MODULE_DEVICE_TABLE(rpmsg, rpmsg_chrdev_id_table);
 
 static struct rpmsg_driver rpmsg_chrdev_driver = {
 	.probe = rpmsg_chrdev_probe,
@@ -565,5 +583,5 @@ static void rpmsg_chrdev_exit(void)
 }
 module_exit(rpmsg_chrdev_exit);
 
-MODULE_ALIAS("rpmsg:rpmsg_chrdev");
+MODULE_DESCRIPTION("RPMSG device interface");
 MODULE_LICENSE("GPL v2");

@@ -127,7 +127,7 @@ static int v4l2_fwnode_endpoint_parse_csi2_bus(struct fwnode_handle *fwnode,
 {
 	struct v4l2_mbus_config_mipi_csi2 *bus = &vep->bus.mipi_csi2;
 	bool have_clk_lane = false, have_data_lanes = false,
-		have_lane_polarities = false;
+		have_lane_polarities = false, have_line_orders = false;
 	unsigned int flags = 0, lanes_used = 0;
 	u32 array[1 + V4L2_MBUS_CSI2_MAX_DATA_LANES];
 	u32 clock_lane = 0;
@@ -197,6 +197,17 @@ static int v4l2_fwnode_endpoint_parse_csi2_bus(struct fwnode_handle *fwnode,
 		have_lane_polarities = true;
 	}
 
+	rval = fwnode_property_count_u32(fwnode, "line-orders");
+	if (rval > 0) {
+		if (rval != num_data_lanes) {
+			pr_warn("invalid number of line-orders entries (need %u, got %u)\n",
+				num_data_lanes, rval);
+			return -EINVAL;
+		}
+
+		have_line_orders = true;
+	}
+
 	if (!fwnode_property_read_u32(fwnode, "clock-lanes", &v)) {
 		clock_lane = v;
 		pr_debug("clock lane position %u\n", v);
@@ -249,6 +260,36 @@ static int v4l2_fwnode_endpoint_parse_csi2_bus(struct fwnode_handle *fwnode,
 			}
 		} else {
 			pr_debug("no lane polarities defined, assuming not inverted\n");
+		}
+
+		if (have_line_orders) {
+			fwnode_property_read_u32_array(fwnode,
+						       "line-orders", array,
+						       num_data_lanes);
+
+			for (i = 0; i < num_data_lanes; i++) {
+				static const char * const orders[] = {
+					"ABC", "ACB", "BAC", "BCA", "CAB", "CBA"
+				};
+
+				if (array[i] >= ARRAY_SIZE(orders)) {
+					pr_warn("lane %u invalid line-order assuming ABC (got %u)\n",
+						i, array[i]);
+					bus->line_orders[i] =
+						V4L2_MBUS_CSI2_CPHY_LINE_ORDER_ABC;
+					continue;
+				}
+
+				bus->line_orders[i] = array[i];
+				pr_debug("lane %u line order %s", i,
+					 orders[array[i]]);
+			}
+		} else {
+			for (i = 0; i < num_data_lanes; i++)
+				bus->line_orders[i] =
+					V4L2_MBUS_CSI2_CPHY_LINE_ORDER_ABC;
+
+			pr_debug("no line orders defined, assuming ABC\n");
 		}
 	}
 
@@ -424,6 +465,16 @@ static int __v4l2_fwnode_endpoint_parse(struct fwnode_handle *fwnode,
 	enum v4l2_mbus_type mbus_type;
 	int rval;
 
+	/*
+	 * Return -EPROBE_DEFER if there's no endpoint -- in case the endpoint's
+	 * origin is a software node, it may be that the endpoint has not been
+	 * instantiated yet, but will be with probing of another driver. This is
+	 * the case with the IPU bridge; once we have no such cases left, return
+	 * another error such as -EINVAL.
+	 */
+	if (!fwnode)
+		return -EPROBE_DEFER;
+
 	pr_debug("===== begin parsing endpoint %pfw\n", fwnode);
 
 	fwnode_property_read_u32(fwnode, "bus-type", &bus_type);
@@ -581,6 +632,8 @@ int v4l2_fwnode_parse_link(struct fwnode_handle *fwnode,
 	link->remote_node = fwnode_graph_get_port_parent(fwnode);
 	if (!link->remote_node)
 		goto err_put_remote_endpoint;
+
+	fwnode_handle_put(fwnode);
 
 	return 0;
 
@@ -741,7 +794,7 @@ int v4l2_fwnode_connector_add_link(struct fwnode_handle *fwnode,
 	if (!connector_ep)
 		return -ENOTCONN;
 
-	link = kzalloc(sizeof(*link), GFP_KERNEL);
+	link = kzalloc_obj(*link);
 	if (!link) {
 		err = -ENOMEM;
 		goto err;
@@ -1179,7 +1232,9 @@ v4l2_async_nf_parse_fwnode_sensor(struct device *dev,
 	static const char * const led_props[] = { "led" };
 	static const struct v4l2_fwnode_int_props props[] = {
 		{ "flash-leds", led_props, ARRAY_SIZE(led_props) },
-		{ "lens-focus", NULL, 0 },
+		{ "mipi-img-flash-leds", },
+		{ "lens-focus", },
+		{ "mipi-img-lens-focus", },
 	};
 	unsigned int i;
 
@@ -1203,7 +1258,7 @@ v4l2_async_nf_parse_fwnode_sensor(struct device *dev,
 	return 0;
 }
 
-int v4l2_async_register_subdev_sensor(struct v4l2_subdev *sd)
+int __v4l2_async_register_subdev_sensor(struct v4l2_subdev *sd, struct module *module)
 {
 	struct v4l2_async_notifier *notifier;
 	int ret;
@@ -1211,7 +1266,7 @@ int v4l2_async_register_subdev_sensor(struct v4l2_subdev *sd)
 	if (WARN_ON(!sd->dev))
 		return -ENODEV;
 
-	notifier = kzalloc(sizeof(*notifier), GFP_KERNEL);
+	notifier = kzalloc_obj(*notifier);
 	if (!notifier)
 		return -ENOMEM;
 
@@ -1229,7 +1284,7 @@ int v4l2_async_register_subdev_sensor(struct v4l2_subdev *sd)
 	if (ret < 0)
 		goto out_cleanup;
 
-	ret = v4l2_async_register_subdev(sd);
+	ret = __v4l2_async_register_subdev(sd, module);
 	if (ret < 0)
 		goto out_unregister;
 
@@ -1247,8 +1302,9 @@ out_cleanup:
 
 	return ret;
 }
-EXPORT_SYMBOL_GPL(v4l2_async_register_subdev_sensor);
+EXPORT_SYMBOL_GPL(__v4l2_async_register_subdev_sensor);
 
+MODULE_DESCRIPTION("V4L2 fwnode binding parsing library");
 MODULE_LICENSE("GPL");
 MODULE_AUTHOR("Sakari Ailus <sakari.ailus@linux.intel.com>");
 MODULE_AUTHOR("Sylwester Nawrocki <s.nawrocki@samsung.com>");

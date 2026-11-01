@@ -26,6 +26,7 @@
 
 /**
  * struct adc_jack_data - internal data for adc_jack device driver
+ * @dev:		The device structure associated with the adc_jack.
  * @edev:		extcon device.
  * @cable_names:	list of supported cables.
  * @adc_conditions:	list of adc value conditions.
@@ -35,6 +36,7 @@
  *			handling at handling_delay jiffies.
  * @handler:		extcon event handler called by interrupt handler.
  * @chan:		iio channel being queried.
+ * @wakeup_source:	Indicates if the device can wake up the system.
  */
 struct adc_jack_data {
 	struct device *dev;
@@ -158,14 +160,14 @@ static int adc_jack_probe(struct platform_device *pdev)
 	return 0;
 }
 
-static int adc_jack_remove(struct platform_device *pdev)
+static void adc_jack_remove(struct platform_device *pdev)
 {
 	struct adc_jack_data *data = platform_get_drvdata(pdev);
 
+	if (data->wakeup_source)
+		device_init_wakeup(&pdev->dev, false);
 	free_irq(data->irq, data);
 	cancel_work_sync(&data->handler.work);
-
-	return 0;
 }
 
 #ifdef CONFIG_PM_SLEEP
@@ -208,3 +210,4 @@ module_platform_driver(adc_jack_driver);
 MODULE_AUTHOR("MyungJoo Ham <myungjoo.ham@samsung.com>");
 MODULE_DESCRIPTION("ADC Jack extcon driver");
 MODULE_LICENSE("GPL v2");
+MODULE_IMPORT_NS("IIO_CONSUMER");

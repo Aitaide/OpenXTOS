@@ -429,7 +429,10 @@ static int is_out(const struct crush_map *map,
 /**
  * crush_choose_firstn - choose numrep distinct items of given type
  * @map: the crush_map
+ * @work: working space initialized by crush_init_workspace()
  * @bucket: the bucket we are choose an item from
+ * @weight: weight vector (for map leaves)
+ * @weight_max: size of weight vector
  * @x: crush input value
  * @numrep: the number of items to choose
  * @type: the type of item to choose
@@ -445,6 +448,7 @@ static int is_out(const struct crush_map *map,
  * @vary_r: pass r to recursive calls
  * @out2: second output vector for leaf items (if @recurse_to_leaf)
  * @parent_r: r value passed from the parent
+ * @choose_args: weights and ids for each known bucket
  */
 static int crush_choose_firstn(const struct crush_map *map,
 			       struct crush_work *work,
@@ -636,9 +640,8 @@ reject:
 }
 
 
-/**
+/*
  * crush_choose_indep: alternative breadth-first positionally stable mapping
- *
  */
 static void crush_choose_indep(const struct crush_map *map,
 			       struct crush_work *work,
@@ -908,7 +911,7 @@ int crush_do_rule(const struct crush_map *map,
 	int osize;
 	const struct crush_rule *rule;
 	__u32 step;
-	int i, j;
+	int i;
 	int numrep;
 	int out_size;
 	/*
@@ -1009,7 +1012,6 @@ int crush_do_rule(const struct crush_map *map,
 					if (numrep <= 0)
 						continue;
 				}
-				j = 0;
 				/* make sure bucket id is valid */
 				bno = -1 - w[i];
 				if (bno < 0 || bno >= map->max_buckets) {
@@ -1033,7 +1035,7 @@ int crush_do_rule(const struct crush_map *map,
 						weight, weight_max,
 						x, numrep,
 						curstep->arg2,
-						o+osize, j,
+						o+osize, 0,
 						result_max-osize,
 						choose_tries,
 						recurse_tries,
@@ -1055,7 +1057,7 @@ int crush_do_rule(const struct crush_map *map,
 						weight, weight_max,
 						x, out_size, numrep,
 						curstep->arg2,
-						o+osize, j,
+						o+osize, 0,
 						choose_tries,
 						choose_leaf_tries ?
 						   choose_leaf_tries : 1,

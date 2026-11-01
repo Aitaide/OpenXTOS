@@ -8,7 +8,7 @@ title: Qualcomm IPQ5018 TLMM pin controller
 
 maintainers:
   - Bjorn Andersson <andersson@kernel.org>
-  - Krzysztof Kozlowski <krzysztof.kozlowski@linaro.org>
+  - Krzysztof Kozlowski <krzk@kernel.org>
 
 description:
   Top Level Mode Multiplexer pin controller in Qualcomm IPQ5018 SoC.
@@ -22,13 +22,6 @@ properties:
 
   interrupts:
     maxItems: 1
-
-  interrupt-controller: true
-  "#interrupt-cells": true
-  gpio-controller: true
-  "#gpio-cells": true
-  gpio-ranges: true
-  wakeup-parent: true
 
   gpio-reserved-ranges:
     minItems: 1
@@ -95,7 +88,10 @@ required:
   - compatible
   - reg
 
-additionalProperties: false
+allOf:
+  - $ref: /schemas/pinctrl/qcom,tlmm-common.yaml#
+
+unevaluatedProperties: false
 
 examples:
   - |

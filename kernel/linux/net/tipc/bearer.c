@@ -163,8 +163,12 @@ static int bearer_name_validate(const char *name,
 
 	/* return bearer name components, if necessary */
 	if (name_parts) {
-		strcpy(name_parts->media_name, media_name);
-		strcpy(name_parts->if_name, if_name);
+		if (strscpy(name_parts->media_name, media_name,
+			    TIPC_MAX_MEDIA_NAME) < 0)
+			return 0;
+		if (strscpy(name_parts->if_name, if_name,
+			    TIPC_MAX_IF_NAME) < 0)
+			return 0;
 	}
 	return 1;
 }
@@ -318,11 +322,11 @@ static int tipc_enable_bearer(struct net *net, const char *name,
 		goto rejected;
 	}
 
-	b = kzalloc(sizeof(*b), GFP_ATOMIC);
+	b = kzalloc_obj(*b, GFP_ATOMIC);
 	if (!b)
 		return -ENOMEM;
 
-	strcpy(b->name, name);
+	strscpy(b->name, name);
 	b->media = m;
 	res = m->enable_media(net, b, attr);
 	if (res) {
@@ -478,6 +482,7 @@ void tipc_disable_l2_media(struct tipc_bearer *b)
 	dev = (struct net_device *)rtnl_dereference(b->media_ptr);
 	dev_remove_pack(&b->pt);
 	RCU_INIT_POINTER(dev->tipc_ptr, NULL);
+	RCU_INIT_POINTER(b->media_ptr, NULL);
 	synchronize_net();
 	dev_put(dev);
 }
@@ -1079,24 +1084,27 @@ int tipc_nl_bearer_add(struct sk_buff *skb, struct genl_info *info)
 	rtnl_lock();
 	b = tipc_bearer_find(net, name);
 	if (!b) {
-		rtnl_unlock();
 		NL_SET_ERR_MSG(info->extack, "Bearer not found");
-		return -EINVAL;
+		err = -EINVAL;
+		goto out;
 	}
 
 #ifdef CONFIG_TIPC_MEDIA_UDP
 	if (attrs[TIPC_NLA_BEARER_UDP_OPTS]) {
+		if (b->media->type_id != TIPC_MEDIA_TYPE_UDP) {
+			NL_SET_ERR_MSG(info->extack, "UDP option is unsupported");
+			err = -EINVAL;
+			goto out;
+		}
+
 		err = tipc_udp_nl_bearer_add(b,
 					     attrs[TIPC_NLA_BEARER_UDP_OPTS]);
-		if (err) {
-			rtnl_unlock();
-			return err;
-		}
 	}
 #endif
+out:
 	rtnl_unlock();
 
-	return 0;
+	return err;
 }
 
 int __tipc_nl_bearer_set(struct sk_buff *skb, struct genl_info *info)

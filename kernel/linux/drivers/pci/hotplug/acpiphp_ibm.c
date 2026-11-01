@@ -84,7 +84,7 @@ static int ibm_get_attention_status(struct hotplug_slot *slot, u8 *status);
 static void ibm_handle_events(acpi_handle handle, u32 event, void *context);
 static int ibm_get_table_from_acpi(char **bufp);
 static ssize_t ibm_read_apci_table(struct file *filp, struct kobject *kobj,
-				   struct bin_attribute *bin_attr,
+				   const struct bin_attribute *bin_attr,
 				   char *buffer, loff_t pos, size_t size);
 static acpi_status __init ibm_find_acpi_device(acpi_handle handle,
 		u32 lvl, void *context, void **rv);
@@ -141,7 +141,7 @@ static union apci_descriptor *ibm_slot_from_id(int id)
 
 ibm_slot_done:
 	if (ret) {
-		ret = kmalloc(sizeof(union apci_descriptor), GFP_KERNEL);
+		ret = kmalloc_obj(union apci_descriptor);
 		if (ret)
 			memcpy(ret, des, sizeof(union apci_descriptor));
 	}
@@ -258,8 +258,7 @@ static void ibm_handle_events(acpi_handle handle, u32 event, void *context)
 
 	if (subevent == 0x80) {
 		pr_debug("%s: generating bus event\n", __func__);
-		acpi_bus_generate_netlink_event(note->device->pnp.device_class,
-						  dev_name(&note->device->dev),
+		acpi_bus_generate_netlink_event("", dev_name(&note->device->dev),
 						  note->event, detail);
 	} else
 		note->event = event;
@@ -353,7 +352,7 @@ read_table_done:
  * our solution is to only allow reading the table in all at once.
  */
 static ssize_t ibm_read_apci_table(struct file *filp, struct kobject *kobj,
-				   struct bin_attribute *bin_attr,
+				   const struct bin_attribute *bin_attr,
 				   char *buffer, loff_t pos, size_t size)
 {
 	int bytes_read = -EINVAL;

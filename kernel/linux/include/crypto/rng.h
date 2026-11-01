@@ -12,22 +12,10 @@
 #include <linux/atomic.h>
 #include <linux/container_of.h>
 #include <linux/crypto.h>
+#include <linux/fips.h>
+#include <linux/random.h>
 
 struct crypto_rng;
-
-/*
- * struct crypto_istat_rng: statistics for RNG algorithm
- * @generate_cnt:	number of RNG generate requests
- * @generate_tlen:	total data size of generated data by the RNG
- * @seed_cnt:		number of times the RNG was seeded
- * @err_cnt:		number of error for RNG requests
- */
-struct crypto_istat_rng {
-	atomic64_t generate_cnt;
-	atomic64_t generate_tlen;
-	atomic64_t seed_cnt;
-	atomic64_t err_cnt;
-};
 
 /**
  * struct rng_alg - random number generator definition
@@ -46,7 +34,6 @@ struct crypto_istat_rng {
  *		size of the seed is defined with @seedsize .
  * @set_ent:	Set entropy that would otherwise be obtained from
  *		entropy source.  Internal use only.
- * @stat:	Statistics for rng algorithm
  * @seedsize:	The seed size required for a random number generator
  *		initialization defined with this variable. Some
  *		random number generators does not require a seed
@@ -63,10 +50,6 @@ struct rng_alg {
 	void (*set_ent)(struct crypto_rng *tfm, const u8 *data,
 			unsigned int len);
 
-#ifdef CONFIG_CRYPTO_STATS
-	struct crypto_istat_rng stat;
-#endif
-
 	unsigned int seedsize;
 
 	struct crypto_alg base;
@@ -76,10 +59,27 @@ struct crypto_rng {
 	struct crypto_tfm base;
 };
 
-extern struct crypto_rng *crypto_default_rng;
+int __crypto_stdrng_get_bytes(void *buf, unsigned int len);
 
-int crypto_get_default_rng(void);
-void crypto_put_default_rng(void);
+/**
+ * crypto_stdrng_get_bytes() - get cryptographically secure random bytes
+ * @buf: output buffer holding the random numbers
+ * @len: length of the output buffer
+ *
+ * This function fills the caller-allocated buffer with random numbers using the
+ * normal Linux RNG if fips_enabled=0, or the highest-priority "stdrng"
+ * algorithm in the crypto_rng subsystem if fips_enabled=1.
+ *
+ * Context: May sleep
+ * Return: 0 function was successful; < 0 if an error occurred
+ */
+static inline int crypto_stdrng_get_bytes(void *buf, unsigned int len)
+{
+	might_sleep();
+	if (fips_enabled)
+		return __crypto_stdrng_get_bytes(buf, len);
+	return get_random_bytes_wait(buf, len);
+}
 
 /**
  * DOC: Random number generator API
@@ -121,12 +121,10 @@ static inline struct rng_alg *__crypto_rng_alg(struct crypto_alg *alg)
 }
 
 /**
- * crypto_rng_alg - obtain name of RNG
- * @tfm: cipher handle
+ * crypto_rng_alg() - obtain 'struct rng_alg' pointer from RNG handle
+ * @tfm: RNG handle
  *
- * Return the generic name (cra_name) of the initialized random number generator
- *
- * Return: generic name string
+ * Return: Pointer to 'struct rng_alg', derived from @tfm RNG handle
  */
 static inline struct rng_alg *crypto_rng_alg(struct crypto_rng *tfm)
 {
@@ -142,26 +140,6 @@ static inline struct rng_alg *crypto_rng_alg(struct crypto_rng *tfm)
 static inline void crypto_free_rng(struct crypto_rng *tfm)
 {
 	crypto_destroy_tfm(tfm, crypto_rng_tfm(tfm));
-}
-
-static inline struct crypto_istat_rng *rng_get_stat(struct rng_alg *alg)
-{
-#ifdef CONFIG_CRYPTO_STATS
-	return &alg->stat;
-#else
-	return NULL;
-#endif
-}
-
-static inline int crypto_rng_errstat(struct rng_alg *alg, int err)
-{
-	if (!IS_ENABLED(CONFIG_CRYPTO_STATS))
-		return err;
-
-	if (err && err != -EINPROGRESS && err != -EBUSY)
-		atomic64_inc(&rng_get_stat(alg)->err_cnt);
-
-	return err;
 }
 
 /**
@@ -182,17 +160,7 @@ static inline int crypto_rng_generate(struct crypto_rng *tfm,
 				      const u8 *src, unsigned int slen,
 				      u8 *dst, unsigned int dlen)
 {
-	struct rng_alg *alg = crypto_rng_alg(tfm);
-
-	if (IS_ENABLED(CONFIG_CRYPTO_STATS)) {
-		struct crypto_istat_rng *istat = rng_get_stat(alg);
-
-		atomic64_inc(&istat->generate_cnt);
-		atomic64_add(dlen, &istat->generate_tlen);
-	}
-
-	return crypto_rng_errstat(alg,
-				  alg->generate(tfm, src, slen, dst, dlen));
+	return crypto_rng_alg(tfm)->generate(tfm, src, slen, dst, dlen);
 }
 
 /**
@@ -220,12 +188,11 @@ static inline int crypto_rng_get_bytes(struct crypto_rng *tfm,
  *
  * The reset function completely re-initializes the random number generator
  * referenced by the cipher handle by clearing the current state. The new state
- * is initialized with the caller provided seed or automatically, depending
- * on the random number generator type (the ANSI X9.31 RNG requires
- * caller-provided seed, the SP800-90A DRBGs perform an automatic seeding).
- * The seed is provided as a parameter to this function call. The provided seed
- * should have the length of the seed size defined for the random number
- * generator as defined by crypto_rng_seedsize.
+ * is initialized with the caller provided seed or automatically, depending on
+ * the random number generator type. (The SP800-90A DRBGs perform an automatic
+ * seeding.) The seed is provided as a parameter to this function call. The
+ * provided seed should have the length of the seed size defined for the random
+ * number generator as defined by crypto_rng_seedsize.
  *
  * Return: 0 if the setting of the key was successful; < 0 if an error occurred
  */

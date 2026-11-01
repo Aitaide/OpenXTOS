@@ -14,6 +14,7 @@
 #include "wsm.h"
 #include "bh.h"
 #include "sta.h"
+#include "hwbus.h"
 #include "debug.h"
 
 #define CW1200_INVALID_RATE_ID (0xFF)
@@ -716,6 +717,7 @@ void cw1200_tx(struct ieee80211_hw *dev,
 	struct ieee80211_sta *sta;
 	struct wsm_tx *wsm;
 	bool tid_update = false;
+	size_t pad_len;
 	u8 flags = 0;
 	int ret;
 
@@ -763,6 +765,18 @@ void cw1200_tx(struct ieee80211_hw *dev,
 		goto drop;
 
 	sta = t.sta;
+
+	/*
+	 * The bus transfer is padded up to the bus alignment and the
+	 * padding is transferred from the frame buffer.  Make sure the
+	 * buffer has room for the padding so the device never receives
+	 * data past the end of the frame.
+	 */
+	pad_len = priv->hwbus_ops->align_size(priv->hwbus_priv, skb->len) -
+		skb->len;
+	if (skb_tailroom(skb) < pad_len &&
+	    pskb_expand_head(skb, 0, pad_len, GFP_ATOMIC))
+		goto drop;
 
 	spin_lock_bh(&priv->ps_state_lock);
 	{
@@ -994,7 +1008,7 @@ void cw1200_skb_dtor(struct cw1200_common *priv,
 					  txpriv->raw_link_id, txpriv->tid);
 		tx_policy_put(priv, txpriv->rate_id);
 	}
-	ieee80211_tx_status(priv->hw, skb);
+	ieee80211_tx_status_skb(priv->hw, skb);
 }
 
 void cw1200_rx_cb(struct cw1200_common *priv,
@@ -1166,7 +1180,7 @@ void cw1200_rx_cb(struct cw1200_common *priv,
 		size_t ies_len = skb->len - (ies - (u8 *)(skb->data));
 
 		tim_ie = cfg80211_find_ie(WLAN_EID_TIM, ies, ies_len);
-		if (tim_ie) {
+		if (tim_ie && tim_ie[1] >= sizeof(struct ieee80211_tim_ie)) {
 			struct ieee80211_tim_ie *tim =
 				(struct ieee80211_tim_ie *)&tim_ie[2];
 

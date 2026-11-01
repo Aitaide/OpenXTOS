@@ -53,6 +53,7 @@ properties:
 additionalProperties:
   anyOf:
     - type: object
+      additionalProperties: false
       allOf:
         - $ref: pincfg-node.yaml#
         - $ref: pinmux-node.yaml#
@@ -87,7 +88,7 @@ additionalProperties:
 
     - type: object
       additionalProperties:
-        $ref: "#/additionalProperties/anyOf/0"
+        $ref: '#/additionalProperties/anyOf/0'
 
 allOf:
   - $ref: pinctrl.yaml#

@@ -1,5 +1,5 @@
-# XTOS configuration fragment for Linux 6.6 + PREEMPT_RT.
-# Apply after kernel/patches/xtos-linux-6.6.patch.
+# XTOS configuration fragment for Linux 7.3.1 with mainline PREEMPT_RT.
+# Apply after the integration patch selected by kernel/source-pin.json.
 CONFIG_EXPERT=y
 CONFIG_PREEMPT_RT=y
 CONFIG_HIGH_RES_TIMERS=y

@@ -209,7 +209,7 @@ static void dce_driver_set_backlight(struct panel_cntl *panel_cntl,
 	if (pwm_period_bitcnt == 0)
 		bit_count = 16;
 	else
-		bit_count = pwm_period_bitcnt;
+		bit_count = (uint8_t)pwm_period_bitcnt;
 
 	/* e.g. maskedPwmPeriod = 0x24 when bitCount is 6 */
 	masked_pwm_period = masked_pwm_period & ((1 << bit_count) - 1);
@@ -218,13 +218,13 @@ static void dce_driver_set_backlight(struct panel_cntl *panel_cntl,
 	 * contain integer component, lower 16 bits contain fractional component
 	 * of active duty cycle e.g. 0x21BDC0 = 0xEFF0 * 0x24
 	 */
-	active_duty_cycle = backlight_pwm_u16_16 * masked_pwm_period;
+	active_duty_cycle = backlight_pwm_u16_16 * (uint64_t)masked_pwm_period;
 
 	/* 1.3 Calculate 16 bit active duty cycle from integer and fractional
 	 * components shift by bitCount then mask 16 bits and add rounding bit
 	 * from MSB of fraction e.g. 0x86F7 = ((0x21BDC0 >> 6) & 0xFFF) + 0
 	 */
-	backlight_16bit = active_duty_cycle >> bit_count;
+	backlight_16bit = (uint32_t)(active_duty_cycle >> bit_count);
 	backlight_16bit &= 0xFFFF;
 	backlight_16bit += (active_duty_cycle >> (bit_count - 1)) & 0x1;
 
@@ -290,4 +290,5 @@ void dce_panel_cntl_construct(
 	dce_panel_cntl->base.funcs = &dce_link_panel_cntl_funcs;
 	dce_panel_cntl->base.ctx = init_data->ctx;
 	dce_panel_cntl->base.inst = init_data->inst;
+	dce_panel_cntl->base.pwrseq_inst = 0;
 }

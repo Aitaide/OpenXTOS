@@ -19,6 +19,10 @@ allOf:
 properties:
   compatible:
     oneOf:
+      - items:
+          - enum:
+              - amlogic,t7-mmc
+          - const: amlogic,meson-axg-mmc
       - const: amlogic,meson-axg-mmc
       - items:
           - const: amlogic,meson-gx-mmc
@@ -50,6 +54,9 @@ properties:
     description:
       set when controller's internal DMA engine cannot access the DRAM memory,
       like on the G12A dedicated SDIO controller.
+
+  power-domains:
+    maxItems: 1
 
 required:
   - compatible

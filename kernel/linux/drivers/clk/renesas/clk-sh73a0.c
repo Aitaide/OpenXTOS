@@ -34,8 +34,6 @@ struct sh73a0_cpg {
 #define CPG_DSI0PHYCR	0x6c
 #define CPG_DSI1PHYCR	0x70
 
-#define CLK_ENABLE_ON_INIT BIT(0)
-
 struct div4_clk {
 	const char *name;
 	const char *parent;
@@ -172,8 +170,8 @@ static void __init sh73a0_cpg_clocks_init(struct device_node *np)
 		return;
 	}
 
-	cpg = kzalloc(sizeof(*cpg), GFP_KERNEL);
-	clks = kcalloc(num_clks, sizeof(*clks), GFP_KERNEL);
+	cpg = kzalloc_obj(*cpg);
+	clks = kzalloc_objs(*clks, num_clks);
 	if (cpg == NULL || clks == NULL) {
 		/* We're leaking memory on purpose, there's no point in cleaning
 		 * up as the system won't boot anyway.

@@ -14,6 +14,7 @@
 #include "xdr3.h"
 #include "vfs.h"
 #include "filecache.h"
+#include "trace.h"
 
 #define NFSDDBG_FACILITY		NFSDDBG_PROC
 
@@ -27,6 +28,48 @@ static int	nfs3_ftypes[] = {
 	S_IFSOCK,		/* NF3SOCK */
 	S_IFIFO,		/* NF3FIFO */
 };
+
+/*
+ * Reject a client-supplied atime or mtime whose nanoseconds field is out
+ * of range. Such a value is well-formed on the wire but is not a valid
+ * timespec64, and storing it verbatim can corrupt on-disk timestamps.
+ * tv_nsec is a long, so it is cast to unsigned long (the same width) to
+ * catch both an over-large value and one that became negative when an
+ * out-of-range u32 wire nseconds was assigned to a 32-bit long.
+ */
+static bool nfsd3_time_in_range(const struct iattr *iap)
+{
+	if ((iap->ia_valid & ATTR_ATIME_SET) &&
+	    (unsigned long)iap->ia_atime.tv_nsec >= NSEC_PER_SEC)
+		return false;
+	if ((iap->ia_valid & ATTR_MTIME_SET) &&
+	    (unsigned long)iap->ia_mtime.tv_nsec >= NSEC_PER_SEC)
+		return false;
+	return true;
+}
+
+static __be32 nfsd3_map_status(__be32 status)
+{
+	switch (status) {
+	case nfs_ok:
+		break;
+	case nfserr_nofilehandle:
+		status = nfserr_badhandle;
+		break;
+	case nfserr_wrongsec:
+	case nfserr_file_open:
+		status = nfserr_acces;
+		break;
+	case nfserr_symlink_not_dir:
+		status = nfserr_notdir;
+		break;
+	case nfserr_symlink:
+	case nfserr_wrong_type:
+		status = nfserr_inval;
+		break;
+	}
+	return status;
+}
 
 /*
  * NULL call.
@@ -46,8 +89,7 @@ nfsd3_proc_getattr(struct svc_rqst *rqstp)
 	struct nfsd_fhandle *argp = rqstp->rq_argp;
 	struct nfsd3_attrstat *resp = rqstp->rq_resp;
 
-	dprintk("nfsd: GETATTR(3)  %s\n",
-		SVCFH_fmt(&argp->fh));
+	trace_nfsd_vfs_getattr(rqstp, &argp->fh);
 
 	fh_copy(&resp->fh, &argp->fh);
 	resp->status = fh_verify(rqstp, &resp->fh, 0,
@@ -57,6 +99,7 @@ nfsd3_proc_getattr(struct svc_rqst *rqstp)
 
 	resp->status = fh_getattr(&resp->fh, &resp->stat);
 out:
+	resp->status = nfsd3_map_status(resp->status);
 	return rpc_success;
 }
 
@@ -71,13 +114,21 @@ nfsd3_proc_setattr(struct svc_rqst *rqstp)
 	struct nfsd_attrs attrs = {
 		.na_iattr	= &argp->attrs,
 	};
+	const struct timespec64 *guardtime = NULL;
 
 	dprintk("nfsd: SETATTR(3)  %s\n",
 				SVCFH_fmt(&argp->fh));
 
 	fh_copy(&resp->fh, &argp->fh);
-	resp->status = nfsd_setattr(rqstp, &resp->fh, &attrs,
-				    argp->check_guard, argp->guardtime);
+	if (!nfsd3_time_in_range(&argp->attrs)) {
+		resp->status = nfserr_inval;
+		goto out;
+	}
+	if (argp->check_guard)
+		guardtime = &argp->guardtime;
+	resp->status = nfsd_setattr(rqstp, &resp->fh, &attrs, guardtime);
+out:
+	resp->status = nfsd3_map_status(resp->status);
 	return rpc_success;
 }
 
@@ -101,6 +152,7 @@ nfsd3_proc_lookup(struct svc_rqst *rqstp)
 	resp->status = nfsd_lookup(rqstp, &resp->dirfh,
 				   argp->name, argp->len,
 				   &resp->fh);
+	resp->status = nfsd3_map_status(resp->status);
 	return rpc_success;
 }
 
@@ -120,6 +172,7 @@ nfsd3_proc_access(struct svc_rqst *rqstp)
 	fh_copy(&resp->fh, &argp->fh);
 	resp->access = argp->access;
 	resp->status = nfsd_access(rqstp, &resp->fh, &resp->access, NULL);
+	resp->status = nfsd3_map_status(resp->status);
 	return rpc_success;
 }
 
@@ -140,6 +193,7 @@ nfsd3_proc_readlink(struct svc_rqst *rqstp)
 	resp->pages = rqstp->rq_next_page++;
 	resp->status = nfsd_readlink(rqstp, &resp->fh,
 				     page_address(*resp->pages), &resp->len);
+	resp->status = nfsd3_map_status(resp->status);
 	return rpc_success;
 }
 
@@ -171,11 +225,13 @@ nfsd3_proc_read(struct svc_rqst *rqstp)
 	 * + 1 (xdr opaque byte count) = 26
 	 */
 	resp->count = argp->count;
-	svc_reserve_auth(rqstp, ((1 + NFS3_POST_OP_ATTR_WORDS + 3)<<2) + resp->count +4);
+	svc_reserve_auth(rqstp, ((1 + NFS3_POST_OP_ATTR_WORDS + 3) << 2) +
+			 resp->count + 4);
 
 	fh_copy(&resp->fh, &argp->fh);
 	resp->status = nfsd_read(rqstp, &resp->fh, argp->offset,
 				 &resp->count, &resp->eof);
+	resp->status = nfsd3_map_status(resp->status);
 	return rpc_success;
 }
 
@@ -188,13 +244,12 @@ nfsd3_proc_write(struct svc_rqst *rqstp)
 	struct nfsd3_writeargs *argp = rqstp->rq_argp;
 	struct nfsd3_writeres *resp = rqstp->rq_resp;
 	unsigned long cnt = argp->len;
-	unsigned int nvecs;
 
 	dprintk("nfsd: WRITE(3)    %s %d bytes at %Lu%s\n",
 				SVCFH_fmt(&argp->fh),
 				argp->len,
 				(unsigned long long) argp->offset,
-				argp->stable? " stable" : "");
+				argp->stable ? " stable" : "");
 
 	resp->status = nfserr_fbig;
 	if (argp->offset > (u64)OFFSET_MAX ||
@@ -203,12 +258,11 @@ nfsd3_proc_write(struct svc_rqst *rqstp)
 
 	fh_copy(&resp->fh, &argp->fh);
 	resp->committed = argp->stable;
-	nvecs = svc_fill_write_vector(rqstp, &argp->payload);
-
 	resp->status = nfsd_write(rqstp, &resp->fh, argp->offset,
-				  rqstp->rq_vec, nvecs, &cnt,
+				  &argp->payload, &cnt,
 				  resp->committed, resp->verf);
 	resp->count = cnt;
+	resp->status = nfsd3_map_status(resp->status);
 	return rpc_success;
 }
 
@@ -233,7 +287,11 @@ nfsd3_create_file(struct svc_rqst *rqstp, struct svc_fh *fhp,
 	__be32 status;
 	int host_err;
 
-	if (isdotent(argp->name, argp->len))
+	trace_nfsd_vfs_create(rqstp, fhp, S_IFREG, argp->name, argp->len);
+
+	if (!nfsd3_time_in_range(iap))
+		return nfserr_inval;
+	if (name_is_dot_dotdot(argp->name, argp->len))
 		return nfserr_exist;
 	if (!(iap->ia_valid & ATTR_MODE))
 		iap->ia_mode = 0;
@@ -249,12 +307,11 @@ nfsd3_create_file(struct svc_rqst *rqstp, struct svc_fh *fhp,
 	if (host_err)
 		return nfserrno(host_err);
 
-	inode_lock_nested(inode, I_MUTEX_PARENT);
-
-	child = lookup_one_len(argp->name, parent, argp->len);
+	child = start_creating(&nop_mnt_idmap, parent,
+			       &QSTR_LEN(argp->name, argp->len));
 	if (IS_ERR(child)) {
 		status = nfserrno(PTR_ERR(child));
-		goto out;
+		goto out_write;
 	}
 
 	if (d_really_is_negative(child)) {
@@ -294,8 +351,8 @@ nfsd3_create_file(struct svc_rqst *rqstp, struct svc_fh *fhp,
 			status = nfserr_exist;
 			break;
 		case NFS3_CREATE_EXCLUSIVE:
-			if (d_inode(child)->i_mtime.tv_sec == v_mtime &&
-			    d_inode(child)->i_atime.tv_sec == v_atime &&
+			if (inode_get_mtime_sec(d_inode(child)) == v_mtime &&
+			    inode_get_atime_sec(d_inode(child)) == v_atime &&
 			    d_inode(child)->i_size == 0) {
 				break;
 			}
@@ -310,7 +367,7 @@ nfsd3_create_file(struct svc_rqst *rqstp, struct svc_fh *fhp,
 	status = fh_fill_pre_attrs(fhp);
 	if (status != nfs_ok)
 		goto out;
-	host_err = vfs_create(&nop_mnt_idmap, inode, child, iap->ia_mode, true);
+	host_err = vfs_create(&nop_mnt_idmap, child, iap->ia_mode, NULL);
 	if (host_err < 0) {
 		status = nfserrno(host_err);
 		goto out;
@@ -333,9 +390,8 @@ set_attr:
 	status = nfsd_create_setattr(rqstp, fhp, resfhp, &attrs);
 
 out:
-	inode_unlock(inode);
-	if (child && !IS_ERR(child))
-		dput(child);
+	end_creating(child);
+out_write:
 	fh_drop_write(fhp);
 	return status;
 }
@@ -347,15 +403,11 @@ nfsd3_proc_create(struct svc_rqst *rqstp)
 	struct nfsd3_diropres *resp = rqstp->rq_resp;
 	svc_fh *dirfhp, *newfhp;
 
-	dprintk("nfsd: CREATE(3)   %s %.*s\n",
-				SVCFH_fmt(&argp->fh),
-				argp->len,
-				argp->name);
-
 	dirfhp = fh_copy(&resp->dirfh, &argp->fh);
 	newfhp = fh_init(&resp->fh, NFS3_FHSIZE);
 
 	resp->status = nfsd3_create_file(rqstp, dirfhp, newfhp, argp);
+	resp->status = nfsd3_map_status(resp->status);
 	return rpc_success;
 }
 
@@ -371,16 +423,17 @@ nfsd3_proc_mkdir(struct svc_rqst *rqstp)
 		.na_iattr	= &argp->attrs,
 	};
 
-	dprintk("nfsd: MKDIR(3)    %s %.*s\n",
-				SVCFH_fmt(&argp->fh),
-				argp->len,
-				argp->name);
-
 	argp->attrs.ia_valid &= ~ATTR_SIZE;
 	fh_copy(&resp->dirfh, &argp->fh);
 	fh_init(&resp->fh, NFS3_FHSIZE);
+	if (!nfsd3_time_in_range(&argp->attrs)) {
+		resp->status = nfserr_inval;
+		goto out;
+	}
 	resp->status = nfsd_create(rqstp, &resp->dirfh, argp->name, argp->len,
 				   &attrs, S_IFDIR, 0, &resp->fh);
+out:
+	resp->status = nfsd3_map_status(resp->status);
 	return rpc_success;
 }
 
@@ -393,6 +446,10 @@ nfsd3_proc_symlink(struct svc_rqst *rqstp)
 		.na_iattr	= &argp->attrs,
 	};
 
+	if (!nfsd3_time_in_range(&argp->attrs)) {
+		resp->status = nfserr_inval;
+		goto out;
+	}
 	if (argp->tlen == 0) {
 		resp->status = nfserr_inval;
 		goto out;
@@ -410,17 +467,13 @@ nfsd3_proc_symlink(struct svc_rqst *rqstp)
 		goto out;
 	}
 
-	dprintk("nfsd: SYMLINK(3)  %s %.*s -> %.*s\n",
-				SVCFH_fmt(&argp->ffh),
-				argp->flen, argp->fname,
-				argp->tlen, argp->tname);
-
 	fh_copy(&resp->dirfh, &argp->ffh);
 	fh_init(&resp->fh, NFS3_FHSIZE);
 	resp->status = nfsd_symlink(rqstp, &resp->dirfh, argp->fname,
 				    argp->flen, argp->tname, &attrs, &resp->fh);
 	kfree(argp->tname);
 out:
+	resp->status = nfsd3_map_status(resp->status);
 	return rpc_success;
 }
 
@@ -438,11 +491,6 @@ nfsd3_proc_mknod(struct svc_rqst *rqstp)
 	int type;
 	dev_t	rdev = 0;
 
-	dprintk("nfsd: MKNOD(3)    %s %.*s\n",
-				SVCFH_fmt(&argp->fh),
-				argp->len,
-				argp->name);
-
 	fh_copy(&resp->dirfh, &argp->fh);
 	fh_init(&resp->fh, NFS3_FHSIZE);
 
@@ -458,10 +506,16 @@ nfsd3_proc_mknod(struct svc_rqst *rqstp)
 		goto out;
 	}
 
+	if (!nfsd3_time_in_range(&argp->attrs)) {
+		resp->status = nfserr_inval;
+		goto out;
+	}
+
 	type = nfs3_ftypes[argp->ftype];
 	resp->status = nfsd_create(rqstp, &resp->dirfh, argp->name, argp->len,
 				   &attrs, type, rdev, &resp->fh);
 out:
+	resp->status = nfsd3_map_status(resp->status);
 	return rpc_success;
 }
 
@@ -474,15 +528,11 @@ nfsd3_proc_remove(struct svc_rqst *rqstp)
 	struct nfsd3_diropargs *argp = rqstp->rq_argp;
 	struct nfsd3_attrstat *resp = rqstp->rq_resp;
 
-	dprintk("nfsd: REMOVE(3)   %s %.*s\n",
-				SVCFH_fmt(&argp->fh),
-				argp->len,
-				argp->name);
-
 	/* Unlink. -S_IFDIR means file must not be a directory */
 	fh_copy(&resp->fh, &argp->fh);
 	resp->status = nfsd_unlink(rqstp, &resp->fh, -S_IFDIR,
 				   argp->name, argp->len);
+	resp->status = nfsd3_map_status(resp->status);
 	return rpc_success;
 }
 
@@ -495,14 +545,10 @@ nfsd3_proc_rmdir(struct svc_rqst *rqstp)
 	struct nfsd3_diropargs *argp = rqstp->rq_argp;
 	struct nfsd3_attrstat *resp = rqstp->rq_resp;
 
-	dprintk("nfsd: RMDIR(3)    %s %.*s\n",
-				SVCFH_fmt(&argp->fh),
-				argp->len,
-				argp->name);
-
 	fh_copy(&resp->fh, &argp->fh);
 	resp->status = nfsd_unlink(rqstp, &resp->fh, S_IFDIR,
 				   argp->name, argp->len);
+	resp->status = nfsd3_map_status(resp->status);
 	return rpc_success;
 }
 
@@ -512,19 +558,11 @@ nfsd3_proc_rename(struct svc_rqst *rqstp)
 	struct nfsd3_renameargs *argp = rqstp->rq_argp;
 	struct nfsd3_renameres *resp = rqstp->rq_resp;
 
-	dprintk("nfsd: RENAME(3)   %s %.*s ->\n",
-				SVCFH_fmt(&argp->ffh),
-				argp->flen,
-				argp->fname);
-	dprintk("nfsd: -> %s %.*s\n",
-				SVCFH_fmt(&argp->tfh),
-				argp->tlen,
-				argp->tname);
-
 	fh_copy(&resp->ffh, &argp->ffh);
 	fh_copy(&resp->tfh, &argp->tfh);
 	resp->status = nfsd_rename(rqstp, &resp->ffh, argp->fname, argp->flen,
 				   &resp->tfh, argp->tname, argp->tlen);
+	resp->status = nfsd3_map_status(resp->status);
 	return rpc_success;
 }
 
@@ -534,17 +572,11 @@ nfsd3_proc_link(struct svc_rqst *rqstp)
 	struct nfsd3_linkargs *argp = rqstp->rq_argp;
 	struct nfsd3_linkres  *resp = rqstp->rq_resp;
 
-	dprintk("nfsd: LINK(3)     %s ->\n",
-				SVCFH_fmt(&argp->ffh));
-	dprintk("nfsd:   -> %s %.*s\n",
-				SVCFH_fmt(&argp->tfh),
-				argp->tlen,
-				argp->tname);
-
 	fh_copy(&resp->fh,  &argp->ffh);
 	fh_copy(&resp->tfh, &argp->tfh);
 	resp->status = nfsd_link(rqstp, &resp->tfh, argp->tname, argp->tlen,
 				 &resp->fh);
+	resp->status = nfsd3_map_status(resp->status);
 	return rpc_success;
 }
 
@@ -565,7 +597,7 @@ static void nfsd3_init_dirlist_pages(struct svc_rqst *rqstp,
 	buf->pages = rqstp->rq_next_page;
 	rqstp->rq_next_page += (buf->buflen + PAGE_SIZE - 1) >> PAGE_SHIFT;
 
-	xdr_init_encode_pages(xdr, buf, buf->pages,  NULL);
+	xdr_init_encode_pages(xdr, buf);
 }
 
 /*
@@ -578,9 +610,7 @@ nfsd3_proc_readdir(struct svc_rqst *rqstp)
 	struct nfsd3_readdirres  *resp = rqstp->rq_resp;
 	loff_t		offset;
 
-	dprintk("nfsd: READDIR(3)  %s %d bytes at %d\n",
-				SVCFH_fmt(&argp->fh),
-				argp->count, (u32) argp->cookie);
+	trace_nfsd_vfs_readdir(rqstp, &argp->fh, argp->count, argp->cookie);
 
 	nfsd3_init_dirlist_pages(rqstp, resp, argp->count);
 
@@ -597,6 +627,7 @@ nfsd3_proc_readdir(struct svc_rqst *rqstp)
 	/* Recycle only pages that were part of the reply */
 	rqstp->rq_next_page = resp->xdr.page_ptr + 1;
 
+	resp->status = nfsd3_map_status(resp->status);
 	return rpc_success;
 }
 
@@ -611,9 +642,7 @@ nfsd3_proc_readdirplus(struct svc_rqst *rqstp)
 	struct nfsd3_readdirres  *resp = rqstp->rq_resp;
 	loff_t	offset;
 
-	dprintk("nfsd: READDIR+(3) %s %d bytes at %d\n",
-				SVCFH_fmt(&argp->fh),
-				argp->count, (u32) argp->cookie);
+	trace_nfsd_vfs_readdir(rqstp, &argp->fh, argp->count, argp->cookie);
 
 	nfsd3_init_dirlist_pages(rqstp, resp, argp->count);
 
@@ -641,6 +670,7 @@ nfsd3_proc_readdirplus(struct svc_rqst *rqstp)
 	rqstp->rq_next_page = resp->xdr.page_ptr + 1;
 
 out:
+	resp->status = nfsd3_map_status(resp->status);
 	return rpc_success;
 }
 
@@ -653,11 +683,9 @@ nfsd3_proc_fsstat(struct svc_rqst *rqstp)
 	struct nfsd_fhandle *argp = rqstp->rq_argp;
 	struct nfsd3_fsstatres *resp = rqstp->rq_resp;
 
-	dprintk("nfsd: FSSTAT(3)   %s\n",
-				SVCFH_fmt(&argp->fh));
-
 	resp->status = nfsd_statfs(rqstp, &argp->fh, &resp->stats, 0);
 	fh_put(&argp->fh);
+	resp->status = nfsd3_map_status(resp->status);
 	return rpc_success;
 }
 
@@ -701,6 +729,7 @@ nfsd3_proc_fsinfo(struct svc_rqst *rqstp)
 	}
 
 	fh_put(&argp->fh);
+	resp->status = nfsd3_map_status(resp->status);
 	return rpc_success;
 }
 
@@ -721,28 +750,52 @@ nfsd3_proc_pathconf(struct svc_rqst *rqstp)
 	resp->p_name_max = 255;		/* at least */
 	resp->p_no_trunc = 0;
 	resp->p_chown_restricted = 1;
-	resp->p_case_insensitive = 0;
-	resp->p_case_preserving = 1;
+	resp->p_case_insensitive = false;
+	resp->p_case_preserving = true;
 
 	resp->status = fh_verify(rqstp, &argp->fh, 0, NFSD_MAY_NOP);
 
 	if (resp->status == nfs_ok) {
 		struct super_block *sb = argp->fh.fh_dentry->d_sb;
+		int err;
 
-		/* Note that we don't care for remote fs's here */
-		switch (sb->s_magic) {
-		case EXT2_SUPER_MAGIC:
+		if (sb->s_magic == EXT2_SUPER_MAGIC) {
 			resp->p_link_max = EXT2_LINK_MAX;
 			resp->p_name_max = EXT2_NAME_LEN;
+		}
+
+		err = nfsd_get_case_info(argp->fh.fh_dentry,
+					 &resp->p_case_insensitive,
+					 &resp->p_case_preserving);
+		/*
+		 * RFC 1813 lists NFS3ERR_STALE, NFS3ERR_BADHANDLE, and
+		 * NFS3ERR_SERVERFAULT as the only PATHCONF errors.
+		 */
+		switch (err) {
+		case 0:
+		case -EOPNOTSUPP:
+			/* Both arms leave the output booleans valid. */
 			break;
-		case MSDOS_SUPER_MAGIC:
-			resp->p_case_insensitive = 1;
-			resp->p_case_preserving  = 0;
+		case -EACCES:
+		case -EPERM:
+			/*
+			 * Policy denied the query. Report STALE so the
+			 * handle is unusable without implying a server
+			 * malfunction.
+			 */
+			resp->status = nfserr_stale;
+			break;
+		case -ESTALE:
+			resp->status = nfserr_stale;
+			break;
+		default:
+			resp->status = nfserr_serverfault;
 			break;
 		}
 	}
 
 	fh_put(&argp->fh);
+	resp->status = nfsd3_map_status(resp->status);
 	return rpc_success;
 }
 
@@ -770,6 +823,7 @@ nfsd3_proc_commit(struct svc_rqst *rqstp)
 				   argp->count, resp->verf);
 	nfsd_file_put(nf);
 out:
+	resp->status = nfsd3_map_status(resp->status);
 	return rpc_success;
 }
 
@@ -1054,13 +1108,10 @@ static const struct svc_procedure nfsd_procedures3[22] = {
 	},
 };
 
-static DEFINE_PER_CPU_ALIGNED(unsigned long,
-			      nfsd_count3[ARRAY_SIZE(nfsd_procedures3)]);
 const struct svc_version nfsd_version3 = {
 	.vs_vers	= 3,
 	.vs_nproc	= ARRAY_SIZE(nfsd_procedures3),
 	.vs_proc	= nfsd_procedures3,
 	.vs_dispatch	= nfsd_dispatch,
-	.vs_count	= nfsd_count3,
 	.vs_xdrsize	= NFS3_SVC_XDRSIZE,
 };

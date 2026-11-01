@@ -15,6 +15,7 @@
 #include <linux/namei.h>
 #include <linux/poll.h>
 #include <linux/mount.h>
+#include <linux/security.h>
 #include <linux/statfs.h>
 #include <linux/ctype.h>
 #include <linux/string.h>
@@ -75,9 +76,6 @@ static const struct cachefiles_daemon_cmd cachefiles_daemon_cmds[] = {
 	{ "inuse",	cachefiles_daemon_inuse		},
 	{ "secctx",	cachefiles_daemon_secctx	},
 	{ "tag",	cachefiles_daemon_tag		},
-#ifdef CONFIG_CACHEFILES_ONDEMAND
-	{ "copen",	cachefiles_ondemand_copen	},
-#endif
 	{ "",		NULL				}
 };
 
@@ -100,7 +98,7 @@ static int cachefiles_daemon_open(struct inode *inode, struct file *file)
 		return -EBUSY;
 
 	/* allocate a cache record */
-	cache = kzalloc(sizeof(struct cachefiles_cache), GFP_KERNEL);
+	cache = kzalloc_obj(struct cachefiles_cache);
 	if (!cache) {
 		cachefiles_open = 0;
 		return -ENOMEM;
@@ -111,9 +109,6 @@ static int cachefiles_daemon_open(struct inode *inode, struct file *file)
 	INIT_LIST_HEAD(&cache->volumes);
 	INIT_LIST_HEAD(&cache->object_list);
 	spin_lock_init(&cache->object_list_lock);
-	refcount_set(&cache->unbind_pincount, 1);
-	xa_init_flags(&cache->reqs, XA_FLAGS_ALLOC);
-	xa_init_flags(&cache->ondemand_ids, XA_FLAGS_ALLOC1);
 
 	/* set default caching limits
 	 * - limit at 1% free space and/or free files
@@ -132,53 +127,6 @@ static int cachefiles_daemon_open(struct inode *inode, struct file *file)
 	return 0;
 }
 
-static void cachefiles_flush_reqs(struct cachefiles_cache *cache)
-{
-	struct xarray *xa = &cache->reqs;
-	struct cachefiles_req *req;
-	unsigned long index;
-
-	/*
-	 * Make sure the following two operations won't be reordered.
-	 *   1) set CACHEFILES_DEAD bit
-	 *   2) flush requests in the xarray
-	 * Otherwise the request may be enqueued after xarray has been
-	 * flushed, leaving the orphan request never being completed.
-	 *
-	 * CPU 1			CPU 2
-	 * =====			=====
-	 * flush requests in the xarray
-	 *				test CACHEFILES_DEAD bit
-	 *				enqueue the request
-	 * set CACHEFILES_DEAD bit
-	 */
-	smp_mb();
-
-	xa_lock(xa);
-	xa_for_each(xa, index, req) {
-		req->error = -EIO;
-		complete(&req->done);
-	}
-	xa_unlock(xa);
-
-	xa_destroy(&cache->reqs);
-	xa_destroy(&cache->ondemand_ids);
-}
-
-void cachefiles_put_unbind_pincount(struct cachefiles_cache *cache)
-{
-	if (refcount_dec_and_test(&cache->unbind_pincount)) {
-		cachefiles_daemon_unbind(cache);
-		cachefiles_open = 0;
-		kfree(cache);
-	}
-}
-
-void cachefiles_get_unbind_pincount(struct cachefiles_cache *cache)
-{
-	refcount_inc(&cache->unbind_pincount);
-}
-
 /*
  * Release a cache.
  */
@@ -191,16 +139,14 @@ static int cachefiles_daemon_release(struct inode *inode, struct file *file)
 	ASSERT(cache);
 
 	set_bit(CACHEFILES_DEAD, &cache->flags);
-
-	if (cachefiles_in_ondemand_mode(cache))
-		cachefiles_flush_reqs(cache);
+	cachefiles_daemon_unbind(cache);
 
 	/* clean up the control file interface */
 	cache->cachefilesd = NULL;
 	file->private_data = NULL;
+	cachefiles_open = 0;
 
-	cachefiles_put_unbind_pincount(cache);
-
+	kfree(cache);
 	_leave("");
 	return 0;
 }
@@ -263,10 +209,7 @@ static ssize_t cachefiles_daemon_read(struct file *file, char __user *_buffer,
 	if (!test_bit(CACHEFILES_READY, &cache->flags))
 		return 0;
 
-	if (cachefiles_in_ondemand_mode(cache))
-		return cachefiles_ondemand_daemon_read(cache, _buffer, buflen);
-	else
-		return cachefiles_do_daemon_read(cache, _buffer, buflen);
+	return cachefiles_do_daemon_read(cache, _buffer, buflen);
 }
 
 /*
@@ -360,13 +303,8 @@ static __poll_t cachefiles_daemon_poll(struct file *file,
 	poll_wait(file, &cache->daemon_pollwq, poll);
 	mask = 0;
 
-	if (cachefiles_in_ondemand_mode(cache)) {
-		if (!xa_empty(&cache->reqs))
-			mask |= EPOLLIN;
-	} else {
-		if (test_bit(CACHEFILES_STATE_CHANGED, &cache->flags))
-			mask |= EPOLLIN;
-	}
+	if (test_bit(CACHEFILES_STATE_CHANGED, &cache->flags))
+		mask |= EPOLLIN;
 
 	if (test_bit(CACHEFILES_CULLING, &cache->flags))
 		mask |= EPOLLOUT;
@@ -564,7 +502,7 @@ static int cachefiles_daemon_dir(struct cachefiles_cache *cache, char *args)
  */
 static int cachefiles_daemon_secctx(struct cachefiles_cache *cache, char *args)
 {
-	char *secctx;
+	int err;
 
 	_enter(",%s", args);
 
@@ -573,16 +511,16 @@ static int cachefiles_daemon_secctx(struct cachefiles_cache *cache, char *args)
 		return -EINVAL;
 	}
 
-	if (cache->secctx) {
+	if (cache->have_secid) {
 		pr_err("Second security context specified\n");
 		return -EINVAL;
 	}
 
-	secctx = kstrdup(args, GFP_KERNEL);
-	if (!secctx)
-		return -ENOMEM;
+	err = security_secctx_to_secid(args, strlen(args), &cache->secid);
+	if (err)
+		return err;
 
-	cache->secctx = secctx;
+	cache->have_secid = true;
 	return 0;
 }
 
@@ -766,14 +704,7 @@ static int cachefiles_daemon_bind(struct cachefiles_cache *cache, char *args)
 		return -EBUSY;
 	}
 
-	if (IS_ENABLED(CONFIG_CACHEFILES_ONDEMAND)) {
-		if (!strcmp(args, "ondemand")) {
-			set_bit(CACHEFILES_ONDEMAND_MODE, &cache->flags);
-		} else if (*args) {
-			pr_err("Invalid argument to the 'bind' command\n");
-			return -EINVAL;
-		}
-	} else if (*args) {
+	if (*args) {
 		pr_err("'bind' command doesn't take an argument\n");
 		return -EINVAL;
 	}
@@ -805,9 +736,9 @@ static void cachefiles_daemon_unbind(struct cachefiles_cache *cache)
 	cachefiles_put_directory(cache->graveyard);
 	cachefiles_put_directory(cache->store);
 	mntput(cache->mnt);
+	put_cred(cache->cache_cred);
 
 	kfree(cache->rootdirname);
-	kfree(cache->secctx);
 	kfree(cache->tag);
 
 	_leave("");

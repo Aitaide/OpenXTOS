@@ -127,7 +127,7 @@ static int rcar_du_plane_hwalloc(struct rcar_du_plane *plane,
 }
 
 int rcar_du_atomic_check_planes(struct drm_device *dev,
-				struct drm_atomic_state *state)
+				struct drm_atomic_commit *state)
 {
 	struct rcar_du_device *rcdu = to_rcar_du_device(dev);
 	unsigned int group_freed_planes[RCAR_DU_MAX_GROUPS] = { 0, };
@@ -635,7 +635,7 @@ int __rcar_du_plane_atomic_check(struct drm_plane *plane,
 }
 
 static int rcar_du_plane_atomic_check(struct drm_plane *plane,
-				      struct drm_atomic_state *state)
+				      struct drm_atomic_commit *state)
 {
 	struct drm_plane_state *new_plane_state = drm_atomic_get_new_plane_state(state,
 										 plane);
@@ -646,7 +646,7 @@ static int rcar_du_plane_atomic_check(struct drm_plane *plane,
 }
 
 static void rcar_du_plane_atomic_update(struct drm_plane *plane,
-					struct drm_atomic_state *state)
+					struct drm_atomic_commit *state)
 {
 	struct drm_plane_state *old_state = drm_atomic_get_old_plane_state(state, plane);
 	struct drm_plane_state *new_state = drm_atomic_get_new_plane_state(state, plane);
@@ -678,6 +678,12 @@ static void rcar_du_plane_atomic_update(struct drm_plane *plane,
 static const struct drm_plane_helper_funcs rcar_du_plane_helper_funcs = {
 	.atomic_check = rcar_du_plane_atomic_check,
 	.atomic_update = rcar_du_plane_atomic_update,
+};
+
+static const struct drm_plane_helper_funcs rcar_du_primary_plane_helper_funcs = {
+	.atomic_check = rcar_du_plane_atomic_check,
+	.atomic_update = rcar_du_plane_atomic_update,
+	.get_scanout_buffer = drm_fb_dma_get_scanout_buffer,
 };
 
 static struct drm_plane_state *
@@ -715,7 +721,7 @@ static void rcar_du_plane_reset(struct drm_plane *plane)
 		plane->state = NULL;
 	}
 
-	state = kzalloc(sizeof(*state), GFP_KERNEL);
+	state = kzalloc_obj(*state);
 	if (state == NULL)
 		return;
 
@@ -812,8 +818,12 @@ int rcar_du_planes_init(struct rcar_du_group *rgrp)
 		if (ret < 0)
 			return ret;
 
-		drm_plane_helper_add(&plane->plane,
-				     &rcar_du_plane_helper_funcs);
+		if (type == DRM_PLANE_TYPE_PRIMARY)
+			drm_plane_helper_add(&plane->plane,
+					     &rcar_du_primary_plane_helper_funcs);
+		else
+			drm_plane_helper_add(&plane->plane,
+					     &rcar_du_plane_helper_funcs);
 
 		drm_plane_create_alpha_property(&plane->plane);
 

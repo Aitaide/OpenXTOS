@@ -12,7 +12,6 @@
  * Author: Linus Walleij <linus.walleij@linaro.org>
  */
 #include <linux/module.h>
-#include <linux/mod_devicetable.h>
 #include <linux/kernel.h>
 #include <linux/i2c.h>
 #include <linux/interrupt.h>
@@ -197,7 +196,7 @@ struct ak8974 {
 	/* Ensure timestamp is naturally aligned */
 	struct {
 		__le16 channels[3];
-		s64 ts __aligned(8);
+		aligned_s64 ts;
 	} scan;
 };
 
@@ -327,10 +326,7 @@ static int ak8974_trigmeas(struct ak8974 *ak8974)
 	}
 
 	/* Force a measurement */
-	return regmap_update_bits(ak8974->map,
-				  AK8974_CTRL3,
-				  AK8974_CTRL3_FORCE,
-				  AK8974_CTRL3_FORCE);
+	return regmap_set_bits(ak8974->map, AK8974_CTRL3, AK8974_CTRL3_FORCE);
 }
 
 static int ak8974_await_drdy(struct ak8974 *ak8974)
@@ -383,11 +379,7 @@ static int ak8974_getresult(struct ak8974 *ak8974, __le16 *result)
 		return -ERANGE;
 	}
 
-	ret = regmap_bulk_read(ak8974->map, AK8974_DATA_X, result, 6);
-	if (ret)
-		return ret;
-
-	return ret;
+	return regmap_bulk_read(ak8974->map, AK8974_DATA_X, result, 6);
 }
 
 static irqreturn_t ak8974_drdy_irq(int irq, void *d)
@@ -438,10 +430,7 @@ static int ak8974_selftest(struct ak8974 *ak8974)
 	}
 
 	/* Trigger self-test */
-	ret = regmap_update_bits(ak8974->map,
-			AK8974_CTRL3,
-			AK8974_CTRL3_SELFTEST,
-			AK8974_CTRL3_SELFTEST);
+	ret = regmap_set_bits(ak8974->map, AK8974_CTRL3, AK8974_CTRL3_SELFTEST);
 	if (ret) {
 		dev_err(dev, "could not write CTRL3\n");
 		return ret;
@@ -541,8 +530,8 @@ static int ak8974_detect(struct ak8974 *ak8974)
 				       fab_data2, sizeof(fab_data2));
 
 		for (i = 0; i < 3; ++i) {
-			static const char axis[3] = "XYZ";
-			static const char pgaxis[6] = "ZYZXYX";
+			static const char axis[] = "XYZ";
+			static const char pgaxis[] = "ZYZXYX";
 			unsigned offz = le16_to_cpu(fab_data2[i]) & 0x7F;
 			unsigned fine = le16_to_cpu(fab_data1[i]);
 			unsigned sens = le16_to_cpu(fab_data1[i + 3]);
@@ -583,13 +572,12 @@ static int ak8974_measure_channel(struct ak8974 *ak8974, unsigned long address,
 	/*
 	 * This explicit cast to (s16) is necessary as the measurement
 	 * is done in 2's complement with positive and negative values.
-	 * The follwing assignment to *val will then convert the signed
+	 * The following assignment to *val will then convert the signed
 	 * s16 value to a signed int value.
 	 */
 	*val = (s16)le16_to_cpu(hw_values[address]);
 out_unlock:
 	mutex_unlock(&ak8974->lock);
-	pm_runtime_mark_last_busy(&ak8974->i2c->dev);
 	pm_runtime_put_autosuspend(&ak8974->i2c->dev);
 
 	return ret;
@@ -679,12 +667,11 @@ static void ak8974_fill_buffer(struct iio_dev *indio_dev)
 		goto out_unlock;
 	}
 
-	iio_push_to_buffers_with_timestamp(indio_dev, &ak8974->scan,
-					   iio_get_time_ns(indio_dev));
+	iio_push_to_buffers_with_ts(indio_dev, &ak8974->scan, sizeof(ak8974->scan),
+				    iio_get_time_ns(indio_dev));
 
  out_unlock:
 	mutex_unlock(&ak8974->lock);
-	pm_runtime_mark_last_busy(&ak8974->i2c->dev);
 	pm_runtime_put_autosuspend(&ak8974->i2c->dev);
 }
 
@@ -710,7 +697,7 @@ ak8974_get_mount_matrix(const struct iio_dev *indio_dev,
 
 static const struct iio_chan_spec_ext_info ak8974_ext_info[] = {
 	IIO_MOUNT_MATRIX(IIO_SHARED_BY_DIR, ak8974_get_mount_matrix),
-	{ },
+	{ }
 };
 
 #define AK8974_AXIS_CHANNEL(axis, index, bits)				\
@@ -916,7 +903,7 @@ static int ak8974_probe(struct i2c_client *i2c)
 
 	/* If we have a valid DRDY IRQ, make use of it */
 	if (irq > 0) {
-		irq_trig = irqd_get_trigger_type(irq_get_irq_data(irq));
+		irq_trig = irq_get_trigger_type(irq);
 		if (irq_trig == IRQF_TRIGGER_RISING) {
 			dev_info(&i2c->dev, "enable rising edge DRDY IRQ\n");
 		} else if (irq_trig == IRQF_TRIGGER_FALLING) {
@@ -935,11 +922,8 @@ static int ak8974_probe(struct i2c_client *i2c)
 						irq_trig,
 						ak8974->name,
 						ak8974);
-		if (ret) {
-			dev_err(&i2c->dev, "unable to request DRDY IRQ "
-				"- proceeding without IRQ\n");
+		if (ret)
 			goto no_irq;
-		}
 		ak8974->drdy_irq = true;
 	}
 
@@ -1025,18 +1009,18 @@ static DEFINE_RUNTIME_DEV_PM_OPS(ak8974_dev_pm_ops, ak8974_runtime_suspend,
 				 ak8974_runtime_resume, NULL);
 
 static const struct i2c_device_id ak8974_id[] = {
-	{"ami305", 0 },
-	{"ami306", 0 },
-	{"ak8974", 0 },
-	{"hscdtd008a", 0 },
-	{}
+	{ .name = "ami305" },
+	{ .name = "ami306" },
+	{ .name = "ak8974" },
+	{ .name = "hscdtd008a" },
+	{ }
 };
 MODULE_DEVICE_TABLE(i2c, ak8974_id);
 
 static const struct of_device_id ak8974_of_match[] = {
 	{ .compatible = "asahi-kasei,ak8974", },
 	{ .compatible = "alps,hscdtd008a", },
-	{}
+	{ }
 };
 MODULE_DEVICE_TABLE(of, ak8974_of_match);
 

@@ -12,7 +12,6 @@
 #include <linux/clk.h>
 #include <linux/platform_data/usb-ehci-orion.h>
 #include <linux/of.h>
-#include <linux/phy/phy.h>
 #include <linux/usb.h>
 #include <linux/usb/hcd.h>
 #include <linux/io.h>
@@ -60,10 +59,18 @@
 
 struct orion_ehci_hcd {
 	struct clk *clk;
-	struct phy *phy;
 };
 
 static struct hc_driver __read_mostly ehci_orion_hc_driver;
+
+/*
+ * Legacy DMA mask is 32 bit.
+ * AC5 has the DDR starting at 8GB, hence it requires
+ * a larger (34-bit) DMA mask, in order for DMA allocations
+ * to succeed:
+ */
+static const u64 dma_mask_orion =	DMA_BIT_MASK(32);
+static const u64 dma_mask_ac5 =		DMA_BIT_MASK(34);
 
 /*
  * Implement Orion USB controller specification guidelines
@@ -211,6 +218,7 @@ static int ehci_orion_drv_probe(struct platform_device *pdev)
 	int irq, err;
 	enum orion_ehci_phy_ver phy_version;
 	struct orion_ehci_hcd *priv;
+	u64 *dma_mask_ptr;
 
 	if (usb_disabled())
 		return -ENODEV;
@@ -228,7 +236,8 @@ static int ehci_orion_drv_probe(struct platform_device *pdev)
 	 * set. Since shared usb code relies on it, set it here for
 	 * now. Once we have dma capability bindings this can go away.
 	 */
-	err = dma_coerce_mask_and_coherent(&pdev->dev, DMA_BIT_MASK(32));
+	dma_mask_ptr = (u64 *)of_device_get_match_data(&pdev->dev);
+	err = dma_coerce_mask_and_coherent(&pdev->dev, *dma_mask_ptr);
 	if (err)
 		goto err;
 
@@ -263,13 +272,6 @@ static int ehci_orion_drv_probe(struct platform_device *pdev)
 		err = clk_prepare_enable(priv->clk);
 		if (err)
 			goto err_put_hcd;
-	}
-
-	priv->phy = devm_phy_optional_get(&pdev->dev, "usb");
-	if (IS_ERR(priv->phy)) {
-		err = PTR_ERR(priv->phy);
-		if (err != -ENOSYS)
-			goto err_dis_clk;
 	}
 
 	/*
@@ -332,15 +334,16 @@ static void ehci_orion_drv_remove(struct platform_device *pdev)
 }
 
 static const struct of_device_id ehci_orion_dt_ids[] = {
-	{ .compatible = "marvell,orion-ehci", },
-	{ .compatible = "marvell,armada-3700-ehci", },
+	{ .compatible = "marvell,orion-ehci", .data = &dma_mask_orion},
+	{ .compatible = "marvell,armada-3700-ehci", .data = &dma_mask_orion},
+	{ .compatible = "marvell,ac5-ehci", .data = &dma_mask_ac5},
 	{},
 };
 MODULE_DEVICE_TABLE(of, ehci_orion_dt_ids);
 
 static struct platform_driver ehci_orion_driver = {
 	.probe		= ehci_orion_drv_probe,
-	.remove_new	= ehci_orion_drv_remove,
+	.remove		= ehci_orion_drv_remove,
 	.shutdown	= usb_hcd_platform_shutdown,
 	.driver = {
 		.name	= "orion-ehci",

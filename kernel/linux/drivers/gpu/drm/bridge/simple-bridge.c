@@ -31,7 +31,6 @@ struct simple_bridge {
 
 	const struct simple_bridge_info *info;
 
-	struct drm_bridge	*next_bridge;
 	struct regulator	*vdd;
 	struct gpio_desc	*enable;
 };
@@ -51,18 +50,20 @@ drm_connector_to_simple_bridge(struct drm_connector *connector)
 static int simple_bridge_get_modes(struct drm_connector *connector)
 {
 	struct simple_bridge *sbridge = drm_connector_to_simple_bridge(connector);
-	struct edid *edid;
+	const struct drm_edid *drm_edid;
 	int ret;
 
-	if (sbridge->next_bridge->ops & DRM_BRIDGE_OP_EDID) {
-		edid = drm_bridge_get_edid(sbridge->next_bridge, connector);
-		if (!edid)
+	if (sbridge->bridge.next_bridge->ops & DRM_BRIDGE_OP_EDID) {
+		drm_edid = drm_bridge_edid_read(sbridge->bridge.next_bridge, connector);
+		if (!drm_edid)
 			DRM_INFO("EDID read failed. Fallback to standard modes\n");
 	} else {
-		edid = NULL;
+		drm_edid = NULL;
 	}
 
-	if (!edid) {
+	drm_edid_connector_update(connector, drm_edid);
+
+	if (!drm_edid) {
 		/*
 		 * In case we cannot retrieve the EDIDs (missing or broken DDC
 		 * bus from the next bridge), fallback on the XGA standards and
@@ -73,9 +74,8 @@ static int simple_bridge_get_modes(struct drm_connector *connector)
 		return ret;
 	}
 
-	drm_connector_update_edid_property(connector, edid);
-	ret = drm_add_edid_modes(connector, edid);
-	kfree(edid);
+	ret = drm_edid_connector_add_modes(connector);
+	drm_edid_free(drm_edid);
 
 	return ret;
 }
@@ -89,7 +89,7 @@ simple_bridge_connector_detect(struct drm_connector *connector, bool force)
 {
 	struct simple_bridge *sbridge = drm_connector_to_simple_bridge(connector);
 
-	return drm_bridge_detect(sbridge->next_bridge);
+	return drm_bridge_detect(sbridge->bridge.next_bridge, connector);
 }
 
 static const struct drm_connector_funcs simple_bridge_con_funcs = {
@@ -102,12 +102,13 @@ static const struct drm_connector_funcs simple_bridge_con_funcs = {
 };
 
 static int simple_bridge_attach(struct drm_bridge *bridge,
+				struct drm_encoder *encoder,
 				enum drm_bridge_attach_flags flags)
 {
 	struct simple_bridge *sbridge = drm_bridge_to_simple_bridge(bridge);
 	int ret;
 
-	ret = drm_bridge_attach(bridge->encoder, sbridge->next_bridge, bridge,
+	ret = drm_bridge_attach(encoder, sbridge->bridge.next_bridge, bridge,
 				DRM_BRIDGE_ATTACH_NO_CONNECTOR);
 	if (ret < 0)
 		return ret;
@@ -115,28 +116,24 @@ static int simple_bridge_attach(struct drm_bridge *bridge,
 	if (flags & DRM_BRIDGE_ATTACH_NO_CONNECTOR)
 		return 0;
 
-	if (!bridge->encoder) {
-		DRM_ERROR("Missing encoder\n");
-		return -ENODEV;
-	}
-
 	drm_connector_helper_add(&sbridge->connector,
 				 &simple_bridge_con_helper_funcs);
 	ret = drm_connector_init_with_ddc(bridge->dev, &sbridge->connector,
 					  &simple_bridge_con_funcs,
 					  sbridge->info->connector_type,
-					  sbridge->next_bridge->ddc);
+					  sbridge->bridge.next_bridge->ddc);
 	if (ret) {
 		DRM_ERROR("Failed to initialize connector\n");
 		return ret;
 	}
 
-	drm_connector_attach_encoder(&sbridge->connector, bridge->encoder);
+	drm_connector_attach_encoder(&sbridge->connector, encoder);
 
 	return 0;
 }
 
-static void simple_bridge_enable(struct drm_bridge *bridge)
+static void simple_bridge_enable(struct drm_bridge *bridge,
+				 struct drm_atomic_commit *commit)
 {
 	struct simple_bridge *sbridge = drm_bridge_to_simple_bridge(bridge);
 	int ret;
@@ -150,7 +147,8 @@ static void simple_bridge_enable(struct drm_bridge *bridge)
 	gpiod_set_value_cansleep(sbridge->enable, 1);
 }
 
-static void simple_bridge_disable(struct drm_bridge *bridge)
+static void simple_bridge_disable(struct drm_bridge *bridge,
+				  struct drm_atomic_commit *commit)
 {
 	struct simple_bridge *sbridge = drm_bridge_to_simple_bridge(bridge);
 
@@ -161,9 +159,12 @@ static void simple_bridge_disable(struct drm_bridge *bridge)
 }
 
 static const struct drm_bridge_funcs simple_bridge_bridge_funcs = {
+	.atomic_create_state = drm_atomic_helper_bridge_create_state,
+	.atomic_destroy_state = drm_atomic_helper_bridge_destroy_state,
+	.atomic_duplicate_state = drm_atomic_helper_bridge_duplicate_state,
 	.attach		= simple_bridge_attach,
-	.enable		= simple_bridge_enable,
-	.disable	= simple_bridge_disable,
+	.atomic_enable = simple_bridge_enable,
+	.atomic_disable = simple_bridge_disable,
 };
 
 static int simple_bridge_probe(struct platform_device *pdev)
@@ -171,10 +172,10 @@ static int simple_bridge_probe(struct platform_device *pdev)
 	struct simple_bridge *sbridge;
 	struct device_node *remote;
 
-	sbridge = devm_kzalloc(&pdev->dev, sizeof(*sbridge), GFP_KERNEL);
-	if (!sbridge)
-		return -ENOMEM;
-	platform_set_drvdata(pdev, sbridge);
+	sbridge = devm_drm_bridge_alloc(&pdev->dev, struct simple_bridge,
+					bridge, &simple_bridge_bridge_funcs);
+	if (IS_ERR(sbridge))
+		return PTR_ERR(sbridge);
 
 	sbridge->info = of_device_get_match_data(&pdev->dev);
 
@@ -183,10 +184,10 @@ static int simple_bridge_probe(struct platform_device *pdev)
 	if (!remote)
 		return -EINVAL;
 
-	sbridge->next_bridge = of_drm_find_bridge(remote);
+	sbridge->bridge.next_bridge = of_drm_find_and_get_bridge(remote);
 	of_node_put(remote);
 
-	if (!sbridge->next_bridge) {
+	if (!sbridge->bridge.next_bridge) {
 		dev_dbg(&pdev->dev, "Next bridge not found, deferring probe\n");
 		return -EPROBE_DEFER;
 	}
@@ -208,20 +209,10 @@ static int simple_bridge_probe(struct platform_device *pdev)
 				     "Unable to retrieve enable GPIO\n");
 
 	/* Register the bridge. */
-	sbridge->bridge.funcs = &simple_bridge_bridge_funcs;
 	sbridge->bridge.of_node = pdev->dev.of_node;
 	sbridge->bridge.timings = sbridge->info->timings;
 
-	drm_bridge_add(&sbridge->bridge);
-
-	return 0;
-}
-
-static void simple_bridge_remove(struct platform_device *pdev)
-{
-	struct simple_bridge *sbridge = platform_get_drvdata(pdev);
-
-	drm_bridge_remove(&sbridge->bridge);
+	return devm_drm_bridge_add(&pdev->dev, &sbridge->bridge);
 }
 
 /*
@@ -275,6 +266,36 @@ static const struct of_device_id simple_bridge_match[] = {
 			.connector_type = DRM_MODE_CONNECTOR_VGA,
 		},
 	}, {
+		.compatible = "algoltek,ag6311",
+		.data = &(const struct simple_bridge_info) {
+			.connector_type = DRM_MODE_CONNECTOR_HDMIA,
+		},
+	}, {
+		.compatible = "asl-tek,cs5263",
+		.data = &(const struct simple_bridge_info) {
+			.connector_type = DRM_MODE_CONNECTOR_HDMIA,
+		},
+	}, {
+		.compatible = "mstar,tsumu88adt3-lf-1",
+		.data = &(const struct simple_bridge_info) {
+			.connector_type = DRM_MODE_CONNECTOR_HDMIA,
+		},
+	}, {
+		.compatible = "parade,ps185hdm",
+		.data = &(const struct simple_bridge_info) {
+			.connector_type = DRM_MODE_CONNECTOR_HDMIA,
+		},
+	}, {
+		.compatible = "radxa,ra620",
+		.data = &(const struct simple_bridge_info) {
+			.connector_type = DRM_MODE_CONNECTOR_HDMIA,
+		},
+	}, {
+		.compatible = "realtek,rtd2171",
+		.data = &(const struct simple_bridge_info) {
+			.connector_type = DRM_MODE_CONNECTOR_HDMIA,
+		},
+	}, {
 		.compatible = "ti,opa362",
 		.data = &(const struct simple_bridge_info) {
 			.connector_type = DRM_MODE_CONNECTOR_Composite,
@@ -298,7 +319,6 @@ MODULE_DEVICE_TABLE(of, simple_bridge_match);
 
 static struct platform_driver simple_bridge_driver = {
 	.probe	= simple_bridge_probe,
-	.remove_new = simple_bridge_remove,
 	.driver		= {
 		.name		= "simple-bridge",
 		.of_match_table	= simple_bridge_match,

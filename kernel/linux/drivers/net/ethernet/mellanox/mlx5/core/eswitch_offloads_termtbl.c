@@ -132,7 +132,7 @@ mlx5_eswitch_termtbl_get_create(struct mlx5_eswitch *esw,
 	if (found)
 		goto tt_add_ref;
 
-	tt = kzalloc(sizeof(*tt), GFP_KERNEL);
+	tt = kzalloc_obj(*tt);
 	if (!tt) {
 		err = -ENOMEM;
 		goto tt_create_err;
@@ -163,12 +163,15 @@ void
 mlx5_eswitch_termtbl_put(struct mlx5_eswitch *esw,
 			 struct mlx5_termtbl_handle *tt)
 {
+	bool last;
+
 	mutex_lock(&esw->offloads.termtbl_mutex);
-	if (--tt->ref_count == 0)
+	last = (--tt->ref_count == 0);
+	if (last)
 		hash_del(&tt->termtbl_hlist);
 	mutex_unlock(&esw->offloads.termtbl_mutex);
 
-	if (!tt->ref_count) {
+	if (last) {
 		mlx5_del_flow_rules(tt->rule);
 		mlx5_destroy_flow_table(tt->termtbl);
 		kfree(tt);
@@ -233,8 +236,8 @@ mlx5_eswitch_termtbl_required(struct mlx5_eswitch *esw,
 
 	/* hairpin */
 	for (i = esw_attr->split_count; i < esw_attr->out_count; i++)
-		if (!esw_attr->dest_int_port && esw_attr->dests[i].rep &&
-		    esw_attr->dests[i].rep->vport == MLX5_VPORT_UPLINK)
+		if (!esw_attr->dest_int_port && esw_attr->dests[i].vport_valid &&
+		    esw_attr->dests[i].vport == MLX5_VPORT_UPLINK)
 			return true;
 
 	return false;

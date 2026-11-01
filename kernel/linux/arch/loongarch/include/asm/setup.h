@@ -7,6 +7,7 @@
 #define _LOONGARCH_SETUP_H
 
 #include <linux/types.h>
+#include <linux/threads.h>
 #include <asm/sections.h>
 #include <uapi/asm/setup.h>
 
@@ -14,6 +15,8 @@
 
 extern unsigned long eentry;
 extern unsigned long tlbrentry;
+extern unsigned long pcpu_handlers[NR_CPUS];
+extern long exception_handlers[VECSIZE * 128 / sizeof(long)];
 extern char init_command_line[COMMAND_LINE_SIZE];
 extern void tlb_init(int cpu);
 extern void cpu_cache_init(void);
@@ -25,7 +28,7 @@ extern void set_merr_handler(unsigned long offset, void *addr, unsigned long len
 #ifdef CONFIG_RELOCATABLE
 
 struct rela_la_abs {
-	long offset;
+	long pc;
 	long symvalue;
 };
 
@@ -33,6 +36,11 @@ extern long __la_abs_begin;
 extern long __la_abs_end;
 extern long __rela_dyn_begin;
 extern long __rela_dyn_end;
+
+#ifdef CONFIG_RELR
+extern long __relr_dyn_begin;
+extern long __relr_dyn_end;
+#endif
 
 extern unsigned long __init relocate_kernel(void);
 

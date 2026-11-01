@@ -44,6 +44,7 @@
 #include <linux/rfkill.h>
 #include <linux/hwmon.h>
 #include <linux/iio/iio.h>
+#include <linux/platform_device.h>
 #include <linux/toshiba.h>
 #include <acpi/battery.h>
 #include <acpi/video.h>
@@ -56,6 +57,11 @@ static int turn_on_panel_on_resume = -1;
 module_param(turn_on_panel_on_resume, int, 0644);
 MODULE_PARM_DESC(turn_on_panel_on_resume,
 	"Call HCI_PANEL_POWER_ON on resume (-1 = auto, 0 = no, 1 = yes");
+
+static int hci_hotkey_quickstart = -1;
+module_param(hci_hotkey_quickstart, int, 0644);
+MODULE_PARM_DESC(hci_hotkey_quickstart,
+		 "Call HCI_HOTKEY_EVENT with value 0x5 for quickstart button support (-1 = auto, 0 = no, 1 = yes");
 
 #define TOSHIBA_WMI_EVENT_GUID "59142400-C6A3-40FA-BADB-8A2652834100"
 
@@ -136,6 +142,7 @@ MODULE_PARM_DESC(turn_on_panel_on_resume,
 #define HCI_ACCEL_MASK			0x7fff
 #define HCI_ACCEL_DIRECTION_MASK	0x8000
 #define HCI_HOTKEY_DISABLE		0x0b
+#define HCI_HOTKEY_ENABLE_QUICKSTART	0x05
 #define HCI_HOTKEY_ENABLE		0x09
 #define HCI_HOTKEY_SPECIAL_FUNCTIONS	0x10
 #define HCI_LCD_BRIGHTNESS_BITS		3
@@ -217,6 +224,7 @@ struct toshiba_acpi_dev {
 	unsigned int cooling_method_supported:1;
 	unsigned int battery_charge_mode_supported:1;
 	unsigned int sysfs_created:1;
+	unsigned int notify_handler_installed:1;
 	unsigned int special_functions;
 
 	bool kbd_event_generated;
@@ -264,6 +272,7 @@ static const struct key_entry toshiba_acpi_keymap[] = {
 	{ KE_KEY, 0xb32, { KEY_NEXTSONG } },
 	{ KE_KEY, 0xb33, { KEY_PLAYPAUSE } },
 	{ KE_KEY, 0xb5a, { KEY_MEDIA } },
+	{ KE_IGNORE, 0x0e00, { KEY_RESERVED } }, /* Wake from sleep */
 	{ KE_IGNORE, 0x1430, { KEY_RESERVED } }, /* Wake from sleep */
 	{ KE_IGNORE, 0x1501, { KEY_RESERVED } }, /* Output changed */
 	{ KE_IGNORE, 0x1502, { KEY_RESERVED } }, /* HDMI plugged/unplugged */
@@ -1814,12 +1823,7 @@ static DECLARE_WORK(kbd_bl_work, toshiba_acpi_kbd_bl_work);
 /*
  * Sysfs files
  */
-static ssize_t version_show(struct device *dev,
-			    struct device_attribute *attr, char *buf)
-{
-	return sprintf(buf, "%s\n", TOSHIBA_ACPI_VERSION);
-}
-static DEVICE_ATTR_RO(version);
+static DEVICE_STRING_ATTR_RO(version, 0444, TOSHIBA_ACPI_VERSION);
 
 static ssize_t fan_store(struct device *dev,
 			 struct device_attribute *attr,
@@ -2428,7 +2432,7 @@ static ssize_t cooling_method_store(struct device *dev,
 static DEVICE_ATTR_RW(cooling_method);
 
 static struct attribute *toshiba_attributes[] = {
-	&dev_attr_version.attr,
+	&dev_attr_version.attr.attr,
 	&dev_attr_fan.attr,
 	&dev_attr_kbd_backlight_mode.attr,
 	&dev_attr_kbd_type.attr,
@@ -2501,8 +2505,7 @@ static void toshiba_acpi_kbd_bl_work(struct work_struct *work)
 				LED_FULL : LED_OFF);
 
 	/* Emulate the keyboard backlight event */
-	acpi_bus_generate_netlink_event(toshiba_acpi->acpi_dev->pnp.device_class,
-					dev_name(&toshiba_acpi->acpi_dev->dev),
+	acpi_bus_generate_netlink_event("", dev_name(&toshiba_acpi->acpi_dev->dev),
 					0x92, 0);
 }
 
@@ -2730,10 +2733,15 @@ static int toshiba_acpi_enable_hotkeys(struct toshiba_acpi_dev *dev)
 		return -ENODEV;
 
 	/*
+	 * Enable quickstart buttons if supported.
+	 *
 	 * Enable the "Special Functions" mode only if they are
 	 * supported and if they are activated.
 	 */
-	if (dev->kbd_function_keys_supported && dev->special_functions)
+	if (hci_hotkey_quickstart)
+		result = hci_write(dev, HCI_HOTKEY_EVENT,
+				   HCI_HOTKEY_ENABLE_QUICKSTART);
+	else if (dev->kbd_function_keys_supported && dev->special_functions)
 		result = hci_write(dev, HCI_HOTKEY_EVENT,
 				   HCI_HOTKEY_SPECIAL_FUNCTIONS);
 	else
@@ -2748,7 +2756,7 @@ static int toshiba_acpi_enable_hotkeys(struct toshiba_acpi_dev *dev)
 }
 
 static bool toshiba_acpi_i8042_filter(unsigned char data, unsigned char str,
-				      struct serio *port)
+				      struct serio *port, void *context)
 {
 	if (str & I8042_STR_AUXDATA)
 		return false;
@@ -2908,7 +2916,7 @@ static int toshiba_acpi_setup_keyboard(struct toshiba_acpi_dev *dev)
 	if (ec_handle && acpi_has_method(ec_handle, "NTFY")) {
 		INIT_WORK(&dev->hotkey_work, toshiba_acpi_hotkey_work);
 
-		error = i8042_install_filter(toshiba_acpi_i8042_filter);
+		error = i8042_install_filter(toshiba_acpi_i8042_filter, NULL);
 		if (error) {
 			pr_err("Error installing key filter\n");
 			goto err_free_dev;
@@ -3186,13 +3194,78 @@ static void print_supported_features(struct toshiba_acpi_dev *dev)
 	pr_cont("\n");
 }
 
-static void toshiba_acpi_remove(struct acpi_device *acpi_dev)
+static void toshiba_acpi_notify(acpi_handle handle, u32 event, void *data)
 {
-	struct toshiba_acpi_dev *dev = acpi_driver_data(acpi_dev);
+	struct toshiba_acpi_dev *dev = data;
+	struct acpi_device *acpi_dev = dev->acpi_dev;
+
+	switch (event) {
+	case 0x80: /* Hotkeys and some system events */
+		/*
+		 * Machines with this WMI GUID aren't supported due to bugs in
+		 * their AML.
+		 *
+		 * Return silently to avoid triggering a netlink event.
+		 */
+		if (wmi_has_guid(TOSHIBA_WMI_EVENT_GUID))
+			return;
+		toshiba_acpi_process_hotkeys(dev);
+		break;
+	case 0x81: /* Dock events */
+	case 0x82:
+	case 0x83:
+		pr_info("Dock event received %x\n", event);
+		break;
+	case 0x88: /* Thermal events */
+		pr_info("Thermal event received\n");
+		break;
+	case 0x8f: /* LID closed */
+	case 0x90: /* LID is closed and Dock has been ejected */
+		break;
+	case 0x8c: /* SATA power events */
+	case 0x8b:
+		pr_info("SATA power event received %x\n", event);
+		break;
+	case 0x92: /* Keyboard backlight mode changed */
+		dev->kbd_event_generated = true;
+		/* Update sysfs entries */
+		if (sysfs_update_group(&acpi_dev->dev.kobj,
+				       &toshiba_attr_group))
+			pr_err("Unable to update sysfs entries\n");
+		/* Notify LED subsystem about keyboard backlight change */
+		if (dev->kbd_type == 2 && dev->kbd_mode != SCI_KBD_MODE_AUTO)
+			led_classdev_notify_brightness_hw_changed(&dev->kbd_led,
+					(dev->kbd_mode == SCI_KBD_MODE_ON) ?
+					LED_FULL : LED_OFF);
+		break;
+	case 0x8e: /* Power button pressed */
+		break;
+	case 0x85: /* Unknown */
+	case 0x8d: /* Unknown */
+	case 0x94: /* Unknown */
+	case 0x95: /* Unknown */
+	default:
+		pr_info("Unknown event received %x\n", event);
+		break;
+	}
+
+	acpi_bus_generate_netlink_event("", dev_name(&acpi_dev->dev),
+					event, (event == 0x80) ?
+					dev->last_key_event : 0);
+}
+
+static void toshiba_acpi_remove(struct platform_device *pdev)
+{
+	struct toshiba_acpi_dev *dev = platform_get_drvdata(pdev);
 
 	misc_deregister(&dev->miscdev);
 
 	remove_toshiba_proc_entries(dev);
+
+	if (dev->notify_handler_installed)
+		acpi_dev_remove_notify_handler(ACPI_COMPANION(&pdev->dev),
+					       ACPI_DEVICE_NOTIFY,
+					       toshiba_acpi_notify);
 
 #if IS_ENABLED(CONFIG_HWMON)
 	if (dev->hwmon_device)
@@ -3233,6 +3306,8 @@ static void toshiba_acpi_remove(struct acpi_device *acpi_dev)
 	if (toshiba_acpi)
 		toshiba_acpi = NULL;
 
+	dev_set_drvdata(&dev->acpi_dev->dev, NULL);
+
 	kfree(dev);
 }
 
@@ -3257,7 +3332,14 @@ static const char *find_hci_method(acpi_handle handle)
  * works. toshiba_acpi_resume() uses HCI_PANEL_POWER_ON to avoid changing
  * the configured brightness level.
  */
-static const struct dmi_system_id turn_on_panel_on_resume_dmi_ids[] = {
+#define QUIRK_TURN_ON_PANEL_ON_RESUME		BIT(0)
+/*
+ * Some Toshibas use "quickstart" keys. On these, HCI_HOTKEY_EVENT must use
+ * the value HCI_HOTKEY_ENABLE_QUICKSTART.
+ */
+#define QUIRK_HCI_HOTKEY_QUICKSTART		BIT(1)
+
+static const struct dmi_system_id toshiba_dmi_quirks[] __initconst = {
 	{
 	 /* Toshiba Portégé R700 */
 	 /* https://bugzilla.kernel.org/show_bug.cgi?id=21012 */
@@ -3265,6 +3347,7 @@ static const struct dmi_system_id turn_on_panel_on_resume_dmi_ids[] = {
 		DMI_MATCH(DMI_SYS_VENDOR, "TOSHIBA"),
 		DMI_MATCH(DMI_PRODUCT_NAME, "PORTEGE R700"),
 		},
+	 .driver_data = (void *)QUIRK_TURN_ON_PANEL_ON_RESUME,
 	},
 	{
 	 /* Toshiba Satellite/Portégé R830 */
@@ -3274,6 +3357,7 @@ static const struct dmi_system_id turn_on_panel_on_resume_dmi_ids[] = {
 		DMI_MATCH(DMI_SYS_VENDOR, "TOSHIBA"),
 		DMI_MATCH(DMI_PRODUCT_NAME, "R830"),
 		},
+	 .driver_data = (void *)QUIRK_TURN_ON_PANEL_ON_RESUME,
 	},
 	{
 	 /* Toshiba Satellite/Portégé Z830 */
@@ -3281,11 +3365,14 @@ static const struct dmi_system_id turn_on_panel_on_resume_dmi_ids[] = {
 		DMI_MATCH(DMI_SYS_VENDOR, "TOSHIBA"),
 		DMI_MATCH(DMI_PRODUCT_NAME, "Z830"),
 		},
+	 .driver_data = (void *)(QUIRK_TURN_ON_PANEL_ON_RESUME | QUIRK_HCI_HOTKEY_QUICKSTART),
 	},
+	{ }
 };
 
-static int toshiba_acpi_add(struct acpi_device *acpi_dev)
+static int toshiba_acpi_probe(struct platform_device *pdev)
 {
+	struct acpi_device *acpi_dev;
 	struct toshiba_acpi_dev *dev;
 	const char *hci_method;
 	u32 dummy;
@@ -3293,6 +3380,10 @@ static int toshiba_acpi_add(struct acpi_device *acpi_dev)
 
 	if (toshiba_acpi)
 		return -EBUSY;
+
+	acpi_dev = ACPI_COMPANION(&pdev->dev);
+	if (!acpi_dev)
+		return -ENODEV;
 
 	pr_info("Toshiba Laptop ACPI Extras version %s\n",
 	       TOSHIBA_ACPI_VERSION);
@@ -3303,7 +3394,7 @@ static int toshiba_acpi_add(struct acpi_device *acpi_dev)
 		return -ENODEV;
 	}
 
-	dev = kzalloc(sizeof(*dev), GFP_KERNEL);
+	dev = kzalloc_obj(*dev);
 	if (!dev)
 		return -ENOMEM;
 	dev->acpi_dev = acpi_dev;
@@ -3319,7 +3410,7 @@ static int toshiba_acpi_add(struct acpi_device *acpi_dev)
 		return ret;
 	}
 
-	acpi_dev->driver_data = dev;
+	platform_set_drvdata(pdev, dev);
 	dev_set_drvdata(&acpi_dev->dev, dev);
 
 	/* Query the BIOS for supported features */
@@ -3350,7 +3441,7 @@ static int toshiba_acpi_add(struct acpi_device *acpi_dev)
 		dev->led_dev.max_brightness = 1;
 		dev->led_dev.brightness_set = toshiba_illumination_set;
 		dev->led_dev.brightness_get = toshiba_illumination_get;
-		led_classdev_register(&acpi_dev->dev, &dev->led_dev);
+		led_classdev_register(&pdev->dev, &dev->led_dev);
 	}
 
 	toshiba_eco_mode_available(dev);
@@ -3359,7 +3450,7 @@ static int toshiba_acpi_add(struct acpi_device *acpi_dev)
 		dev->eco_led.max_brightness = 1;
 		dev->eco_led.brightness_set = toshiba_eco_mode_set_status;
 		dev->eco_led.brightness_get = toshiba_eco_mode_get_status;
-		led_classdev_register(&dev->acpi_dev->dev, &dev->eco_led);
+		led_classdev_register(&pdev->dev, &dev->eco_led);
 	}
 
 	toshiba_kbd_illum_available(dev);
@@ -3375,7 +3466,7 @@ static int toshiba_acpi_add(struct acpi_device *acpi_dev)
 		dev->kbd_led.max_brightness = 1;
 		dev->kbd_led.brightness_set = toshiba_kbd_backlight_set;
 		dev->kbd_led.brightness_get = toshiba_kbd_backlight_get;
-		led_classdev_register(&dev->acpi_dev->dev, &dev->kbd_led);
+		led_classdev_register(&pdev->dev, &dev->kbd_led);
 	}
 
 	ret = toshiba_touchpad_get(dev, &dummy);
@@ -3383,7 +3474,7 @@ static int toshiba_acpi_add(struct acpi_device *acpi_dev)
 
 	toshiba_accelerometer_available(dev);
 	if (dev->accelerometer_supported) {
-		dev->indio_dev = iio_device_alloc(&acpi_dev->dev, sizeof(*dev));
+		dev->indio_dev = iio_device_alloc(&pdev->dev, sizeof(*dev));
 		if (!dev->indio_dev) {
 			pr_err("Unable to allocate iio device\n");
 			goto iio_error;
@@ -3432,7 +3523,7 @@ iio_error:
 #if IS_ENABLED(CONFIG_HWMON)
 	if (dev->fan_rpm_supported) {
 		dev->hwmon_device = hwmon_device_register_with_info(
-			&dev->acpi_dev->dev, "toshiba_acpi_sensors", NULL,
+			&pdev->dev, "toshiba_acpi_sensors", NULL,
 			&toshiba_acpi_hwmon_chip_info, NULL);
 		if (IS_ERR(dev->hwmon_device)) {
 			dev->hwmon_device = NULL;
@@ -3440,9 +3531,6 @@ iio_error:
 		}
 	}
 #endif
-
-	if (turn_on_panel_on_resume == -1)
-		turn_on_panel_on_resume = dmi_check_system(turn_on_panel_on_resume_dmi_ids);
 
 	toshiba_wwan_available(dev);
 	if (dev->wwan_supported)
@@ -3462,6 +3550,13 @@ iio_error:
 	}
 	dev->sysfs_created = !ret;
 
+	ret = acpi_dev_install_notify_handler(acpi_dev, ACPI_DEVICE_NOTIFY,
+					      toshiba_acpi_notify, dev);
+	if (ret)
+		goto error;
+
+	dev->notify_handler_installed = 1;
+
 	create_toshiba_proc_entries(dev);
 
 	toshiba_acpi = dev;
@@ -3476,73 +3571,14 @@ iio_error:
 	return 0;
 
 error:
-	toshiba_acpi_remove(acpi_dev);
+	toshiba_acpi_remove(pdev);
 	return ret;
-}
-
-static void toshiba_acpi_notify(struct acpi_device *acpi_dev, u32 event)
-{
-	struct toshiba_acpi_dev *dev = acpi_driver_data(acpi_dev);
-
-	switch (event) {
-	case 0x80: /* Hotkeys and some system events */
-		/*
-		 * Machines with this WMI GUID aren't supported due to bugs in
-		 * their AML.
-		 *
-		 * Return silently to avoid triggering a netlink event.
-		 */
-		if (wmi_has_guid(TOSHIBA_WMI_EVENT_GUID))
-			return;
-		toshiba_acpi_process_hotkeys(dev);
-		break;
-	case 0x81: /* Dock events */
-	case 0x82:
-	case 0x83:
-		pr_info("Dock event received %x\n", event);
-		break;
-	case 0x88: /* Thermal events */
-		pr_info("Thermal event received\n");
-		break;
-	case 0x8f: /* LID closed */
-	case 0x90: /* LID is closed and Dock has been ejected */
-		break;
-	case 0x8c: /* SATA power events */
-	case 0x8b:
-		pr_info("SATA power event received %x\n", event);
-		break;
-	case 0x92: /* Keyboard backlight mode changed */
-		dev->kbd_event_generated = true;
-		/* Update sysfs entries */
-		if (sysfs_update_group(&acpi_dev->dev.kobj,
-				       &toshiba_attr_group))
-			pr_err("Unable to update sysfs entries\n");
-		/* Notify LED subsystem about keyboard backlight change */
-		if (dev->kbd_type == 2 && dev->kbd_mode != SCI_KBD_MODE_AUTO)
-			led_classdev_notify_brightness_hw_changed(&dev->kbd_led,
-					(dev->kbd_mode == SCI_KBD_MODE_ON) ?
-					LED_FULL : LED_OFF);
-		break;
-	case 0x85: /* Unknown */
-	case 0x8d: /* Unknown */
-	case 0x8e: /* Unknown */
-	case 0x94: /* Unknown */
-	case 0x95: /* Unknown */
-	default:
-		pr_info("Unknown event received %x\n", event);
-		break;
-	}
-
-	acpi_bus_generate_netlink_event(acpi_dev->pnp.device_class,
-					dev_name(&acpi_dev->dev),
-					event, (event == 0x80) ?
-					dev->last_key_event : 0);
 }
 
 #ifdef CONFIG_PM_SLEEP
 static int toshiba_acpi_suspend(struct device *device)
 {
-	struct toshiba_acpi_dev *dev = acpi_driver_data(to_acpi_device(device));
+	struct toshiba_acpi_dev *dev = dev_get_drvdata(device);
 
 	if (dev->hotkey_dev) {
 		u32 result;
@@ -3557,7 +3593,7 @@ static int toshiba_acpi_suspend(struct device *device)
 
 static int toshiba_acpi_resume(struct device *device)
 {
-	struct toshiba_acpi_dev *dev = acpi_driver_data(to_acpi_device(device));
+	struct toshiba_acpi_dev *dev = dev_get_drvdata(device);
 
 	if (dev->hotkey_dev) {
 		if (toshiba_acpi_enable_hotkeys(dev))
@@ -3579,30 +3615,44 @@ static int toshiba_acpi_resume(struct device *device)
 static SIMPLE_DEV_PM_OPS(toshiba_acpi_pm,
 			 toshiba_acpi_suspend, toshiba_acpi_resume);
 
-static struct acpi_driver toshiba_acpi_driver = {
-	.name	= "Toshiba ACPI driver",
-	.owner	= THIS_MODULE,
-	.ids	= toshiba_device_ids,
-	.flags	= ACPI_DRIVER_ALL_NOTIFY_EVENTS,
-	.ops	= {
-		.add		= toshiba_acpi_add,
-		.remove		= toshiba_acpi_remove,
-		.notify		= toshiba_acpi_notify,
+static struct platform_driver toshiba_acpi_driver = {
+	.probe = toshiba_acpi_probe,
+	.remove = toshiba_acpi_remove,
+	.driver = {
+		.name = "Toshiba ACPI driver",
+		.acpi_match_table = toshiba_device_ids,
+		.pm = &toshiba_acpi_pm,
 	},
-	.drv.pm	= &toshiba_acpi_pm,
 };
+
+static void __init toshiba_dmi_init(void)
+{
+	const struct dmi_system_id *dmi_id;
+	long quirks = 0;
+
+	dmi_id = dmi_first_match(toshiba_dmi_quirks);
+	if (dmi_id)
+		quirks = (long)dmi_id->driver_data;
+
+	if (turn_on_panel_on_resume == -1)
+		turn_on_panel_on_resume = !!(quirks & QUIRK_TURN_ON_PANEL_ON_RESUME);
+
+	if (hci_hotkey_quickstart == -1)
+		hci_hotkey_quickstart = !!(quirks & QUIRK_HCI_HOTKEY_QUICKSTART);
+}
 
 static int __init toshiba_acpi_init(void)
 {
 	int ret;
 
+	toshiba_dmi_init();
 	toshiba_proc_dir = proc_mkdir(PROC_TOSHIBA, acpi_root_dir);
 	if (!toshiba_proc_dir) {
 		pr_err("Unable to create proc dir " PROC_TOSHIBA "\n");
 		return -ENODEV;
 	}
 
-	ret = acpi_bus_register_driver(&toshiba_acpi_driver);
+	ret = platform_driver_register(&toshiba_acpi_driver);
 	if (ret) {
 		pr_err("Failed to register ACPI driver: %d\n", ret);
 		remove_proc_entry(PROC_TOSHIBA, acpi_root_dir);
@@ -3613,7 +3663,7 @@ static int __init toshiba_acpi_init(void)
 
 static void __exit toshiba_acpi_exit(void)
 {
-	acpi_bus_unregister_driver(&toshiba_acpi_driver);
+	platform_driver_unregister(&toshiba_acpi_driver);
 	if (toshiba_proc_dir)
 		remove_proc_entry(PROC_TOSHIBA, acpi_root_dir);
 }

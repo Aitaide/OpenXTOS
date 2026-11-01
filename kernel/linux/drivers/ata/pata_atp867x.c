@@ -525,10 +525,10 @@ static int atp867x_reinit_one(struct pci_dev *pdev)
 }
 #endif
 
-static struct pci_device_id atp867x_pci_tbl[] = {
-	{ PCI_VDEVICE(ARTOP, PCI_DEVICE_ID_ARTOP_ATP867A),	0 },
-	{ PCI_VDEVICE(ARTOP, PCI_DEVICE_ID_ARTOP_ATP867B),	0 },
-	{ },
+static const struct pci_device_id atp867x_pci_tbl[] = {
+	{ PCI_VDEVICE(ARTOP, PCI_DEVICE_ID_ARTOP_ATP867A) },
+	{ PCI_VDEVICE(ARTOP, PCI_DEVICE_ID_ARTOP_ATP867B) },
+	{ }
 };
 
 static struct pci_driver atp867x_driver = {

@@ -28,6 +28,7 @@
 #include <linux/highmem.h>
 
 #include <drm/drm_cache.h>
+#include <drm/drm_print.h>
 
 #include "gt/intel_engine.h"
 #include "gt/intel_engine_regs.h"
@@ -917,8 +918,7 @@ static int init_hash_table(struct intel_engine_cs *engine,
 		for (j = 0; j < table->count; j++) {
 			const struct drm_i915_cmd_descriptor *desc =
 				&table->table[j];
-			struct cmd_node *desc_node =
-				kmalloc(sizeof(*desc_node), GFP_KERNEL);
+			struct cmd_node *desc_node = kmalloc_obj(*desc_node);
 
 			if (!desc_node)
 				return -ENOMEM;
@@ -1211,11 +1211,11 @@ static u32 *copy_batch(struct drm_i915_gem_object *dst_obj,
 		for (n = offset >> PAGE_SHIFT; remain; n++) {
 			int len = min(remain, PAGE_SIZE - x);
 
-			src = kmap_atomic(i915_gem_object_get_page(src_obj, n));
+			src = kmap_local_page(i915_gem_object_get_page(src_obj, n));
 			if (src_needs_clflush)
 				drm_clflush_virt_range(src + x, len);
 			memcpy(ptr, src + x, len);
-			kunmap_atomic(src);
+			kunmap_local(src);
 
 			ptr += len;
 			remain -= len;

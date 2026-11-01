@@ -5,11 +5,11 @@
 
 #include <linux/spinlock.h>
 #include <linux/device.h>
-#include <linux/mod_devicetable.h>
+#include <linux/device-id/apr.h>
 #include <dt-bindings/soc/qcom,apr.h>
 #include <dt-bindings/soc/qcom,gpr.h>
 
-extern struct bus_type aprbus;
+extern const struct bus_type aprbus;
 
 #define APR_HDR_LEN(hdr_len) ((hdr_len)/4)
 
@@ -122,7 +122,7 @@ struct gpr_ibasic_rsp_accepted_t {
 #define APR_SVC_MAJOR_VERSION(v)	((v >> 16) & 0xFF)
 #define APR_SVC_MINOR_VERSION(v)	(v & 0xFF)
 
-typedef int (*gpr_port_cb) (struct gpr_resp_pkt *d, void *priv, int op);
+typedef int (*gpr_port_cb) (const struct gpr_resp_pkt *d, void *priv, int op);
 struct packet_router;
 struct pkt_router_svc {
 	struct device *dev;
@@ -155,14 +155,14 @@ struct apr_driver {
 	int	(*probe)(struct apr_device *sl);
 	void	(*remove)(struct apr_device *sl);
 	int	(*callback)(struct apr_device *a,
-			    struct apr_resp_pkt *d);
-	int	(*gpr_callback)(struct gpr_resp_pkt *d, void *data, int op);
+			    const struct apr_resp_pkt *d);
+	gpr_port_cb gpr_callback;
 	struct device_driver		driver;
 	const struct apr_device_id	*id_table;
 };
 
 typedef struct apr_driver gpr_driver_t;
-#define to_apr_driver(d) container_of(d, struct apr_driver, driver)
+#define to_apr_driver(d) container_of_const(d, struct apr_driver, driver)
 
 /*
  * use a macro to avoid include chaining to get THIS_MODULE
@@ -191,7 +191,7 @@ int apr_send_pkt(struct apr_device *adev, struct apr_pkt *pkt);
 gpr_port_t *gpr_alloc_port(gpr_device_t *gdev, struct device *dev,
 				gpr_port_cb cb, void *priv);
 void gpr_free_port(gpr_port_t *port);
-int gpr_send_port_pkt(gpr_port_t *port, struct gpr_pkt *pkt);
-int gpr_send_pkt(gpr_device_t *gdev, struct gpr_pkt *pkt);
+int gpr_send_port_pkt(gpr_port_t *port, const struct gpr_pkt *pkt);
+int gpr_send_pkt(gpr_device_t *gdev, const struct gpr_pkt *pkt);
 
 #endif /* __QCOM_APR_H_ */

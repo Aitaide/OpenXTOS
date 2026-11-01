@@ -45,8 +45,20 @@ enum transcoder {
 	TRANSCODER_DSI_1,
 	TRANSCODER_DSI_A = TRANSCODER_DSI_0,	/* legacy DSI */
 	TRANSCODER_DSI_C = TRANSCODER_DSI_1,	/* legacy DSI */
+	TRANSCODER_CMTG0,
+	TRANSCODER_CMTG1,
 
 	I915_MAX_TRANSCODERS
+};
+
+/*
+ * Global legacy plane identifier. Valid only for primary/sprite
+ * planes on pre-g4x, and only for primary planes on g4x-bdw.
+ */
+enum i9xx_plane_id {
+	PLANE_A,
+	PLANE_B,
+	PLANE_C,
 };
 
 /*
@@ -60,16 +72,23 @@ enum transcoder {
  * (eg. PLANE_CTL(), PS_PLANE_SEL(), etc.) so adjust with care.
  */
 enum plane_id {
-	PLANE_PRIMARY,
-	PLANE_SPRITE0,
-	PLANE_SPRITE1,
-	PLANE_SPRITE2,
-	PLANE_SPRITE3,
-	PLANE_SPRITE4,
-	PLANE_SPRITE5,
+	/* skl+ universal plane names */
+	PLANE_1,
+	PLANE_2,
+	PLANE_3,
+	PLANE_4,
+	PLANE_5,
+	PLANE_6,
+	PLANE_7,
+
 	PLANE_CURSOR,
 
 	I915_MAX_PLANES,
+
+	/* pre-skl plane names */
+	PLANE_PRIMARY = PLANE_1,
+	PLANE_SPRITE0,
+	PLANE_SPRITE1,
 };
 
 enum port {
@@ -119,6 +138,41 @@ enum hpd_pin {
 	HPD_PORT_TC6,
 
 	HPD_NUM_PINS
+};
+
+enum aux_ch {
+	AUX_CH_NONE = -1,
+
+	AUX_CH_A,
+	AUX_CH_B,
+	AUX_CH_C,
+	AUX_CH_D,
+	AUX_CH_E, /* ICL+ */
+	AUX_CH_F,
+	AUX_CH_G,
+	AUX_CH_H,
+	AUX_CH_I,
+
+	/* tgl+ */
+	AUX_CH_USBC1 = AUX_CH_D,
+	AUX_CH_USBC2,
+	AUX_CH_USBC3,
+	AUX_CH_USBC4,
+	AUX_CH_USBC5,
+	AUX_CH_USBC6,
+
+	/* XE_LPD repositions D/E offsets and bitfields */
+	AUX_CH_D_XELPD = AUX_CH_USBC5,
+	AUX_CH_E_XELPD,
+};
+
+enum intel_color_block {
+	INTEL_PLANE_CB_PRE_CSC_LUT,
+	INTEL_PLANE_CB_CSC,
+	INTEL_PLANE_CB_POST_CSC_LUT,
+	INTEL_PLANE_CB_3DLUT,
+
+	INTEL_CB_MAX
 };
 
 #endif /* __INTEL_DISPLAY_LIMITS_H__ */

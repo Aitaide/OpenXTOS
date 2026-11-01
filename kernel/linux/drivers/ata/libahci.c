@@ -111,6 +111,7 @@ static DEVICE_ATTR(em_buffer, S_IWUSR | S_IRUGO,
 static DEVICE_ATTR(em_message_supported, S_IRUGO, ahci_show_em_supported, NULL);
 
 static struct attribute *ahci_shost_attrs[] = {
+	&dev_attr_link_power_management_supported.attr,
 	&dev_attr_link_power_management_policy.attr,
 	&dev_attr_em_message_type.attr,
 	&dev_attr_em_message.attr,
@@ -162,10 +163,10 @@ struct ata_port_operations ahci_ops = {
 
 	.freeze			= ahci_freeze,
 	.thaw			= ahci_thaw,
-	.softreset		= ahci_softreset,
-	.hardreset		= ahci_hardreset,
-	.postreset		= ahci_postreset,
-	.pmp_softreset		= ahci_softreset,
+	.reset.softreset	= ahci_softreset,
+	.reset.hardreset	= ahci_hardreset,
+	.reset.postreset	= ahci_postreset,
+	.pmp_reset.softreset	= ahci_softreset,
 	.error_handler		= ahci_error_handler,
 	.post_internal_cmd	= ahci_post_internal_cmd,
 	.dev_config		= ahci_dev_config,
@@ -192,7 +193,7 @@ EXPORT_SYMBOL_GPL(ahci_ops);
 
 struct ata_port_operations ahci_pmp_retry_srst_ops = {
 	.inherits		= &ahci_ops,
-	.softreset		= ahci_pmp_retry_softreset,
+	.reset.softreset	= ahci_pmp_retry_softreset,
 };
 EXPORT_SYMBOL_GPL(ahci_pmp_retry_srst_ops);
 
@@ -541,6 +542,7 @@ void ahci_save_initial_config(struct device *dev, struct ahci_host_priv *hpriv)
 		hpriv->saved_port_map = port_map;
 	}
 
+	/* mask_port_map not set means that all ports are available */
 	if (hpriv->mask_port_map) {
 		dev_warn(dev, "masking port_map 0x%lx -> 0x%lx\n",
 			port_map,
@@ -550,11 +552,7 @@ void ahci_save_initial_config(struct device *dev, struct ahci_host_priv *hpriv)
 
 	/* cross check port_map and cap.n_ports */
 	if (port_map) {
-		int map_ports = 0;
-
-		for (i = 0; i < AHCI_MAX_PORTS; i++)
-			if (port_map & (1 << i))
-				map_ports++;
+		int map_ports = hweight_long(port_map);
 
 		/* If PI has more ports than n_ports, whine, clear
 		 * port_map and let it be generated from n_ports.
@@ -746,15 +744,28 @@ void ahci_start_fis_rx(struct ata_port *ap)
 	struct ahci_port_priv *pp = ap->private_data;
 	u32 tmp;
 
-	/* set FIS registers */
+	/*
+	 * On HBAs that only support 32-bit addressing PxCLBU is read only '0'.
+	 * When applying the AHCI_HFLAG_32BIT_ONLY quirk, PxCLBU is RW, and the
+	 * reset value is Implementation Specific, so we need to clear it to 0.
+	 */
 	if (hpriv->cap & HOST_CAP_64)
 		writel((pp->cmd_slot_dma >> 16) >> 16,
 		       port_mmio + PORT_LST_ADDR_HI);
+	else if (hpriv->flags & AHCI_HFLAG_32BIT_ONLY)
+		writel(0, port_mmio + PORT_LST_ADDR_HI);
 	writel(pp->cmd_slot_dma & 0xffffffff, port_mmio + PORT_LST_ADDR);
 
+	/*
+	 * On HBAs that only support 32-bit addressing PxFBU is read only '0'.
+	 * When applying the AHCI_HFLAG_32BIT_ONLY quirk, PxFBU is RW, and the
+	 * reset value is Implementation Specific, so we need to clear it to 0.
+	 */
 	if (hpriv->cap & HOST_CAP_64)
 		writel((pp->rx_fis_dma >> 16) >> 16,
 		       port_mmio + PORT_FIS_ADDR_HI);
+	else if (hpriv->flags & AHCI_HFLAG_32BIT_ONLY)
+		writel(0, port_mmio + PORT_FIS_ADDR_HI);
 	writel(pp->rx_fis_dma & 0xffffffff, port_mmio + PORT_FIS_ADDR);
 
 	/* enable FIS reception */
@@ -1033,7 +1044,7 @@ static void ahci_sw_activity(struct ata_link *link)
 
 static void ahci_sw_activity_blink(struct timer_list *t)
 {
-	struct ahci_em_priv *emp = from_timer(emp, t, timer);
+	struct ahci_em_priv *emp = timer_container_of(emp, t, timer);
 	struct ata_link *link = emp->link;
 	struct ata_port *ap = link->ap;
 
@@ -1280,10 +1291,8 @@ static void ahci_port_init(struct device *dev, struct ata_port *ap,
 			   int port_no, void __iomem *mmio,
 			   void __iomem *port_mmio)
 {
-	struct ahci_host_priv *hpriv = ap->host->private_data;
 	const char *emsg = NULL;
 	int rc;
-	u32 tmp;
 
 	/* make sure port is not active */
 	rc = ahci_deinit_port(ap, &emsg);
@@ -1291,11 +1300,6 @@ static void ahci_port_init(struct device *dev, struct ata_port *ap,
 		dev_warn(dev, "%s (%d)\n", emsg, rc);
 
 	ahci_port_clear_pending_irq(ap);
-
-	/* mark esata ports */
-	tmp = readl(port_mmio + PORT_CMD);
-	if ((tmp & PORT_CMD_ESP) && (hpriv->cap & HOST_CAP_SXS))
-		ap->pflags |= ATA_PFLAG_EXTERNAL;
 }
 
 void ahci_init_controller(struct ata_host *host)
@@ -1327,6 +1331,10 @@ EXPORT_SYMBOL_GPL(ahci_init_controller);
 static void ahci_dev_config(struct ata_device *dev)
 {
 	struct ahci_host_priv *hpriv = dev->link->ap->host->private_data;
+
+	if ((dev->class == ATA_DEV_ATAPI) &&
+	    (hpriv->flags & AHCI_HFLAG_ATAPI_DMA_QUIRK))
+		dev->quirks |= ATA_QUIRK_ATAPI_MOD16_DMA;
 
 	if (hpriv->flags & AHCI_HFLAG_SECT255) {
 		dev->max_sectors = 255;
@@ -1528,6 +1536,7 @@ int ahci_do_softreset(struct ata_link *link, unsigned int *class,
 	ata_link_err(link, "softreset failed (%s)\n", reason);
 	return rc;
 }
+EXPORT_SYMBOL_GPL(ahci_do_softreset);
 
 int ahci_check_ready(struct ata_link *link)
 {
@@ -1545,7 +1554,6 @@ static int ahci_softreset(struct ata_link *link, unsigned int *class,
 
 	return ahci_do_softreset(link, class, pmp, deadline, ahci_check_ready);
 }
-EXPORT_SYMBOL_GPL(ahci_do_softreset);
 
 static int ahci_bad_pmp_check_ready(struct ata_link *link)
 {
@@ -2082,13 +2090,6 @@ static void ahci_qc_fill_rtf(struct ata_queued_cmd *qc)
 	struct ahci_port_priv *pp = qc->ap->private_data;
 	u8 *rx_fis = pp->rx_fis;
 
-	/*
-	 * rtf may already be filled (e.g. for successful NCQ commands).
-	 * If that is the case, we have nothing to do.
-	 */
-	if (qc->flags & ATA_QCFLAG_RTF_FILLED)
-		return;
-
 	if (pp->fbs_enabled)
 		rx_fis += qc->dev->link->pmp * AHCI_RX_FIS_SZ;
 
@@ -2102,7 +2103,6 @@ static void ahci_qc_fill_rtf(struct ata_queued_cmd *qc)
 	    !(qc->flags & ATA_QCFLAG_EH)) {
 		ata_tf_from_fis(rx_fis + RX_FIS_PIO_SETUP, &qc->result_tf);
 		qc->result_tf.status = (rx_fis + RX_FIS_PIO_SETUP)[15];
-		qc->flags |= ATA_QCFLAG_RTF_FILLED;
 		return;
 	}
 
@@ -2125,12 +2125,10 @@ static void ahci_qc_fill_rtf(struct ata_queued_cmd *qc)
 		 */
 		qc->result_tf.status = fis[2];
 		qc->result_tf.error = fis[3];
-		qc->flags |= ATA_QCFLAG_RTF_FILLED;
 		return;
 	}
 
 	ata_tf_from_fis(rx_fis + RX_FIS_D2H_REG, &qc->result_tf);
-	qc->flags |= ATA_QCFLAG_RTF_FILLED;
 }
 
 static void ahci_qc_ncq_fill_rtf(struct ata_port *ap, u64 done_mask)
@@ -2165,6 +2163,7 @@ static void ahci_qc_ncq_fill_rtf(struct ata_port *ap, u64 done_mask)
 			if (qc && ata_is_ncq(qc->tf.protocol)) {
 				qc->result_tf.status = status;
 				qc->result_tf.error = error;
+				qc->result_tf.flags = qc->tf.flags;
 				qc->flags |= ATA_QCFLAG_RTF_FILLED;
 			}
 			done_mask &= ~(1ULL << tag);
@@ -2189,6 +2188,7 @@ static void ahci_qc_ncq_fill_rtf(struct ata_port *ap, u64 done_mask)
 			fis += RX_FIS_SDB;
 			qc->result_tf.status = fis[2];
 			qc->result_tf.error = fis[3];
+			qc->result_tf.flags = qc->tf.flags;
 			qc->flags |= ATA_QCFLAG_RTF_FILLED;
 		}
 		done_mask &= ~(1ULL << tag);
@@ -2221,6 +2221,7 @@ static void ahci_thaw(struct ata_port *ap)
 }
 
 void ahci_error_handler(struct ata_port *ap)
+	__must_hold(&ap->host->eh_mutex)
 {
 	struct ahci_host_priv *hpriv = ap->host->private_data;
 
@@ -2627,8 +2628,8 @@ void ahci_print_info(struct ata_host *host, const char *scc_s)
 		speed_s = "?";
 
 	dev_info(host->dev,
-		"AHCI %02x%02x.%02x%02x "
-		"%u slots %u ports %s Gbps 0x%x impl %s mode\n"
+		"AHCI vers %02x%02x.%02x%02x, "
+		"%u command slots, %s Gbps, %s mode\n"
 		,
 
 		(vers >> 24) & 0xff,
@@ -2637,10 +2638,16 @@ void ahci_print_info(struct ata_host *host, const char *scc_s)
 		vers & 0xff,
 
 		((cap >> 8) & 0x1f) + 1,
-		(cap & 0x1f) + 1,
 		speed_s,
-		impl,
 		scc_s);
+
+	dev_info(host->dev,
+		"%u/%u ports implemented (port mask 0x%x)\n"
+		,
+
+		hweight32(impl),
+		ahci_nr_ports(cap),
+		impl);
 
 	dev_info(host->dev,
 		"flags: "
@@ -2730,7 +2737,7 @@ static int ahci_host_activate_multi_irqs(struct ata_host *host,
 
 		if (rc)
 			return rc;
-		ata_port_desc(host->ports[i], "irq %d", irq);
+		ata_port_desc_misc(host->ports[i], irq);
 	}
 
 	return ata_host_register(host, sht);

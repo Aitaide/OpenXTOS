@@ -1,8 +1,8 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 /*
- * Quick & dirty crypto testing module.
+ * Quick & dirty crypto benchmarking module.
  *
- * This will only exist until we have a better testing mechanism
+ * This will only exist until we have a better benchmarking mechanism
  * (e.g. a char device).
  *
  * Copyright (c) 2002 James Morris <jmorris@intercode.com.au>
@@ -39,7 +39,7 @@
 #include "tcrypt.h"
 
 /*
- * Need slab memory for testing (size in number of pages).
+ * Need slab memory for benchmarking (size in number of pages).
  */
 #define TVMEMSIZE	4
 
@@ -180,7 +180,7 @@ static int test_mb_aead_jiffies(struct test_mb_aead_data *data, int enc,
 	int ret = 0;
 	int *rc;
 
-	rc = kcalloc(num_mb, sizeof(*rc), GFP_KERNEL);
+	rc = kzalloc_objs(*rc, num_mb);
 	if (!rc)
 		return -ENOMEM;
 
@@ -207,7 +207,7 @@ static int test_mb_aead_cycles(struct test_mb_aead_data *data, int enc,
 	int i;
 	int *rc;
 
-	rc = kcalloc(num_mb, sizeof(*rc), GFP_KERNEL);
+	rc = kzalloc_objs(*rc, num_mb);
 	if (!rc)
 		return -ENOMEM;
 
@@ -270,7 +270,7 @@ static void test_mb_aead_speed(const char *algo, int enc, int secs,
 	else
 		e = "decryption";
 
-	data = kcalloc(num_mb, sizeof(*data), GFP_KERNEL);
+	data = kzalloc_objs(*data, num_mb);
 	if (!data)
 		goto out_free_iv;
 
@@ -911,8 +911,14 @@ static void test_ahash_speed_common(const char *algo, unsigned int secs,
 			break;
 		}
 
-		if (klen)
-			crypto_ahash_setkey(tfm, tvmem[0], klen);
+		if (klen) {
+			ret = crypto_ahash_setkey(tfm, tvmem[0], klen);
+			if (ret) {
+				pr_err("setkey() failed flags=%x: %d\n",
+				       crypto_ahash_get_flags(tfm), ret);
+				break;
+			}
+		}
 
 		pr_info("test%3u "
 			"(%5u byte blocks,%5u bytes per update,%4u updates): ",
@@ -997,7 +1003,7 @@ static int test_mb_acipher_jiffies(struct test_mb_skcipher_data *data, int enc,
 	int ret = 0;
 	int *rc;
 
-	rc = kcalloc(num_mb, sizeof(*rc), GFP_KERNEL);
+	rc = kzalloc_objs(*rc, num_mb);
 	if (!rc)
 		return -ENOMEM;
 
@@ -1024,7 +1030,7 @@ static int test_mb_acipher_cycles(struct test_mb_skcipher_data *data, int enc,
 	int i;
 	int *rc;
 
-	rc = kcalloc(num_mb, sizeof(*rc), GFP_KERNEL);
+	rc = kzalloc_objs(*rc, num_mb);
 	if (!rc)
 		return -ENOMEM;
 
@@ -1075,7 +1081,7 @@ static void test_mb_skcipher_speed(const char *algo, int enc, int secs,
 	else
 		e = "decryption";
 
-	data = kcalloc(num_mb, sizeof(*data), GFP_KERNEL);
+	data = kzalloc_objs(*data, num_mb);
 	if (!data)
 		return;
 
@@ -1524,8 +1530,6 @@ static int do_test(const char *alg, u32 type, u32 mask, int m, u32 num_mb)
 		ret = min(ret, tcrypt_test("xts(aes)"));
 		ret = min(ret, tcrypt_test("ctr(aes)"));
 		ret = min(ret, tcrypt_test("rfc3686(ctr(aes))"));
-		ret = min(ret, tcrypt_test("ofb(aes)"));
-		ret = min(ret, tcrypt_test("cfb(aes)"));
 		ret = min(ret, tcrypt_test("xctr(aes)"));
 		break;
 
@@ -1557,10 +1561,6 @@ static int do_test(const char *alg, u32 type, u32 mask, int m, u32 num_mb)
 
 	case 16:
 		ret = min(ret, tcrypt_test("ecb(arc4)"));
-		break;
-
-	case 17:
-		ret = min(ret, tcrypt_test("michael_mic"));
 		break;
 
 	case 18:
@@ -1598,10 +1598,6 @@ static int do_test(const char *alg, u32 type, u32 mask, int m, u32 num_mb)
 
 	case 30:
 		ret = min(ret, tcrypt_test("ecb(xeta)"));
-		break;
-
-	case 31:
-		ret = min(ret, tcrypt_test("pcbc(fcrypt)"));
 		break;
 
 	case 32:
@@ -1652,14 +1648,6 @@ static int do_test(const char *alg, u32 type, u32 mask, int m, u32 num_mb)
 		ret = min(ret, tcrypt_test("rfc4309(ccm(aes))"));
 		break;
 
-	case 46:
-		ret = min(ret, tcrypt_test("ghash"));
-		break;
-
-	case 47:
-		ret = min(ret, tcrypt_test("crct10dif"));
-		break;
-
 	case 48:
 		ret = min(ret, tcrypt_test("sha3-224"));
 		break;
@@ -1694,10 +1682,6 @@ static int do_test(const char *alg, u32 type, u32 mask, int m, u32 num_mb)
 
 	case 56:
 		ret = min(ret, tcrypt_test("ccm(sm4)"));
-		break;
-
-	case 57:
-		ret = min(ret, tcrypt_test("polyval"));
 		break;
 
 	case 58:
@@ -1740,10 +1724,6 @@ static int do_test(const char *alg, u32 type, u32 mask, int m, u32 num_mb)
 		ret = min(ret, tcrypt_test("hmac(rmd160)"));
 		break;
 
-	case 109:
-		ret = min(ret, tcrypt_test("vmac64(aes)"));
-		break;
-
 	case 111:
 		ret = min(ret, tcrypt_test("hmac(sha3-224)"));
 		break;
@@ -1766,10 +1746,6 @@ static int do_test(const char *alg, u32 type, u32 mask, int m, u32 num_mb)
 
 	case 116:
 		ret = min(ret, tcrypt_test("hmac(streebog512)"));
-		break;
-
-	case 150:
-		ret = min(ret, tcrypt_test("ansi_cprng"));
 		break;
 
 	case 151:
@@ -1845,15 +1821,16 @@ static int do_test(const char *alg, u32 type, u32 mask, int m, u32 num_mb)
 	case 191:
 		ret = min(ret, tcrypt_test("ecb(sm4)"));
 		ret = min(ret, tcrypt_test("cbc(sm4)"));
-		ret = min(ret, tcrypt_test("cfb(sm4)"));
 		ret = min(ret, tcrypt_test("ctr(sm4)"));
 		ret = min(ret, tcrypt_test("xts(sm4)"));
 		break;
 	case 192:
 		ret = min(ret, tcrypt_test("ecb(aria)"));
 		ret = min(ret, tcrypt_test("cbc(aria)"));
-		ret = min(ret, tcrypt_test("cfb(aria)"));
 		ret = min(ret, tcrypt_test("ctr(aria)"));
+		break;
+	case 193:
+		ret = min(ret, tcrypt_test("ffdhe2048(dh)"));
 		break;
 	case 200:
 		test_cipher_speed("ecb(aes)", ENCRYPT, sec, NULL, 0,
@@ -1879,10 +1856,6 @@ static int do_test(const char *alg, u32 type, u32 mask, int m, u32 num_mb)
 		test_cipher_speed("ctr(aes)", ENCRYPT, sec, NULL, 0,
 				speed_template_16_24_32);
 		test_cipher_speed("ctr(aes)", DECRYPT, sec, NULL, 0,
-				speed_template_16_24_32);
-		test_cipher_speed("cfb(aes)", ENCRYPT, sec, NULL, 0,
-				speed_template_16_24_32);
-		test_cipher_speed("cfb(aes)", DECRYPT, sec, NULL, 0,
 				speed_template_16_24_32);
 		break;
 
@@ -2115,10 +2088,6 @@ static int do_test(const char *alg, u32 type, u32 mask, int m, u32 num_mb)
 				speed_template_16);
 		test_cipher_speed("cts(cbc(sm4))", DECRYPT, sec, NULL, 0,
 				speed_template_16);
-		test_cipher_speed("cfb(sm4)", ENCRYPT, sec, NULL, 0,
-				speed_template_16);
-		test_cipher_speed("cfb(sm4)", DECRYPT, sec, NULL, 0,
-				speed_template_16);
 		test_cipher_speed("ctr(sm4)", ENCRYPT, sec, NULL, 0,
 				speed_template_16);
 		test_cipher_speed("ctr(sm4)", DECRYPT, sec, NULL, 0,
@@ -2198,10 +2167,6 @@ static int do_test(const char *alg, u32 type, u32 mask, int m, u32 num_mb)
 				  speed_template_16_24_32);
 		test_cipher_speed("cbc(aria)", DECRYPT, sec, NULL, 0,
 				  speed_template_16_24_32);
-		test_cipher_speed("cfb(aria)", ENCRYPT, sec, NULL, 0,
-				  speed_template_16_24_32);
-		test_cipher_speed("cfb(aria)", DECRYPT, sec, NULL, 0,
-				  speed_template_16_24_32);
 		test_cipher_speed("ctr(aria)", ENCRYPT, sec, NULL, 0,
 				  speed_template_16_24_32);
 		test_cipher_speed("ctr(aria)", DECRYPT, sec, NULL, 0,
@@ -2280,21 +2245,8 @@ static int do_test(const char *alg, u32 type, u32 mask, int m, u32 num_mb)
 		test_hash_speed("blake2b-512", sec, generic_hash_speed_template);
 		if (mode > 300 && mode < 400) break;
 		fallthrough;
-	case 318:
-		klen = 16;
-		test_hash_speed("ghash", sec, generic_hash_speed_template);
-		if (mode > 300 && mode < 400) break;
-		fallthrough;
 	case 319:
 		test_hash_speed("crc32c", sec, generic_hash_speed_template);
-		if (mode > 300 && mode < 400) break;
-		fallthrough;
-	case 320:
-		test_hash_speed("crct10dif", sec, generic_hash_speed_template);
-		if (mode > 300 && mode < 400) break;
-		fallthrough;
-	case 321:
-		test_hash_speed("poly1305", sec, poly1305_speed_template);
 		if (mode > 300 && mode < 400) break;
 		fallthrough;
 	case 322:
@@ -2436,14 +2388,6 @@ static int do_test(const char *alg, u32 type, u32 mask, int m, u32 num_mb)
 				   speed_template_16_24_32);
 		test_acipher_speed("ctr(aes)", DECRYPT, sec, NULL, 0,
 				   speed_template_16_24_32);
-		test_acipher_speed("cfb(aes)", ENCRYPT, sec, NULL, 0,
-				   speed_template_16_24_32);
-		test_acipher_speed("cfb(aes)", DECRYPT, sec, NULL, 0,
-				   speed_template_16_24_32);
-		test_acipher_speed("ofb(aes)", ENCRYPT, sec, NULL, 0,
-				   speed_template_16_24_32);
-		test_acipher_speed("ofb(aes)", DECRYPT, sec, NULL, 0,
-				   speed_template_16_24_32);
 		test_acipher_speed("rfc3686(ctr(aes))", ENCRYPT, sec, NULL, 0,
 				   speed_template_20_28_36);
 		test_acipher_speed("rfc3686(ctr(aes))", DECRYPT, sec, NULL, 0,
@@ -2463,18 +2407,6 @@ static int do_test(const char *alg, u32 type, u32 mask, int m, u32 num_mb)
 		test_acipher_speed("cbc(des3_ede)", DECRYPT, sec,
 				   des3_speed_template, DES3_SPEED_VECTORS,
 				   speed_template_24);
-		test_acipher_speed("cfb(des3_ede)", ENCRYPT, sec,
-				   des3_speed_template, DES3_SPEED_VECTORS,
-				   speed_template_24);
-		test_acipher_speed("cfb(des3_ede)", DECRYPT, sec,
-				   des3_speed_template, DES3_SPEED_VECTORS,
-				   speed_template_24);
-		test_acipher_speed("ofb(des3_ede)", ENCRYPT, sec,
-				   des3_speed_template, DES3_SPEED_VECTORS,
-				   speed_template_24);
-		test_acipher_speed("ofb(des3_ede)", DECRYPT, sec,
-				   des3_speed_template, DES3_SPEED_VECTORS,
-				   speed_template_24);
 		break;
 
 	case 502:
@@ -2485,14 +2417,6 @@ static int do_test(const char *alg, u32 type, u32 mask, int m, u32 num_mb)
 		test_acipher_speed("cbc(des)", ENCRYPT, sec, NULL, 0,
 				   speed_template_8);
 		test_acipher_speed("cbc(des)", DECRYPT, sec, NULL, 0,
-				   speed_template_8);
-		test_acipher_speed("cfb(des)", ENCRYPT, sec, NULL, 0,
-				   speed_template_8);
-		test_acipher_speed("cfb(des)", DECRYPT, sec, NULL, 0,
-				   speed_template_8);
-		test_acipher_speed("ofb(des)", ENCRYPT, sec, NULL, 0,
-				   speed_template_8);
-		test_acipher_speed("ofb(des)", DECRYPT, sec, NULL, 0,
 				   speed_template_8);
 		break;
 
@@ -2632,10 +2556,6 @@ static int do_test(const char *alg, u32 type, u32 mask, int m, u32 num_mb)
 				speed_template_16);
 		test_acipher_speed("cbc(sm4)", DECRYPT, sec, NULL, 0,
 				speed_template_16);
-		test_acipher_speed("cfb(sm4)", ENCRYPT, sec, NULL, 0,
-				speed_template_16);
-		test_acipher_speed("cfb(sm4)", DECRYPT, sec, NULL, 0,
-				speed_template_16);
 		test_acipher_speed("ctr(sm4)", ENCRYPT, sec, NULL, 0,
 				speed_template_16);
 		test_acipher_speed("ctr(sm4)", DECRYPT, sec, NULL, 0,
@@ -2658,6 +2578,15 @@ static int do_test(const char *alg, u32 type, u32 mask, int m, u32 num_mb)
 		break;
 
 	case 600:
+		if (alg) {
+			u8 speed_template[2] = {klen, 0};
+			test_mb_skcipher_speed(alg, ENCRYPT, sec, NULL, 0,
+					       speed_template, num_mb);
+			test_mb_skcipher_speed(alg, DECRYPT, sec, NULL, 0,
+					       speed_template, num_mb);
+			break;
+		}
+
 		test_mb_skcipher_speed("ecb(aes)", ENCRYPT, sec, NULL, 0,
 				       speed_template_16_24_32, num_mb);
 		test_mb_skcipher_speed("ecb(aes)", DECRYPT, sec, NULL, 0,
@@ -2682,14 +2611,6 @@ static int do_test(const char *alg, u32 type, u32 mask, int m, u32 num_mb)
 				       speed_template_16_24_32, num_mb);
 		test_mb_skcipher_speed("ctr(aes)", DECRYPT, sec, NULL, 0,
 				       speed_template_16_24_32, num_mb);
-		test_mb_skcipher_speed("cfb(aes)", ENCRYPT, sec, NULL, 0,
-				       speed_template_16_24_32, num_mb);
-		test_mb_skcipher_speed("cfb(aes)", DECRYPT, sec, NULL, 0,
-				       speed_template_16_24_32, num_mb);
-		test_mb_skcipher_speed("ofb(aes)", ENCRYPT, sec, NULL, 0,
-				       speed_template_16_24_32, num_mb);
-		test_mb_skcipher_speed("ofb(aes)", DECRYPT, sec, NULL, 0,
-				       speed_template_16_24_32, num_mb);
 		test_mb_skcipher_speed("rfc3686(ctr(aes))", ENCRYPT, sec, NULL,
 				       0, speed_template_20_28_36, num_mb);
 		test_mb_skcipher_speed("rfc3686(ctr(aes))", DECRYPT, sec, NULL,
@@ -2709,18 +2630,6 @@ static int do_test(const char *alg, u32 type, u32 mask, int m, u32 num_mb)
 		test_mb_skcipher_speed("cbc(des3_ede)", DECRYPT, sec,
 				       des3_speed_template, DES3_SPEED_VECTORS,
 				       speed_template_24, num_mb);
-		test_mb_skcipher_speed("cfb(des3_ede)", ENCRYPT, sec,
-				       des3_speed_template, DES3_SPEED_VECTORS,
-				       speed_template_24, num_mb);
-		test_mb_skcipher_speed("cfb(des3_ede)", DECRYPT, sec,
-				       des3_speed_template, DES3_SPEED_VECTORS,
-				       speed_template_24, num_mb);
-		test_mb_skcipher_speed("ofb(des3_ede)", ENCRYPT, sec,
-				       des3_speed_template, DES3_SPEED_VECTORS,
-				       speed_template_24, num_mb);
-		test_mb_skcipher_speed("ofb(des3_ede)", DECRYPT, sec,
-				       des3_speed_template, DES3_SPEED_VECTORS,
-				       speed_template_24, num_mb);
 		break;
 
 	case 602:
@@ -2731,14 +2640,6 @@ static int do_test(const char *alg, u32 type, u32 mask, int m, u32 num_mb)
 		test_mb_skcipher_speed("cbc(des)", ENCRYPT, sec, NULL, 0,
 				       speed_template_8, num_mb);
 		test_mb_skcipher_speed("cbc(des)", DECRYPT, sec, NULL, 0,
-				       speed_template_8, num_mb);
-		test_mb_skcipher_speed("cfb(des)", ENCRYPT, sec, NULL, 0,
-				       speed_template_8, num_mb);
-		test_mb_skcipher_speed("cfb(des)", DECRYPT, sec, NULL, 0,
-				       speed_template_8, num_mb);
-		test_mb_skcipher_speed("ofb(des)", ENCRYPT, sec, NULL, 0,
-				       speed_template_8, num_mb);
-		test_mb_skcipher_speed("ofb(des)", DECRYPT, sec, NULL, 0,
 				       speed_template_8, num_mb);
 		break;
 
@@ -2896,6 +2797,11 @@ static int __init tcrypt_mod_init(void)
 			goto err_free_tv;
 	}
 
+	if (!num_mb) {
+		pr_warn("num_mb must be at least 1; forcing to 1\n");
+		num_mb = 1;
+	}
+
 	err = do_test(alg, type, mask, mode, num_mb);
 
 	if (err) {
@@ -2905,7 +2811,7 @@ static int __init tcrypt_mod_init(void)
 		pr_debug("all tests passed\n");
 	}
 
-	/* We intentionaly return -EAGAIN to prevent keeping the module,
+	/* We intentionally return -EAGAIN to prevent keeping the module,
 	 * unless we're running in fips mode. It does all its work from
 	 * init() and doesn't offer any runtime functionality, but in
 	 * the fips case, checking for a successful load is helpful.
@@ -2944,5 +2850,5 @@ module_param(klen, uint, 0);
 MODULE_PARM_DESC(klen, "Key length (defaults to 0)");
 
 MODULE_LICENSE("GPL");
-MODULE_DESCRIPTION("Quick & dirty crypto testing module");
+MODULE_DESCRIPTION("Quick & dirty crypto benchmarking module");
 MODULE_AUTHOR("James Morris <jmorris@intercode.com.au>");

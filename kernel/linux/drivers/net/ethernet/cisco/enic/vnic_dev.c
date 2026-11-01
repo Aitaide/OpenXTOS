@@ -77,6 +77,9 @@ static int vnic_dev_discover_res(struct vnic_dev *vdev,
 		u32 count = ioread32(&r->count);
 		u32 len;
 
+		vdev_dbg(vdev, "res type %u bar %u offset 0x%x count %u\n",
+			 type, bar_num, bar_offset, count);
+
 		r++;
 
 		if (bar_num >= num_bars)
@@ -90,6 +93,9 @@ static int vnic_dev_discover_res(struct vnic_dev *vdev,
 		case RES_TYPE_RQ:
 		case RES_TYPE_CQ:
 		case RES_TYPE_INTR_CTRL:
+		case RES_TYPE_ADMIN_WQ:
+		case RES_TYPE_ADMIN_RQ:
+		case RES_TYPE_ADMIN_CQ:
 			/* each count is stride bytes long */
 			len = count * VNIC_RES_STRIDE;
 			if (len + bar_offset > bar[bar_num].len) {
@@ -102,6 +108,7 @@ static int vnic_dev_discover_res(struct vnic_dev *vdev,
 		case RES_TYPE_INTR_PBA_LEGACY:
 		case RES_TYPE_DEVCMD:
 		case RES_TYPE_DEVCMD2:
+		case RES_TYPE_SRIOV_INTR:
 			len = count;
 			break;
 		default:
@@ -135,6 +142,9 @@ void __iomem *vnic_dev_get_res(struct vnic_dev *vdev, enum vnic_res_type type,
 	case RES_TYPE_RQ:
 	case RES_TYPE_CQ:
 	case RES_TYPE_INTR_CTRL:
+	case RES_TYPE_ADMIN_WQ:
+	case RES_TYPE_ADMIN_RQ:
+	case RES_TYPE_ADMIN_CQ:
 		return (char __iomem *)vdev->res[type].vaddr +
 			index * VNIC_RES_STRIDE;
 	default:
@@ -146,23 +156,19 @@ EXPORT_SYMBOL(vnic_dev_get_res);
 static unsigned int vnic_dev_desc_ring_size(struct vnic_dev_ring *ring,
 	unsigned int desc_count, unsigned int desc_size)
 {
-	/* The base address of the desc rings must be 512 byte aligned.
-	 * Descriptor count is aligned to groups of 32 descriptors.  A
-	 * count of 0 means the maximum 4096 descriptors.  Descriptor
-	 * size is aligned to 16 bytes.
-	 */
 
-	unsigned int count_align = 32;
-	unsigned int desc_align = 16;
+	/* Descriptor ring base address alignment in bytes*/
+	ring->base_align = VNIC_DESC_BASE_ALIGN;
 
-	ring->base_align = 512;
-
+	/* A count of 0 means the maximum descriptors */
 	if (desc_count == 0)
-		desc_count = 4096;
+		desc_count = VNIC_DESC_MAX_COUNT;
 
-	ring->desc_count = ALIGN(desc_count, count_align);
+	/* Descriptor count aligned in groups of VNIC_DESC_COUNT_ALIGN descriptors */
+	ring->desc_count = ALIGN(desc_count, VNIC_DESC_COUNT_ALIGN);
 
-	ring->desc_size = ALIGN(desc_size, desc_align);
+	/* Descriptor size alignment in bytes */
+	ring->desc_size = ALIGN(desc_size, VNIC_DESC_SIZE_ALIGN);
 
 	ring->size = ring->desc_count * ring->desc_size;
 	ring->size_unaligned = ring->size + ring->base_align;
@@ -375,7 +381,7 @@ static int vnic_dev_init_devcmd2(struct vnic_dev *vdev)
 	if (vdev->devcmd2)
 		return 0;
 
-	vdev->devcmd2 = kzalloc(sizeof(*vdev->devcmd2), GFP_KERNEL);
+	vdev->devcmd2 = kzalloc_obj(*vdev->devcmd2);
 	if (!vdev->devcmd2)
 		return -ENOMEM;
 
@@ -1057,7 +1063,7 @@ struct vnic_dev *vnic_dev_register(struct vnic_dev *vdev,
 	unsigned int num_bars)
 {
 	if (!vdev) {
-		vdev = kzalloc(sizeof(struct vnic_dev), GFP_KERNEL);
+		vdev = kzalloc_obj(struct vnic_dev);
 		if (!vdev)
 			return NULL;
 	}

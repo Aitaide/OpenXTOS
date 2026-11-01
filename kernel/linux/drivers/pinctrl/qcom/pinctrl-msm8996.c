@@ -33,7 +33,6 @@
 		.io_reg = REG_BASE + 0x4 + REG_SIZE * id,		\
 		.intr_cfg_reg = REG_BASE + 0x8 + REG_SIZE * id,		\
 		.intr_status_reg = REG_BASE + 0xc + REG_SIZE * id,	\
-		.intr_target_reg = REG_BASE + 0x8 + REG_SIZE * id,	\
 		.mux_bit = 2,			\
 		.pull_bit = 0,			\
 		.drv_bit = 6,			\
@@ -59,7 +58,6 @@
 		.io_reg = 0,				\
 		.intr_cfg_reg = 0,			\
 		.intr_status_reg = 0,			\
-		.intr_target_reg = 0,			\
 		.mux_bit = -1,				\
 		.pull_bit = pull,			\
 		.drv_bit = drv,				\
@@ -1532,7 +1530,7 @@ static const struct pinfunction msm8996_functions[] = {
 	MSM_PIN_FUNCTION(gcc_gp2_clk_b),
 	MSM_PIN_FUNCTION(gcc_gp3_clk_a),
 	MSM_PIN_FUNCTION(gcc_gp3_clk_b),
-	MSM_PIN_FUNCTION(gpio),
+	MSM_GPIO_PIN_FUNCTION(gpio),
 	MSM_PIN_FUNCTION(gsm_tx),
 	MSM_PIN_FUNCTION(hdmi_cec),
 	MSM_PIN_FUNCTION(hdmi_ddc),
@@ -1880,6 +1878,18 @@ static const struct msm_pingroup msm8996_groups[] = {
 	SDC_QDSD_PINGROUP(sdc1_rclk, 0x12c000, 15, 0),
 };
 
+static const struct msm_gpio_wakeirq_map msm8996_mpm_map[] = {
+	{ 1, 3 }, { 5, 4 }, { 9, 5 }, { 11, 6 }, { 66, 7 }, { 22, 8 }, { 24, 9 }, { 26, 10 },
+	{ 34, 11 }, { 36, 12 }, { 37, 13 }, { 38, 14 }, { 40, 15 }, { 42, 16 }, { 46, 17 },
+	{ 50, 18 }, { 53, 19 }, { 54, 20 }, { 56, 21 }, { 57, 22 }, { 58, 23 }, { 59, 24 },
+	{ 60, 25 }, { 61, 26 }, { 62, 27 }, { 63, 28 }, { 64, 29 }, { 71, 30 }, { 73, 31 },
+	{ 77, 32 }, { 78, 33 }, { 79, 34 }, { 80, 35 }, { 82, 36 }, { 86, 37 }, { 91, 38 },
+	{ 92, 39 }, { 95, 40 }, { 97, 41 }, { 101, 42 }, { 104, 43 }, { 106, 44 }, { 108, 45 },
+	{ 112, 46 }, { 113, 47 }, { 110, 48 }, { 127, 50 }, { 115, 51 }, { 116, 54 }, { 117, 55 },
+	{ 118, 56 }, { 119, 57 }, { 120, 58 }, { 121, 59 }, { 122, 60 }, { 123, 61 }, { 124, 62 },
+	{ 125, 63 }, { 126, 64 }, { 129, 65 }, { 131, 66 }, { 132, 67 }, { 133, 68 }, { 145, 69 },
+};
+
 static const struct msm_pinctrl_soc_data msm8996_pinctrl = {
 	.pins = msm8996_pins,
 	.npins = ARRAY_SIZE(msm8996_pins),
@@ -1888,6 +1898,8 @@ static const struct msm_pinctrl_soc_data msm8996_pinctrl = {
 	.groups = msm8996_groups,
 	.ngroups = ARRAY_SIZE(msm8996_groups),
 	.ngpios = 150,
+	.wakeirq_map = msm8996_mpm_map,
+	.nwakeirq_map = ARRAY_SIZE(msm8996_mpm_map),
 };
 
 static int msm8996_pinctrl_probe(struct platform_device *pdev)
@@ -1899,6 +1911,7 @@ static const struct of_device_id msm8996_pinctrl_of_match[] = {
 	{ .compatible = "qcom,msm8996-pinctrl", },
 	{ }
 };
+MODULE_DEVICE_TABLE(of, msm8996_pinctrl_of_match);
 
 static struct platform_driver msm8996_pinctrl_driver = {
 	.driver = {
@@ -1906,7 +1919,6 @@ static struct platform_driver msm8996_pinctrl_driver = {
 		.of_match_table = msm8996_pinctrl_of_match,
 	},
 	.probe = msm8996_pinctrl_probe,
-	.remove = msm_pinctrl_remove,
 };
 
 static int __init msm8996_pinctrl_init(void)
@@ -1923,4 +1935,3 @@ module_exit(msm8996_pinctrl_exit);
 
 MODULE_DESCRIPTION("Qualcomm msm8996 pinctrl driver");
 MODULE_LICENSE("GPL v2");
-MODULE_DEVICE_TABLE(of, msm8996_pinctrl_of_match);

@@ -6,7 +6,6 @@
  */
 
 #include <linux/module.h>
-#include <linux/mod_devicetable.h>
 #include <linux/regmap.h>
 #include <linux/spi/spi.h>
 #include <linux/property.h>
@@ -26,30 +25,23 @@ static const struct regmap_config adxl355_spi_regmap_config = {
 static int adxl355_spi_probe(struct spi_device *spi)
 {
 	const struct adxl355_chip_info *chip_data;
+	struct device *dev = &spi->dev;
 	struct regmap *regmap;
 
-	chip_data = device_get_match_data(&spi->dev);
-	if (!chip_data) {
-		chip_data = (void *)spi_get_device_id(spi)->driver_data;
-
-		if (!chip_data)
-			return -EINVAL;
-	}
+	chip_data = spi_get_device_match_data(spi);
+	if (!chip_data)
+		return -EINVAL;
 
 	regmap = devm_regmap_init_spi(spi, &adxl355_spi_regmap_config);
-	if (IS_ERR(regmap)) {
-		dev_err(&spi->dev, "Error initializing spi regmap: %ld\n",
-			PTR_ERR(regmap));
+	if (IS_ERR(regmap))
+		return dev_err_probe(dev, PTR_ERR(regmap), "Error initializing spi regmap\n");
 
-		return PTR_ERR(regmap);
-	}
-
-	return adxl355_core_probe(&spi->dev, regmap, chip_data);
+	return adxl355_core_probe(dev, regmap, chip_data);
 }
 
 static const struct spi_device_id adxl355_spi_id[] = {
-	{ "adxl355", (kernel_ulong_t)&adxl35x_chip_info[ADXL355] },
-	{ "adxl359", (kernel_ulong_t)&adxl35x_chip_info[ADXL359] },
+	{ .name = "adxl355", .driver_data = (kernel_ulong_t)&adxl35x_chip_info[ADXL355] },
+	{ .name = "adxl359", .driver_data = (kernel_ulong_t)&adxl35x_chip_info[ADXL359] },
 	{ }
 };
 MODULE_DEVICE_TABLE(spi, adxl355_spi_id);
@@ -74,4 +66,4 @@ module_spi_driver(adxl355_spi_driver);
 MODULE_AUTHOR("Puranjay Mohan <puranjay12@gmail.com>");
 MODULE_DESCRIPTION("ADXL355 3-Axis Digital Accelerometer SPI driver");
 MODULE_LICENSE("GPL v2");
-MODULE_IMPORT_NS(IIO_ADXL355);
+MODULE_IMPORT_NS("IIO_ADXL355");

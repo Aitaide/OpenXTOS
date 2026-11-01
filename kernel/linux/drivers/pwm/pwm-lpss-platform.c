@@ -8,7 +8,6 @@
  */
 
 #include <linux/kernel.h>
-#include <linux/mod_devicetable.h>
 #include <linux/module.h>
 #include <linux/platform_device.h>
 #include <linux/pm_runtime.h>
@@ -20,7 +19,7 @@
 static int pwm_lpss_probe_platform(struct platform_device *pdev)
 {
 	const struct pwm_lpss_boardinfo *info;
-	struct pwm_lpss_chip *lpwm;
+	struct pwm_chip *chip;
 	void __iomem *base;
 
 	info = device_get_match_data(&pdev->dev);
@@ -31,11 +30,9 @@ static int pwm_lpss_probe_platform(struct platform_device *pdev)
 	if (IS_ERR(base))
 		return PTR_ERR(base);
 
-	lpwm = devm_pwm_lpss_probe(&pdev->dev, base, info);
-	if (IS_ERR(lpwm))
-		return PTR_ERR(lpwm);
-
-	platform_set_drvdata(pdev, lpwm);
+	chip = devm_pwm_lpss_probe(&pdev->dev, base, info);
+	if (IS_ERR(chip))
+		return PTR_ERR(chip);
 
 	/*
 	 * On Cherry Trail devices the GFX0._PS0 AML checks if the controller
@@ -57,22 +54,15 @@ static int pwm_lpss_probe_platform(struct platform_device *pdev)
 						    DPM_FLAG_SMART_SUSPEND);
 
 	pm_runtime_set_active(&pdev->dev);
-	pm_runtime_enable(&pdev->dev);
-
-	return 0;
-}
-
-static void pwm_lpss_remove_platform(struct platform_device *pdev)
-{
-	pm_runtime_disable(&pdev->dev);
+	return devm_pm_runtime_enable(&pdev->dev);
 }
 
 static const struct acpi_device_id pwm_lpss_acpi_match[] = {
-	{ "80860F09", (unsigned long)&pwm_lpss_byt_info },
-	{ "80862288", (unsigned long)&pwm_lpss_bsw_info },
-	{ "80862289", (unsigned long)&pwm_lpss_bsw_info },
-	{ "80865AC8", (unsigned long)&pwm_lpss_bxt_info },
-	{ },
+	{ .id = "80860F09", .driver_data = (unsigned long)&pwm_lpss_byt_info },
+	{ .id = "80862288", .driver_data = (unsigned long)&pwm_lpss_bsw_info },
+	{ .id = "80862289", .driver_data = (unsigned long)&pwm_lpss_bsw_info },
+	{ .id = "80865AC8", .driver_data = (unsigned long)&pwm_lpss_bxt_info },
+	{ }
 };
 MODULE_DEVICE_TABLE(acpi, pwm_lpss_acpi_match);
 
@@ -82,11 +72,10 @@ static struct platform_driver pwm_lpss_driver_platform = {
 		.acpi_match_table = pwm_lpss_acpi_match,
 	},
 	.probe = pwm_lpss_probe_platform,
-	.remove_new = pwm_lpss_remove_platform,
 };
 module_platform_driver(pwm_lpss_driver_platform);
 
 MODULE_DESCRIPTION("PWM platform driver for Intel LPSS");
 MODULE_LICENSE("GPL v2");
-MODULE_IMPORT_NS(PWM_LPSS);
+MODULE_IMPORT_NS("PWM_LPSS");
 MODULE_ALIAS("platform:pwm-lpss");

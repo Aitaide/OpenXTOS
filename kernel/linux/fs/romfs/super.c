@@ -101,19 +101,15 @@ static struct inode *romfs_iget(struct super_block *sb, unsigned long pos);
  */
 static int romfs_read_folio(struct file *file, struct folio *folio)
 {
-	struct page *page = &folio->page;
-	struct inode *inode = page->mapping->host;
+	struct inode *inode = folio->mapping->host;
 	loff_t offset, size;
 	unsigned long fillsize, pos;
 	void *buf;
 	int ret;
 
-	buf = kmap(page);
-	if (!buf)
-		return -ENOMEM;
+	buf = kmap_local_folio(folio, 0);
 
-	/* 32 bit warning -- but not for us :) */
-	offset = page_offset(page);
+	offset = folio_pos(folio);
 	size = i_size_read(inode);
 	fillsize = 0;
 	ret = 0;
@@ -125,20 +121,14 @@ static int romfs_read_folio(struct file *file, struct folio *folio)
 
 		ret = romfs_dev_read(inode->i_sb, pos, buf, fillsize);
 		if (ret < 0) {
-			SetPageError(page);
 			fillsize = 0;
 			ret = -EIO;
 		}
 	}
 
-	if (fillsize < PAGE_SIZE)
-		memset(buf + fillsize, 0, PAGE_SIZE - fillsize);
-	if (ret == 0)
-		SetPageUptodate(page);
-
-	flush_dcache_page(page);
-	kunmap(page);
-	unlock_page(page);
+	buf = folio_zero_tail(folio, fillsize, buf + fillsize);
+	kunmap_local(buf);
+	folio_end_read(folio, ret == 0);
 	return ret;
 }
 
@@ -250,6 +240,8 @@ static struct dentry *romfs_lookup(struct inode *dir, struct dentry *dentry,
 			if ((be32_to_cpu(ri.next) & ROMFH_TYPE) == ROMFH_HRD)
 				offset = be32_to_cpu(ri.spec) & ROMFH_MASK;
 			inode = romfs_iget(dir->i_sb, offset);
+			if (IS_ERR(inode))
+				return ERR_CAST(inode);
 			break;
 		}
 
@@ -272,6 +264,8 @@ static const struct inode_operations romfs_dir_inode_operations = {
 	.lookup		= romfs_lookup,
 };
 
+#define ROMFS_MAX_HARDLINK_DEPTH 64
+
 /*
  * get a romfs inode based on its position in the image (which doubles as the
  * inode number)
@@ -283,6 +277,7 @@ static struct inode *romfs_iget(struct super_block *sb, unsigned long pos)
 	struct inode *i;
 	unsigned long nlen;
 	unsigned nextfh;
+	unsigned int depth = 0;
 	int ret;
 	umode_t mode;
 
@@ -299,6 +294,9 @@ static struct inode *romfs_iget(struct super_block *sb, unsigned long pos)
 		if ((nextfh & ROMFH_TYPE) != ROMFH_HRD)
 			break;
 
+		if (++depth > ROMFS_MAX_HARDLINK_DEPTH)
+			return ERR_PTR(-ELOOP);
+
 		pos = be32_to_cpu(ri.spec) & ROMFH_MASK;
 	}
 
@@ -312,7 +310,7 @@ static struct inode *romfs_iget(struct super_block *sb, unsigned long pos)
 	if (!i)
 		return ERR_PTR(-ENOMEM);
 
-	if (!(i->i_state & I_NEW))
+	if (!(inode_state_read_once(i) & I_NEW))
 		return i;
 
 	/* precalculate the data offset */
@@ -322,7 +320,8 @@ static struct inode *romfs_iget(struct super_block *sb, unsigned long pos)
 
 	set_nlink(i, 1);		/* Hard to decide.. */
 	i->i_size = be32_to_cpu(ri.size);
-	i->i_mtime = i->i_atime = inode_set_ctime(i, 0, 0);
+	inode_set_mtime_to_ts(i,
+			      inode_set_atime_to_ts(i, inode_set_ctime(i, 0, 0)));
 
 	/* set up mode and ops */
 	mode = romfs_modemap[nextfh & ROMFH_TYPE];
@@ -467,7 +466,10 @@ static int romfs_fill_super(struct super_block *sb, struct fs_context *fc)
 
 #ifdef CONFIG_BLOCK
 	if (!sb->s_mtd) {
-		sb_set_blocksize(sb, ROMBSIZE);
+		if (!sb_set_blocksize(sb, ROMBSIZE)) {
+			errorf(fc, "romfs: unable to set blocksize\n");
+			return -EINVAL;
+		}
 	} else {
 		sb->s_blocksize = ROMBSIZE;
 		sb->s_blocksize_bits = blksize_bits(ROMBSIZE);
@@ -593,7 +595,7 @@ static void romfs_kill_sb(struct super_block *sb)
 #ifdef CONFIG_ROMFS_ON_BLOCK
 	if (sb->s_bdev) {
 		sync_blockdev(sb->s_bdev);
-		blkdev_put(sb->s_bdev, sb);
+		fs_bdev_file_release(sb->s_bdev_file, sb);
 	}
 #endif
 }
@@ -629,8 +631,8 @@ static int __init init_romfs_fs(void)
 	romfs_inode_cachep =
 		kmem_cache_create("romfs_i",
 				  sizeof(struct romfs_inode_info), 0,
-				  SLAB_RECLAIM_ACCOUNT | SLAB_MEM_SPREAD |
-				  SLAB_ACCOUNT, romfs_i_init_once);
+				  SLAB_RECLAIM_ACCOUNT | SLAB_ACCOUNT,
+				  romfs_i_init_once);
 
 	if (!romfs_inode_cachep) {
 		pr_err("Failed to initialise inode cache\n");

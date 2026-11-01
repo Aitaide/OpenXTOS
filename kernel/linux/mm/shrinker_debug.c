@@ -6,8 +6,10 @@
 #include <linux/shrinker.h>
 #include <linux/memcontrol.h>
 
+#include "internal.h"
+
 /* defined in vmscan.c */
-extern struct rw_semaphore shrinker_rwsem;
+extern struct mutex shrinker_mutex;
 extern struct list_head shrinker_list;
 
 static DEFINE_IDA(shrinker_debugfs_ida);
@@ -49,18 +51,11 @@ static int shrinker_debugfs_count_show(struct seq_file *m, void *v)
 	struct mem_cgroup *memcg;
 	unsigned long total;
 	bool memcg_aware;
-	int ret, nid;
+	int ret = 0, nid;
 
 	count_per_node = kcalloc(nr_node_ids, sizeof(unsigned long), GFP_KERNEL);
 	if (!count_per_node)
 		return -ENOMEM;
-
-	ret = down_read_killable(&shrinker_rwsem);
-	if (ret) {
-		kfree(count_per_node);
-		return ret;
-	}
-	rcu_read_lock();
 
 	memcg_aware = shrinker->flags & SHRINKER_MEMCG_AWARE;
 
@@ -73,7 +68,7 @@ static int shrinker_debugfs_count_show(struct seq_file *m, void *v)
 					       memcg_aware ? memcg : NULL,
 					       count_per_node);
 		if (total) {
-			seq_printf(m, "%lu", mem_cgroup_ino(memcg));
+			seq_printf(m, "%llu", mem_cgroup_id(memcg));
 			for_each_node(nid)
 				seq_printf(m, " %lu", count_per_node[nid]);
 			seq_putc(m, '\n');
@@ -91,9 +86,6 @@ static int shrinker_debugfs_count_show(struct seq_file *m, void *v)
 		}
 	} while ((memcg = mem_cgroup_iter(NULL, memcg, NULL)) != NULL);
 
-	rcu_read_unlock();
-	up_read(&shrinker_rwsem);
-
 	kfree(count_per_node);
 	return ret;
 }
@@ -110,21 +102,21 @@ static ssize_t shrinker_debugfs_scan_write(struct file *file,
 					   size_t size, loff_t *pos)
 {
 	struct shrinker *shrinker = file->private_data;
-	unsigned long nr_to_scan = 0, ino, read_len;
+	unsigned long nr_to_scan = 0, read_len;
+	u64 id;
 	struct shrink_control sc = {
 		.gfp_mask = GFP_KERNEL,
 	};
 	struct mem_cgroup *memcg = NULL;
 	int nid;
 	char kbuf[72];
-	ssize_t ret;
 
-	read_len = size < (sizeof(kbuf) - 1) ? size : (sizeof(kbuf) - 1);
+	read_len = min(size, sizeof(kbuf) - 1);
 	if (copy_from_user(kbuf, buf, read_len))
 		return -EFAULT;
 	kbuf[read_len] = '\0';
 
-	if (sscanf(kbuf, "%lu %d %lu", &ino, &nid, &nr_to_scan) != 3)
+	if (sscanf(kbuf, "%llu %d %lu", &id, &nid, &nr_to_scan) != 3)
 		return -EINVAL;
 
 	if (nid < 0 || nid >= nr_node_ids)
@@ -134,22 +126,16 @@ static ssize_t shrinker_debugfs_scan_write(struct file *file,
 		return size;
 
 	if (shrinker->flags & SHRINKER_MEMCG_AWARE) {
-		memcg = mem_cgroup_get_from_ino(ino);
-		if (!memcg || IS_ERR(memcg))
+		memcg = mem_cgroup_get_from_id(id);
+		if (!memcg)
 			return -ENOENT;
 
 		if (!mem_cgroup_online(memcg)) {
 			mem_cgroup_put(memcg);
 			return -ENOENT;
 		}
-	} else if (ino != 0) {
+	} else if (id != 0) {
 		return -EINVAL;
-	}
-
-	ret = down_read_killable(&shrinker_rwsem);
-	if (ret) {
-		mem_cgroup_put(memcg);
-		return ret;
 	}
 
 	sc.nid = nid;
@@ -159,7 +145,6 @@ static ssize_t shrinker_debugfs_scan_write(struct file *file,
 
 	shrinker->scan_objects(shrinker, &sc);
 
-	up_read(&shrinker_rwsem);
 	mem_cgroup_put(memcg);
 
 	return size;
@@ -177,7 +162,7 @@ int shrinker_debugfs_add(struct shrinker *shrinker)
 	char buf[128];
 	int id;
 
-	lockdep_assert_held(&shrinker_rwsem);
+	lockdep_assert_held(&shrinker_mutex);
 
 	/* debugfs isn't initialized yet, add debugfs entries later. */
 	if (!shrinker_debugfs_root)
@@ -198,17 +183,17 @@ int shrinker_debugfs_add(struct shrinker *shrinker)
 	}
 	shrinker->debugfs_entry = entry;
 
-	debugfs_create_file("count", 0440, entry, shrinker,
-			    &shrinker_debugfs_count_fops);
-	debugfs_create_file("scan", 0220, entry, shrinker,
-			    &shrinker_debugfs_scan_fops);
+	if (shrinker->count_objects)
+		debugfs_create_file("count", 0440, entry, shrinker,
+				    &shrinker_debugfs_count_fops);
+	if (shrinker->scan_objects)
+		debugfs_create_file("scan", 0220, entry, shrinker,
+				    &shrinker_debugfs_scan_fops);
 	return 0;
 }
 
 int shrinker_debugfs_rename(struct shrinker *shrinker, const char *fmt, ...)
 {
-	struct dentry *entry;
-	char buf[128];
 	const char *new, *old;
 	va_list ap;
 	int ret = 0;
@@ -220,27 +205,21 @@ int shrinker_debugfs_rename(struct shrinker *shrinker, const char *fmt, ...)
 	if (!new)
 		return -ENOMEM;
 
-	down_write(&shrinker_rwsem);
+	mutex_lock(&shrinker_mutex);
 
 	old = shrinker->name;
 	shrinker->name = new;
 
-	if (shrinker->debugfs_entry) {
-		snprintf(buf, sizeof(buf), "%s-%d", shrinker->name,
-			 shrinker->debugfs_id);
+	ret = debugfs_change_name(shrinker->debugfs_entry, "%s-%d",
+			shrinker->name, shrinker->debugfs_id);
 
-		entry = debugfs_rename(shrinker_debugfs_root,
-				       shrinker->debugfs_entry,
-				       shrinker_debugfs_root, buf);
-		if (IS_ERR(entry))
-			ret = PTR_ERR(entry);
-		else
-			shrinker->debugfs_entry = entry;
+	if (ret) {
+		shrinker->name = old;
+		kfree_const(new);
+	} else {
+		kfree_const(old);
 	}
-
-	up_write(&shrinker_rwsem);
-
-	kfree_const(old);
+	mutex_unlock(&shrinker_mutex);
 
 	return ret;
 }
@@ -251,10 +230,7 @@ struct dentry *shrinker_debugfs_detach(struct shrinker *shrinker,
 {
 	struct dentry *entry = shrinker->debugfs_entry;
 
-	lockdep_assert_held(&shrinker_rwsem);
-
-	kfree_const(shrinker->name);
-	shrinker->name = NULL;
+	lockdep_assert_held(&shrinker_mutex);
 
 	*debugfs_id = entry ? shrinker->debugfs_id : -1;
 	shrinker->debugfs_entry = NULL;
@@ -280,14 +256,14 @@ static int __init shrinker_debugfs_init(void)
 	shrinker_debugfs_root = dentry;
 
 	/* Create debugfs entries for shrinkers registered at boot */
-	down_write(&shrinker_rwsem);
+	mutex_lock(&shrinker_mutex);
 	list_for_each_entry(shrinker, &shrinker_list, list)
 		if (!shrinker->debugfs_entry) {
 			ret = shrinker_debugfs_add(shrinker);
 			if (ret)
 				break;
 		}
-	up_write(&shrinker_rwsem);
+	mutex_unlock(&shrinker_mutex);
 
 	return ret;
 }

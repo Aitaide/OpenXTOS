@@ -3110,6 +3110,10 @@
 #define mmCM0_CM_3DLUT_OUT_OFFSET_G_BASE_IDX                                                           2
 #define mmCM0_CM_3DLUT_OUT_OFFSET_B                                                                    0x0e18
 #define mmCM0_CM_3DLUT_OUT_OFFSET_B_BASE_IDX                                                           2
+#define mmCM0_CM_TEST_DEBUG_INDEX                                                                      0x0e19
+#define mmCM0_CM_TEST_DEBUG_INDEX_BASE_IDX                                                             2
+#define mmCM0_CM_TEST_DEBUG_DATA                                                                       0x0e1a
+#define mmCM0_CM_TEST_DEBUG_DATA_BASE_IDX                                                              2
 
 
 // addressBlock: dce_dc_dpp0_dispdec_dpp_dcperfmon_dc_perfmon_dispdec
@@ -3798,6 +3802,10 @@
 #define mmCM1_CM_3DLUT_OUT_OFFSET_G_BASE_IDX                                                           2
 #define mmCM1_CM_3DLUT_OUT_OFFSET_B                                                                    0x0f83
 #define mmCM1_CM_3DLUT_OUT_OFFSET_B_BASE_IDX                                                           2
+#define mmCM1_CM_TEST_DEBUG_INDEX                                                                      0x0f84
+#define mmCM1_CM_TEST_DEBUG_INDEX_BASE_IDX                                                             2
+#define mmCM1_CM_TEST_DEBUG_DATA                                                                       0x0f85
+#define mmCM1_CM_TEST_DEBUG_DATA_BASE_IDX                                                              2
 
 
 // addressBlock: dce_dc_dpp1_dispdec_dpp_dcperfmon_dc_perfmon_dispdec
@@ -5687,6 +5695,24 @@
 #define mmDSCC0_DSCC_RATE_CONTROL_BUFFER2_MAX_FULLNESS_LEVEL_BASE_IDX                                  2
 #define mmDSCC0_DSCC_RATE_CONTROL_BUFFER3_MAX_FULLNESS_LEVEL                                           0x3035
 #define mmDSCC0_DSCC_RATE_CONTROL_BUFFER3_MAX_FULLNESS_LEVEL_BASE_IDX                                  2
+#define mmDSCC0_DSCC_TEST_DEBUG_INDEX0                                                                 0x3036
+#define mmDSCC0_DSCC_TEST_DEBUG_INDEX0_BASE_IDX                                                        2
+#define mmDSCC0_DSCC_TEST_DEBUG_INDEX1                                                                 0x3037
+#define mmDSCC0_DSCC_TEST_DEBUG_INDEX1_BASE_IDX                                                        2
+#define mmDSCC0_DSCC_TEST_DEBUG_INDEX2                                                                 0x3038
+#define mmDSCC0_DSCC_TEST_DEBUG_INDEX2_BASE_IDX                                                        2
+#define mmDSCC0_DSCC_TEST_DEBUG_INDEX3                                                                 0x3039
+#define mmDSCC0_DSCC_TEST_DEBUG_INDEX3_BASE_IDX                                                        2
+#define mmDSCC0_DSCC_TEST_DEBUG_BUS_ROTATE                                                             0x303a
+#define mmDSCC0_DSCC_TEST_DEBUG_BUS_ROTATE_BASE_IDX                                                    2
+#define mmDSCC0_DSCC_TEST_DEBUG_DATA0                                                                  0x303b
+#define mmDSCC0_DSCC_TEST_DEBUG_DATA0_BASE_IDX                                                         2
+#define mmDSCC0_DSCC_TEST_DEBUG_DATA1                                                                  0x303c
+#define mmDSCC0_DSCC_TEST_DEBUG_DATA1_BASE_IDX                                                         2
+#define mmDSCC0_DSCC_TEST_DEBUG_DATA2                                                                  0x303d
+#define mmDSCC0_DSCC_TEST_DEBUG_DATA2_BASE_IDX                                                         2
+#define mmDSCC0_DSCC_TEST_DEBUG_DATA3                                                                  0x303e
+#define mmDSCC0_DSCC_TEST_DEBUG_DATA3_BASE_IDX                                                         2
 
 
 // addressBlock: dce_dc_dsc0_dispdec_dsc_dcperfmon_dc_perfmon_dispdec
@@ -5817,6 +5843,24 @@
 #define mmDSCC1_DSCC_RATE_CONTROL_BUFFER2_MAX_FULLNESS_LEVEL_BASE_IDX                                  2
 #define mmDSCC1_DSCC_RATE_CONTROL_BUFFER3_MAX_FULLNESS_LEVEL                                           0x3091
 #define mmDSCC1_DSCC_RATE_CONTROL_BUFFER3_MAX_FULLNESS_LEVEL_BASE_IDX                                  2
+#define mmDSCC1_DSCC_TEST_DEBUG_INDEX0                                                                 0x3092
+#define mmDSCC1_DSCC_TEST_DEBUG_INDEX0_BASE_IDX                                                        2
+#define mmDSCC1_DSCC_TEST_DEBUG_INDEX1                                                                 0x3093
+#define mmDSCC1_DSCC_TEST_DEBUG_INDEX1_BASE_IDX                                                        2
+#define mmDSCC1_DSCC_TEST_DEBUG_INDEX2                                                                 0x3094
+#define mmDSCC1_DSCC_TEST_DEBUG_INDEX2_BASE_IDX                                                        2
+#define mmDSCC1_DSCC_TEST_DEBUG_INDEX3                                                                 0x3095
+#define mmDSCC1_DSCC_TEST_DEBUG_INDEX3_BASE_IDX                                                        2
+#define mmDSCC1_DSCC_TEST_DEBUG_BUS_ROTATE                                                             0x3096
+#define mmDSCC1_DSCC_TEST_DEBUG_BUS_ROTATE_BASE_IDX                                                    2
+#define mmDSCC1_DSCC_TEST_DEBUG_DATA0                                                                  0x3097
+#define mmDSCC1_DSCC_TEST_DEBUG_DATA0_BASE_IDX                                                         2
+#define mmDSCC1_DSCC_TEST_DEBUG_DATA1                                                                  0x3098
+#define mmDSCC1_DSCC_TEST_DEBUG_DATA1_BASE_IDX                                                         2
+#define mmDSCC1_DSCC_TEST_DEBUG_DATA2                                                                  0x3099
+#define mmDSCC1_DSCC_TEST_DEBUG_DATA2_BASE_IDX                                                         2
+#define mmDSCC1_DSCC_TEST_DEBUG_DATA3                                                                  0x309a
+#define mmDSCC1_DSCC_TEST_DEBUG_DATA3_BASE_IDX                                                         2
 
 
 // addressBlock: dce_dc_dsc1_dispdec_dsc_dcperfmon_dc_perfmon_dispdec
@@ -6794,6 +6838,98 @@
 #define mmDC_PERFMON15_PERFMON_LOW                                                                     0x08cf
 #define mmDC_PERFMON15_PERFMON_LOW_BASE_IDX                                                            3
 
+// addressBlock: dce_dc_hpo_hdmi_stream_enc0_dispdec
+// base address: 0x2634c
+#define mmHDMI_STREAM_ENC_CLOCK_CONTROL                                                                0x08d3
+#define mmHDMI_STREAM_ENC_CLOCK_CONTROL_BASE_IDX                                                       3
+#define mmHDMI_STREAM_ENC_HDMISTREAMCLK_CONTROL                                                        0x08d4
+#define mmHDMI_STREAM_ENC_HDMISTREAMCLK_CONTROL_BASE_IDX                                               3
+#define mmHDMI_STREAM_ENC_INPUT_MUX_CONTROL                                                            0x08d5
+#define mmHDMI_STREAM_ENC_INPUT_MUX_CONTROL_BASE_IDX                                                   3
+#define mmHDMI_STREAM_ENC_CLOCK_RAMP_ADJUSTER_FIFO_STATUS_CONTROL0                                     0x08d6
+#define mmHDMI_STREAM_ENC_CLOCK_RAMP_ADJUSTER_FIFO_STATUS_CONTROL0_BASE_IDX                            3
+#define mmHDMI_STREAM_ENC_CLOCK_RAMP_ADJUSTER_FIFO_STATUS_CONTROL1                                     0x08d7
+#define mmHDMI_STREAM_ENC_CLOCK_RAMP_ADJUSTER_FIFO_STATUS_CONTROL1_BASE_IDX                            3
+#define mmHDMI_STREAM_ENC_CLOCK_RAMP_ADJUSTER_FIFO_STATUS_CONTROL2                                     0x08d8
+#define mmHDMI_STREAM_ENC_CLOCK_RAMP_ADJUSTER_FIFO_STATUS_CONTROL2_BASE_IDX                            3
+
+// addressBlock: dce_dc_hpo_hdmi_tb_enc0_dispdec
+// base address: 0x2637c
+#define mmHDMI_TB_ENC_CONTROL                                                                          0x08df
+#define mmHDMI_TB_ENC_CONTROL_BASE_IDX                                                                 3
+#define mmHDMI_TB_ENC_PIXEL_FORMAT                                                                     0x08e0
+#define mmHDMI_TB_ENC_PIXEL_FORMAT_BASE_IDX                                                            3
+#define mmHDMI_TB_ENC_PACKET_CONTROL                                                                   0x08e1
+#define mmHDMI_TB_ENC_PACKET_CONTROL_BASE_IDX                                                          3
+#define mmHDMI_TB_ENC_ACR_PACKET_CONTROL                                                               0x08e2
+#define mmHDMI_TB_ENC_ACR_PACKET_CONTROL_BASE_IDX                                                      3
+#define mmHDMI_TB_ENC_VBI_PACKET_CONTROL1                                                              0x08e3
+#define mmHDMI_TB_ENC_VBI_PACKET_CONTROL1_BASE_IDX                                                     3
+#define mmHDMI_TB_ENC_VBI_PACKET_CONTROL2                                                              0x08e4
+#define mmHDMI_TB_ENC_VBI_PACKET_CONTROL2_BASE_IDX                                                     3
+#define mmHDMI_TB_ENC_GC_CONTROL                                                                       0x08e5
+#define mmHDMI_TB_ENC_GC_CONTROL_BASE_IDX                                                              3
+#define mmHDMI_TB_ENC_GENERIC_PACKET_CONTROL0                                                          0x08e6
+#define mmHDMI_TB_ENC_GENERIC_PACKET_CONTROL0_BASE_IDX                                                 3
+#define mmHDMI_TB_ENC_GENERIC_PACKET_CONTROL1                                                          0x08e7
+#define mmHDMI_TB_ENC_GENERIC_PACKET_CONTROL1_BASE_IDX                                                 3
+#define mmHDMI_TB_ENC_GENERIC_PACKET_CONTROL2                                                          0x08e8
+#define mmHDMI_TB_ENC_GENERIC_PACKET_CONTROL2_BASE_IDX                                                 3
+#define mmHDMI_TB_ENC_GENERIC_PACKET0_1_LINE                                                           0x08e9
+#define mmHDMI_TB_ENC_GENERIC_PACKET0_1_LINE_BASE_IDX                                                  3
+#define mmHDMI_TB_ENC_GENERIC_PACKET2_3_LINE                                                           0x08ea
+#define mmHDMI_TB_ENC_GENERIC_PACKET2_3_LINE_BASE_IDX                                                  3
+#define mmHDMI_TB_ENC_GENERIC_PACKET4_5_LINE                                                           0x08eb
+#define mmHDMI_TB_ENC_GENERIC_PACKET4_5_LINE_BASE_IDX                                                  3
+#define mmHDMI_TB_ENC_GENERIC_PACKET6_7_LINE                                                           0x08ec
+#define mmHDMI_TB_ENC_GENERIC_PACKET6_7_LINE_BASE_IDX                                                  3
+#define mmHDMI_TB_ENC_GENERIC_PACKET8_9_LINE                                                           0x08ed
+#define mmHDMI_TB_ENC_GENERIC_PACKET8_9_LINE_BASE_IDX                                                  3
+#define mmHDMI_TB_ENC_GENERIC_PACKET10_11_LINE                                                         0x08ee
+#define mmHDMI_TB_ENC_GENERIC_PACKET10_11_LINE_BASE_IDX                                                3
+#define mmHDMI_TB_ENC_GENERIC_PACKET12_13_LINE                                                         0x08ef
+#define mmHDMI_TB_ENC_GENERIC_PACKET12_13_LINE_BASE_IDX                                                3
+#define mmHDMI_TB_ENC_GENERIC_PACKET14_LINE                                                            0x08f0
+#define mmHDMI_TB_ENC_GENERIC_PACKET14_LINE_BASE_IDX                                                   3
+#define mmHDMI_TB_ENC_DB_CONTROL                                                                       0x08f1
+#define mmHDMI_TB_ENC_DB_CONTROL_BASE_IDX                                                              3
+#define mmHDMI_TB_ENC_ACR_32_0                                                                         0x08f2
+#define mmHDMI_TB_ENC_ACR_32_0_BASE_IDX                                                                3
+#define mmHDMI_TB_ENC_ACR_32_1                                                                         0x08f3
+#define mmHDMI_TB_ENC_ACR_32_1_BASE_IDX                                                                3
+#define mmHDMI_TB_ENC_ACR_44_0                                                                         0x08f4
+#define mmHDMI_TB_ENC_ACR_44_0_BASE_IDX                                                                3
+#define mmHDMI_TB_ENC_ACR_44_1                                                                         0x08f5
+#define mmHDMI_TB_ENC_ACR_44_1_BASE_IDX                                                                3
+#define mmHDMI_TB_ENC_ACR_48_0                                                                         0x08f6
+#define mmHDMI_TB_ENC_ACR_48_0_BASE_IDX                                                                3
+#define mmHDMI_TB_ENC_ACR_48_1                                                                         0x08f7
+#define mmHDMI_TB_ENC_ACR_48_1_BASE_IDX                                                                3
+#define mmHDMI_TB_ENC_ACR_STATUS_0                                                                     0x08f8
+#define mmHDMI_TB_ENC_ACR_STATUS_0_BASE_IDX                                                            3
+#define mmHDMI_TB_ENC_ACR_STATUS_1                                                                     0x08f9
+#define mmHDMI_TB_ENC_ACR_STATUS_1_BASE_IDX                                                            3
+#define mmHDMI_TB_ENC_BUFFER_CONTROL                                                                   0x08fb
+#define mmHDMI_TB_ENC_BUFFER_CONTROL_BASE_IDX                                                          3
+#define mmHDMI_TB_ENC_MEM_CTRL                                                                         0x08fe
+#define mmHDMI_TB_ENC_MEM_CTRL_BASE_IDX                                                                3
+#define mmHDMI_TB_ENC_METADATA_PACKET_CONTROL                                                          0x08ff
+#define mmHDMI_TB_ENC_METADATA_PACKET_CONTROL_BASE_IDX                                                 3
+#define mmHDMI_TB_ENC_H_ACTIVE_BLANK                                                                   0x0900
+#define mmHDMI_TB_ENC_H_ACTIVE_BLANK_BASE_IDX                                                          3
+#define mmHDMI_TB_ENC_HC_ACTIVE_BLANK                                                                  0x0901
+#define mmHDMI_TB_ENC_HC_ACTIVE_BLANK_BASE_IDX                                                         3
+#define mmHDMI_TB_ENC_CRC_CNTL                                                                         0x0903
+#define mmHDMI_TB_ENC_CRC_CNTL_BASE_IDX                                                                3
+#define mmHDMI_TB_ENC_CRC_RESULT_0                                                                     0x0904
+#define mmHDMI_TB_ENC_CRC_RESULT_0_BASE_IDX                                                            3
+#define mmHDMI_TB_ENC_MODE                                                                             0x0908
+#define mmHDMI_TB_ENC_MODE_BASE_IDX                                                                    3
+#define mmHDMI_TB_ENC_INPUT_FIFO_STATUS                                                                0x0909
+#define mmHDMI_TB_ENC_INPUT_FIFO_STATUS_BASE_IDX                                                       3
+#define mmHDMI_TB_ENC_CRC_RESULT_1                                                                     0x090a
+#define mmHDMI_TB_ENC_CRC_RESULT_1_BASE_IDX                                                            3
+
 
 // addressBlock: dce_dc_hpo_hdmi_stream_enc0_afmt_afmt_dispdec
 // base address: 0x2646c
@@ -6837,6 +6973,25 @@
 #define mmDME2_DME_CONTROL_BASE_IDX                                                                    3
 #define mmDME2_DME_MEMORY_CONTROL                                                                      0x093d
 #define mmDME2_DME_MEMORY_CONTROL_BASE_IDX                                                             3
+
+// addressBlock: dce_dc_hpo_hdmi_link_enc0_dispdec
+// base address: 0x2656c
+#define mmHDMI_LINK_ENC_CONTROL                                                                        0x095b
+#define mmHDMI_LINK_ENC_CONTROL_BASE_IDX                                                               3
+#define mmHDMI_LINK_ENC_CLK_CTRL                                                                       0x095c
+#define mmHDMI_LINK_ENC_CLK_CTRL_BASE_IDX                                                              3
+
+
+// addressBlock: dce_dc_hpo_hdmi_frl_enc0_dispdec
+// base address: 0x26594
+#define mmHDMI_FRL_ENC_CONFIG                                                                          0x0965
+#define mmHDMI_FRL_ENC_CONFIG_BASE_IDX                                                                 3
+#define mmHDMI_FRL_ENC_CONFIG2                                                                         0x0966
+#define mmHDMI_FRL_ENC_CONFIG2_BASE_IDX                                                                3
+#define mmHDMI_FRL_ENC_METER_BUFFER_STATUS                                                             0x0967
+#define mmHDMI_FRL_ENC_METER_BUFFER_STATUS_BASE_IDX                                                    3
+#define mmHDMI_FRL_ENC_MEM_CTRL                                                                        0x0968
+#define mmHDMI_FRL_ENC_MEM_CTRL_BASE_IDX                                                               3
 
 
 // addressBlock: dce_dc_hpo_hpo_top_dispdec

@@ -29,7 +29,7 @@
 static int
 wndwc67e_image_set(struct nv50_wndw *wndw, struct nv50_wndw_atom *asyw)
 {
-	struct nvif_push *push = wndw->wndw.push;
+	struct nvif_push *push = &wndw->wndw.push;
 	int ret;
 
 	if ((ret = PUSH_WAIT(push, 17)))
@@ -95,6 +95,7 @@ wndwc67e = {
 	.image_set = wndwc67e_image_set,
 	.image_clr = wndwc37e_image_clr,
 	.blend_set = wndwc37e_blend_set,
+	.blend_modes = WNDW_BLEND_MODES,
 	.update = wndwc37e_update,
 };
 

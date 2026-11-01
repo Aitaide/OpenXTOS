@@ -13,7 +13,7 @@ description: |
   Qualcomm global clock control module provides the clocks, resets and power
   domains on IPQ5018
 
-  See also::
+  See also:
     include/dt-bindings/clock/qcom,ipq5018-gcc.h
     include/dt-bindings/reset/qcom,ipq5018-gcc.h
 
@@ -32,6 +32,8 @@ properties:
       - description: GEPHY TX clock source
       - description: UNIPHY RX clock source
       - description: UNIPHY TX clk source
+
+  '#power-domain-cells': false
 
 required:
   - compatible
@@ -58,6 +60,5 @@ examples:
                <&uniphy_tx_clk>;
       #clock-cells = <1>;
       #reset-cells = <1>;
-      #power-domain-cells = <1>;
     };
 ...

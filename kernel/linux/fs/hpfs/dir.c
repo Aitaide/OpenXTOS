@@ -96,8 +96,8 @@ static int hpfs_readdir(struct file *file, struct dir_context *ctx)
 		}
 		if (!fnode_is_dir(fno)) {
 			e = 1;
-			hpfs_error(inode->i_sb, "not a directory, fnode %08lx",
-					(unsigned long)inode->i_ino);
+			hpfs_error(inode->i_sb, "not a directory, fnode %08llx",
+					inode->i_ino);
 		}
 		if (hpfs_inode->i_dno != le32_to_cpu(fno->u.external[0].disk_secno)) {
 			e = 1;
@@ -247,7 +247,7 @@ struct dentry *hpfs_lookup(struct inode *dir, struct dentry *dentry, unsigned in
 		result = ERR_PTR(-ENOMEM);
 		goto bail1;
 	}
-	if (result->i_state & I_NEW) {
+	if (inode_state_read_once(result) & I_NEW) {
 		hpfs_init_inode(result);
 		if (de->directory)
 			hpfs_read_inode(result);
@@ -277,14 +277,16 @@ struct dentry *hpfs_lookup(struct inode *dir, struct dentry *dentry, unsigned in
 	 * inode.
 	 */
 
-	if (!inode_get_ctime(result).tv_sec) {
+	if (!inode_get_ctime_sec(result)) {
 		time64_t csec = local_to_gmt(dir->i_sb, le32_to_cpu(de->creation_date));
 
 		inode_set_ctime(result, csec ? csec : 1, 0);
-		result->i_mtime.tv_sec = local_to_gmt(dir->i_sb, le32_to_cpu(de->write_date));
-		result->i_mtime.tv_nsec = 0;
-		result->i_atime.tv_sec = local_to_gmt(dir->i_sb, le32_to_cpu(de->read_date));
-		result->i_atime.tv_nsec = 0;
+		inode_set_mtime(result,
+				local_to_gmt(dir->i_sb, le32_to_cpu(de->write_date)),
+				0);
+		inode_set_atime(result,
+				local_to_gmt(dir->i_sb, le32_to_cpu(de->read_date)),
+				0);
 		hpfs_result->i_ea_size = le32_to_cpu(de->ea_size);
 		if (!hpfs_result->i_ea_mode && de->read_only)
 			result->i_mode &= ~0222;

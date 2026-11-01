@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: ISC
+// SPDX-License-Identifier: BSD-3-Clause-Clear
 
 #include <linux/etherdevice.h>
 #include <linux/platform_device.h>
@@ -23,7 +23,7 @@ mt7603_start(struct ieee80211_hw *hw)
 }
 
 static void
-mt7603_stop(struct ieee80211_hw *hw)
+mt7603_stop(struct ieee80211_hw *hw, bool suspend)
 {
 	struct mt7603_dev *dev = hw->priv;
 
@@ -66,11 +66,9 @@ mt7603_add_interface(struct ieee80211_hw *hw, struct ieee80211_vif *vif)
 
 	idx = MT7603_WTBL_RESERVED - 1 - mvif->idx;
 	dev->mt76.vif_mask |= BIT_ULL(mvif->idx);
-	INIT_LIST_HEAD(&mvif->sta.wcid.poll_list);
 	mvif->sta.wcid.idx = idx;
-	mvif->sta.wcid.hw_key_idx = -1;
 	mvif->sta.vif = mvif;
-	mt76_packet_id_init(&mvif->sta.wcid);
+	mt76_wcid_init(&mvif->sta.wcid, 0);
 
 	eth_broadcast_addr(bc_addr);
 	mt7603_wtbl_init(dev, idx, mvif->idx, bc_addr);
@@ -110,7 +108,7 @@ mt7603_remove_interface(struct ieee80211_hw *hw, struct ieee80211_vif *vif)
 	dev->mt76.vif_mask &= ~BIT_ULL(mvif->idx);
 	mutex_unlock(&dev->mt76.mutex);
 
-	mt76_packet_id_flush(&dev->mt76, &mvif->sta.wcid);
+	mt76_wcid_cleanup(&dev->mt76, &mvif->sta.wcid);
 }
 
 void mt7603_init_edcca(struct mt7603_dev *dev)
@@ -133,30 +131,24 @@ void mt7603_init_edcca(struct mt7603_dev *dev)
 	mt7603_edcca_set_strict(dev, false);
 }
 
-static int
-mt7603_set_channel(struct ieee80211_hw *hw, struct cfg80211_chan_def *def)
+int mt7603_set_channel(struct mt76_phy *mphy)
 {
-	struct mt7603_dev *dev = hw->priv;
+	struct mt7603_dev *dev = container_of(mphy->dev, struct mt7603_dev, mt76);
+	struct cfg80211_chan_def *def = &mphy->chandef;
+
 	u8 *rssi_data = (u8 *)dev->mt76.eeprom.data;
 	int idx, ret;
 	u8 bw = MT_BW_20;
 	bool failed = false;
 
-	ieee80211_stop_queues(hw);
-	cancel_delayed_work_sync(&dev->mphy.mac_work);
 	tasklet_disable(&dev->mt76.pre_tbtt_tasklet);
 
-	mutex_lock(&dev->mt76.mutex);
-	set_bit(MT76_RESET, &dev->mphy.state);
-
 	mt7603_beacon_set_timer(dev, -1, 0);
-	mt76_set_channel(&dev->mphy);
 	mt7603_mac_stop(dev);
 
 	if (def->width == NL80211_CHAN_WIDTH_40)
 		bw = MT_BW_40;
 
-	dev->mphy.chandef = *def;
 	mt76_rmw_field(dev, MT_AGG_BWCR, MT_AGG_BWCR_BW, bw);
 	ret = mt7603_mcu_set_channel(dev);
 	if (ret) {
@@ -180,10 +172,6 @@ mt7603_set_channel(struct ieee80211_hw *hw, struct cfg80211_chan_def *def)
 	mt7603_mac_set_timing(dev);
 	mt7603_mac_start(dev);
 
-	clear_bit(MT76_RESET, &dev->mphy.state);
-
-	mt76_txq_schedule_all(&dev->mphy);
-
 	ieee80211_queue_delayed_work(mt76_hw(dev), &dev->mphy.mac_work,
 				     msecs_to_jiffies(MT7603_WATCHDOG_TIME));
 
@@ -199,16 +187,13 @@ mt7603_set_channel(struct ieee80211_hw *hw, struct cfg80211_chan_def *def)
 	mt7603_init_edcca(dev);
 
 out:
-	if (!(mt76_hw(dev)->conf.flags & IEEE80211_CONF_OFFCHANNEL))
+	if (!mphy->offchannel)
 		mt7603_beacon_set_timer(dev, -1, dev->mt76.beacon_int);
-	mutex_unlock(&dev->mt76.mutex);
 
 	tasklet_enable(&dev->mt76.pre_tbtt_tasklet);
 
 	if (failed)
 		mt7603_mac_work(&dev->mphy.mac_work.work);
-
-	ieee80211_wake_queues(hw);
 
 	return ret;
 }
@@ -227,18 +212,18 @@ static int mt7603_set_sar_specs(struct ieee80211_hw *hw,
 	if (err)
 		return err;
 
-	return mt7603_set_channel(hw, &mphy->chandef);
+	return mt76_update_channel(mphy);
 }
 
 static int
-mt7603_config(struct ieee80211_hw *hw, u32 changed)
+mt7603_config(struct ieee80211_hw *hw, int radio_idx, u32 changed)
 {
 	struct mt7603_dev *dev = hw->priv;
 	int ret = 0;
 
 	if (changed & (IEEE80211_CONF_CHANGE_CHANNEL |
 		       IEEE80211_CONF_CHANGE_POWER))
-		ret = mt7603_set_channel(hw, &hw->conf.chandef);
+		ret = mt76_update_channel(&dev->mphy);
 
 	if (changed & IEEE80211_CONF_CHANGE_MONITOR) {
 		mutex_lock(&dev->mt76.mutex);
@@ -368,13 +353,19 @@ mt7603_sta_add(struct mt76_dev *mdev, struct ieee80211_vif *vif,
 	return ret;
 }
 
-void
-mt7603_sta_assoc(struct mt76_dev *mdev, struct ieee80211_vif *vif,
-		 struct ieee80211_sta *sta)
+int
+mt7603_sta_event(struct mt76_dev *mdev, struct ieee80211_vif *vif,
+		 struct ieee80211_sta *sta, enum mt76_sta_event ev)
 {
 	struct mt7603_dev *dev = container_of(mdev, struct mt7603_dev, mt76);
 
-	mt7603_wtbl_update_cap(dev, sta);
+	if (ev == MT76_STA_EVENT_ASSOC) {
+		mutex_lock(&dev->mt76.mutex);
+		mt7603_wtbl_update_cap(dev, sta);
+		mutex_unlock(&dev->mt76.mutex);
+	}
+
+	return 0;
 }
 
 void
@@ -419,7 +410,7 @@ mt7603_sta_ps(struct mt76_dev *mdev, struct ieee80211_sta *sta, bool ps)
 	struct sk_buff_head list;
 
 	mt76_stop_tx_queues(&dev->mphy, sta, true);
-	mt7603_wtbl_set_ps(dev, msta, ps);
+	mt7603_wtbl_sta_ps(dev, msta, ps);
 	if (ps)
 		return;
 
@@ -432,13 +423,33 @@ mt7603_sta_ps(struct mt76_dev *mdev, struct ieee80211_sta *sta, bool ps)
 	mt7603_ps_tx_list(dev, &list);
 }
 
-static void
-mt7603_ps_set_more_data(struct sk_buff *skb)
+static struct ieee80211_hdr *
+mt7603_ps_skb_hdr(struct sk_buff *skb)
 {
-	struct ieee80211_hdr *hdr;
+	return (struct ieee80211_hdr *)&skb->data[MT_TXD_SIZE];
+}
 
-	hdr = (struct ieee80211_hdr *)&skb->data[MT_TXD_SIZE];
-	hdr->frame_control |= cpu_to_le16(IEEE80211_FCTL_MOREDATA);
+/*
+ * Buffered frames can be recycled into the PS queue by mt7603_filter_tx(), so
+ * both bits have to be assigned, not just set.
+ */
+static void
+mt7603_ps_set_flags(struct sk_buff *skb, bool more_data, bool eosp)
+{
+	struct ieee80211_hdr *hdr = mt7603_ps_skb_hdr(skb);
+
+	if (more_data)
+		hdr->frame_control |= cpu_to_le16(IEEE80211_FCTL_MOREDATA);
+	else
+		hdr->frame_control &= ~cpu_to_le16(IEEE80211_FCTL_MOREDATA);
+
+	if (!ieee80211_is_data_qos(hdr->frame_control))
+		return;
+
+	if (eosp)
+		*ieee80211_get_qos_ctl(hdr) |= IEEE80211_QOS_CTL_EOSP;
+	else
+		*ieee80211_get_qos_ctl(hdr) &= ~IEEE80211_QOS_CTL_EOSP;
 }
 
 static void
@@ -451,7 +462,12 @@ mt7603_release_buffered_frames(struct ieee80211_hw *hw,
 	struct mt7603_dev *dev = hw->priv;
 	struct mt7603_sta *msta = (struct mt7603_sta *)sta->drv_priv;
 	struct sk_buff_head list;
-	struct sk_buff *skb, *tmp;
+	struct sk_buff *skb, *tmp, *last;
+	bool eosp_null, uapsd;
+	unsigned long drained;
+	u16 pending = 0;
+	u8 last_tid;
+	int i;
 
 	__skb_queue_head_init(&list);
 
@@ -467,20 +483,58 @@ mt7603_release_buffered_frames(struct ieee80211_hw *hw,
 
 		skb_set_queue_mapping(skb, MT_TXQ_PSD);
 		__skb_unlink(skb, &msta->psq);
-		mt7603_ps_set_more_data(skb);
 		__skb_queue_tail(&list, skb);
 		nframes--;
 	}
+
+	skb_queue_walk(&msta->psq, skb)
+		pending |= BIT(skb->priority);
 	spin_unlock_bh(&dev->ps_lock);
 
-	if (!skb_queue_empty(&list))
-		ieee80211_sta_eosp(sta);
+	/*
+	 * Without this, mac80211 keeps the TIM bit set for the station and
+	 * keeps routing every service period to the driver, even though there
+	 * is nothing left to release.
+	 */
+	drained = tids & ~pending;
+	for_each_set_bit(i, &drained, IEEE80211_NUM_TIDS)
+		ieee80211_sta_set_buffered(sta, i, false);
+
+	last = skb_peek_tail(&list);
+	if (!last) {
+		mt76_release_buffered_frames(hw, sta, tids, nframes, reason,
+					     more_data);
+		return;
+	}
+
+	/*
+	 * End the service period here instead of passing the remaining frame
+	 * budget on to mt76_release_buffered_frames(), which would signal the
+	 * end of the same service period a second time.
+	 */
+	uapsd = reason == IEEE80211_FRAME_RELEASE_UAPSD;
+	more_data |= !!(pending & tids);
+
+	skb_queue_walk(&list, skb)
+		mt7603_ps_set_flags(skb, skb != last || more_data,
+				    skb == last && uapsd);
+
+	/*
+	 * EOSP lives in the QoS control field, so a bufferable MMPDU cannot
+	 * terminate a U-APSD service period on its own. In that case mac80211
+	 * has to append a QoS-Null frame, which ends the SP through its tx
+	 * status.
+	 */
+	eosp_null = uapsd &&
+		    !ieee80211_is_data_qos(mt7603_ps_skb_hdr(last)->frame_control);
+	last_tid = __fls(tids);
 
 	mt7603_ps_tx_list(dev, &list);
 
-	if (nframes)
-		mt76_release_buffered_frames(hw, sta, tids, nframes, reason,
-					     more_data);
+	if (eosp_null)
+		ieee80211_send_eosp_nullfunc(sta, last_tid);
+	else
+		ieee80211_sta_eosp(sta);
 }
 
 static int
@@ -666,7 +720,8 @@ mt7603_sta_rate_tbl_update(struct ieee80211_hw *hw, struct ieee80211_vif *vif,
 }
 
 static void
-mt7603_set_coverage_class(struct ieee80211_hw *hw, s16 coverage_class)
+mt7603_set_coverage_class(struct ieee80211_hw *hw, int radio_idx,
+			  s16 coverage_class)
 {
 	struct mt7603_dev *dev = hw->priv;
 
@@ -701,6 +756,10 @@ static void mt7603_tx(struct ieee80211_hw *hw,
 }
 
 const struct ieee80211_ops mt7603_ops = {
+	.add_chanctx = ieee80211_emulate_add_chanctx,
+	.remove_chanctx = ieee80211_emulate_remove_chanctx,
+	.change_chanctx = ieee80211_emulate_change_chanctx,
+	.switch_vif_chanctx = ieee80211_emulate_switch_vif_chanctx,
 	.tx = mt7603_tx,
 	.start = mt7603_start,
 	.stop = mt7603_stop,
@@ -728,6 +787,7 @@ const struct ieee80211_ops mt7603_ops = {
 	.set_sar_specs = mt7603_set_sar_specs,
 };
 
+MODULE_DESCRIPTION("MediaTek MT7603E and MT76x8 wireless driver");
 MODULE_LICENSE("Dual BSD/GPL");
 
 static int __init mt7603_init(void)

@@ -44,12 +44,12 @@ static inline unsigned int brs_to(int idx)
 static __always_inline void set_debug_extn_cfg(u64 val)
 {
 	/* bits[4:3] must always be set to 11b */
-	__wrmsr(MSR_AMD_DBG_EXTN_CFG, val | 3ULL << 3, val >> 32);
+	native_wrmsrq(MSR_AMD_DBG_EXTN_CFG, val | 3ULL << 3);
 }
 
 static __always_inline u64 get_debug_extn_cfg(void)
 {
-	return __rdmsr(MSR_AMD_DBG_EXTN_CFG);
+	return native_rdmsrq(MSR_AMD_DBG_EXTN_CFG);
 }
 
 static bool __init amd_brs_detect(void)
@@ -125,7 +125,7 @@ int amd_brs_hw_config(struct perf_event *event)
 	 * Where X is the number of taken branches due to interrupt
 	 * skid. Skid is large.
 	 *
-	 * Where Y is the occurences of the event while BRS is
+	 * Where Y is the occurrences of the event while BRS is
 	 * capturing the lbr_nr entries.
 	 *
 	 * By using retired taken branches, we limit the impact on the
@@ -187,7 +187,7 @@ void amd_brs_reset(void)
 	/*
 	 * Mark first entry as poisoned
 	 */
-	wrmsrl(brs_to(0), BRS_POISON);
+	wrmsrq(brs_to(0), BRS_POISON);
 }
 
 int __init amd_brs_init(void)
@@ -259,13 +259,13 @@ void amd_brs_disable_all(void)
 		amd_brs_disable();
 }
 
-static bool amd_brs_match_plm(struct perf_event *event, u64 to)
+static bool amd_brs_match_plm(struct perf_event *event, u64 from, u64 to)
 {
 	int type = event->attr.branch_sample_type;
 	int plm_k = PERF_SAMPLE_BRANCH_KERNEL | PERF_SAMPLE_BRANCH_HV;
 	int plm_u = PERF_SAMPLE_BRANCH_USER;
 
-	if (!(type & plm_k) && kernel_ip(to))
+	if (!(type & plm_k) && (kernel_ip(to) || kernel_ip(from)))
 		return 0;
 
 	if (!(type & plm_u) && !kernel_ip(to))
@@ -325,7 +325,7 @@ void amd_brs_drain(void)
 		u32 brs_idx = tos - i;
 		u64 from, to;
 
-		rdmsrl(brs_to(brs_idx), to);
+		rdmsrq(brs_to(brs_idx), to);
 
 		/* Entry does not belong to us (as marked by kernel) */
 		if (to == BRS_POISON)
@@ -338,16 +338,15 @@ void amd_brs_drain(void)
 		 */
 		to = (u64)(((s64)to << shift) >> shift);
 
-		if (!amd_brs_match_plm(event, to))
+		rdmsrq(brs_from(brs_idx), from);
+
+		if (!amd_brs_match_plm(event, from, to))
 			continue;
 
-		rdmsrl(brs_from(brs_idx), from);
-
-		perf_clear_branch_entry_bitfields(br+nr);
-
-		br[nr].from = from;
-		br[nr].to   = to;
-
+		br[nr] = (struct perf_branch_entry){
+			.from	= from,
+			.to	= to,
+		};
 		nr++;
 	}
 empty:
@@ -371,7 +370,7 @@ static void amd_brs_poison_buffer(void)
 	idx = amd_brs_get_tos(&cfg);
 
 	/* Poison target of entry */
-	wrmsrl(brs_to(idx), BRS_POISON);
+	wrmsrq(brs_to(idx), BRS_POISON);
 }
 
 /*
@@ -381,7 +380,8 @@ static void amd_brs_poison_buffer(void)
  * On ctxswin, sched_in = true, called after the PMU has started
  * On ctxswout, sched_in = false, called before the PMU is stopped
  */
-void amd_pmu_brs_sched_task(struct perf_event_pmu_context *pmu_ctx, bool sched_in)
+void amd_pmu_brs_sched_task(struct perf_event_pmu_context *pmu_ctx,
+			    struct task_struct *task, bool sched_in)
 {
 	struct cpu_hw_events *cpuc = this_cpu_ptr(&cpu_hw_events);
 

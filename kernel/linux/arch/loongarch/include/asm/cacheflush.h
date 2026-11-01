@@ -32,12 +32,24 @@ static inline unsigned int cpu_last_level_cache_line_size(void)
 }
 
 asmlinkage void __flush_cache_all(void);
-void local_flush_icache_range(unsigned long start, unsigned long end);
 
+/*
+ * LoongArch maintains ICache/DCache coherency by hardware,
+ * we just need "ibar" to avoid instruction hazard here.
+ */
+static inline void local_flush_icache_all(void)
+{
+	asm volatile ("ibar\t0\n"::);
+}
+
+static inline void local_flush_icache_range(unsigned long start, unsigned long end)
+{
+	asm volatile ("ibar\t0\n"::);
+}
+
+#define flush_icache_all	local_flush_icache_all
 #define flush_icache_range	local_flush_icache_range
 #define flush_icache_user_range	local_flush_icache_range
-
-#define ARCH_IMPLEMENTS_FLUSH_DCACHE_PAGE 0
 
 #define flush_cache_all()				do { } while (0)
 #define flush_cache_mm(mm)				do { } while (0)
@@ -47,7 +59,6 @@ void local_flush_icache_range(unsigned long start, unsigned long end);
 #define flush_cache_vmap(start, end)			do { } while (0)
 #define flush_cache_vunmap(start, end)			do { } while (0)
 #define flush_icache_user_page(vma, page, addr, len)	do { } while (0)
-#define flush_dcache_page(page)				do { } while (0)
 #define flush_dcache_mmap_lock(mapping)			do { } while (0)
 #define flush_dcache_mmap_unlock(mapping)		do { } while (0)
 

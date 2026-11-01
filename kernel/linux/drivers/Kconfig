@@ -4,13 +4,18 @@ menu "Device Drivers"
 # Keep I/O buses first
 
 source "drivers/amba/Kconfig"
-source "drivers/xtos/Kconfig"
 source "drivers/eisa/Kconfig"
 source "drivers/pci/Kconfig"
 source "drivers/cxl/Kconfig"
 source "drivers/pcmcia/Kconfig"
 source "drivers/rapidio/Kconfig"
 
+config PC104
+	bool "PC/104 support" if EXPERT
+	help
+	  Expose PC/104 form factor device drivers and options available for
+	  selection and configuration. Enable this option if your target
+	  machine has a PC/104 bus.
 
 source "drivers/base/Kconfig"
 
@@ -21,6 +26,8 @@ source "drivers/cache/Kconfig"
 source "drivers/connector/Kconfig"
 
 source "drivers/firmware/Kconfig"
+
+source "drivers/fwctl/Kconfig"
 
 source "drivers/gnss/Kconfig"
 
@@ -54,8 +61,6 @@ source "drivers/macintosh/Kconfig"
 
 source "drivers/net/Kconfig"
 
-source "drivers/isdn/Kconfig"
-
 # input before char - char/joystick depends on it. As does USB.
 
 source "drivers/input/Kconfig"
@@ -75,6 +80,8 @@ source "drivers/hsi/Kconfig"
 source "drivers/pps/Kconfig"
 
 source "drivers/ptp/Kconfig"
+
+source "drivers/dpll/Kconfig"
 
 source "drivers/pinctrl/Kconfig"
 
@@ -136,8 +143,6 @@ source "drivers/uio/Kconfig"
 
 source "drivers/vfio/Kconfig"
 
-source "drivers/vlynq/Kconfig"
-
 source "drivers/virt/Kconfig"
 
 source "drivers/virtio/Kconfig"
@@ -153,6 +158,8 @@ source "drivers/xen/Kconfig"
 source "drivers/greybus/Kconfig"
 
 source "drivers/comedi/Kconfig"
+
+source "drivers/gpib/Kconfig"
 
 source "drivers/staging/Kconfig"
 
@@ -175,6 +182,8 @@ source "drivers/rpmsg/Kconfig"
 source "drivers/soundwire/Kconfig"
 
 source "drivers/soc/Kconfig"
+
+source "drivers/pmdomain/Kconfig"
 
 source "drivers/devfreq/Kconfig"
 
@@ -207,8 +216,6 @@ source "drivers/ras/Kconfig"
 source "drivers/thunderbolt/Kconfig"
 
 source "drivers/android/Kconfig"
-
-source "drivers/gpu/trace/Kconfig"
 
 source "drivers/nvdimm/Kconfig"
 
@@ -243,5 +250,9 @@ source "drivers/peci/Kconfig"
 source "drivers/hte/Kconfig"
 
 source "drivers/cdx/Kconfig"
+
+source "drivers/resctrl/Kconfig"
+
+source "drivers/xtos/Kconfig"
 
 endmenu

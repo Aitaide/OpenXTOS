@@ -241,12 +241,12 @@ enum {
 	AHCI_HFLAG_YES_ALPM		= BIT(23), /* force ALPM cap on */
 	AHCI_HFLAG_NO_WRITE_TO_RO	= BIT(24), /* don't write to read
 						      only registers */
-	AHCI_HFLAG_USE_LPM_POLICY	= BIT(25), /* chipset that should use
-						      SATA_MOBILE_LPM_POLICY
-						      as default lpm_policy */
-	AHCI_HFLAG_SUSPEND_PHYS		= BIT(26), /* handle PHYs during
+	AHCI_HFLAG_SUSPEND_PHYS		= BIT(25), /* handle PHYs during
 						      suspend/resume */
-	AHCI_HFLAG_NO_SXS		= BIT(28), /* SXS not supported */
+	AHCI_HFLAG_NO_SXS		= BIT(26), /* SXS not supported */
+	AHCI_HFLAG_43BIT_ONLY		= BIT(27), /* 43bit DMA addr limit */
+	AHCI_HFLAG_INTEL_PCS_QUIRK	= BIT(28), /* apply Intel PCS quirk */
+	AHCI_HFLAG_ATAPI_DMA_QUIRK	= BIT(29), /* force ATAPI to use DMA */
 
 	/* ap->flags bits */
 
@@ -329,7 +329,8 @@ struct ahci_port_priv {
 struct ahci_host_priv {
 	/* Input fields */
 	unsigned int		flags;		/* AHCI_HFLAG_* */
-	u32			mask_port_map;	/* mask out particular bits */
+	u32			mask_port_map;	/* Mask of valid ports */
+	u32			mask_port_ext;	/* Mask of ports ext capability */
 
 	void __iomem *		mmio;		/* bus-independent mem map */
 	u32			cap;		/* cap to use */
@@ -356,7 +357,6 @@ struct ahci_host_priv {
 	 * If platform uses PHYs. There is a 1:1 relation between the port number and
 	 * the PHY position in this array.
 	 */
-	struct phy		**phys;
 	unsigned		nports;		/* Number of ports */
 	void			*plat_data;	/* Other platform data */
 	unsigned int		irq;		/* interrupt line */
@@ -378,7 +378,24 @@ struct ahci_host_priv {
 	/* only required for per-port MSI(-X) support */
 	int			(*get_irq_vector)(struct ata_host *host,
 						  int port);
+
+	struct phy		*phys[] __counted_by(nports);
 };
+
+/*
+ * Return true if a port should be ignored because it is excluded from
+ * the host port map.
+ */
+static inline bool ahci_ignore_port(struct ahci_host_priv *hpriv,
+				    unsigned int portid)
+{
+	if (portid >= hpriv->nports)
+		return true;
+	/* mask_port_map not set means that all ports are available */
+	if (!hpriv->mask_port_map)
+		return false;
+	return !(hpriv->mask_port_map & (1 << portid));
+}
 
 extern int ahci_ignore_sss;
 
@@ -397,8 +414,8 @@ extern const struct attribute_group *ahci_sdev_groups[];
 	.shost_groups		= ahci_shost_groups,			\
 	.sdev_groups		= ahci_sdev_groups,			\
 	.change_queue_depth     = ata_scsi_change_queue_depth,		\
-	.tag_alloc_policy       = BLK_TAG_ALLOC_RR,             	\
-	.slave_configure        = ata_scsi_slave_config
+	.tag_alloc_policy_rr	= true,					\
+	.sdev_configure		= ata_scsi_sdev_configure
 
 extern struct ata_port_operations ahci_ops;
 extern struct ata_port_operations ahci_platform_ops;
@@ -431,7 +448,8 @@ void ahci_set_em_messages(struct ahci_host_priv *hpriv,
 int ahci_reset_em(struct ata_host *host);
 void ahci_print_info(struct ata_host *host, const char *scc_s);
 int ahci_host_activate(struct ata_host *host, const struct scsi_host_template *sht);
-void ahci_error_handler(struct ata_port *ap);
+void ahci_error_handler(struct ata_port *ap)
+	__must_hold(&ap->host->eh_mutex);
 u32 ahci_handle_port_intr(struct ata_host *host, u32 irq_masked);
 
 static inline void __iomem *__ahci_port_base(struct ahci_host_priv *hpriv,

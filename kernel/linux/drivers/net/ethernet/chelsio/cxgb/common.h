@@ -48,7 +48,7 @@
 #define DRV_NAME "cxgb"
 
 #define CH_DEVICE(devid, ssid, idx) \
-	{ PCI_VENDOR_ID_CHELSIO, devid, PCI_ANY_ID, ssid, 0, 0, idx }
+	{ PCI_VDEVICE_SUB(CHELSIO, devid, PCI_ANY_ID, ssid), .driver_data = idx }
 
 #define SUPPORTED_PAUSE       (1 << 13)
 #define SUPPORTED_LOOPBACK    (1 << 15)
@@ -329,8 +329,6 @@ irqreturn_t t1_slow_intr_handler(adapter_t *adapter);
 
 int t1_link_start(struct cphy *phy, struct cmac *mac, struct link_config *lc);
 const struct board_info *t1_get_board_info(unsigned int board_id);
-const struct board_info *t1_get_board_info_from_ids(unsigned int devid,
-						    unsigned short ssid);
 int t1_seeprom_read(adapter_t *adapter, u32 addr, __le32 *data);
 int t1_get_board_rev(adapter_t *adapter, const struct board_info *bi,
 		     struct adapter_params *p);

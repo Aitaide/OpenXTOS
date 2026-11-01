@@ -5,6 +5,7 @@
 #include <linux/percpu.h>
 #include <linux/init.h>
 #include <linux/sched.h>
+#include <linux/sysfs.h>
 #include <linux/export.h>
 #include <linux/nodemask.h>
 #include <linux/cpumask.h>
@@ -17,6 +18,7 @@
 #include <asm/hvcall.h>
 #include <asm/machdep.h>
 #include <asm/smp.h>
+#include <asm/time.h>
 #include <asm/pmc.h>
 #include <asm/firmware.h>
 #include <asm/idle.h>
@@ -62,7 +64,7 @@ static ssize_t show_smt_snooze_delay(struct device *dev,
 {
 	pr_warn_once("%s (%d) read from unsupported smt_snooze_delay\n",
 		     current->comm, current->pid);
-	return sprintf(buf, "100\n");
+	return sysfs_emit(buf, "100\n");
 }
 
 static DEVICE_ATTR(smt_snooze_delay, 0644, show_smt_snooze_delay,
@@ -99,7 +101,7 @@ static ssize_t show_##NAME(struct device *dev, \
 	struct cpu *cpu = container_of(dev, struct cpu, dev); \
 	unsigned long val; \
 	smp_call_function_single(cpu->dev.id, read_##NAME, &val, 1);	\
-	return sprintf(buf, "%lx\n", val); \
+	return sysfs_emit(buf, "%lx\n", val); \
 } \
 static ssize_t __used \
 	store_##NAME(struct device *dev, struct device_attribute *attr, \
@@ -139,7 +141,7 @@ static unsigned long dscr_default;
  * @val:	Returned cpu specific DSCR default value
  *
  * This function returns the per cpu DSCR default value
- * for any cpu which is contained in it's PACA structure.
+ * for any cpu which is contained in its PACA structure.
  */
 static void read_dscr(void *val)
 {
@@ -152,7 +154,7 @@ static void read_dscr(void *val)
  * @val:	New cpu specific DSCR default value to update
  *
  * This function updates the per cpu DSCR default value
- * for any cpu which is contained in it's PACA structure.
+ * for any cpu which is contained in its PACA structure.
  */
 static void write_dscr(void *val)
 {
@@ -182,7 +184,7 @@ static void add_write_permission_dev_attr(struct device_attribute *attr)
 static ssize_t show_dscr_default(struct device *dev,
 		struct device_attribute *attr, char *buf)
 {
-	return sprintf(buf, "%lx\n", dscr_default);
+	return sysfs_emit(buf, "%lx\n", dscr_default);
 }
 
 /**
@@ -271,7 +273,7 @@ static ssize_t show_pw20_state(struct device *dev,
 
 	value &= PWRMGTCR0_PW20_WAIT;
 
-	return sprintf(buf, "%u\n", value ? 1 : 0);
+	return sysfs_emit(buf, "%u\n", value ? 1 : 0);
 }
 
 static void do_store_pw20_state(void *val)
@@ -336,7 +338,7 @@ static ssize_t show_pw20_wait_time(struct device *dev,
 		time = pw20_wt;
 	}
 
-	return sprintf(buf, "%llu\n", time > 0 ? time : 0);
+	return sysfs_emit(buf, "%llu\n", time > 0 ? time : 0);
 }
 
 static void set_pw20_wait_entry_bit(void *val)
@@ -393,7 +395,7 @@ static ssize_t show_altivec_idle(struct device *dev,
 
 	value &= PWRMGTCR0_AV_IDLE_PD_EN;
 
-	return sprintf(buf, "%u\n", value ? 1 : 0);
+	return sysfs_emit(buf, "%u\n", value ? 1 : 0);
 }
 
 static void do_store_altivec_idle(void *val)
@@ -458,7 +460,7 @@ static ssize_t show_altivec_idle_wait_time(struct device *dev,
 		time = altivec_idle_wt;
 	}
 
-	return sprintf(buf, "%llu\n", time > 0 ? time : 0);
+	return sysfs_emit(buf, "%llu\n", time > 0 ? time : 0);
 }
 
 static void set_altivec_idle_wait_entry_bit(void *val)
@@ -745,7 +747,7 @@ static struct device_attribute pa6t_attrs[] = {
 #ifdef CONFIG_PPC_SVM
 static ssize_t show_svm(struct device *dev, struct device_attribute *attr, char *buf)
 {
-	return sprintf(buf, "%u\n", is_secure_guest());
+	return sysfs_emit(buf, "%u\n", is_secure_guest());
 }
 static DEVICE_ATTR(svm, 0444, show_svm, NULL);
 
@@ -779,7 +781,7 @@ static ssize_t idle_purr_show(struct device *dev,
 	u64 val;
 
 	smp_call_function_single(cpu->dev.id, read_idle_purr, &val, 1);
-	return sprintf(buf, "%llx\n", val);
+	return sysfs_emit(buf, "%llx\n", val);
 }
 static DEVICE_ATTR(idle_purr, 0400, idle_purr_show, NULL);
 
@@ -809,7 +811,7 @@ static ssize_t idle_spurr_show(struct device *dev,
 	u64 val;
 
 	smp_call_function_single(cpu->dev.id, read_idle_spurr, &val, 1);
-	return sprintf(buf, "%llx\n", val);
+	return sysfs_emit(buf, "%llx\n", val);
 }
 static DEVICE_ATTR(idle_spurr, 0400, idle_spurr_show, NULL);
 
@@ -1142,7 +1144,7 @@ static ssize_t show_physical_id(struct device *dev,
 {
 	struct cpu *cpu = container_of(dev, struct cpu, dev);
 
-	return sprintf(buf, "%d\n", get_hard_smp_processor_id(cpu->dev.id));
+	return sysfs_emit(buf, "%d\n", get_hard_smp_processor_id(cpu->dev.id));
 }
 static DEVICE_ATTR(physical_id, 0444, show_physical_id, NULL);
 

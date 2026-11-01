@@ -500,7 +500,7 @@ static const struct mhuv2_protocol_ops mhuv2_data_transfer_ops = {
 static struct mbox_chan *get_irq_chan_comb(struct mhuv2 *mhu, u32 __iomem *reg)
 {
 	struct mbox_chan *chans = mhu->mbox.chans;
-	int channel = 0, i, offset = 0, windows, protocol, ch_wn;
+	int channel = 0, i, j, offset = 0, windows, protocol, ch_wn;
 	u32 stat;
 
 	for (i = 0; i < MHUV2_CMB_INT_ST_REG_CNT; i++) {
@@ -510,9 +510,9 @@ static struct mbox_chan *get_irq_chan_comb(struct mhuv2 *mhu, u32 __iomem *reg)
 
 		ch_wn = i * MHUV2_STAT_BITS + __builtin_ctz(stat);
 
-		for (i = 0; i < mhu->length; i += 2) {
-			protocol = mhu->protocols[i];
-			windows = mhu->protocols[i + 1];
+		for (j = 0; j < mhu->length; j += 2) {
+			protocol = mhu->protocols[j];
+			windows = mhu->protocols[j + 1];
 
 			if (ch_wn >= offset + windows) {
 				if (protocol == DOORBELL)
@@ -553,7 +553,8 @@ static irqreturn_t mhuv2_sender_interrupt(int irq, void *data)
 	priv = chan->con_priv;
 
 	if (!IS_PROTOCOL_DOORBELL(priv)) {
-		writel_relaxed(1, &mhu->send->ch_wn[priv->ch_wn_idx + priv->windows - 1].int_clr);
+		for (i = 0; i < priv->windows; i++)
+			writel_relaxed(1, &mhu->send->ch_wn[priv->ch_wn_idx + i].int_clr);
 
 		if (chan->cl) {
 			mbox_chan_txdone(chan, 0);
@@ -788,14 +789,14 @@ static const struct mbox_chan_ops mhuv2_receiver_ops = {
 	.last_tx_done = mhuv2_receiver_last_tx_done,
 };
 
-static struct mbox_chan *mhuv2_mbox_of_xlate(struct mbox_controller *mbox,
-					     const struct of_phandle_args *pa)
+static struct mbox_chan *mhuv2_mbox_fw_xlate(struct mbox_controller *mbox,
+					     const struct fwnode_reference_args *pa)
 {
 	struct mhuv2 *mhu = mhu_from_mbox(mbox);
 	struct mbox_chan *chans = mbox->chans;
 	int channel = 0, i, offset, doorbell, protocol, windows;
 
-	if (pa->args_count != 2)
+	if (pa->nargs != 2)
 		return ERR_PTR(-EINVAL);
 
 	offset = pa->args[0];
@@ -827,7 +828,7 @@ static struct mbox_chan *mhuv2_mbox_of_xlate(struct mbox_controller *mbox,
 	}
 
 out:
-	dev_err(mbox->dev, "Couldn't xlate to a valid channel (%d: %d)\n",
+	dev_err(mbox->dev, "Couldn't xlate to a valid channel (%llu: %d)\n",
 		pa->args[0], doorbell);
 	return ERR_PTR(-ENODEV);
 }
@@ -930,11 +931,10 @@ static int mhuv2_allocate_channels(struct mhuv2 *mhu)
 static int mhuv2_parse_channels(struct mhuv2 *mhu)
 {
 	struct device *dev = mhu->mbox.dev;
-	const struct device_node *np = dev->of_node;
 	int ret, count;
 	u32 *protocols;
 
-	count = of_property_count_u32_elems(np, MHUV2_PROTOCOL_PROP);
+	count = device_property_count_u32(dev, MHUV2_PROTOCOL_PROP);
 	if (count <= 0 || count % 2) {
 		dev_err(dev, "Invalid %s property (%d)\n", MHUV2_PROTOCOL_PROP,
 			count);
@@ -945,7 +945,7 @@ static int mhuv2_parse_channels(struct mhuv2 *mhu)
 	if (!protocols)
 		return -ENOMEM;
 
-	ret = of_property_read_u32_array(np, MHUV2_PROTOCOL_PROP, protocols, count);
+	ret = device_property_read_u32_array(dev, MHUV2_PROTOCOL_PROP, protocols, count);
 	if (ret) {
 		dev_err(dev, "Failed to read %s property: %d\n",
 			MHUV2_PROTOCOL_PROP, ret);
@@ -985,10 +985,7 @@ static int mhuv2_tx_init(struct amba_device *adev, struct mhuv2 *mhu,
 		ret = devm_request_threaded_irq(dev, adev->irq[0], NULL,
 						mhuv2_sender_interrupt,
 						IRQF_ONESHOT, "mhuv2-tx", mhu);
-		if (ret) {
-			dev_err(dev, "Failed to request tx IRQ, fallback to polling mode: %d\n",
-				ret);
-		} else {
+		if (!ret) {
 			mhu->mbox.txdone_irq = true;
 			mhu->mbox.txdone_poll = false;
 			mhu->irq = adev->irq[0];
@@ -1038,10 +1035,8 @@ static int mhuv2_rx_init(struct amba_device *adev, struct mhuv2 *mhu,
 	ret = devm_request_threaded_irq(dev, mhu->irq, NULL,
 					mhuv2_receiver_interrupt, IRQF_ONESHOT,
 					"mhuv2-rx", mhu);
-	if (ret) {
-		dev_err(dev, "Failed to request rx IRQ\n");
+	if (ret)
 		return ret;
-	}
 
 	/* Mask all the channel windows */
 	for (i = 0; i < mhu->windows; i++)
@@ -1070,7 +1065,7 @@ static int mhuv2_probe(struct amba_device *adev, const struct amba_id *id)
 		return -ENOMEM;
 
 	mhu->mbox.dev = dev;
-	mhu->mbox.of_xlate = mhuv2_mbox_of_xlate;
+	mhu->mbox.fw_xlate = mhuv2_mbox_fw_xlate;
 
 	if (of_device_is_compatible(np, "arm,mhuv2-tx"))
 		ret = mhuv2_tx_init(adev, mhu, reg);
@@ -1106,7 +1101,7 @@ static void mhuv2_remove(struct amba_device *adev)
 		writel_relaxed(0x0, &mhu->send->access_request);
 }
 
-static struct amba_id mhuv2_ids[] = {
+static const struct amba_id mhuv2_ids[] = {
 	{
 		/* 2.0 */
 		.id = 0xbb0d1,

@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0
 /* Copyright (c)  2018 Intel Corporation */
 
+#include <linux/bitfield.h>
 #include "igc_phy.h"
 
 /**
@@ -129,11 +130,7 @@ void igc_power_down_phy_copper(struct igc_hw *hw)
 	/* The PHY will retain its settings across a power down/up cycle */
 	hw->phy.ops.read_reg(hw, PHY_CONTROL, &mii_reg);
 	mii_reg |= MII_CR_POWER_DOWN;
-
-	/* Temporary workaround - should be removed when PHY will implement
-	 * IEEE registers as properly
-	 */
-	/* hw->phy.ops.write_reg(hw, PHY_CONTROL, mii_reg);*/
+	hw->phy.ops.write_reg(hw, PHY_CONTROL, mii_reg);
 	usleep_range(1000, 2000);
 }
 
@@ -243,7 +240,7 @@ static s32 igc_phy_setup_autoneg(struct igc_hw *hw)
 		/* Read the MULTI GBT AN Control Register - reg 7.32 */
 		ret_val = phy->ops.read_reg(hw, (STANDARD_AN_REG_MASK <<
 					    MMD_DEVADDR_SHIFT) |
-					    ANEG_MULTIGBT_AN_CTRL,
+					    IGC_ANEG_MULTIGBT_AN_CTRL,
 					    &aneg_multigbt_an_ctrl);
 
 		if (ret_val)
@@ -383,7 +380,7 @@ static s32 igc_phy_setup_autoneg(struct igc_hw *hw)
 		ret_val = phy->ops.write_reg(hw,
 					     (STANDARD_AN_REG_MASK <<
 					     MMD_DEVADDR_SHIFT) |
-					     ANEG_MULTIGBT_AN_CTRL,
+					     IGC_ANEG_MULTIGBT_AN_CTRL,
 					     aneg_multigbt_an_ctrl);
 
 	return ret_val;
@@ -497,7 +494,7 @@ s32 igc_setup_copper_link(struct igc_hw *hw)
 	s32 ret_val = 0;
 	bool link;
 
-	if (hw->mac.autoneg) {
+	if (hw->mac.autoneg_enabled) {
 		/* Setup autoneg and flow control advertisement and perform
 		 * autonegotiation.
 		 */
@@ -505,13 +502,9 @@ s32 igc_setup_copper_link(struct igc_hw *hw)
 		if (ret_val)
 			goto out;
 	} else {
-		/* PHY will be set to 10H, 10F, 100H or 100F
-		 * depending on user settings.
-		 */
-		hw_dbg("Forcing Speed and Duplex\n");
 		ret_val = hw->phy.ops.force_speed_duplex(hw);
 		if (ret_val) {
-			hw_dbg("Error Forcing Speed and Duplex\n");
+			hw_dbg("Error Forcing Speed/Duplex\n");
 			goto out;
 		}
 	}
@@ -682,11 +675,7 @@ static s32 __igc_access_xmdio_reg(struct igc_hw *hw, u16 address,
 		return ret_val;
 
 	/* Recalibrate the device back to 0 */
-	ret_val = hw->phy.ops.write_reg(hw, IGC_MMDAC, 0);
-	if (ret_val)
-		return ret_val;
-
-	return ret_val;
+	return hw->phy.ops.write_reg(hw, IGC_MMDAC, 0);
 }
 
 /**
@@ -726,7 +715,7 @@ static s32 igc_write_xmdio_reg(struct igc_hw *hw, u16 addr,
  */
 s32 igc_write_phy_reg_gpy(struct igc_hw *hw, u32 offset, u16 data)
 {
-	u8 dev_addr = (offset & GPY_MMD_MASK) >> GPY_MMD_SHIFT;
+	u8 dev_addr = FIELD_GET(GPY_MMD_MASK, offset);
 	s32 ret_val;
 
 	offset = offset & GPY_REG_MASK;
@@ -757,7 +746,7 @@ s32 igc_write_phy_reg_gpy(struct igc_hw *hw, u32 offset, u16 data)
  */
 s32 igc_read_phy_reg_gpy(struct igc_hw *hw, u32 offset, u16 *data)
 {
-	u8 dev_addr = (offset & GPY_MMD_MASK) >> GPY_MMD_SHIFT;
+	u8 dev_addr = FIELD_GET(GPY_MMD_MASK, offset);
 	s32 ret_val;
 
 	offset = offset & GPY_REG_MASK;
@@ -792,4 +781,49 @@ u16 igc_read_phy_fw_version(struct igc_hw *hw)
 		hw_dbg("igc_phy: read wrong gphy version\n");
 
 	return gphy_version;
+}
+
+/**
+ * igc_force_speed_duplex - Force PHY speed and duplex settings
+ * @hw: pointer to the HW structure
+ *
+ * Programs the GPY PHY control register to disable autonegotiation
+ * and force the speed/duplex indicated by hw->mac.forced_speed_duplex.
+ */
+s32 igc_force_speed_duplex(struct igc_hw *hw)
+{
+	struct igc_phy_info *phy = &hw->phy;
+	u16 phy_ctrl;
+	s32 ret_val;
+
+	ret_val = phy->ops.read_reg(hw, PHY_CONTROL, &phy_ctrl);
+	if (ret_val)
+		return ret_val;
+
+	phy_ctrl &= ~(MII_CR_SPEED_MASK | MII_CR_DUPLEX_EN |
+		      MII_CR_AUTO_NEG_EN | MII_CR_RESTART_AUTO_NEG);
+
+	switch (hw->mac.forced_speed_duplex) {
+	case IGC_FORCED_10H:
+		phy_ctrl |= MII_CR_SPEED_10;
+		break;
+	case IGC_FORCED_10F:
+		phy_ctrl |= MII_CR_SPEED_10 | MII_CR_DUPLEX_EN;
+		break;
+	case IGC_FORCED_100H:
+		phy_ctrl |= MII_CR_SPEED_100;
+		break;
+	case IGC_FORCED_100F:
+		phy_ctrl |= MII_CR_SPEED_100 | MII_CR_DUPLEX_EN;
+		break;
+	default:
+		return -IGC_ERR_CONFIG;
+	}
+
+	ret_val = phy->ops.write_reg(hw, PHY_CONTROL, phy_ctrl);
+	if (ret_val)
+		return ret_val;
+
+	hw->mac.get_link_status = true;
+	return 0;
 }

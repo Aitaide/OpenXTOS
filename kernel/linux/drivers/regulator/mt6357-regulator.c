@@ -123,7 +123,7 @@ struct mt6357_regulator_info {
  *
  * Regulators that use regmap for their register I/O can set the
  * da_vsel_reg and da_vsel_mask fields in the info structure and
- * then use this as their get_voltage_vsel operation.
+ * then use this as their get_voltage_sel operation.
  */
 static int mt6357_get_buck_voltage_sel(struct regulator_dev *rdev)
 {
@@ -410,7 +410,7 @@ static int mt6357_regulator_probe(struct platform_device *pdev)
 	struct regulator_dev *rdev;
 	int i;
 
-	pdev->dev.of_node = pdev->dev.parent->of_node;
+	device_set_of_node_from_dev(&pdev->dev, pdev->dev.parent);
 
 	for (i = 0; i < MT6357_MAX_REGULATOR; i++) {
 		config.dev = &pdev->dev;
@@ -431,8 +431,8 @@ static int mt6357_regulator_probe(struct platform_device *pdev)
 }
 
 static const struct platform_device_id mt6357_platform_ids[] = {
-	{ "mt6357-regulator" },
-	{ /* sentinel */ },
+	{ .name = "mt6357-regulator" },
+	{ /* sentinel */ }
 };
 MODULE_DEVICE_TABLE(platform, mt6357_platform_ids);
 

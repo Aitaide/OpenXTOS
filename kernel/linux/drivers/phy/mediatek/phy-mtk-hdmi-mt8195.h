@@ -17,6 +17,9 @@
 
 #define HDMI20_CLK_CFG 0x70
 #define REG_TXC_DIV GENMASK(31, 30)
+#define VAL_TXC_DIV2 1
+#define VAL_TXC_DIV4 2
+#define VAL_TXC_DIV8 3
 
 #define HDMI_1_CFG_0 0x00
 #define RG_HDMITX21_DRV_IBIAS_CLK GENMASK(10, 5)
@@ -102,6 +105,9 @@
 
 #define HDMI_ANA_CTL 0x7c
 #define REG_ANA_HDMI20_FIFO_EN BIT(16)
+
+#define HDMI_CTL_1 0xc4
+#define RG_HDMITX_PWR5V_O BIT(9)
 
 #define HDMI_CTL_3 0xcc
 #define REG_HDMITXPLL_DIV GENMASK(4, 0)

@@ -1,13 +1,16 @@
 # SPDX-License-Identifier: GPL-2.0-only
-menu "SoC Audio for Freescale CPUs"
+menu "Freescale"
 
 comment "Common SoC Audio options for Freescale CPUs:"
 
 config SND_SOC_FSL_ASRC
 	tristate "Asynchronous Sample Rate Converter (ASRC) module support"
 	depends on HAS_DMA
+	select DMA_SHARED_BUFFER
 	select REGMAP_MMIO
 	select SND_SOC_GENERIC_DMAENGINE_PCM
+	select SND_COMPRESS_ACCEL
+	select SND_COMPRESS_OFFLOAD
 	help
 	  Say Y if you want to add Asynchronous Sample Rate Converter (ASRC)
 	  support for the Freescale CPUs.
@@ -16,6 +19,7 @@ config SND_SOC_FSL_ASRC
 
 config SND_SOC_FSL_SAI
 	tristate "Synchronous Audio Interface (SAI) module support"
+	depends on IMX_SCMI_MISC_DRV || !IMX_SCMI_MISC_DRV
 	select REGMAP_MMIO
 	select SND_SOC_IMX_PCM_DMA if SND_IMX_SOC != n
 	select SND_SOC_GENERIC_DMAENGINE_PCM
@@ -103,6 +107,7 @@ config SND_SOC_FSL_XCVR
 	select REGMAP_MMIO
 	select SND_SOC_IMX_PCM_DMA if SND_IMX_SOC != n
 	select SND_SOC_GENERIC_DMAENGINE_PCM
+	select SND_SOC_FSL_UTILS
 	help
 	  Say Y if you want to add Audio Transceiver (XCVR) support for NXP
 	  iMX CPUs. XCVR is a digital module that supports HDMI2.1 eARC,
@@ -121,6 +126,7 @@ config SND_SOC_FSL_UTILS
 config SND_SOC_FSL_RPMSG
 	tristate "NXP Audio Base On RPMSG support"
 	depends on COMMON_CLK
+	depends on OF && I2C
 	depends on RPMSG
 	depends on SND_IMX_SOC || SND_IMX_SOC = n
 	select SND_SOC_IMX_RPMSG if SND_IMX_SOC != n
@@ -128,6 +134,13 @@ config SND_SOC_FSL_RPMSG
 	  Say Y if you want to add rpmsg audio support for the Freescale CPUs.
 	  This option is only useful for out-of-tree drivers since
 	  in-tree drivers select it automatically.
+
+config SND_SOC_FSL_LPC3XXX
+	tristate "SoC Audio for NXP LPC32XX CPUs"
+	depends on ARCH_LPC32XX || COMPILE_TEST
+	select SND_SOC_GENERIC_DMAENGINE_PCM
+	help
+	  Say Y or M if you want to add support for the LPC3XXX I2S interface.
 
 config SND_SOC_IMX_PCM_DMA
 	tristate
@@ -152,7 +165,7 @@ config SND_SOC_IMX_AUDMUX
 
 config SND_POWERPC_SOC
 	tristate "SoC Audio for Freescale PowerPC CPUs"
-	depends on FSL_SOC || PPC_MPC52xx
+	depends on FSL_SOC || PPC_MPC52xx || (PPC && COMPILE_TEST)
 	help
 	  Say Y or M if you want to add support for codecs attached to
 	  the PowerPC CPUs.
@@ -182,19 +195,6 @@ config SND_SOC_POWERPC_QMC_AUDIO
 	  QMC.
 
 comment "SoC Audio support for Freescale PPC boards:"
-
-config SND_SOC_MPC8610_HPCD
-	tristate "ALSA SoC support for the Freescale MPC8610 HPCD board"
-	# I2C is necessary for the CS4270 driver
-	depends on MPC8610_HPCD && I2C
-	select SND_SOC_FSL_SSI
-	select SND_SOC_FSL_UTILS
-	select SND_SOC_POWERPC_DMA
-	select SND_SOC_CS4270
-	select SND_SOC_CS4270_VD33_ERRATA
-	default y if MPC8610_HPCD
-	help
-	  Say Y if you want to enable audio on the Freescale MPC8610 HPCD.
 
 config SND_SOC_P1022_DS
 	tristate "ALSA SoC support for the Freescale P1022 DS board"
@@ -226,7 +226,7 @@ config SND_SOC_P1022_RDK
 
 config SND_SOC_MPC5200_I2S
 	tristate "Freescale MPC5200 PSC in I2S mode driver"
-	depends on PPC_MPC52xx && PPC_BESTCOMM
+	depends on PPC_BESTCOMM
 	select SND_MPC52xx_DMA
 	select PPC_BESTCOMM_GEN_BD
 	help
@@ -234,7 +234,7 @@ config SND_SOC_MPC5200_I2S
 
 config SND_SOC_MPC5200_AC97
 	tristate "Freescale MPC5200 PSC in AC97 mode driver"
-	depends on PPC_MPC52xx && PPC_BESTCOMM
+	depends on PPC_BESTCOMM
 	select SND_SOC_AC97_BUS
 	select SND_MPC52xx_DMA
 	select PPC_BESTCOMM_GEN_BD
@@ -244,7 +244,7 @@ config SND_SOC_MPC5200_AC97
 config SND_MPC52xx_SOC_PCM030
 	tristate "SoC AC97 Audio support for Phytec pcm030 and WM9712"
 	depends on PPC_MPC5200_SIMPLE
-	select SND_SOC_MPC5200_AC97
+	depends on SND_SOC_MPC5200_AC97
 	select SND_SOC_WM9712
 	help
 	  Say Y if you want to add support for sound on the Phytec pcm030
@@ -253,7 +253,7 @@ config SND_MPC52xx_SOC_PCM030
 config SND_MPC52xx_SOC_EFIKA
 	tristate "SoC AC97 Audio support for bbplan Efika and STAC9766"
 	depends on PPC_EFIKA
-	select SND_SOC_MPC5200_AC97
+	depends on SND_SOC_MPC5200_AC97
 	select SND_SOC_STAC9766
 	help
 	  Say Y if you want to add support for sound on the Efika.
@@ -307,17 +307,9 @@ config SND_SOC_IMX_SGTL5000
 	  SND_SOC_FSL_ASOC_CARD and SND_SOC_SGTL5000 to use the newer
 	  driver.
 
-config SND_SOC_IMX_SPDIF
-	tristate "SoC Audio support for i.MX boards with S/PDIF"
-	select SND_SOC_IMX_PCM_DMA
-	select SND_SOC_FSL_SPDIF
-	help
-	  SoC Audio support for i.MX boards with S/PDIF
-	  Say Y if you want to add support for SoC audio on an i.MX board with
-	  a S/DPDIF.
-
 config SND_SOC_FSL_ASOC_CARD
 	tristate "Generic ASoC Sound Card with ASRC support"
+	depends on IMX_SCMI_MISC_DRV || !IMX_SCMI_MISC_DRV
 	depends on OF && I2C
 	# enforce SND_SOC_FSL_ASOC_CARD=m if SND_AC97_CODEC=m:
 	depends on SND_AC97_CODEC || SND_AC97_CODEC=n
@@ -327,6 +319,7 @@ config SND_SOC_FSL_ASOC_CARD
 	select SND_SOC_FSL_ESAI
 	select SND_SOC_FSL_SAI
 	select SND_SOC_FSL_SSI
+	select SND_SOC_FSL_SPDIF
 	select SND_SOC_TLV320AIC31XX
 	select SND_SOC_WM8994
 	select MFD_WM8994
@@ -338,6 +331,7 @@ config SND_SOC_FSL_ASOC_CARD
 
 config SND_SOC_IMX_AUDMIX
 	tristate "SoC Audio support for i.MX boards with AUDMIX"
+	depends on IMX_SCMI_MISC_DRV || !IMX_SCMI_MISC_DRV
 	select SND_SOC_FSL_AUDMIX
 	select SND_SOC_FSL_SAI
 	help
@@ -347,6 +341,7 @@ config SND_SOC_IMX_AUDMIX
 
 config SND_SOC_IMX_HDMI
 	tristate "SoC Audio support for i.MX boards with HDMI port"
+	depends on IMX_SCMI_MISC_DRV || !IMX_SCMI_MISC_DRV
 	select SND_SOC_FSL_SAI
 	select SND_SOC_FSL_AUD2HTX
 	select SND_SOC_HDMI_CODEC
@@ -360,8 +355,10 @@ config SND_SOC_IMX_HDMI
 config SND_SOC_IMX_RPMSG
 	tristate "SoC Audio support for i.MX boards with rpmsg"
 	depends on RPMSG
+	depends on OF && I2C
 	select SND_SOC_IMX_PCM_RPMSG
 	select SND_SOC_IMX_AUDIO_RPMSG
+	select SND_SIMPLE_CARD_UTILS
 	help
 	  SoC Audio support for i.MX boards with rpmsg.
 	  There should be rpmsg devices defined in other core (M core)
@@ -371,6 +368,7 @@ config SND_SOC_IMX_RPMSG
 config SND_SOC_IMX_CARD
 	tristate "SoC Audio Graph Sound Card support for i.MX boards"
 	depends on OF && I2C
+	depends on IMX_SCMI_MISC_DRV || !IMX_SCMI_MISC_DRV
 	select SND_SOC_AK4458
 	select SND_SOC_AK5558
 	select SND_SOC_IMX_PCM_DMA

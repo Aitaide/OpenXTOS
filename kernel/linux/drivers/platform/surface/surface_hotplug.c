@@ -14,7 +14,7 @@
  */
 
 #include <linux/acpi.h>
-#include <linux/gpio.h>
+#include <linux/gpio/consumer.h>
 #include <linux/interrupt.h>
 #include <linux/kernel.h>
 #include <linux/module.h>
@@ -183,7 +183,7 @@ static int shps_setup_irq(struct platform_device *pdev, enum shps_irq_type type)
 	return 0;
 }
 
-static int surface_hotplug_remove(struct platform_device *pdev)
+static void surface_hotplug_remove(struct platform_device *pdev)
 {
 	struct shps_device *sdev = platform_get_drvdata(pdev);
 	int i;
@@ -195,8 +195,6 @@ static int surface_hotplug_remove(struct platform_device *pdev)
 
 		mutex_destroy(&sdev->lock[i]);
 	}
-
-	return 0;
 }
 
 static int surface_hotplug_probe(struct platform_device *pdev)

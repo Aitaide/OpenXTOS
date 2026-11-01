@@ -1,12 +1,9 @@
+// SPDX-License-Identifier: GPL-2.0
 /*
    BlueZ - Bluetooth protocol stack for Linux
    Copyright (C) 2000-2001 Qualcomm Incorporated
 
    Written 2000,2001 by Maxim Krasnyansky <maxk@qualcomm.com>
-
-   This program is free software; you can redistribute it and/or modify
-   it under the terms of the GNU General Public License version 2 as
-   published by the Free Software Foundation;
 
    THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS
    OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
@@ -30,6 +27,15 @@
 
 #include <net/bluetooth/bluetooth.h>
 
+/**
+ * baswap() - Swaps the order of a bd address
+ * @dst: Pointer to a bdaddr_t struct that will store the swapped
+ * 		 bd address.
+ * @src: Pointer to the bdaddr_t struct to be swapped.
+ *
+ * This function reverses the byte order of a Bluetooth device
+ * address.
+ */
 void baswap(bdaddr_t *dst, const bdaddr_t *src)
 {
 	const unsigned char *s = (const unsigned char *)src;
@@ -41,7 +47,19 @@ void baswap(bdaddr_t *dst, const bdaddr_t *src)
 }
 EXPORT_SYMBOL(baswap);
 
-/* Bluetooth error codes to Unix errno mapping */
+/**
+ * bt_to_errno() - Bluetooth error codes to standard errno
+ * @code: Bluetooth error code to be converted
+ *
+ * This function takes a Bluetooth error code as input and converts
+ * it to an equivalent Unix/standard errno value.
+ *
+ * Return:
+ *
+ * If the bt error code is known, an equivalent Unix errno value
+ * is returned.
+ * If the given bt error code is not known, ENOSYS is returned.
+ */
 int bt_to_errno(__u16 code)
 {
 	switch (code) {
@@ -135,10 +153,22 @@ int bt_to_errno(__u16 code)
 }
 EXPORT_SYMBOL(bt_to_errno);
 
-/* Unix errno to Bluetooth error codes mapping */
+/**
+ * bt_status() - Standard errno value to Bluetooth error code
+ * @err: Unix/standard errno value to be converted
+ *
+ * This function converts a standard/Unix errno value to an
+ * equivalent Bluetooth error code.
+ *
+ * Return: Bluetooth error code.
+ *
+ * If the given errno is not found, 0x1f is returned by default
+ * which indicates an unspecified error.
+ * For err >= 0, no conversion is performed, and the same value
+ * is immediately returned.
+ */
 __u8 bt_status(int err)
 {
-	/* Don't convert if already positive value */
 	if (err >= 0)
 		return err;
 
@@ -206,6 +236,10 @@ __u8 bt_status(int err)
 }
 EXPORT_SYMBOL(bt_status);
 
+/**
+ * bt_info() - Log Bluetooth information message
+ * @format: Message's format string
+ */
 void bt_info(const char *format, ...)
 {
 	struct va_format vaf;
@@ -222,6 +256,10 @@ void bt_info(const char *format, ...)
 }
 EXPORT_SYMBOL(bt_info);
 
+/**
+ * bt_warn() - Log Bluetooth warning message
+ * @format: Message's format string
+ */
 void bt_warn(const char *format, ...)
 {
 	struct va_format vaf;
@@ -238,6 +276,10 @@ void bt_warn(const char *format, ...)
 }
 EXPORT_SYMBOL(bt_warn);
 
+/**
+ * bt_err() - Log Bluetooth error message
+ * @format: Message's format string
+ */
 void bt_err(const char *format, ...)
 {
 	struct va_format vaf;
@@ -267,6 +309,10 @@ bool bt_dbg_get(void)
 	return debug_enable;
 }
 
+/**
+ * bt_dbg() - Log Bluetooth debugging message
+ * @format: Message's format string
+ */
 void bt_dbg(const char *format, ...)
 {
 	struct va_format vaf;
@@ -287,6 +333,13 @@ void bt_dbg(const char *format, ...)
 EXPORT_SYMBOL(bt_dbg);
 #endif
 
+/**
+ * bt_warn_ratelimited() - Log rate-limited Bluetooth warning message
+ * @format: Message's format string
+ *
+ * This functions works like bt_warn, but it uses rate limiting
+ * to prevent the message from being logged too often.
+ */
 void bt_warn_ratelimited(const char *format, ...)
 {
 	struct va_format vaf;
@@ -303,6 +356,13 @@ void bt_warn_ratelimited(const char *format, ...)
 }
 EXPORT_SYMBOL(bt_warn_ratelimited);
 
+/**
+ * bt_err_ratelimited() - Log rate-limited Bluetooth error message
+ * @format: Message's format string
+ *
+ * This functions works like bt_err, but it uses rate limiting
+ * to prevent the message from being logged too often.
+ */
 void bt_err_ratelimited(const char *format, ...)
 {
 	struct va_format vaf;

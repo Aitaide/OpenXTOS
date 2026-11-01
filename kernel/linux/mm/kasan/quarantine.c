@@ -8,6 +8,8 @@
  * Based on code by Dmitry Chernenkov.
  */
 
+#define pr_fmt(fmt) "kasan: " fmt
+
 #include <linux/gfp.h>
 #include <linux/hash.h>
 #include <linux/kernel.h>
@@ -141,11 +143,12 @@ static void *qlink_to_object(struct qlist_node *qlink, struct kmem_cache *cache)
 static void qlink_free(struct qlist_node *qlink, struct kmem_cache *cache)
 {
 	void *object = qlink_to_object(qlink, cache);
-	struct kasan_free_meta *meta = kasan_get_free_meta(cache, object);
-	unsigned long flags;
+	struct kasan_free_meta *free_meta = kasan_get_free_meta(cache, object);
 
-	if (IS_ENABLED(CONFIG_SLAB))
-		local_irq_save(flags);
+	/*
+	 * Note: Keep per-object metadata to allow KASAN print stack traces for
+	 * use-after-free-before-realloc bugs.
+	 */
 
 	/*
 	 * If init_on_free is enabled and KASAN's free metadata is stored in
@@ -155,18 +158,9 @@ static void qlink_free(struct qlist_node *qlink, struct kmem_cache *cache)
 	 */
 	if (slab_want_init_on_free(cache) &&
 	    cache->kasan_info.free_meta_offset == 0)
-		memzero_explicit(meta, sizeof(*meta));
-
-	/*
-	 * As the object now gets freed from the quarantine, assume that its
-	 * free track is no longer valid.
-	 */
-	*(u8 *)kasan_mem_to_shadow(object) = KASAN_SLAB_FREE;
+		memzero_explicit(free_meta, sizeof(*free_meta));
 
 	___cache_free(cache, object, _THIS_IP_);
-
-	if (IS_ENABLED(CONFIG_SLAB))
-		local_irq_restore(flags);
 }
 
 static void qlist_free_all(struct qlist_head *q, struct kmem_cache *cache)
@@ -361,7 +355,12 @@ void kasan_quarantine_remove_cache(struct kmem_cache *cache)
 	 */
 	on_each_cpu(per_cpu_remove_cache, cache, 1);
 
-	for_each_online_cpu(cpu) {
+	/*
+	 * A CPU can go offline after on_each_cpu() returns, leaving cache
+	 * objects on that CPU's shrink list. Scan all possible CPUs to
+	 * drain those lists.
+	 */
+	for_each_possible_cpu(cpu) {
 		sq = per_cpu_ptr(&shrink_qlist, cpu);
 		raw_spin_lock_irqsave(&sq->lock, flags);
 		qlist_move_cache(&sq->qlist, &to_free, cache);
@@ -371,9 +370,14 @@ void kasan_quarantine_remove_cache(struct kmem_cache *cache)
 
 	raw_spin_lock_irqsave(&quarantine_lock, flags);
 	for (i = 0; i < QUARANTINE_BATCHES; i++) {
+		size_t old_bytes;
+
 		if (qlist_empty(&global_quarantine[i]))
 			continue;
+		old_bytes = global_quarantine[i].bytes;
 		qlist_move_cache(&global_quarantine[i], &to_free, cache);
+		WRITE_ONCE(quarantine_size, quarantine_size -
+			   (old_bytes - global_quarantine[i].bytes));
 		/* Scanning whole quarantine can take a while. */
 		raw_spin_unlock_irqrestore(&quarantine_lock, flags);
 		cond_resched();
@@ -414,7 +418,7 @@ static int __init kasan_cpu_quarantine_init(void)
 	ret = cpuhp_setup_state(CPUHP_AP_ONLINE_DYN, "mm/kasan:online",
 				kasan_cpu_online, kasan_cpu_offline);
 	if (ret < 0)
-		pr_err("kasan cpu quarantine register failed [%d]\n", ret);
+		pr_err("cpu quarantine register failed [%d]\n", ret);
 	return ret;
 }
 late_initcall(kasan_cpu_quarantine_init);

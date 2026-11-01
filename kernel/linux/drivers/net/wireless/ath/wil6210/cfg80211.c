@@ -2,6 +2,7 @@
 /*
  * Copyright (c) 2012-2017 Qualcomm Atheros, Inc.
  * Copyright (c) 2018-2019, The Linux Foundation. All rights reserved.
+ * Copyright (c) Qualcomm Technologies, Inc. and/or its subsidiaries.
  */
 
 #include <linux/etherdevice.h>
@@ -533,11 +534,11 @@ int wil_cid_fill_sinfo(struct wil6210_vif *vif, int cid,
 }
 
 static int wil_cfg80211_get_station(struct wiphy *wiphy,
-				    struct net_device *ndev,
+				    struct wireless_dev *wdev,
 				    const u8 *mac, struct station_info *sinfo)
 {
-	struct wil6210_vif *vif = ndev_to_vif(ndev);
 	struct wil6210_priv *wil = wiphy_to_wil(wiphy);
+	struct wil6210_vif *vif = wdev_to_vif(wil, wdev);
 	int rc;
 
 	int cid = wil_find_cid(wil, vif->mid, mac);
@@ -573,11 +574,11 @@ int wil_find_cid_by_idx(struct wil6210_priv *wil, u8 mid, int idx)
 }
 
 static int wil_cfg80211_dump_station(struct wiphy *wiphy,
-				     struct net_device *dev, int idx,
+				     struct wireless_dev *wdev, int idx,
 				     u8 *mac, struct station_info *sinfo)
 {
-	struct wil6210_vif *vif = ndev_to_vif(dev);
 	struct wil6210_priv *wil = wiphy_to_wil(wiphy);
+	struct wil6210_vif *vif = wdev_to_vif(wil, wdev);
 	int rc;
 	int cid = wil_find_cid_by_idx(wil, vif->mid, idx);
 
@@ -691,7 +692,7 @@ wil_cfg80211_add_iface(struct wiphy *wiphy, const char *name,
 			return ERR_PTR(-EINVAL);
 		}
 
-		p2p_wdev = kzalloc(sizeof(*p2p_wdev), GFP_KERNEL);
+		p2p_wdev = kzalloc_obj(*p2p_wdev);
 		if (!p2p_wdev)
 			return ERR_PTR(-ENOMEM);
 
@@ -892,10 +893,8 @@ static int wil_cfg80211_scan(struct wiphy *wiphy,
 	struct wil6210_priv *wil = wiphy_to_wil(wiphy);
 	struct wireless_dev *wdev = request->wdev;
 	struct wil6210_vif *vif = wdev_to_vif(wil, wdev);
-	struct {
-		struct wmi_start_scan_cmd cmd;
-		u16 chnl[4];
-	} __packed cmd;
+	DEFINE_FLEX(struct wmi_start_scan_cmd, cmd,
+		    channel_list, num_channels, 4);
 	uint i, n;
 	int rc;
 
@@ -977,9 +976,8 @@ static int wil_cfg80211_scan(struct wiphy *wiphy,
 	vif->scan_request = request;
 	mod_timer(&vif->scan_timer, jiffies + WIL6210_SCAN_TO);
 
-	memset(&cmd, 0, sizeof(cmd));
-	cmd.cmd.scan_type = WMI_ACTIVE_SCAN;
-	cmd.cmd.num_channels = 0;
+	cmd->scan_type = WMI_ACTIVE_SCAN;
+	cmd->num_channels = 0;
 	n = min(request->n_channels, 4U);
 	for (i = 0; i < n; i++) {
 		int ch = request->channels[i]->hw_value;
@@ -991,7 +989,8 @@ static int wil_cfg80211_scan(struct wiphy *wiphy,
 			continue;
 		}
 		/* 0-based channel indexes */
-		cmd.cmd.channel_list[cmd.cmd.num_channels++].channel = ch - 1;
+		cmd->num_channels++;
+		cmd->channel_list[cmd->num_channels - 1].channel = ch - 1;
 		wil_dbg_misc(wil, "Scan for ch %d  : %d MHz\n", ch,
 			     request->channels[i]->center_freq);
 	}
@@ -1007,20 +1006,19 @@ static int wil_cfg80211_scan(struct wiphy *wiphy,
 	if (rc)
 		goto out_restore;
 
-	if (wil->discovery_mode && cmd.cmd.scan_type == WMI_ACTIVE_SCAN) {
-		cmd.cmd.discovery_mode = 1;
+	if (wil->discovery_mode && cmd->scan_type == WMI_ACTIVE_SCAN) {
+		cmd->discovery_mode = 1;
 		wil_dbg_misc(wil, "active scan with discovery_mode=1\n");
 	}
 
 	if (vif->mid == 0)
 		wil->radio_wdev = wdev;
 	rc = wmi_send(wil, WMI_START_SCAN_CMDID, vif->mid,
-		      &cmd, sizeof(cmd.cmd) +
-		      cmd.cmd.num_channels * sizeof(cmd.cmd.channel_list[0]));
+		      cmd, struct_size(cmd, channel_list, cmd->num_channels));
 
 out_restore:
 	if (rc) {
-		del_timer_sync(&vif->scan_timer);
+		timer_delete_sync(&vif->scan_timer);
 		if (vif->mid == 0)
 			wil->radio_wdev = wil->main_ndev->ieee80211_ptr;
 		vif->scan_request = NULL;
@@ -1411,7 +1409,8 @@ static int wil_cfg80211_disconnect(struct wiphy *wiphy,
 	return rc;
 }
 
-static int wil_cfg80211_set_wiphy_params(struct wiphy *wiphy, u32 changed)
+static int wil_cfg80211_set_wiphy_params(struct wiphy *wiphy, int radio_idx,
+					 u32 changed)
 {
 	struct wil6210_priv *wil = wiphy_to_wil(wiphy);
 	int rc;
@@ -1433,7 +1432,7 @@ static int wil_cfg80211_set_wiphy_params(struct wiphy *wiphy, u32 changed)
 
 int wil_cfg80211_mgmt_tx(struct wiphy *wiphy, struct wireless_dev *wdev,
 			 struct cfg80211_mgmt_tx_params *params,
-			 u64 *cookie)
+			 u64 cookie)
 {
 	const u8 *buf = params->buf;
 	size_t len = params->len;
@@ -1489,13 +1488,13 @@ out:
 	 */
 	tx_status = (rc == 0);
 	rc = (rc == -EAGAIN) ? 0 : rc;
-	cfg80211_mgmt_tx_status(wdev, cookie ? *cookie : 0, buf, len,
-				tx_status, GFP_KERNEL);
+	cfg80211_mgmt_tx_status(wdev, cookie, buf, len, tx_status, GFP_KERNEL);
 
 	return rc;
 }
 
 static int wil_cfg80211_set_channel(struct wiphy *wiphy,
+				    struct net_device *dev,
 				    struct cfg80211_chan_def *chandef)
 {
 	struct wil6210_priv *wil = wiphy_to_wil(wiphy);
@@ -1620,15 +1619,14 @@ static void wil_del_rx_key(u8 key_index, enum wmi_key_usage key_usage,
 }
 
 static int wil_cfg80211_add_key(struct wiphy *wiphy,
-				struct net_device *ndev, int link_id,
+				struct wireless_dev *wdev, int link_id,
 				u8 key_index, bool pairwise,
 				const u8 *mac_addr,
 				struct key_params *params)
 {
 	int rc;
-	struct wil6210_vif *vif = ndev_to_vif(ndev);
 	struct wil6210_priv *wil = wiphy_to_wil(wiphy);
-	struct wireless_dev *wdev = vif_to_wdev(vif);
+	struct wil6210_vif *vif = wdev_to_vif(wil, wdev);
 	enum wmi_key_usage key_usage = wil_detect_key_usage(wdev, pairwise);
 	struct wil_sta_info *cs = wil_find_sta_by_key_usage(wil, vif->mid,
 							    key_usage,
@@ -1696,13 +1694,12 @@ static int wil_cfg80211_add_key(struct wiphy *wiphy,
 }
 
 static int wil_cfg80211_del_key(struct wiphy *wiphy,
-				struct net_device *ndev, int link_id,
+				struct wireless_dev *wdev, int link_id,
 				u8 key_index, bool pairwise,
 				const u8 *mac_addr)
 {
-	struct wil6210_vif *vif = ndev_to_vif(ndev);
 	struct wil6210_priv *wil = wiphy_to_wil(wiphy);
-	struct wireless_dev *wdev = vif_to_wdev(vif);
+	struct wil6210_vif *vif = wdev_to_vif(wil, wdev);
 	enum wmi_key_usage key_usage = wil_detect_key_usage(wdev, pairwise);
 	struct wil_sta_info *cs = wil_find_sta_by_key_usage(wil, vif->mid,
 							    key_usage,
@@ -1737,7 +1734,7 @@ static int wil_remain_on_channel(struct wiphy *wiphy,
 				 struct wireless_dev *wdev,
 				 struct ieee80211_channel *chan,
 				 unsigned int duration,
-				 u64 *cookie)
+				 u64 cookie, const u8 *rx_addr)
 {
 	struct wil6210_priv *wil = wiphy_to_wil(wiphy);
 	int rc;
@@ -2072,7 +2069,8 @@ void wil_cfg80211_ap_recovery(struct wil6210_priv *wil)
 		key_params.key = vif->gtk;
 		key_params.key_len = vif->gtk_len;
 		key_params.seq_len = IEEE80211_GCMP_PN_LEN;
-		rc = wil_cfg80211_add_key(wiphy, ndev, -1, vif->gtk_index,
+		rc = wil_cfg80211_add_key(wiphy, vif_to_wdev(vif), -1,
+					  vif->gtk_index,
 					  false, NULL, &key_params);
 		if (rc)
 			wil_err(wil, "vif %d recovery add key failed (%d)\n",
@@ -2082,11 +2080,12 @@ void wil_cfg80211_ap_recovery(struct wil6210_priv *wil)
 
 static int wil_cfg80211_change_beacon(struct wiphy *wiphy,
 				      struct net_device *ndev,
-				      struct cfg80211_beacon_data *bcon)
+				      struct cfg80211_ap_update *params)
 {
 	struct wil6210_priv *wil = wiphy_to_wil(wiphy);
 	struct wireless_dev *wdev = ndev->ieee80211_ptr;
 	struct wil6210_vif *vif = ndev_to_vif(ndev);
+	struct cfg80211_beacon_data *bcon = &params->beacon;
 	int rc;
 	u32 privacy = 0;
 
@@ -2225,12 +2224,12 @@ static int wil_cfg80211_stop_ap(struct wiphy *wiphy,
 }
 
 static int wil_cfg80211_add_station(struct wiphy *wiphy,
-				    struct net_device *dev,
+				    struct wireless_dev *wdev,
 				    const u8 *mac,
 				    struct station_parameters *params)
 {
-	struct wil6210_vif *vif = ndev_to_vif(dev);
 	struct wil6210_priv *wil = wiphy_to_wil(wiphy);
+	struct wil6210_vif *vif = wdev_to_vif(wil, wdev);
 
 	wil_dbg_misc(wil, "add station %pM aid %d mid %d mask 0x%x set 0x%x\n",
 		     mac, params->aid, vif->mid,
@@ -2250,11 +2249,11 @@ static int wil_cfg80211_add_station(struct wiphy *wiphy,
 }
 
 static int wil_cfg80211_del_station(struct wiphy *wiphy,
-				    struct net_device *dev,
+				    struct wireless_dev *wdev,
 				    struct station_del_parameters *params)
 {
-	struct wil6210_vif *vif = ndev_to_vif(dev);
 	struct wil6210_priv *wil = wiphy_to_wil(wiphy);
+	struct wil6210_vif *vif = wdev_to_vif(wil, wdev);
 
 	wil_dbg_misc(wil, "del_station: %pM, reason=%d mid=%d\n",
 		     params->mac, params->reason_code, vif->mid);
@@ -2267,12 +2266,12 @@ static int wil_cfg80211_del_station(struct wiphy *wiphy,
 }
 
 static int wil_cfg80211_change_station(struct wiphy *wiphy,
-				       struct net_device *dev,
+				       struct wireless_dev *wdev,
 				       const u8 *mac,
 				       struct station_parameters *params)
 {
-	struct wil6210_vif *vif = ndev_to_vif(dev);
 	struct wil6210_priv *wil = wiphy_to_wil(wiphy);
+	struct wil6210_vif *vif = wdev_to_vif(wil, wdev);
 	int authorize;
 	int cid, i;
 	struct wil_ring_tx_data *txdata = NULL;
@@ -2326,7 +2325,7 @@ static void wil_probe_client_handle(struct wil6210_priv *wil,
 	 */
 	bool alive = (sta->status == wil_sta_connected);
 
-	cfg80211_probe_status(ndev, sta->addr, req->cookie, alive,
+	cfg80211_probe_status(ndev, sta->addr, req->cookie, -1, alive,
 			      0, false, GFP_KERNEL);
 }
 
@@ -2379,9 +2378,9 @@ void wil_probe_client_flush(struct wil6210_vif *vif)
 	mutex_unlock(&vif->probe_client_mutex);
 }
 
-static int wil_cfg80211_probe_client(struct wiphy *wiphy,
-				     struct net_device *dev,
-				     const u8 *peer, u64 *cookie)
+static int wil_cfg80211_probe_peer(struct wiphy *wiphy,
+				   struct net_device *dev,
+				   const u8 *peer, u64 cookie)
 {
 	struct wil6210_priv *wil = wiphy_to_wil(wiphy);
 	struct wil6210_vif *vif = ndev_to_vif(dev);
@@ -2394,18 +2393,17 @@ static int wil_cfg80211_probe_client(struct wiphy *wiphy,
 	if (cid < 0)
 		return -ENOLINK;
 
-	req = kzalloc(sizeof(*req), GFP_KERNEL);
+	req = kzalloc_obj(*req);
 	if (!req)
 		return -ENOMEM;
 
 	req->cid = cid;
-	req->cookie = cid;
+	req->cookie = cookie;
 
 	mutex_lock(&vif->probe_client_mutex);
 	list_add_tail(&req->list, &vif->probe_client_pending);
 	mutex_unlock(&vif->probe_client_mutex);
 
-	*cookie = req->cookie;
 	queue_work(wil->wq_service, &vif->probe_client_worker);
 	return 0;
 }
@@ -2660,7 +2658,7 @@ static const struct cfg80211_ops wil_cfg80211_ops = {
 	.add_station = wil_cfg80211_add_station,
 	.del_station = wil_cfg80211_del_station,
 	.change_station = wil_cfg80211_change_station,
-	.probe_client = wil_cfg80211_probe_client,
+	.probe_peer = wil_cfg80211_probe_peer,
 	.change_bss = wil_cfg80211_change_bss,
 	/* P2P device */
 	.start_p2p_device = wil_cfg80211_start_p2p_device,
@@ -2708,6 +2706,7 @@ static void wil_wiphy_init(struct wiphy *wiphy)
 	wiphy->n_cipher_suites = ARRAY_SIZE(wil_cipher_suites);
 	wiphy->mgmt_stypes = wil_mgmt_stypes;
 	wiphy->features |= NL80211_FEATURE_SK_TX_STATUS;
+	wiphy->bss_param_support = WIPHY_BSS_PARAM_AP_ISOLATE;
 
 	wiphy->n_vendor_commands = ARRAY_SIZE(wil_nl80211_vendor_commands);
 	wiphy->vendor_commands = wil_nl80211_vendor_commands;
@@ -2734,7 +2733,7 @@ int wil_cfg80211_iface_combinations_from_fw(
 		return 0;
 	}
 
-	combo = conc->combos;
+	combo = (const struct wil_fw_concurrency_combo *)(conc + 1);
 	n_combos = le16_to_cpu(conc->n_combos);
 	for (i = 0; i < n_combos; i++) {
 		total_limits += combo->n_limits;
@@ -2750,7 +2749,7 @@ int wil_cfg80211_iface_combinations_from_fw(
 		return -ENOMEM;
 	iface_limit = (struct ieee80211_iface_limit *)(iface_combinations +
 						       n_combos);
-	combo = conc->combos;
+	combo = (const struct wil_fw_concurrency_combo *)(conc + 1);
 	for (i = 0; i < n_combos; i++) {
 		iface_combinations[i].max_interfaces = combo->max_interfaces;
 		iface_combinations[i].num_different_channels =

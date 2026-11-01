@@ -13,24 +13,25 @@
 #include "test_util.h"
 #include "kvm_util.h"
 #include "processor.h"
+#include "ucall_common.h"
 
 struct guest_vals {
-	uint64_t a;
-	uint64_t b;
-	uint64_t type;
+	u64 a;
+	u64 b;
+	u64 type;
 };
 
 static struct guest_vals vals;
 
 /* GUEST_PRINTF()/GUEST_ASSERT_FMT() does not support float or double. */
 #define TYPE_LIST					\
-TYPE(test_type_i64,  I64,  "%ld",   int64_t)		\
-TYPE(test_type_u64,  U64u, "%lu",   uint64_t)		\
-TYPE(test_type_x64,  U64x, "0x%lx", uint64_t)		\
-TYPE(test_type_X64,  U64X, "0x%lX", uint64_t)		\
-TYPE(test_type_u32,  U32u, "%u",    uint32_t)		\
-TYPE(test_type_x32,  U32x, "0x%x",  uint32_t)		\
-TYPE(test_type_X32,  U32X, "0x%X",  uint32_t)		\
+TYPE(test_type_i64,  I64,  "%ld",   s64)		\
+TYPE(test_type_u64,  U64u, "%lu",   u64)		\
+TYPE(test_type_x64,  U64x, "0x%lx", u64)		\
+TYPE(test_type_X64,  U64X, "0x%lX", u64)		\
+TYPE(test_type_u32,  U32u, "%u",    u32)		\
+TYPE(test_type_x32,  U32x, "0x%x",  u32)		\
+TYPE(test_type_X32,  U32X, "0x%X",  u32)		\
 TYPE(test_type_int,  INT,  "%d",    int)		\
 TYPE(test_type_char, CHAR, "%c",    char)		\
 TYPE(test_type_str,  STR,  "'%s'",  const char *)	\
@@ -55,7 +56,7 @@ static void fn(struct kvm_vcpu *vcpu, T a, T b)				     \
 									     \
 	snprintf(expected_printf, UCALL_BUFFER_LEN, PRINTF_FMT_##ext, a, b); \
 	snprintf(expected_assert, UCALL_BUFFER_LEN, ASSERT_FMT_##ext, a, b); \
-	vals = (struct guest_vals){ (uint64_t)a, (uint64_t)b, TYPE_##ext };  \
+	vals = (struct guest_vals){ (u64)a, (u64)b, TYPE_##ext };  \
 	sync_global_to_guest(vcpu->vm, vals);				     \
 	run_test(vcpu, expected_printf, expected_assert);		     \
 }
@@ -98,12 +99,27 @@ static void ucall_abort(const char *assert_msg, const char *expected_assert_msg)
 	int offset = len_str - len_substr;
 
 	TEST_ASSERT(len_substr <= len_str,
-		    "Expected '%s' to be a substring of '%s'\n",
+		    "Expected '%s' to be a substring of '%s'",
 		    assert_msg, expected_assert_msg);
 
 	TEST_ASSERT(strcmp(&assert_msg[offset], expected_assert_msg) == 0,
 		    "Unexpected mismatch. Expected: '%s', got: '%s'",
 		    expected_assert_msg, &assert_msg[offset]);
+}
+
+/*
+ * Open code vcpu_run(), sans the UCALL_ABORT handling, so that intentional
+ * guest asserts guest can be verified instead of being reported as failures.
+ */
+static void do_vcpu_run(struct kvm_vcpu *vcpu)
+{
+	int r;
+
+	do {
+		r = __vcpu_run(vcpu);
+	} while (r == -1 && errno == EINTR);
+
+	TEST_ASSERT(!r, KVM_IOCTL_ERROR(KVM_RUN, r));
 }
 
 static void run_test(struct kvm_vcpu *vcpu, const char *expected_printf,
@@ -113,10 +129,10 @@ static void run_test(struct kvm_vcpu *vcpu, const char *expected_printf,
 	struct ucall uc;
 
 	while (1) {
-		vcpu_run(vcpu);
+		do_vcpu_run(vcpu);
 
 		TEST_ASSERT(run->exit_reason == UCALL_EXIT_REASON,
-			    "Unexpected exit reason: %u (%s),\n",
+			    "Unexpected exit reason: %u (%s),",
 			    run->exit_reason, exit_reason_str(run->exit_reason));
 
 		switch (get_ucall(vcpu, &uc)) {
@@ -158,14 +174,14 @@ static void test_limits(void)
 
 	vm = vm_create_with_one_vcpu(&vcpu, guest_code_limits);
 	run = vcpu->run;
-	vcpu_run(vcpu);
+	do_vcpu_run(vcpu);
 
 	TEST_ASSERT(run->exit_reason == UCALL_EXIT_REASON,
-		    "Unexpected exit reason: %u (%s),\n",
+		    "Unexpected exit reason: %u (%s),",
 		    run->exit_reason, exit_reason_str(run->exit_reason));
 
 	TEST_ASSERT(get_ucall(vcpu, &uc) == UCALL_ABORT,
-		    "Unexpected ucall command: %lu,  Expected: %u (UCALL_ABORT)\n",
+		    "Unexpected ucall command: %lu,  Expected: %u (UCALL_ABORT)",
 		    uc.cmd, UCALL_ABORT);
 
 	kvm_vm_free(vm);

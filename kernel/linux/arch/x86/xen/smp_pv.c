@@ -29,6 +29,7 @@
 #include <asm/idtentry.h>
 #include <asm/desc.h>
 #include <asm/cpu.h>
+#include <asm/apic.h>
 #include <asm/io_apic.h>
 
 #include <xen/interface/xen.h>
@@ -45,9 +46,6 @@
 
 #include <xen/hvc-console.h>
 #include "xen-ops.h"
-#include "mmu.h"
-#include "smp.h"
-#include "pmu.h"
 
 cpumask_var_t xen_cpu_initialized_map;
 
@@ -67,13 +65,11 @@ static void cpu_bringup(void)
 	touch_softlockup_watchdog();
 
 	/* PVH runs in ring 0 and allows us to do native syscalls. Yay! */
-	if (!xen_feature(XENFEAT_supervisor_mode_kernel)) {
-		xen_enable_sysenter();
+	if (!xen_feature(XENFEAT_supervisor_mode_kernel))
 		xen_enable_syscall();
-	}
+
 	cpu = smp_processor_id();
-	smp_store_cpu_info(cpu);
-	cpu_data(cpu).x86_max_cores = 1;
+	identify_secondary_cpu(cpu);
 	set_cpu_sibling_map(cpu);
 
 	speculative_store_bypass_ht_init();
@@ -149,39 +145,16 @@ int xen_smp_intr_init_pv(unsigned int cpu)
 	return rc;
 }
 
-static void __init _get_smp_config(unsigned int early)
+static void __init xen_pv_smp_config(void)
 {
-	int i, rc;
-	unsigned int subtract = 0;
+	u32 apicid = 0;
+	int i;
 
-	if (early)
-		return;
+	topology_register_boot_apic(apicid);
 
-	num_processors = 0;
-	disabled_cpus = 0;
-	for (i = 0; i < nr_cpu_ids; i++) {
-		rc = HYPERVISOR_vcpu_op(VCPUOP_is_up, i, NULL);
-		if (rc >= 0) {
-			num_processors++;
-			set_cpu_possible(i, true);
-		} else {
-			set_cpu_possible(i, false);
-			set_cpu_present(i, false);
-			subtract++;
-		}
-	}
-#ifdef CONFIG_HOTPLUG_CPU
-	/* This is akin to using 'nr_cpus' on the Linux command line.
-	 * Which is OK as when we use 'dom0_max_vcpus=X' we can only
-	 * have up to X, while nr_cpu_ids is greater than X. This
-	 * normally is not a problem, except when CPU hotplugging
-	 * is involved and then there might be more than X CPUs
-	 * in the guest - which will not work as there is no
-	 * hypercall to expand the max number of VCPUs an already
-	 * running guest has. So cap it up to X. */
-	if (subtract)
-		set_nr_cpu_ids(nr_cpu_ids - subtract);
-#endif
+	for (i = 0; i < nr_cpu_ids; i++)
+		topology_register_apic(apicid++, CPU_ACPIID_INVALID, true);
+
 	/* Pretend to be a proper enumerated system */
 	smp_found_config = 1;
 }
@@ -224,8 +197,6 @@ static void __init xen_pv_smp_prepare_cpus(unsigned int max_cpus)
 
 	smp_prepare_cpus_common();
 
-	cpu_data(0).x86_max_cores = 1;
-
 	speculative_store_bypass_ht_init();
 
 	xen_pmu_init(0);
@@ -259,7 +230,7 @@ cpu_initialize_context(unsigned int cpu, struct task_struct *idle)
 	if (cpumask_test_and_set_cpu(cpu, xen_cpu_initialized_map))
 		return 0;
 
-	ctxt = kzalloc(sizeof(*ctxt), GFP_KERNEL);
+	ctxt = kzalloc_obj(*ctxt);
 	if (ctxt == NULL) {
 		cpumask_clear_cpu(cpu, xen_cpu_initialized_map);
 		return -ENOMEM;
@@ -429,9 +400,23 @@ static void xen_pv_stop_other_cpus(int wait)
 static irqreturn_t xen_irq_work_interrupt(int irq, void *dev_id)
 {
 	irq_work_run();
-	inc_irq_stat(apic_irq_work_irqs);
+	inc_irq_stat(IRQ_WORK);
 
 	return IRQ_HANDLED;
+}
+
+void __init xen_smp_count_cpus(void)
+{
+	unsigned int cpus;
+
+	for (cpus = 0; cpus < nr_cpu_ids; cpus++) {
+		if (HYPERVISOR_vcpu_op(VCPUOP_is_up, cpus, NULL) < 0)
+			break;
+	}
+
+	pr_info("Xen PV: Detected %u vCPUS\n", cpus);
+	if (cpus < nr_cpu_ids)
+		set_nr_cpu_ids(cpus);
 }
 
 static const struct smp_ops xen_smp_ops __initconst = {
@@ -458,6 +443,12 @@ void __init xen_smp_init(void)
 	smp_ops = xen_smp_ops;
 
 	/* Avoid searching for BIOS MP tables */
-	x86_init.mpparse.find_smp_config = x86_init_noop;
-	x86_init.mpparse.get_smp_config = _get_smp_config;
+	x86_init.mpparse.find_mptable		= x86_init_noop;
+	x86_init.mpparse.early_parse_smp_cfg	= x86_init_noop;
+
+	/* XEN/PV Dom0 has halfways sane topology information via CPUID/MADT */
+	if (xen_initial_domain())
+		x86_init.mpparse.parse_smp_cfg	= x86_init_noop;
+	else
+		x86_init.mpparse.parse_smp_cfg	= xen_pv_smp_config;
 }

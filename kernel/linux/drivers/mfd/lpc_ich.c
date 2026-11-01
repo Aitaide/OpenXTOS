@@ -38,12 +38,14 @@
 
 #define pr_fmt(fmt) KBUILD_MODNAME ": " fmt
 
+#include <linux/align.h>
 #include <linux/kernel.h>
 #include <linux/module.h>
 #include <linux/errno.h>
 #include <linux/acpi.h>
 #include <linux/pci.h>
 #include <linux/pinctrl/pinctrl.h>
+#include <linux/property.h>
 #include <linux/mfd/core.h>
 #include <linux/mfd/lpc_ich.h>
 #include <linux/platform_data/itco_wdt.h>
@@ -85,19 +87,6 @@
 #define wdt_mem_res(i) wdt_res(ICH_RES_MEM_OFF, i)
 #define wdt_res(b, i) (&wdt_ich_res[(b) + (i)])
 
-struct lpc_ich_priv {
-	int chipset;
-
-	int abase;		/* ACPI base */
-	int actrl_pbase;	/* ACPI control or PMC base */
-	int gbase;		/* GPIO base */
-	int gctrl;		/* GPIO control */
-
-	int abase_save;		/* Cached ACPI base value */
-	int actrl_pbase_save;		/* Cached ACPI control or PMC base value */
-	int gctrl_save;		/* Cached GPIO control value */
-};
-
 static struct resource wdt_ich_res[] = {
 	/* ACPI - TCO */
 	{
@@ -137,28 +126,45 @@ static struct mfd_cell lpc_ich_wdt_cell = {
 	.ignore_resource_conflicts = true,
 };
 
+const struct software_node lpc_ich_gpio_swnode = {
+	.name = "gpio_ich",
+};
+EXPORT_SYMBOL_NS(lpc_ich_gpio_swnode, "LPC_ICH");
+
 static struct mfd_cell lpc_ich_gpio_cell = {
 	.name = "gpio_ich",
 	.num_resources = ARRAY_SIZE(gpio_ich_res),
 	.resources = gpio_ich_res,
 	.ignore_resource_conflicts = true,
+	.swnode = &lpc_ich_gpio_swnode,
+};
+
+#define INTEL_GPIO_RESOURCE_SIZE	0x1000
+
+struct lpc_ich_gpio_info {
+	const char *hid;
+	const struct mfd_cell *devices;
+	size_t nr_devices;
+	struct resource **resources;
+	size_t nr_resources;
+	const resource_size_t *offsets;
 };
 
 #define APL_GPIO_NORTH		0
 #define APL_GPIO_NORTHWEST	1
 #define APL_GPIO_WEST		2
 #define APL_GPIO_SOUTHWEST	3
+
 #define APL_GPIO_NR_DEVICES	4
+#define APL_GPIO_NR_RESOURCES	4
 
 /* Offset data for Apollo Lake GPIO controllers */
-static resource_size_t apl_gpio_offsets[APL_GPIO_NR_DEVICES] = {
+static const resource_size_t apl_gpio_offsets[APL_GPIO_NR_RESOURCES] = {
 	[APL_GPIO_NORTH]	= 0xc50000,
 	[APL_GPIO_NORTHWEST]	= 0xc40000,
 	[APL_GPIO_WEST]		= 0xc70000,
 	[APL_GPIO_SOUTHWEST]	= 0xc00000,
 };
-
-#define APL_GPIO_RESOURCE_SIZE		0x1000
 
 #define APL_GPIO_IRQ			14
 
@@ -179,6 +185,13 @@ static struct resource apl_gpio_resources[APL_GPIO_NR_DEVICES][2] = {
 		DEFINE_RES_MEM(0, 0),
 		DEFINE_RES_IRQ(APL_GPIO_IRQ),
 	},
+};
+
+static struct resource *apl_gpio_mem_resources[APL_GPIO_NR_RESOURCES] = {
+	[APL_GPIO_NORTH] = &apl_gpio_resources[APL_GPIO_NORTH][0],
+	[APL_GPIO_NORTHWEST] = &apl_gpio_resources[APL_GPIO_NORTHWEST][0],
+	[APL_GPIO_WEST] = &apl_gpio_resources[APL_GPIO_WEST][0],
+	[APL_GPIO_SOUTHWEST] = &apl_gpio_resources[APL_GPIO_SOUTHWEST][0],
 };
 
 static const struct mfd_cell apl_gpio_devices[APL_GPIO_NR_DEVICES] = {
@@ -210,6 +223,58 @@ static const struct mfd_cell apl_gpio_devices[APL_GPIO_NR_DEVICES] = {
 		.resources = apl_gpio_resources[APL_GPIO_SOUTHWEST],
 		.ignore_resource_conflicts = true,
 	},
+};
+
+static const struct lpc_ich_gpio_info apl_gpio_info = {
+	.hid = "INT3452",
+	.devices = apl_gpio_devices,
+	.nr_devices = ARRAY_SIZE(apl_gpio_devices),
+	.resources = apl_gpio_mem_resources,
+	.nr_resources = ARRAY_SIZE(apl_gpio_mem_resources),
+	.offsets = apl_gpio_offsets,
+};
+
+#define DNV_GPIO_NORTH		0
+#define DNV_GPIO_SOUTH		1
+
+#define DNV_GPIO_NR_DEVICES	1
+#define DNV_GPIO_NR_RESOURCES	2
+
+/* Offset data for Denverton GPIO controllers */
+static const resource_size_t dnv_gpio_offsets[DNV_GPIO_NR_RESOURCES] = {
+	[DNV_GPIO_NORTH]	= 0xc20000,
+	[DNV_GPIO_SOUTH]	= 0xc50000,
+};
+
+#define DNV_GPIO_IRQ			14
+
+static struct resource dnv_gpio_resources[DNV_GPIO_NR_RESOURCES + 1] = {
+	[DNV_GPIO_NORTH] = DEFINE_RES_MEM(0, 0),
+	[DNV_GPIO_SOUTH] = DEFINE_RES_MEM(0, 0),
+	DEFINE_RES_IRQ(DNV_GPIO_IRQ),
+};
+
+static struct resource *dnv_gpio_mem_resources[DNV_GPIO_NR_RESOURCES] = {
+	[DNV_GPIO_NORTH] = &dnv_gpio_resources[DNV_GPIO_NORTH],
+	[DNV_GPIO_SOUTH] = &dnv_gpio_resources[DNV_GPIO_SOUTH],
+};
+
+static const struct mfd_cell dnv_gpio_devices[DNV_GPIO_NR_DEVICES] = {
+	{
+		.name = "denverton-pinctrl",
+		.num_resources = ARRAY_SIZE(dnv_gpio_resources),
+		.resources = dnv_gpio_resources,
+		.ignore_resource_conflicts = true,
+	},
+};
+
+static const struct lpc_ich_gpio_info dnv_gpio_info = {
+	.hid = "INTC3000",
+	.devices = dnv_gpio_devices,
+	.nr_devices = ARRAY_SIZE(dnv_gpio_devices),
+	.resources = dnv_gpio_mem_resources,
+	.nr_resources = ARRAY_SIZE(dnv_gpio_mem_resources),
+	.offsets = dnv_gpio_offsets,
 };
 
 static struct mfd_cell lpc_ich_spi_cell = {
@@ -289,8 +354,22 @@ enum lpc_chipsets {
 	LPC_LEWISBURG,	/* Lewisburg */
 	LPC_9S,		/* 9 Series */
 	LPC_APL,	/* Apollo Lake SoC */
+	LPC_DNV,	/* Denverton SoC */
 	LPC_GLK,	/* Gemini Lake SoC */
 	LPC_COUGARMOUNTAIN,/* Cougar Mountain SoC*/
+};
+
+struct lpc_ich_priv {
+	enum lpc_chipsets chipset;
+
+	int abase;		/* ACPI base */
+	int actrl_pbase;	/* ACPI control or PMC base */
+	int gbase;		/* GPIO base */
+	int gctrl;		/* GPIO control */
+
+	int abase_save;		/* Cached ACPI base value */
+	int actrl_pbase_save;		/* Cached ACPI control or PMC base value */
+	int gctrl_save;		/* Cached GPIO control value */
 };
 
 static struct lpc_ich_info lpc_chipset_info[] = {
@@ -618,7 +697,12 @@ static struct lpc_ich_info lpc_chipset_info[] = {
 	[LPC_APL] = {
 		.name = "Apollo Lake SoC",
 		.iTCO_version = 5,
+		.gpio_info = &apl_gpio_info,
 		.spi_type = INTEL_SPI_BXT,
+	},
+	[LPC_DNV] = {
+		.name = "Denverton SoC",
+		.gpio_info = &dnv_gpio_info,
 	},
 	[LPC_GLK] = {
 		.name = "Gemini Lake SoC",
@@ -637,242 +721,244 @@ static struct lpc_ich_info lpc_chipset_info[] = {
  * functions that probably will be registered by other drivers.
  */
 static const struct pci_device_id lpc_ich_ids[] = {
-	{ PCI_VDEVICE(INTEL, 0x0f1c), LPC_BAYTRAIL},
-	{ PCI_VDEVICE(INTEL, 0x1c41), LPC_CPT},
-	{ PCI_VDEVICE(INTEL, 0x1c42), LPC_CPTD},
-	{ PCI_VDEVICE(INTEL, 0x1c43), LPC_CPTM},
-	{ PCI_VDEVICE(INTEL, 0x1c44), LPC_CPT},
-	{ PCI_VDEVICE(INTEL, 0x1c45), LPC_CPT},
-	{ PCI_VDEVICE(INTEL, 0x1c46), LPC_CPT},
-	{ PCI_VDEVICE(INTEL, 0x1c47), LPC_CPT},
-	{ PCI_VDEVICE(INTEL, 0x1c48), LPC_CPT},
-	{ PCI_VDEVICE(INTEL, 0x1c49), LPC_CPT},
-	{ PCI_VDEVICE(INTEL, 0x1c4a), LPC_CPT},
-	{ PCI_VDEVICE(INTEL, 0x1c4b), LPC_CPT},
-	{ PCI_VDEVICE(INTEL, 0x1c4c), LPC_CPT},
-	{ PCI_VDEVICE(INTEL, 0x1c4d), LPC_CPT},
-	{ PCI_VDEVICE(INTEL, 0x1c4e), LPC_CPT},
-	{ PCI_VDEVICE(INTEL, 0x1c4f), LPC_CPT},
-	{ PCI_VDEVICE(INTEL, 0x1c50), LPC_CPT},
-	{ PCI_VDEVICE(INTEL, 0x1c51), LPC_CPT},
-	{ PCI_VDEVICE(INTEL, 0x1c52), LPC_CPT},
-	{ PCI_VDEVICE(INTEL, 0x1c53), LPC_CPT},
-	{ PCI_VDEVICE(INTEL, 0x1c54), LPC_CPT},
-	{ PCI_VDEVICE(INTEL, 0x1c55), LPC_CPT},
-	{ PCI_VDEVICE(INTEL, 0x1c56), LPC_CPT},
-	{ PCI_VDEVICE(INTEL, 0x1c57), LPC_CPT},
-	{ PCI_VDEVICE(INTEL, 0x1c58), LPC_CPT},
-	{ PCI_VDEVICE(INTEL, 0x1c59), LPC_CPT},
-	{ PCI_VDEVICE(INTEL, 0x1c5a), LPC_CPT},
-	{ PCI_VDEVICE(INTEL, 0x1c5b), LPC_CPT},
-	{ PCI_VDEVICE(INTEL, 0x1c5c), LPC_CPT},
-	{ PCI_VDEVICE(INTEL, 0x1c5d), LPC_CPT},
-	{ PCI_VDEVICE(INTEL, 0x1c5e), LPC_CPT},
-	{ PCI_VDEVICE(INTEL, 0x1c5f), LPC_CPT},
-	{ PCI_VDEVICE(INTEL, 0x1d40), LPC_PBG},
-	{ PCI_VDEVICE(INTEL, 0x1d41), LPC_PBG},
-	{ PCI_VDEVICE(INTEL, 0x1e40), LPC_PPT},
-	{ PCI_VDEVICE(INTEL, 0x1e41), LPC_PPT},
-	{ PCI_VDEVICE(INTEL, 0x1e42), LPC_PPT},
-	{ PCI_VDEVICE(INTEL, 0x1e43), LPC_PPT},
-	{ PCI_VDEVICE(INTEL, 0x1e44), LPC_PPT},
-	{ PCI_VDEVICE(INTEL, 0x1e45), LPC_PPT},
-	{ PCI_VDEVICE(INTEL, 0x1e46), LPC_PPT},
-	{ PCI_VDEVICE(INTEL, 0x1e47), LPC_PPT},
-	{ PCI_VDEVICE(INTEL, 0x1e48), LPC_PPT},
-	{ PCI_VDEVICE(INTEL, 0x1e49), LPC_PPT},
-	{ PCI_VDEVICE(INTEL, 0x1e4a), LPC_PPT},
-	{ PCI_VDEVICE(INTEL, 0x1e4b), LPC_PPT},
-	{ PCI_VDEVICE(INTEL, 0x1e4c), LPC_PPT},
-	{ PCI_VDEVICE(INTEL, 0x1e4d), LPC_PPT},
-	{ PCI_VDEVICE(INTEL, 0x1e4e), LPC_PPT},
-	{ PCI_VDEVICE(INTEL, 0x1e4f), LPC_PPT},
-	{ PCI_VDEVICE(INTEL, 0x1e50), LPC_PPT},
-	{ PCI_VDEVICE(INTEL, 0x1e51), LPC_PPT},
-	{ PCI_VDEVICE(INTEL, 0x1e52), LPC_PPT},
-	{ PCI_VDEVICE(INTEL, 0x1e53), LPC_PPT},
-	{ PCI_VDEVICE(INTEL, 0x1e54), LPC_PPT},
-	{ PCI_VDEVICE(INTEL, 0x1e55), LPC_PPT},
-	{ PCI_VDEVICE(INTEL, 0x1e56), LPC_PPT},
-	{ PCI_VDEVICE(INTEL, 0x1e57), LPC_PPT},
-	{ PCI_VDEVICE(INTEL, 0x1e58), LPC_PPT},
-	{ PCI_VDEVICE(INTEL, 0x1e59), LPC_PPT},
-	{ PCI_VDEVICE(INTEL, 0x1e5a), LPC_PPT},
-	{ PCI_VDEVICE(INTEL, 0x1e5b), LPC_PPT},
-	{ PCI_VDEVICE(INTEL, 0x1e5c), LPC_PPT},
-	{ PCI_VDEVICE(INTEL, 0x1e5d), LPC_PPT},
-	{ PCI_VDEVICE(INTEL, 0x1e5e), LPC_PPT},
-	{ PCI_VDEVICE(INTEL, 0x1e5f), LPC_PPT},
-	{ PCI_VDEVICE(INTEL, 0x1f38), LPC_AVN},
-	{ PCI_VDEVICE(INTEL, 0x1f39), LPC_AVN},
-	{ PCI_VDEVICE(INTEL, 0x1f3a), LPC_AVN},
-	{ PCI_VDEVICE(INTEL, 0x1f3b), LPC_AVN},
-	{ PCI_VDEVICE(INTEL, 0x229c), LPC_BRASWELL},
-	{ PCI_VDEVICE(INTEL, 0x2310), LPC_DH89XXCC},
-	{ PCI_VDEVICE(INTEL, 0x2390), LPC_COLETO},
-	{ PCI_VDEVICE(INTEL, 0x2410), LPC_ICH},
-	{ PCI_VDEVICE(INTEL, 0x2420), LPC_ICH0},
-	{ PCI_VDEVICE(INTEL, 0x2440), LPC_ICH2},
-	{ PCI_VDEVICE(INTEL, 0x244c), LPC_ICH2M},
-	{ PCI_VDEVICE(INTEL, 0x2450), LPC_CICH},
-	{ PCI_VDEVICE(INTEL, 0x2480), LPC_ICH3},
-	{ PCI_VDEVICE(INTEL, 0x248c), LPC_ICH3M},
-	{ PCI_VDEVICE(INTEL, 0x24c0), LPC_ICH4},
-	{ PCI_VDEVICE(INTEL, 0x24cc), LPC_ICH4M},
-	{ PCI_VDEVICE(INTEL, 0x24d0), LPC_ICH5},
-	{ PCI_VDEVICE(INTEL, 0x25a1), LPC_6300ESB},
-	{ PCI_VDEVICE(INTEL, 0x2640), LPC_ICH6},
-	{ PCI_VDEVICE(INTEL, 0x2641), LPC_ICH6M},
-	{ PCI_VDEVICE(INTEL, 0x2642), LPC_ICH6W},
-	{ PCI_VDEVICE(INTEL, 0x2670), LPC_631XESB},
-	{ PCI_VDEVICE(INTEL, 0x2671), LPC_631XESB},
-	{ PCI_VDEVICE(INTEL, 0x2672), LPC_631XESB},
-	{ PCI_VDEVICE(INTEL, 0x2673), LPC_631XESB},
-	{ PCI_VDEVICE(INTEL, 0x2674), LPC_631XESB},
-	{ PCI_VDEVICE(INTEL, 0x2675), LPC_631XESB},
-	{ PCI_VDEVICE(INTEL, 0x2676), LPC_631XESB},
-	{ PCI_VDEVICE(INTEL, 0x2677), LPC_631XESB},
-	{ PCI_VDEVICE(INTEL, 0x2678), LPC_631XESB},
-	{ PCI_VDEVICE(INTEL, 0x2679), LPC_631XESB},
-	{ PCI_VDEVICE(INTEL, 0x267a), LPC_631XESB},
-	{ PCI_VDEVICE(INTEL, 0x267b), LPC_631XESB},
-	{ PCI_VDEVICE(INTEL, 0x267c), LPC_631XESB},
-	{ PCI_VDEVICE(INTEL, 0x267d), LPC_631XESB},
-	{ PCI_VDEVICE(INTEL, 0x267e), LPC_631XESB},
-	{ PCI_VDEVICE(INTEL, 0x267f), LPC_631XESB},
-	{ PCI_VDEVICE(INTEL, 0x27b0), LPC_ICH7DH},
-	{ PCI_VDEVICE(INTEL, 0x27b8), LPC_ICH7},
-	{ PCI_VDEVICE(INTEL, 0x27b9), LPC_ICH7M},
-	{ PCI_VDEVICE(INTEL, 0x27bc), LPC_NM10},
-	{ PCI_VDEVICE(INTEL, 0x27bd), LPC_ICH7MDH},
-	{ PCI_VDEVICE(INTEL, 0x2810), LPC_ICH8},
-	{ PCI_VDEVICE(INTEL, 0x2811), LPC_ICH8ME},
-	{ PCI_VDEVICE(INTEL, 0x2812), LPC_ICH8DH},
-	{ PCI_VDEVICE(INTEL, 0x2814), LPC_ICH8DO},
-	{ PCI_VDEVICE(INTEL, 0x2815), LPC_ICH8M},
-	{ PCI_VDEVICE(INTEL, 0x2912), LPC_ICH9DH},
-	{ PCI_VDEVICE(INTEL, 0x2914), LPC_ICH9DO},
-	{ PCI_VDEVICE(INTEL, 0x2916), LPC_ICH9R},
-	{ PCI_VDEVICE(INTEL, 0x2917), LPC_ICH9ME},
-	{ PCI_VDEVICE(INTEL, 0x2918), LPC_ICH9},
-	{ PCI_VDEVICE(INTEL, 0x2919), LPC_ICH9M},
-	{ PCI_VDEVICE(INTEL, 0x3197), LPC_GLK},
-	{ PCI_VDEVICE(INTEL, 0x2b9c), LPC_COUGARMOUNTAIN},
-	{ PCI_VDEVICE(INTEL, 0x3a14), LPC_ICH10DO},
-	{ PCI_VDEVICE(INTEL, 0x3a16), LPC_ICH10R},
-	{ PCI_VDEVICE(INTEL, 0x3a18), LPC_ICH10},
-	{ PCI_VDEVICE(INTEL, 0x3a1a), LPC_ICH10D},
-	{ PCI_VDEVICE(INTEL, 0x3b00), LPC_PCH},
-	{ PCI_VDEVICE(INTEL, 0x3b01), LPC_PCHM},
-	{ PCI_VDEVICE(INTEL, 0x3b02), LPC_P55},
-	{ PCI_VDEVICE(INTEL, 0x3b03), LPC_PM55},
-	{ PCI_VDEVICE(INTEL, 0x3b06), LPC_H55},
-	{ PCI_VDEVICE(INTEL, 0x3b07), LPC_QM57},
-	{ PCI_VDEVICE(INTEL, 0x3b08), LPC_H57},
-	{ PCI_VDEVICE(INTEL, 0x3b09), LPC_HM55},
-	{ PCI_VDEVICE(INTEL, 0x3b0a), LPC_Q57},
-	{ PCI_VDEVICE(INTEL, 0x3b0b), LPC_HM57},
-	{ PCI_VDEVICE(INTEL, 0x3b0d), LPC_PCHMSFF},
-	{ PCI_VDEVICE(INTEL, 0x3b0f), LPC_QS57},
-	{ PCI_VDEVICE(INTEL, 0x3b12), LPC_3400},
-	{ PCI_VDEVICE(INTEL, 0x3b14), LPC_3420},
-	{ PCI_VDEVICE(INTEL, 0x3b16), LPC_3450},
-	{ PCI_VDEVICE(INTEL, 0x5031), LPC_EP80579},
-	{ PCI_VDEVICE(INTEL, 0x5ae8), LPC_APL},
-	{ PCI_VDEVICE(INTEL, 0x8c40), LPC_LPT},
-	{ PCI_VDEVICE(INTEL, 0x8c41), LPC_LPT},
-	{ PCI_VDEVICE(INTEL, 0x8c42), LPC_LPT},
-	{ PCI_VDEVICE(INTEL, 0x8c43), LPC_LPT},
-	{ PCI_VDEVICE(INTEL, 0x8c44), LPC_LPT},
-	{ PCI_VDEVICE(INTEL, 0x8c45), LPC_LPT},
-	{ PCI_VDEVICE(INTEL, 0x8c46), LPC_LPT},
-	{ PCI_VDEVICE(INTEL, 0x8c47), LPC_LPT},
-	{ PCI_VDEVICE(INTEL, 0x8c48), LPC_LPT},
-	{ PCI_VDEVICE(INTEL, 0x8c49), LPC_LPT},
-	{ PCI_VDEVICE(INTEL, 0x8c4a), LPC_LPT},
-	{ PCI_VDEVICE(INTEL, 0x8c4b), LPC_LPT},
-	{ PCI_VDEVICE(INTEL, 0x8c4c), LPC_LPT},
-	{ PCI_VDEVICE(INTEL, 0x8c4d), LPC_LPT},
-	{ PCI_VDEVICE(INTEL, 0x8c4e), LPC_LPT},
-	{ PCI_VDEVICE(INTEL, 0x8c4f), LPC_LPT},
-	{ PCI_VDEVICE(INTEL, 0x8c50), LPC_LPT},
-	{ PCI_VDEVICE(INTEL, 0x8c51), LPC_LPT},
-	{ PCI_VDEVICE(INTEL, 0x8c52), LPC_LPT},
-	{ PCI_VDEVICE(INTEL, 0x8c53), LPC_LPT},
-	{ PCI_VDEVICE(INTEL, 0x8c54), LPC_LPT},
-	{ PCI_VDEVICE(INTEL, 0x8c55), LPC_LPT},
-	{ PCI_VDEVICE(INTEL, 0x8c56), LPC_LPT},
-	{ PCI_VDEVICE(INTEL, 0x8c57), LPC_LPT},
-	{ PCI_VDEVICE(INTEL, 0x8c58), LPC_LPT},
-	{ PCI_VDEVICE(INTEL, 0x8c59), LPC_LPT},
-	{ PCI_VDEVICE(INTEL, 0x8c5a), LPC_LPT},
-	{ PCI_VDEVICE(INTEL, 0x8c5b), LPC_LPT},
-	{ PCI_VDEVICE(INTEL, 0x8c5c), LPC_LPT},
-	{ PCI_VDEVICE(INTEL, 0x8c5d), LPC_LPT},
-	{ PCI_VDEVICE(INTEL, 0x8c5e), LPC_LPT},
-	{ PCI_VDEVICE(INTEL, 0x8c5f), LPC_LPT},
-	{ PCI_VDEVICE(INTEL, 0x8cc1), LPC_9S},
-	{ PCI_VDEVICE(INTEL, 0x8cc2), LPC_9S},
-	{ PCI_VDEVICE(INTEL, 0x8cc3), LPC_9S},
-	{ PCI_VDEVICE(INTEL, 0x8cc4), LPC_9S},
-	{ PCI_VDEVICE(INTEL, 0x8cc6), LPC_9S},
-	{ PCI_VDEVICE(INTEL, 0x8d40), LPC_WBG},
-	{ PCI_VDEVICE(INTEL, 0x8d41), LPC_WBG},
-	{ PCI_VDEVICE(INTEL, 0x8d42), LPC_WBG},
-	{ PCI_VDEVICE(INTEL, 0x8d43), LPC_WBG},
-	{ PCI_VDEVICE(INTEL, 0x8d44), LPC_WBG},
-	{ PCI_VDEVICE(INTEL, 0x8d45), LPC_WBG},
-	{ PCI_VDEVICE(INTEL, 0x8d46), LPC_WBG},
-	{ PCI_VDEVICE(INTEL, 0x8d47), LPC_WBG},
-	{ PCI_VDEVICE(INTEL, 0x8d48), LPC_WBG},
-	{ PCI_VDEVICE(INTEL, 0x8d49), LPC_WBG},
-	{ PCI_VDEVICE(INTEL, 0x8d4a), LPC_WBG},
-	{ PCI_VDEVICE(INTEL, 0x8d4b), LPC_WBG},
-	{ PCI_VDEVICE(INTEL, 0x8d4c), LPC_WBG},
-	{ PCI_VDEVICE(INTEL, 0x8d4d), LPC_WBG},
-	{ PCI_VDEVICE(INTEL, 0x8d4e), LPC_WBG},
-	{ PCI_VDEVICE(INTEL, 0x8d4f), LPC_WBG},
-	{ PCI_VDEVICE(INTEL, 0x8d50), LPC_WBG},
-	{ PCI_VDEVICE(INTEL, 0x8d51), LPC_WBG},
-	{ PCI_VDEVICE(INTEL, 0x8d52), LPC_WBG},
-	{ PCI_VDEVICE(INTEL, 0x8d53), LPC_WBG},
-	{ PCI_VDEVICE(INTEL, 0x8d54), LPC_WBG},
-	{ PCI_VDEVICE(INTEL, 0x8d55), LPC_WBG},
-	{ PCI_VDEVICE(INTEL, 0x8d56), LPC_WBG},
-	{ PCI_VDEVICE(INTEL, 0x8d57), LPC_WBG},
-	{ PCI_VDEVICE(INTEL, 0x8d58), LPC_WBG},
-	{ PCI_VDEVICE(INTEL, 0x8d59), LPC_WBG},
-	{ PCI_VDEVICE(INTEL, 0x8d5a), LPC_WBG},
-	{ PCI_VDEVICE(INTEL, 0x8d5b), LPC_WBG},
-	{ PCI_VDEVICE(INTEL, 0x8d5c), LPC_WBG},
-	{ PCI_VDEVICE(INTEL, 0x8d5d), LPC_WBG},
-	{ PCI_VDEVICE(INTEL, 0x8d5e), LPC_WBG},
-	{ PCI_VDEVICE(INTEL, 0x8d5f), LPC_WBG},
-	{ PCI_VDEVICE(INTEL, 0x9c40), LPC_LPT_LP},
-	{ PCI_VDEVICE(INTEL, 0x9c41), LPC_LPT_LP},
-	{ PCI_VDEVICE(INTEL, 0x9c42), LPC_LPT_LP},
-	{ PCI_VDEVICE(INTEL, 0x9c43), LPC_LPT_LP},
-	{ PCI_VDEVICE(INTEL, 0x9c44), LPC_LPT_LP},
-	{ PCI_VDEVICE(INTEL, 0x9c45), LPC_LPT_LP},
-	{ PCI_VDEVICE(INTEL, 0x9c46), LPC_LPT_LP},
-	{ PCI_VDEVICE(INTEL, 0x9c47), LPC_LPT_LP},
-	{ PCI_VDEVICE(INTEL, 0x9cc1), LPC_WPT_LP},
-	{ PCI_VDEVICE(INTEL, 0x9cc2), LPC_WPT_LP},
-	{ PCI_VDEVICE(INTEL, 0x9cc3), LPC_WPT_LP},
-	{ PCI_VDEVICE(INTEL, 0x9cc5), LPC_WPT_LP},
-	{ PCI_VDEVICE(INTEL, 0x9cc6), LPC_WPT_LP},
-	{ PCI_VDEVICE(INTEL, 0x9cc7), LPC_WPT_LP},
-	{ PCI_VDEVICE(INTEL, 0x9cc9), LPC_WPT_LP},
-	{ PCI_VDEVICE(INTEL, 0xa1c1), LPC_LEWISBURG},
-	{ PCI_VDEVICE(INTEL, 0xa1c2), LPC_LEWISBURG},
-	{ PCI_VDEVICE(INTEL, 0xa1c3), LPC_LEWISBURG},
-	{ PCI_VDEVICE(INTEL, 0xa1c4), LPC_LEWISBURG},
-	{ PCI_VDEVICE(INTEL, 0xa1c5), LPC_LEWISBURG},
-	{ PCI_VDEVICE(INTEL, 0xa1c6), LPC_LEWISBURG},
-	{ PCI_VDEVICE(INTEL, 0xa1c7), LPC_LEWISBURG},
-	{ PCI_VDEVICE(INTEL, 0xa242), LPC_LEWISBURG},
-	{ PCI_VDEVICE(INTEL, 0xa243), LPC_LEWISBURG},
-	{ 0, },			/* End of list */
+	{ PCI_VDEVICE(INTEL, 0x0f1c), .driver_data = LPC_BAYTRAIL },
+	{ PCI_VDEVICE(INTEL, 0x19dc), .driver_data = LPC_DNV },
+	{ PCI_VDEVICE(INTEL, 0x1c41), .driver_data = LPC_CPT },
+	{ PCI_VDEVICE(INTEL, 0x1c42), .driver_data = LPC_CPTD },
+	{ PCI_VDEVICE(INTEL, 0x1c43), .driver_data = LPC_CPTM },
+	{ PCI_VDEVICE(INTEL, 0x1c44), .driver_data = LPC_CPT },
+	{ PCI_VDEVICE(INTEL, 0x1c45), .driver_data = LPC_CPT },
+	{ PCI_VDEVICE(INTEL, 0x1c46), .driver_data = LPC_CPT },
+	{ PCI_VDEVICE(INTEL, 0x1c47), .driver_data = LPC_CPT },
+	{ PCI_VDEVICE(INTEL, 0x1c48), .driver_data = LPC_CPT },
+	{ PCI_VDEVICE(INTEL, 0x1c49), .driver_data = LPC_CPT },
+	{ PCI_VDEVICE(INTEL, 0x1c4a), .driver_data = LPC_CPT },
+	{ PCI_VDEVICE(INTEL, 0x1c4b), .driver_data = LPC_CPT },
+	{ PCI_VDEVICE(INTEL, 0x1c4c), .driver_data = LPC_CPT },
+	{ PCI_VDEVICE(INTEL, 0x1c4d), .driver_data = LPC_CPT },
+	{ PCI_VDEVICE(INTEL, 0x1c4e), .driver_data = LPC_CPT },
+	{ PCI_VDEVICE(INTEL, 0x1c4f), .driver_data = LPC_CPT },
+	{ PCI_VDEVICE(INTEL, 0x1c50), .driver_data = LPC_CPT },
+	{ PCI_VDEVICE(INTEL, 0x1c51), .driver_data = LPC_CPT },
+	{ PCI_VDEVICE(INTEL, 0x1c52), .driver_data = LPC_CPT },
+	{ PCI_VDEVICE(INTEL, 0x1c53), .driver_data = LPC_CPT },
+	{ PCI_VDEVICE(INTEL, 0x1c54), .driver_data = LPC_CPT },
+	{ PCI_VDEVICE(INTEL, 0x1c55), .driver_data = LPC_CPT },
+	{ PCI_VDEVICE(INTEL, 0x1c56), .driver_data = LPC_CPT },
+	{ PCI_VDEVICE(INTEL, 0x1c57), .driver_data = LPC_CPT },
+	{ PCI_VDEVICE(INTEL, 0x1c58), .driver_data = LPC_CPT },
+	{ PCI_VDEVICE(INTEL, 0x1c59), .driver_data = LPC_CPT },
+	{ PCI_VDEVICE(INTEL, 0x1c5a), .driver_data = LPC_CPT },
+	{ PCI_VDEVICE(INTEL, 0x1c5b), .driver_data = LPC_CPT },
+	{ PCI_VDEVICE(INTEL, 0x1c5c), .driver_data = LPC_CPT },
+	{ PCI_VDEVICE(INTEL, 0x1c5d), .driver_data = LPC_CPT },
+	{ PCI_VDEVICE(INTEL, 0x1c5e), .driver_data = LPC_CPT },
+	{ PCI_VDEVICE(INTEL, 0x1c5f), .driver_data = LPC_CPT },
+	{ PCI_VDEVICE(INTEL, 0x1d40), .driver_data = LPC_PBG },
+	{ PCI_VDEVICE(INTEL, 0x1d41), .driver_data = LPC_PBG },
+	{ PCI_VDEVICE(INTEL, 0x1e40), .driver_data = LPC_PPT },
+	{ PCI_VDEVICE(INTEL, 0x1e41), .driver_data = LPC_PPT },
+	{ PCI_VDEVICE(INTEL, 0x1e42), .driver_data = LPC_PPT },
+	{ PCI_VDEVICE(INTEL, 0x1e43), .driver_data = LPC_PPT },
+	{ PCI_VDEVICE(INTEL, 0x1e44), .driver_data = LPC_PPT },
+	{ PCI_VDEVICE(INTEL, 0x1e45), .driver_data = LPC_PPT },
+	{ PCI_VDEVICE(INTEL, 0x1e46), .driver_data = LPC_PPT },
+	{ PCI_VDEVICE(INTEL, 0x1e47), .driver_data = LPC_PPT },
+	{ PCI_VDEVICE(INTEL, 0x1e48), .driver_data = LPC_PPT },
+	{ PCI_VDEVICE(INTEL, 0x1e49), .driver_data = LPC_PPT },
+	{ PCI_VDEVICE(INTEL, 0x1e4a), .driver_data = LPC_PPT },
+	{ PCI_VDEVICE(INTEL, 0x1e4b), .driver_data = LPC_PPT },
+	{ PCI_VDEVICE(INTEL, 0x1e4c), .driver_data = LPC_PPT },
+	{ PCI_VDEVICE(INTEL, 0x1e4d), .driver_data = LPC_PPT },
+	{ PCI_VDEVICE(INTEL, 0x1e4e), .driver_data = LPC_PPT },
+	{ PCI_VDEVICE(INTEL, 0x1e4f), .driver_data = LPC_PPT },
+	{ PCI_VDEVICE(INTEL, 0x1e50), .driver_data = LPC_PPT },
+	{ PCI_VDEVICE(INTEL, 0x1e51), .driver_data = LPC_PPT },
+	{ PCI_VDEVICE(INTEL, 0x1e52), .driver_data = LPC_PPT },
+	{ PCI_VDEVICE(INTEL, 0x1e53), .driver_data = LPC_PPT },
+	{ PCI_VDEVICE(INTEL, 0x1e54), .driver_data = LPC_PPT },
+	{ PCI_VDEVICE(INTEL, 0x1e55), .driver_data = LPC_PPT },
+	{ PCI_VDEVICE(INTEL, 0x1e56), .driver_data = LPC_PPT },
+	{ PCI_VDEVICE(INTEL, 0x1e57), .driver_data = LPC_PPT },
+	{ PCI_VDEVICE(INTEL, 0x1e58), .driver_data = LPC_PPT },
+	{ PCI_VDEVICE(INTEL, 0x1e59), .driver_data = LPC_PPT },
+	{ PCI_VDEVICE(INTEL, 0x1e5a), .driver_data = LPC_PPT },
+	{ PCI_VDEVICE(INTEL, 0x1e5b), .driver_data = LPC_PPT },
+	{ PCI_VDEVICE(INTEL, 0x1e5c), .driver_data = LPC_PPT },
+	{ PCI_VDEVICE(INTEL, 0x1e5d), .driver_data = LPC_PPT },
+	{ PCI_VDEVICE(INTEL, 0x1e5e), .driver_data = LPC_PPT },
+	{ PCI_VDEVICE(INTEL, 0x1e5f), .driver_data = LPC_PPT },
+	{ PCI_VDEVICE(INTEL, 0x1f38), .driver_data = LPC_AVN },
+	{ PCI_VDEVICE(INTEL, 0x1f39), .driver_data = LPC_AVN },
+	{ PCI_VDEVICE(INTEL, 0x1f3a), .driver_data = LPC_AVN },
+	{ PCI_VDEVICE(INTEL, 0x1f3b), .driver_data = LPC_AVN },
+	{ PCI_VDEVICE(INTEL, 0x229c), .driver_data = LPC_BRASWELL },
+	{ PCI_VDEVICE(INTEL, 0x2310), .driver_data = LPC_DH89XXCC },
+	{ PCI_VDEVICE(INTEL, 0x2390), .driver_data = LPC_COLETO },
+	{ PCI_VDEVICE(INTEL, 0x2410), .driver_data = LPC_ICH },
+	{ PCI_VDEVICE(INTEL, 0x2420), .driver_data = LPC_ICH0 },
+	{ PCI_VDEVICE(INTEL, 0x2440), .driver_data = LPC_ICH2 },
+	{ PCI_VDEVICE(INTEL, 0x244c), .driver_data = LPC_ICH2M },
+	{ PCI_VDEVICE(INTEL, 0x2450), .driver_data = LPC_CICH },
+	{ PCI_VDEVICE(INTEL, 0x2480), .driver_data = LPC_ICH3 },
+	{ PCI_VDEVICE(INTEL, 0x248c), .driver_data = LPC_ICH3M },
+	{ PCI_VDEVICE(INTEL, 0x24c0), .driver_data = LPC_ICH4 },
+	{ PCI_VDEVICE(INTEL, 0x24cc), .driver_data = LPC_ICH4M },
+	{ PCI_VDEVICE(INTEL, 0x24d0), .driver_data = LPC_ICH5 },
+	{ PCI_VDEVICE(INTEL, 0x25a1), .driver_data = LPC_6300ESB },
+	{ PCI_VDEVICE(INTEL, 0x2640), .driver_data = LPC_ICH6 },
+	{ PCI_VDEVICE(INTEL, 0x2641), .driver_data = LPC_ICH6M },
+	{ PCI_VDEVICE(INTEL, 0x2642), .driver_data = LPC_ICH6W },
+	{ PCI_VDEVICE(INTEL, 0x2670), .driver_data = LPC_631XESB },
+	{ PCI_VDEVICE(INTEL, 0x2671), .driver_data = LPC_631XESB },
+	{ PCI_VDEVICE(INTEL, 0x2672), .driver_data = LPC_631XESB },
+	{ PCI_VDEVICE(INTEL, 0x2673), .driver_data = LPC_631XESB },
+	{ PCI_VDEVICE(INTEL, 0x2674), .driver_data = LPC_631XESB },
+	{ PCI_VDEVICE(INTEL, 0x2675), .driver_data = LPC_631XESB },
+	{ PCI_VDEVICE(INTEL, 0x2676), .driver_data = LPC_631XESB },
+	{ PCI_VDEVICE(INTEL, 0x2677), .driver_data = LPC_631XESB },
+	{ PCI_VDEVICE(INTEL, 0x2678), .driver_data = LPC_631XESB },
+	{ PCI_VDEVICE(INTEL, 0x2679), .driver_data = LPC_631XESB },
+	{ PCI_VDEVICE(INTEL, 0x267a), .driver_data = LPC_631XESB },
+	{ PCI_VDEVICE(INTEL, 0x267b), .driver_data = LPC_631XESB },
+	{ PCI_VDEVICE(INTEL, 0x267c), .driver_data = LPC_631XESB },
+	{ PCI_VDEVICE(INTEL, 0x267d), .driver_data = LPC_631XESB },
+	{ PCI_VDEVICE(INTEL, 0x267e), .driver_data = LPC_631XESB },
+	{ PCI_VDEVICE(INTEL, 0x267f), .driver_data = LPC_631XESB },
+	{ PCI_VDEVICE(INTEL, 0x27b0), .driver_data = LPC_ICH7DH },
+	{ PCI_VDEVICE(INTEL, 0x27b8), .driver_data = LPC_ICH7 },
+	{ PCI_VDEVICE(INTEL, 0x27b9), .driver_data = LPC_ICH7M },
+	{ PCI_VDEVICE(INTEL, 0x27bc), .driver_data = LPC_NM10 },
+	{ PCI_VDEVICE(INTEL, 0x27bd), .driver_data = LPC_ICH7MDH },
+	{ PCI_VDEVICE(INTEL, 0x2810), .driver_data = LPC_ICH8 },
+	{ PCI_VDEVICE(INTEL, 0x2811), .driver_data = LPC_ICH8ME },
+	{ PCI_VDEVICE(INTEL, 0x2812), .driver_data = LPC_ICH8DH },
+	{ PCI_VDEVICE(INTEL, 0x2814), .driver_data = LPC_ICH8DO },
+	{ PCI_VDEVICE(INTEL, 0x2815), .driver_data = LPC_ICH8M },
+	{ PCI_VDEVICE(INTEL, 0x2912), .driver_data = LPC_ICH9DH },
+	{ PCI_VDEVICE(INTEL, 0x2914), .driver_data = LPC_ICH9DO },
+	{ PCI_VDEVICE(INTEL, 0x2916), .driver_data = LPC_ICH9R },
+	{ PCI_VDEVICE(INTEL, 0x2917), .driver_data = LPC_ICH9ME },
+	{ PCI_VDEVICE(INTEL, 0x2918), .driver_data = LPC_ICH9 },
+	{ PCI_VDEVICE(INTEL, 0x2919), .driver_data = LPC_ICH9M },
+	{ PCI_VDEVICE(INTEL, 0x2b9c), .driver_data = LPC_COUGARMOUNTAIN },
+	{ PCI_VDEVICE(INTEL, 0x3197), .driver_data = LPC_GLK },
+	{ PCI_VDEVICE(INTEL, 0x31e8), .driver_data = LPC_GLK },
+	{ PCI_VDEVICE(INTEL, 0x3a14), .driver_data = LPC_ICH10DO },
+	{ PCI_VDEVICE(INTEL, 0x3a16), .driver_data = LPC_ICH10R },
+	{ PCI_VDEVICE(INTEL, 0x3a18), .driver_data = LPC_ICH10 },
+	{ PCI_VDEVICE(INTEL, 0x3a1a), .driver_data = LPC_ICH10D },
+	{ PCI_VDEVICE(INTEL, 0x3b00), .driver_data = LPC_PCH },
+	{ PCI_VDEVICE(INTEL, 0x3b01), .driver_data = LPC_PCHM },
+	{ PCI_VDEVICE(INTEL, 0x3b02), .driver_data = LPC_P55 },
+	{ PCI_VDEVICE(INTEL, 0x3b03), .driver_data = LPC_PM55 },
+	{ PCI_VDEVICE(INTEL, 0x3b06), .driver_data = LPC_H55 },
+	{ PCI_VDEVICE(INTEL, 0x3b07), .driver_data = LPC_QM57 },
+	{ PCI_VDEVICE(INTEL, 0x3b08), .driver_data = LPC_H57 },
+	{ PCI_VDEVICE(INTEL, 0x3b09), .driver_data = LPC_HM55 },
+	{ PCI_VDEVICE(INTEL, 0x3b0a), .driver_data = LPC_Q57 },
+	{ PCI_VDEVICE(INTEL, 0x3b0b), .driver_data = LPC_HM57 },
+	{ PCI_VDEVICE(INTEL, 0x3b0d), .driver_data = LPC_PCHMSFF },
+	{ PCI_VDEVICE(INTEL, 0x3b0f), .driver_data = LPC_QS57 },
+	{ PCI_VDEVICE(INTEL, 0x3b12), .driver_data = LPC_3400 },
+	{ PCI_VDEVICE(INTEL, 0x3b14), .driver_data = LPC_3420 },
+	{ PCI_VDEVICE(INTEL, 0x3b16), .driver_data = LPC_3450 },
+	{ PCI_VDEVICE(INTEL, 0x5031), .driver_data = LPC_EP80579 },
+	{ PCI_VDEVICE(INTEL, 0x5ae8), .driver_data = LPC_APL },
+	{ PCI_VDEVICE(INTEL, 0x8c40), .driver_data = LPC_LPT },
+	{ PCI_VDEVICE(INTEL, 0x8c41), .driver_data = LPC_LPT },
+	{ PCI_VDEVICE(INTEL, 0x8c42), .driver_data = LPC_LPT },
+	{ PCI_VDEVICE(INTEL, 0x8c43), .driver_data = LPC_LPT },
+	{ PCI_VDEVICE(INTEL, 0x8c44), .driver_data = LPC_LPT },
+	{ PCI_VDEVICE(INTEL, 0x8c45), .driver_data = LPC_LPT },
+	{ PCI_VDEVICE(INTEL, 0x8c46), .driver_data = LPC_LPT },
+	{ PCI_VDEVICE(INTEL, 0x8c47), .driver_data = LPC_LPT },
+	{ PCI_VDEVICE(INTEL, 0x8c48), .driver_data = LPC_LPT },
+	{ PCI_VDEVICE(INTEL, 0x8c49), .driver_data = LPC_LPT },
+	{ PCI_VDEVICE(INTEL, 0x8c4a), .driver_data = LPC_LPT },
+	{ PCI_VDEVICE(INTEL, 0x8c4b), .driver_data = LPC_LPT },
+	{ PCI_VDEVICE(INTEL, 0x8c4c), .driver_data = LPC_LPT },
+	{ PCI_VDEVICE(INTEL, 0x8c4d), .driver_data = LPC_LPT },
+	{ PCI_VDEVICE(INTEL, 0x8c4e), .driver_data = LPC_LPT },
+	{ PCI_VDEVICE(INTEL, 0x8c4f), .driver_data = LPC_LPT },
+	{ PCI_VDEVICE(INTEL, 0x8c50), .driver_data = LPC_LPT },
+	{ PCI_VDEVICE(INTEL, 0x8c51), .driver_data = LPC_LPT },
+	{ PCI_VDEVICE(INTEL, 0x8c52), .driver_data = LPC_LPT },
+	{ PCI_VDEVICE(INTEL, 0x8c53), .driver_data = LPC_LPT },
+	{ PCI_VDEVICE(INTEL, 0x8c54), .driver_data = LPC_LPT },
+	{ PCI_VDEVICE(INTEL, 0x8c55), .driver_data = LPC_LPT },
+	{ PCI_VDEVICE(INTEL, 0x8c56), .driver_data = LPC_LPT },
+	{ PCI_VDEVICE(INTEL, 0x8c57), .driver_data = LPC_LPT },
+	{ PCI_VDEVICE(INTEL, 0x8c58), .driver_data = LPC_LPT },
+	{ PCI_VDEVICE(INTEL, 0x8c59), .driver_data = LPC_LPT },
+	{ PCI_VDEVICE(INTEL, 0x8c5a), .driver_data = LPC_LPT },
+	{ PCI_VDEVICE(INTEL, 0x8c5b), .driver_data = LPC_LPT },
+	{ PCI_VDEVICE(INTEL, 0x8c5c), .driver_data = LPC_LPT },
+	{ PCI_VDEVICE(INTEL, 0x8c5d), .driver_data = LPC_LPT },
+	{ PCI_VDEVICE(INTEL, 0x8c5e), .driver_data = LPC_LPT },
+	{ PCI_VDEVICE(INTEL, 0x8c5f), .driver_data = LPC_LPT },
+	{ PCI_VDEVICE(INTEL, 0x8cc1), .driver_data = LPC_9S },
+	{ PCI_VDEVICE(INTEL, 0x8cc2), .driver_data = LPC_9S },
+	{ PCI_VDEVICE(INTEL, 0x8cc3), .driver_data = LPC_9S },
+	{ PCI_VDEVICE(INTEL, 0x8cc4), .driver_data = LPC_9S },
+	{ PCI_VDEVICE(INTEL, 0x8cc6), .driver_data = LPC_9S },
+	{ PCI_VDEVICE(INTEL, 0x8d40), .driver_data = LPC_WBG },
+	{ PCI_VDEVICE(INTEL, 0x8d41), .driver_data = LPC_WBG },
+	{ PCI_VDEVICE(INTEL, 0x8d42), .driver_data = LPC_WBG },
+	{ PCI_VDEVICE(INTEL, 0x8d43), .driver_data = LPC_WBG },
+	{ PCI_VDEVICE(INTEL, 0x8d44), .driver_data = LPC_WBG },
+	{ PCI_VDEVICE(INTEL, 0x8d45), .driver_data = LPC_WBG },
+	{ PCI_VDEVICE(INTEL, 0x8d46), .driver_data = LPC_WBG },
+	{ PCI_VDEVICE(INTEL, 0x8d47), .driver_data = LPC_WBG },
+	{ PCI_VDEVICE(INTEL, 0x8d48), .driver_data = LPC_WBG },
+	{ PCI_VDEVICE(INTEL, 0x8d49), .driver_data = LPC_WBG },
+	{ PCI_VDEVICE(INTEL, 0x8d4a), .driver_data = LPC_WBG },
+	{ PCI_VDEVICE(INTEL, 0x8d4b), .driver_data = LPC_WBG },
+	{ PCI_VDEVICE(INTEL, 0x8d4c), .driver_data = LPC_WBG },
+	{ PCI_VDEVICE(INTEL, 0x8d4d), .driver_data = LPC_WBG },
+	{ PCI_VDEVICE(INTEL, 0x8d4e), .driver_data = LPC_WBG },
+	{ PCI_VDEVICE(INTEL, 0x8d4f), .driver_data = LPC_WBG },
+	{ PCI_VDEVICE(INTEL, 0x8d50), .driver_data = LPC_WBG },
+	{ PCI_VDEVICE(INTEL, 0x8d51), .driver_data = LPC_WBG },
+	{ PCI_VDEVICE(INTEL, 0x8d52), .driver_data = LPC_WBG },
+	{ PCI_VDEVICE(INTEL, 0x8d53), .driver_data = LPC_WBG },
+	{ PCI_VDEVICE(INTEL, 0x8d54), .driver_data = LPC_WBG },
+	{ PCI_VDEVICE(INTEL, 0x8d55), .driver_data = LPC_WBG },
+	{ PCI_VDEVICE(INTEL, 0x8d56), .driver_data = LPC_WBG },
+	{ PCI_VDEVICE(INTEL, 0x8d57), .driver_data = LPC_WBG },
+	{ PCI_VDEVICE(INTEL, 0x8d58), .driver_data = LPC_WBG },
+	{ PCI_VDEVICE(INTEL, 0x8d59), .driver_data = LPC_WBG },
+	{ PCI_VDEVICE(INTEL, 0x8d5a), .driver_data = LPC_WBG },
+	{ PCI_VDEVICE(INTEL, 0x8d5b), .driver_data = LPC_WBG },
+	{ PCI_VDEVICE(INTEL, 0x8d5c), .driver_data = LPC_WBG },
+	{ PCI_VDEVICE(INTEL, 0x8d5d), .driver_data = LPC_WBG },
+	{ PCI_VDEVICE(INTEL, 0x8d5e), .driver_data = LPC_WBG },
+	{ PCI_VDEVICE(INTEL, 0x8d5f), .driver_data = LPC_WBG },
+	{ PCI_VDEVICE(INTEL, 0x9c40), .driver_data = LPC_LPT_LP },
+	{ PCI_VDEVICE(INTEL, 0x9c41), .driver_data = LPC_LPT_LP },
+	{ PCI_VDEVICE(INTEL, 0x9c42), .driver_data = LPC_LPT_LP },
+	{ PCI_VDEVICE(INTEL, 0x9c43), .driver_data = LPC_LPT_LP },
+	{ PCI_VDEVICE(INTEL, 0x9c44), .driver_data = LPC_LPT_LP },
+	{ PCI_VDEVICE(INTEL, 0x9c45), .driver_data = LPC_LPT_LP },
+	{ PCI_VDEVICE(INTEL, 0x9c46), .driver_data = LPC_LPT_LP },
+	{ PCI_VDEVICE(INTEL, 0x9c47), .driver_data = LPC_LPT_LP },
+	{ PCI_VDEVICE(INTEL, 0x9cc1), .driver_data = LPC_WPT_LP },
+	{ PCI_VDEVICE(INTEL, 0x9cc2), .driver_data = LPC_WPT_LP },
+	{ PCI_VDEVICE(INTEL, 0x9cc3), .driver_data = LPC_WPT_LP },
+	{ PCI_VDEVICE(INTEL, 0x9cc5), .driver_data = LPC_WPT_LP },
+	{ PCI_VDEVICE(INTEL, 0x9cc6), .driver_data = LPC_WPT_LP },
+	{ PCI_VDEVICE(INTEL, 0x9cc7), .driver_data = LPC_WPT_LP },
+	{ PCI_VDEVICE(INTEL, 0x9cc9), .driver_data = LPC_WPT_LP },
+	{ PCI_VDEVICE(INTEL, 0xa1c1), .driver_data = LPC_LEWISBURG },
+	{ PCI_VDEVICE(INTEL, 0xa1c2), .driver_data = LPC_LEWISBURG },
+	{ PCI_VDEVICE(INTEL, 0xa1c3), .driver_data = LPC_LEWISBURG },
+	{ PCI_VDEVICE(INTEL, 0xa1c4), .driver_data = LPC_LEWISBURG },
+	{ PCI_VDEVICE(INTEL, 0xa1c5), .driver_data = LPC_LEWISBURG },
+	{ PCI_VDEVICE(INTEL, 0xa1c6), .driver_data = LPC_LEWISBURG },
+	{ PCI_VDEVICE(INTEL, 0xa1c7), .driver_data = LPC_LEWISBURG },
+	{ PCI_VDEVICE(INTEL, 0xa242), .driver_data = LPC_LEWISBURG },
+	{ PCI_VDEVICE(INTEL, 0xa243), .driver_data = LPC_LEWISBURG },
+	{ },			/* End of list */
 };
 MODULE_DEVICE_TABLE(pci, lpc_ich_ids);
 
@@ -1156,30 +1242,32 @@ wdt_done:
 
 static int lpc_ich_init_pinctrl(struct pci_dev *dev)
 {
+	struct lpc_ich_priv *priv = pci_get_drvdata(dev);
+	const struct lpc_ich_gpio_info *info = lpc_chipset_info[priv->chipset].gpio_info;
 	struct resource base;
 	unsigned int i;
 	int ret;
 
 	/* Check, if GPIO has been exported as an ACPI device */
-	if (acpi_dev_present("INT3452", NULL, -1))
+	if (acpi_dev_present(info->hid, NULL, -1))
 		return -EEXIST;
 
 	ret = p2sb_bar(dev->bus, 0, &base);
 	if (ret)
 		return ret;
 
-	for (i = 0; i < ARRAY_SIZE(apl_gpio_devices); i++) {
-		struct resource *mem = &apl_gpio_resources[i][0];
-		resource_size_t offset = apl_gpio_offsets[i];
+	for (i = 0; i < info->nr_resources; i++) {
+		struct resource *mem = info->resources[i];
+		resource_size_t offset = info->offsets[i];
 
 		/* Fill MEM resource */
 		mem->start = base.start + offset;
-		mem->end = base.start + offset + APL_GPIO_RESOURCE_SIZE - 1;
+		mem->end = base.start + offset + INTEL_GPIO_RESOURCE_SIZE - 1;
 		mem->flags = base.flags;
 	}
 
-	return mfd_add_devices(&dev->dev, 0, apl_gpio_devices,
-			       ARRAY_SIZE(apl_gpio_devices), NULL, 0, NULL);
+	return mfd_add_devices(&dev->dev, 0, info->devices, info->nr_devices,
+			       NULL, 0, NULL);
 }
 
 static bool lpc_ich_byt_set_writeable(void __iomem *base, void *data)
@@ -1242,7 +1330,7 @@ static int lpc_ich_init_spi(struct pci_dev *dev)
 	case INTEL_SPI_BYT:
 		pci_read_config_dword(dev, SPIBASE_BYT, &spi_base);
 		if (spi_base & SPIBASE_BYT_EN) {
-			res->start = spi_base & ~(SPIBASE_BYT_SZ - 1);
+			res->start = ALIGN_DOWN(spi_base, SPIBASE_BYT_SZ);
 			res->end = res->start + SPIBASE_BYT_SZ - 1;
 
 			info->set_writeable = lpc_ich_byt_set_writeable;
@@ -1332,7 +1420,7 @@ static int lpc_ich_probe(struct pci_dev *dev,
 			cell_added = true;
 	}
 
-	if (priv->chipset == LPC_APL) {
+	if (lpc_chipset_info[priv->chipset].gpio_info) {
 		ret = lpc_ich_init_pinctrl(dev);
 		if (!ret)
 			cell_added = true;

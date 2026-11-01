@@ -91,9 +91,11 @@ static const struct ata_port_info acard_ahci_port_info[] = {
 };
 
 static const struct pci_device_id acard_ahci_pci_tbl[] = {
-	/* ACard */
-	{ PCI_VDEVICE(ARTOP, 0x000d), board_acard_ahci }, /* ATP8620 */
-
+	{
+		/* ACard ATP8620 */
+		PCI_VDEVICE(ARTOP, 0x000d),
+		.driver_data = board_acard_ahci,
+	},
 	{ }    /* terminate list */
 };
 
@@ -370,7 +372,7 @@ static int acard_ahci_init_one(struct pci_dev *pdev, const struct pci_device_id 
 	/* AHCI controllers often implement SFF compatible interface.
 	 * Grab all PCI BARs just in case.
 	 */
-	rc = pcim_iomap_regions_request_all(pdev, 1 << AHCI_PCI_BAR, DRV_NAME);
+	rc = pcim_request_all_regions(pdev, DRV_NAME);
 	if (rc == -EBUSY)
 		pcim_pin_device(pdev);
 	if (rc)
@@ -386,7 +388,9 @@ static int acard_ahci_init_one(struct pci_dev *pdev, const struct pci_device_id 
 	if (!(hpriv->flags & AHCI_HFLAG_NO_MSI))
 		pci_enable_msi(pdev);
 
-	hpriv->mmio = pcim_iomap_table(pdev)[AHCI_PCI_BAR];
+	hpriv->mmio = pcim_iomap(pdev, AHCI_PCI_BAR, 0);
+	if (!hpriv->mmio)
+		return -ENOMEM;
 
 	/* save initial config */
 	ahci_save_initial_config(&pdev->dev, hpriv);

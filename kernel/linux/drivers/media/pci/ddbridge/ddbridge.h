@@ -14,7 +14,7 @@
 #include <linux/delay.h>
 #include <linux/device.h>
 #include <linux/dvb/ca.h>
-#include <linux/gpio.h>
+#include <linux/gpio/consumer.h>
 #include <linux/i2c.h>
 #include <linux/init.h>
 #include <linux/interrupt.h>
@@ -298,7 +298,7 @@ struct ddb_link {
 	spinlock_t             lock; /* lock link access */
 	struct mutex           flash_mutex; /* lock flash access */
 	struct ddb_lnb         lnb;
-	struct tasklet_struct  tasklet;
+	struct work_struct     bh_work;
 	struct ddb_ids         ids;
 
 	spinlock_t             temp_lock; /* lock temp chip access */

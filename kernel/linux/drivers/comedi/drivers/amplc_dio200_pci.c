@@ -223,14 +223,17 @@
  */
 
 enum dio200_pci_model {
+#ifdef CONFIG_HAS_IOPORT
 	pci215_model,
 	pci272_model,
+#endif /* CONFIG_HAS_IOPORT */
 	pcie215_model,
 	pcie236_model,
 	pcie296_model
 };
 
 static const struct dio200_board dio200_pci_boards[] = {
+#ifdef CONFIG_HAS_IOPORT
 	[pci215_model] = {
 		.name		= "pci215",
 		.mainbar	= 2,
@@ -252,6 +255,7 @@ static const struct dio200_board dio200_pci_boards[] = {
 		.sdinfo		= { 0x00, 0x08, 0x10, 0x3f },
 		.has_int_sce	= true,
 	},
+#endif /* CONFIG_HAS_IOPORT */
 	[pcie215_model] = {
 		.name		= "pcie215",
 		.mainbar	= 1,
@@ -364,8 +368,12 @@ static int dio200_pci_auto_attach(struct comedi_device *dev,
 				"error! cannot remap registers\n");
 			return -ENOMEM;
 		}
-	} else {
+	} else if (IS_ENABLED(CONFIG_HAS_IOPORT)) {
 		dev->iobase = pci_resource_start(pci_dev, bar);
+	} else {
+		dev_err(dev->class_dev,
+			"error! need I/O port support\n");
+		return -ENXIO;
 	}
 
 	if (board->is_pcie) {
@@ -385,12 +393,14 @@ static struct comedi_driver dio200_pci_comedi_driver = {
 };
 
 static const struct pci_device_id dio200_pci_table[] = {
-	{ PCI_VDEVICE(AMPLICON, 0x000b), pci215_model },
-	{ PCI_VDEVICE(AMPLICON, 0x000a), pci272_model },
-	{ PCI_VDEVICE(AMPLICON, 0x0011), pcie236_model },
-	{ PCI_VDEVICE(AMPLICON, 0x0012), pcie215_model },
-	{ PCI_VDEVICE(AMPLICON, 0x0014), pcie296_model },
-	{0}
+#ifdef CONFIG_HAS_IOPORT
+	{ PCI_VDEVICE(AMPLICON, 0x000b), .driver_data = pci215_model },
+	{ PCI_VDEVICE(AMPLICON, 0x000a), .driver_data = pci272_model },
+#endif /* CONFIG_HAS_IOPORT */
+	{ PCI_VDEVICE(AMPLICON, 0x0011), .driver_data = pcie236_model },
+	{ PCI_VDEVICE(AMPLICON, 0x0012), .driver_data = pcie215_model },
+	{ PCI_VDEVICE(AMPLICON, 0x0014), .driver_data = pcie296_model },
+	{ }
 };
 
 MODULE_DEVICE_TABLE(pci, dio200_pci_table);

@@ -1,4 +1,4 @@
-/* SPDX-License-Identifier: ISC */
+/* SPDX-License-Identifier: BSD-3-Clause-Clear */
 /* Copyright (C) 2020 MediaTek Inc. */
 
 #ifndef __MT7915_H
@@ -70,6 +70,7 @@
 #define MT7915_CDEV_THROTTLE_MAX	99
 
 #define MT7915_SKU_RATE_NUM		161
+#define MT7915_SKU_PATH_NUM		185
 
 #define MT7915_MAX_TWT_AGRT		16
 #define MT7915_MAX_STA_TWT_AGRT		8
@@ -82,6 +83,8 @@
 #define MT7915_MAX_TEMP_IDX		1
 #define MT7915_CRIT_TEMP		110
 #define MT7915_MAX_TEMP			120
+
+#define MT7915_RTS_LEN_THRES		0x92b
 
 struct mt7915_vif;
 struct mt7915_sta;
@@ -166,7 +169,7 @@ struct mt7915_vif_cap {
 };
 
 struct mt7915_vif {
-	struct mt76_vif mt76; /* must be first */
+	struct mt76_vif_link mt76; /* must be first */
 
 	struct mt7915_vif_cap cap;
 	struct mt7915_sta sta;
@@ -191,6 +194,7 @@ struct mt7915_hif {
 	struct device *dev;
 	void __iomem *regs;
 	int irq;
+	u32 index;
 };
 
 struct mt7915_phy {
@@ -201,6 +205,7 @@ struct mt7915_phy {
 
 	struct ieee80211_vif *monitor_vif;
 
+	struct thermal_zone_device *tzone;
 	struct thermal_cooling_device *cdev;
 	u8 cdev_state;
 	u8 throttle_state;
@@ -214,8 +219,6 @@ struct mt7915_phy {
 	s16 coverage_class;
 	u8 slottime;
 
-	u8 rdd_state;
-
 	u32 trb_ts;
 
 	u32 rx_ampdu_ts;
@@ -223,6 +226,9 @@ struct mt7915_phy {
 
 	struct mt76_mib_stats mib;
 	struct mt76_channel_state state_ts;
+
+	bool sku_limit_en:1;
+	bool sku_path_en:1;
 
 #ifdef CONFIG_NL80211_TESTMODE
 	struct {
@@ -287,18 +293,26 @@ struct mt7915_dev {
 
 	struct list_head sta_rc_list;
 	struct list_head twt_list;
+	spinlock_t reg_lock;
 
 	u32 hw_pattern;
+	u32 ple1_sts;
 
 	bool dbdc_support;
 	bool flash_mode;
 	bool muru_debug;
 	bool ibf;
 
+	u8 monitor_mask;
+
 	struct dentry *debugfs_dir;
 	struct rchan *relay_fwlog;
 
 	void *cal;
+	u32 cur_prek_offset;
+	u8 dpd_chan_num_2g;
+	u8 dpd_chan_num_5g;
+	u8 dpd_chan_num_6g;
 
 	struct {
 		u8 debug_wm;
@@ -323,10 +337,10 @@ enum {
 	__MT_WFDMA_MAX,
 };
 
-enum {
-	MT_RX_SEL0,
-	MT_RX_SEL1,
-	MT_RX_SEL2, /* monitor chain */
+enum rdd_idx {
+	MT_RDD_IDX_BAND0,	/* RDD idx for band idx 0 (single-band) */
+	MT_RDD_IDX_BAND1,	/* RDD idx for band idx 1 */
+	MT_RDD_IDX_BACKGROUND,	/* RDD idx for background chain */
 };
 
 enum mt7915_rdd_cmd {
@@ -345,6 +359,18 @@ enum mt7915_rdd_cmd {
 	RDD_RESUME_BF,
 	RDD_IRQ_OFF,
 };
+
+static inline int
+mt7915_get_rdd_idx(struct mt7915_phy *phy, bool is_background)
+{
+	if (!phy->mt76->cap.has_5ghz)
+		return -1;
+
+	if (is_background)
+		return MT_RDD_IDX_BACKGROUND;
+
+	return phy->mt76->band_idx;
+}
 
 static inline struct mt7915_phy *
 mt7915_hw_phy(struct ieee80211_hw *hw)
@@ -371,6 +397,24 @@ mt7915_ext_phy(struct mt7915_dev *dev)
 		return NULL;
 
 	return phy->priv;
+}
+
+/* without dbdc, the chainmask is stored unshifted, even if the phy is
+ * bound to band 1
+ */
+static inline u8 mt7915_band_chainshift(struct mt7915_phy *phy)
+{
+	struct mt7915_dev *dev = phy->dev;
+
+	if (!dev->dbdc_support)
+		return 0;
+
+	return phy->mt76->band_idx * dev->chainshift;
+}
+
+static inline u16 mt7915_band_chainmask(struct mt7915_phy *phy)
+{
+	return phy->mt76->chainmask >> mt7915_band_chainshift(phy);
 }
 
 static inline u32 mt7915_check_adie(struct mt7915_dev *dev, bool sku)
@@ -417,14 +461,14 @@ int mt7915_eeprom_get_target_power(struct mt7915_dev *dev,
 				   struct ieee80211_channel *chan,
 				   u8 chain_idx);
 s8 mt7915_eeprom_get_power_delta(struct mt7915_dev *dev, int band);
+bool mt7915_eeprom_has_background_radar(struct mt7915_dev *dev);
 int mt7915_dma_init(struct mt7915_dev *dev, struct mt7915_phy *phy2);
 void mt7915_dma_prefetch(struct mt7915_dev *dev);
 void mt7915_dma_cleanup(struct mt7915_dev *dev);
 int mt7915_dma_reset(struct mt7915_dev *dev, bool force);
 int mt7915_dma_start(struct mt7915_dev *dev, bool reset, bool wed_reset);
 int mt7915_txbf_init(struct mt7915_dev *dev);
-void mt7915_init_txpower(struct mt7915_dev *dev,
-			 struct ieee80211_supported_band *sband);
+void mt7915_init_txpower(struct mt7915_phy *phy);
 void mt7915_reset(struct mt7915_dev *dev);
 int mt7915_run(struct ieee80211_hw *hw);
 int mt7915_mcu_init(struct mt7915_dev *dev);
@@ -438,7 +482,7 @@ int mt7915_mcu_add_dev_info(struct mt7915_phy *phy,
 int mt7915_mcu_add_bss_info(struct mt7915_phy *phy,
 			    struct ieee80211_vif *vif, int enable);
 int mt7915_mcu_add_sta(struct mt7915_dev *dev, struct ieee80211_vif *vif,
-		       struct ieee80211_sta *sta, bool enable);
+		       struct ieee80211_sta *sta, int conn_state, bool newly);
 int mt7915_mcu_add_tx_ba(struct mt7915_dev *dev,
 			 struct ieee80211_ampdu_params *params,
 			 bool add);
@@ -447,15 +491,19 @@ int mt7915_mcu_add_rx_ba(struct mt7915_dev *dev,
 			 bool add);
 int mt7915_mcu_update_bss_color(struct mt7915_dev *dev, struct ieee80211_vif *vif,
 				struct cfg80211_he_bss_color *he_bss_color);
+int mt7915_mcu_add_inband_discov(struct mt7915_dev *dev, struct ieee80211_vif *vif,
+				 u32 changed);
 int mt7915_mcu_add_beacon(struct ieee80211_hw *hw, struct ieee80211_vif *vif,
 			  int enable, u32 changed);
+int mt7915_mcu_set_protection(struct mt7915_phy *phy, struct ieee80211_vif *vif,
+			      u8 ht_mode, bool use_cts_prot);
 int mt7915_mcu_add_obss_spr(struct mt7915_phy *phy, struct ieee80211_vif *vif,
 			    struct ieee80211_he_obss_pd *he_obss_pd);
 int mt7915_mcu_add_rate_ctrl(struct mt7915_dev *dev, struct ieee80211_vif *vif,
 			     struct ieee80211_sta *sta, bool changed);
 int mt7915_mcu_add_smps(struct mt7915_dev *dev, struct ieee80211_vif *vif,
 			struct ieee80211_sta *sta);
-int mt7915_set_channel(struct mt7915_phy *phy);
+int mt7915_set_channel(struct mt76_phy *mphy);
 int mt7915_mcu_set_chan_info(struct mt7915_phy *phy, int cmd);
 int mt7915_mcu_set_tx(struct mt7915_dev *dev, struct ieee80211_vif *vif);
 int mt7915_mcu_update_edca(struct mt7915_dev *dev, void *req);
@@ -464,16 +512,17 @@ int mt7915_mcu_set_fixed_rate_ctrl(struct mt7915_dev *dev,
 				   struct ieee80211_sta *sta,
 				   void *data, u32 field);
 int mt7915_mcu_set_eeprom(struct mt7915_dev *dev);
-int mt7915_mcu_get_eeprom(struct mt7915_dev *dev, u32 offset);
+int mt7915_mcu_get_eeprom(struct mt7915_dev *dev, u32 offset, u8 *read_buf);
 int mt7915_mcu_get_eeprom_free_block(struct mt7915_dev *dev, u8 *block_num);
 int mt7915_mcu_set_mac(struct mt7915_dev *dev, int band, bool enable,
 		       bool hdr_trans);
 int mt7915_mcu_set_test_param(struct mt7915_dev *dev, u8 param, bool test_mode,
 			      u8 en);
 int mt7915_mcu_set_ser(struct mt7915_dev *dev, u8 action, u8 set, u8 band);
-int mt7915_mcu_set_sku_en(struct mt7915_phy *phy, bool enable);
+int mt7915_mcu_set_sku_en(struct mt7915_phy *phy);
 int mt7915_mcu_set_txpower_sku(struct mt7915_phy *phy);
-int mt7915_mcu_get_txpower_sku(struct mt7915_phy *phy, s8 *txpower, int len);
+int mt7915_mcu_get_txpower_sku(struct mt7915_phy *phy, s8 *txpower, int len,
+			       u8 category);
 int mt7915_mcu_set_txpower_frame_min(struct mt7915_phy *phy, s8 txpower);
 int mt7915_mcu_set_txpower_frame(struct mt7915_phy *phy,
 				 struct ieee80211_vif *vif,
@@ -552,6 +601,8 @@ void mt7915_mac_write_txwi(struct mt76_dev *dev, __le32 *txwi,
 void mt7915_mac_set_timing(struct mt7915_phy *phy);
 int mt7915_mac_sta_add(struct mt76_dev *mdev, struct ieee80211_vif *vif,
 		       struct ieee80211_sta *sta);
+int mt7915_mac_sta_event(struct mt76_dev *mdev, struct ieee80211_vif *vif,
+			 struct ieee80211_sta *sta, enum mt76_sta_event ev);
 void mt7915_mac_sta_remove(struct mt76_dev *mdev, struct ieee80211_vif *vif,
 			   struct ieee80211_sta *sta);
 void mt7915_mac_work(struct work_struct *work);

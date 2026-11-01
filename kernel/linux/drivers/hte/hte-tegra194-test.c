@@ -9,7 +9,6 @@
 #include <linux/gpio/consumer.h>
 #include <linux/hte.h>
 #include <linux/interrupt.h>
-#include <linux/mod_devicetable.h>
 #include <linux/module.h>
 #include <linux/platform_device.h>
 #include <linux/timer.h>
@@ -153,8 +152,10 @@ static int tegra_hte_test_probe(struct platform_device *pdev)
 	}
 
 	cnt = of_hte_req_count(hte.pdev);
-	if (cnt < 0)
+	if (cnt < 0) {
+		ret = cnt;
 		goto free_irq;
+	}
 
 	dev_info(&pdev->dev, "Total requested lines:%d\n", cnt);
 
@@ -212,16 +213,14 @@ out:
 	return ret;
 }
 
-static int tegra_hte_test_remove(struct platform_device *pdev)
+static void tegra_hte_test_remove(struct platform_device *pdev)
 {
 	(void)pdev;
 
 	free_irq(hte.gpio_in_irq, &hte);
 	gpiod_put(hte.gpio_in);
 	gpiod_put(hte.gpio_out);
-	del_timer_sync(&hte.timer);
-
-	return 0;
+	timer_delete_sync(&hte.timer);
 }
 
 static struct platform_driver tegra_hte_test_driver = {
@@ -235,4 +234,5 @@ static struct platform_driver tegra_hte_test_driver = {
 module_platform_driver(tegra_hte_test_driver);
 
 MODULE_AUTHOR("Dipen Patel <dipenp@nvidia.com>");
+MODULE_DESCRIPTION("NVIDIA Tegra HTE (Hardware Timestamping Engine) test driver");
 MODULE_LICENSE("GPL");

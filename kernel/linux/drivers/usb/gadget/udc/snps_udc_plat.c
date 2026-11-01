@@ -8,7 +8,6 @@
 #include <linux/extcon.h>
 #include <linux/of_address.h>
 #include <linux/of_irq.h>
-#include <linux/of_gpio.h>
 #include <linux/platform_device.h>
 #include <linux/phy/phy.h>
 #include <linux/module.h>
@@ -160,10 +159,9 @@ static int udc_plat_probe(struct platform_device *pdev)
 	if (of_property_present(dev->of_node, "extcon")) {
 		udc->edev = extcon_get_edev_by_phandle(dev, 0);
 		if (IS_ERR(udc->edev)) {
-			if (PTR_ERR(udc->edev) == -EPROBE_DEFER)
-				return -EPROBE_DEFER;
-			dev_err(dev, "Invalid or missing extcon\n");
 			ret = PTR_ERR(udc->edev);
+			if (ret != -EPROBE_DEFER)
+				dev_err(dev, "Invalid or missing extcon\n");
 			goto exit_phy;
 		}
 
@@ -310,7 +308,7 @@ MODULE_DEVICE_TABLE(of, of_udc_match);
 
 static struct platform_driver udc_plat_driver = {
 	.probe		= udc_plat_probe,
-	.remove_new	= udc_plat_remove,
+	.remove		= udc_plat_remove,
 	.driver		= {
 		.name	= "snps-udc-plat",
 		.of_match_table = of_udc_match,

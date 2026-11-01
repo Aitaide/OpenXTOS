@@ -4,7 +4,6 @@
  * Author: Cosmin Tanislav <cosmin.tanislav@analog.com>
  */
 
-#include <linux/mod_devicetable.h>
 #include <linux/module.h>
 #include <linux/regmap.h>
 #include <linux/spi/spi.h>
@@ -72,7 +71,7 @@ static int adxl367_write(void *context, const void *val_buf, size_t val_size)
 	return spi_sync(st->spi, &st->reg_write_msg);
 }
 
-static struct regmap_bus adxl367_spi_regmap_bus = {
+static const struct regmap_bus adxl367_spi_regmap_bus = {
 	.read = adxl367_read,
 	.write = adxl367_write,
 };
@@ -138,14 +137,14 @@ static int adxl367_spi_probe(struct spi_device *spi)
 }
 
 static const struct spi_device_id adxl367_spi_id[] = {
-	{ "adxl367", 0 },
-	{ },
+	{ .name = "adxl367" },
+	{ }
 };
 MODULE_DEVICE_TABLE(spi, adxl367_spi_id);
 
 static const struct of_device_id adxl367_of_match[] = {
 	{ .compatible = "adi,adxl367" },
-	{ },
+	{ }
 };
 MODULE_DEVICE_TABLE(of, adxl367_of_match);
 
@@ -160,7 +159,7 @@ static struct spi_driver adxl367_spi_driver = {
 
 module_spi_driver(adxl367_spi_driver);
 
-MODULE_IMPORT_NS(IIO_ADXL367);
+MODULE_IMPORT_NS("IIO_ADXL367");
 MODULE_AUTHOR("Cosmin Tanislav <cosmin.tanislav@analog.com>");
 MODULE_DESCRIPTION("Analog Devices ADXL367 3-axis accelerometer SPI driver");
 MODULE_LICENSE("GPL");

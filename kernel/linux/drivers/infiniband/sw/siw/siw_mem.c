@@ -1,10 +1,11 @@
-// SPDX-License-Identifier: GPL-2.0 or BSD-3-Clause
+// SPDX-License-Identifier: GPL-2.0 OR BSD-3-Clause
 
 /* Authors: Bernard Metzler <bmt@zurich.ibm.com> */
 /* Copyright (c) 2008-2019, IBM Corporation */
 
 #include <linux/gfp.h>
 #include <rdma/ib_verbs.h>
+#include <rdma/ib_umem.h>
 #include <linux/dma-mapping.h>
 #include <linux/slab.h>
 #include <linux/sched/mm.h>
@@ -13,30 +14,8 @@
 #include "siw.h"
 #include "siw_mem.h"
 
-/*
- * Stag lookup is based on its index part only (24 bits).
- * The code avoids special Stag of zero and tries to randomize
- * STag values between 1 and SIW_STAG_MAX_INDEX.
- */
-int siw_mem_add(struct siw_device *sdev, struct siw_mem *m)
-{
-	struct xa_limit limit = XA_LIMIT(1, 0x00ffffff);
-	u32 id, next;
-
-	get_random_bytes(&next, 4);
-	next &= 0x00ffffff;
-
-	if (xa_alloc_cyclic(&sdev->mem_xa, &id, m, limit, &next,
-	    GFP_KERNEL) < 0)
-		return -ENOMEM;
-
-	/* Set the STag index part */
-	m->stag = id << 8;
-
-	siw_dbg_mem(m, "new MEM object\n");
-
-	return 0;
-}
+/* Stag lookup is based on its index part only (24 bits). */
+#define SIW_STAG_MAX_INDEX	0x00ffffff
 
 /*
  * siw_mem_id2obj()
@@ -60,29 +39,16 @@ struct siw_mem *siw_mem_id2obj(struct siw_device *sdev, int stag_index)
 	return NULL;
 }
 
-static void siw_free_plist(struct siw_page_chunk *chunk, int num_pages,
-			   bool dirty)
+void siw_umem_release(struct siw_umem *umem)
 {
-	unpin_user_pages_dirty_lock(chunk->plist, num_pages, dirty);
-}
+	unsigned int i, num_chunks = umem->num_chunks;
 
-void siw_umem_release(struct siw_umem *umem, bool dirty)
-{
-	struct mm_struct *mm_s = umem->owning_mm;
-	int i, num_pages = umem->num_pages;
+	if (umem->base_mem)
+		ib_umem_release(umem->base_mem);
 
-	for (i = 0; num_pages; i++) {
-		int to_free = min_t(int, PAGES_PER_CHUNK, num_pages);
-
-		siw_free_plist(&umem->page_chunk[i], to_free,
-			       umem->writable && dirty);
+	for (i = 0; i < num_chunks; i++)
 		kfree(umem->page_chunk[i].plist);
-		num_pages -= to_free;
-	}
-	atomic64_sub(umem->num_pages, &mm_s->pinned_vm);
 
-	mmdrop(mm_s);
-	kfree(umem->page_chunk);
 	kfree(umem);
 }
 
@@ -90,8 +56,8 @@ int siw_mr_add_mem(struct siw_mr *mr, struct ib_pd *pd, void *mem_obj,
 		   u64 start, u64 len, int rights)
 {
 	struct siw_device *sdev = to_siw_dev(pd->device);
-	struct siw_mem *mem = kzalloc(sizeof(*mem), GFP_KERNEL);
-	struct xa_limit limit = XA_LIMIT(1, 0x00ffffff);
+	struct siw_mem *mem = kzalloc_obj(*mem);
+	struct xa_limit limit = XA_LIMIT(1, SIW_STAG_MAX_INDEX);
 	u32 id, next;
 
 	if (!mem)
@@ -107,7 +73,7 @@ int siw_mr_add_mem(struct siw_mr *mr, struct ib_pd *pd, void *mem_obj,
 	kref_init(&mem->ref);
 
 	get_random_bytes(&next, 4);
-	next &= 0x00ffffff;
+	next &= SIW_STAG_MAX_INDEX;
 
 	if (xa_alloc_cyclic(&sdev->mem_xa, &id, mem, limit, &next,
 	    GFP_KERNEL) < 0) {
@@ -145,7 +111,7 @@ void siw_free_mem(struct kref *ref)
 
 	if (!mem->is_mw && mem->mem_obj) {
 		if (mem->is_pbl == 0)
-			siw_umem_release(mem->umem, true);
+			siw_umem_release(mem->umem);
 		else
 			kfree(mem->pbl);
 	}
@@ -189,10 +155,10 @@ int siw_check_mem(struct ib_pd *pd, struct siw_mem *mem, u64 addr,
 	 */
 	if (addr < mem->va || addr + len > mem->va + mem->len) {
 		siw_dbg_pd(pd, "MEM interval len %d\n", len);
-		siw_dbg_pd(pd, "[0x%pK, 0x%pK] out of bounds\n",
+		siw_dbg_pd(pd, "[0x%p, 0x%p] out of bounds\n",
 			   (void *)(uintptr_t)addr,
 			   (void *)(uintptr_t)(addr + len));
-		siw_dbg_pd(pd, "[0x%pK, 0x%pK] STag=0x%08x\n",
+		siw_dbg_pd(pd, "[0x%p, 0x%p] STag=0x%08x\n",
 			   (void *)(uintptr_t)mem->va,
 			   (void *)(uintptr_t)(mem->va + mem->len),
 			   mem->stag);
@@ -220,7 +186,7 @@ int siw_check_mem(struct ib_pd *pd, struct siw_mem *mem, u64 addr,
  * lookup is being done and mem is not released it check fails.
  */
 int siw_check_sge(struct ib_pd *pd, struct siw_sge *sge, struct siw_mem *mem[],
-		  enum ib_access_flags perms, u32 off, int len)
+		  enum ib_access_flags perms, u32 off, u32 len)
 {
 	struct siw_device *sdev = to_siw_dev(pd->device);
 	struct siw_mem *new = NULL;
@@ -353,7 +319,7 @@ struct siw_pbl *siw_pbl_alloc(u32 num_buf)
 	if (num_buf == 0)
 		return ERR_PTR(-EINVAL);
 
-	pbl = kzalloc(struct_size(pbl, pbe, num_buf), GFP_KERNEL);
+	pbl = kzalloc_flex(*pbl, pbe, num_buf);
 	if (!pbl)
 		return ERR_PTR(-ENOMEM);
 
@@ -362,88 +328,73 @@ struct siw_pbl *siw_pbl_alloc(u32 num_buf)
 	return pbl;
 }
 
-struct siw_umem *siw_umem_get(u64 start, u64 len, bool writable)
+struct siw_umem *siw_umem_get(struct ib_device *base_dev, u64 start,
+			      u64 len, int rights)
 {
 	struct siw_umem *umem;
-	struct mm_struct *mm_s;
+	struct ib_umem *base_mem;
+	struct sg_page_iter sg_iter;
+	struct sg_table *sgt;
 	u64 first_page_va;
-	unsigned long mlock_limit;
-	unsigned int foll_flags = FOLL_LONGTERM;
-	int num_pages, num_chunks, i, rv = 0;
-
-	if (!can_do_mlock())
-		return ERR_PTR(-EPERM);
+	unsigned int num_pages, num_chunks, i;
+	int rv = 0;
 
 	if (!len)
 		return ERR_PTR(-EINVAL);
 
 	first_page_va = start & PAGE_MASK;
 	num_pages = PAGE_ALIGN(start + len - first_page_va) >> PAGE_SHIFT;
-	num_chunks = (num_pages >> CHUNK_SHIFT) + 1;
+	num_chunks = ((num_pages - 1) >> CHUNK_SHIFT) + 1;
 
-	umem = kzalloc(sizeof(*umem), GFP_KERNEL);
+	umem = kzalloc_flex(*umem, page_chunk, num_chunks);
 	if (!umem)
 		return ERR_PTR(-ENOMEM);
 
-	mm_s = current->mm;
-	umem->owning_mm = mm_s;
-	umem->writable = writable;
-
-	mmgrab(mm_s);
-
-	if (writable)
-		foll_flags |= FOLL_WRITE;
-
-	mmap_read_lock(mm_s);
-
-	mlock_limit = rlimit(RLIMIT_MEMLOCK) >> PAGE_SHIFT;
-
-	if (atomic64_add_return(num_pages, &mm_s->pinned_vm) > mlock_limit) {
-		rv = -ENOMEM;
-		goto out_sem_up;
+	base_mem = ib_umem_get_va(base_dev, start, len, rights);
+	if (IS_ERR(base_mem)) {
+		rv = PTR_ERR(base_mem);
+		siw_dbg(base_dev, "Cannot pin user memory: %d\n", rv);
+		goto err_out;
 	}
 	umem->fp_addr = first_page_va;
+	umem->base_mem = base_mem;
+	umem->num_pages = num_pages;
+	umem->num_chunks = num_chunks;
 
-	umem->page_chunk =
-		kcalloc(num_chunks, sizeof(struct siw_page_chunk), GFP_KERNEL);
-	if (!umem->page_chunk) {
-		rv = -ENOMEM;
-		goto out_sem_up;
-	}
-	for (i = 0; num_pages; i++) {
-		int nents = min_t(int, num_pages, PAGES_PER_CHUNK);
-		struct page **plist =
-			kcalloc(nents, sizeof(struct page *), GFP_KERNEL);
+	sgt = &base_mem->sgt_append.sgt;
+	__sg_page_iter_start(&sg_iter, sgt->sgl, sgt->orig_nents, 0);
 
+	for (i = 0; i < num_chunks; i++) {
+		struct page **plist;
+		unsigned int pix, nents = min(num_pages, PAGES_PER_CHUNK);
+
+		plist = kzalloc_objs(struct page *, nents);
 		if (!plist) {
 			rv = -ENOMEM;
-			goto out_sem_up;
+			goto err_out;
 		}
 		umem->page_chunk[i].plist = plist;
-		while (nents) {
-			rv = pin_user_pages(first_page_va, nents, foll_flags,
-					    plist);
-			if (rv < 0)
-				goto out_sem_up;
 
-			umem->num_pages += rv;
-			first_page_va += rv * PAGE_SIZE;
-			plist += rv;
-			nents -= rv;
-			num_pages -= rv;
+		for (pix = 0; pix < nents; pix++) {
+			if (!__sg_page_iter_next(&sg_iter))
+				break;
+			plist[pix] = sg_page_iter_page(&sg_iter);
+			num_pages--;
 		}
 	}
-out_sem_up:
-	mmap_read_unlock(mm_s);
 
-	if (rv > 0)
-		return umem;
-
-	/* Adjust accounting for pages not pinned */
-	if (num_pages)
-		atomic64_sub(num_pages, &mm_s->pinned_vm);
-
-	siw_umem_release(umem, false);
+	if (num_pages) {
+		/*
+		 * Unexpected size of sg list provided by ib_umem_get_va()
+		 */
+		siw_dbg(base_dev, "Short SG list, missing %u pages\n",
+			num_pages);
+		rv = -EINVAL;
+		goto err_out;
+	}
+	return umem;
+err_out:
+	siw_umem_release(umem);
 
 	return ERR_PTR(rv);
 }

@@ -37,7 +37,7 @@
 #include "vme.h"
 #include "vme_user.h"
 
-static const char driver_name[] = "vme_user";
+#define DRIVER_NAME "vme_user"
 
 static int bus[VME_USER_BUS_MAX];
 static unsigned int bus_num;
@@ -101,8 +101,11 @@ struct image_desc {
 static struct image_desc image[VME_DEVS];
 
 static struct cdev *vme_user_cdev;		/* Character device */
-static struct class *vme_user_sysfs_class;	/* Sysfs class */
 static struct vme_dev *vme_user_bridge;		/* Pointer to user device */
+
+static const struct class vme_user_sysfs_class = {
+	.name = DRIVER_NAME,
+};
 
 static const int type[VME_DEVS] = {	MASTER_MINOR,	MASTER_MINOR,
 					MASTER_MINOR,	MASTER_MINOR,
@@ -153,6 +156,17 @@ static ssize_t buffer_to_user(unsigned int minor, char __user *buf,
 {
 	void *image_ptr;
 
+	/*
+	 * The slave window (image_size) can exceed the fixed kern_buf
+	 * (size_buf == PCI_BUF_SIZE), so bound the copy to kern_buf.
+	 * *ppos is >= 0 here (checked by the caller), so the
+	 * subtraction below cannot wrap.
+	 */
+	if (*ppos >= image[minor].size_buf)
+		return 0;
+	if (count > image[minor].size_buf - *ppos)
+		count = image[minor].size_buf - *ppos;
+
 	image_ptr = image[minor].kern_buf + *ppos;
 	if (copy_to_user(buf, image_ptr, (unsigned long)count))
 		return -EFAULT;
@@ -164,6 +178,17 @@ static ssize_t buffer_from_user(unsigned int minor, const char __user *buf,
 				size_t count, loff_t *ppos)
 {
 	void *image_ptr;
+
+	/*
+	 * The slave window (image_size) can exceed the fixed kern_buf
+	 * (size_buf == PCI_BUF_SIZE), so bound the copy to kern_buf.
+	 * *ppos is >= 0 here (checked by the caller), so the
+	 * subtraction below cannot wrap.
+	 */
+	if (*ppos >= image[minor].size_buf)
+		return 0;
+	if (count > image[minor].size_buf - *ppos)
+		count = image[minor].size_buf - *ppos;
 
 	image_ptr = image[minor].kern_buf + *ppos;
 	if (copy_from_user(image_ptr, buf, (unsigned long)count))
@@ -443,25 +468,15 @@ static void vme_user_vm_close(struct vm_area_struct *vma)
 	kfree(vma_priv);
 }
 
-static const struct vm_operations_struct vme_user_vm_ops = {
-	.open = vme_user_vm_open,
-	.close = vme_user_vm_close,
-};
-
-static int vme_user_master_mmap(unsigned int minor, struct vm_area_struct *vma)
+static int vme_user_vm_mapped(unsigned long start, unsigned long end, pgoff_t pgoff,
+			      const struct file *file, void **vm_private_data)
 {
-	int err;
+	const unsigned int minor = iminor(file_inode(file));
 	struct vme_user_vma_priv *vma_priv;
 
 	mutex_lock(&image[minor].mutex);
 
-	err = vme_master_mmap(image[minor].resource, vma);
-	if (err) {
-		mutex_unlock(&image[minor].mutex);
-		return err;
-	}
-
-	vma_priv = kmalloc(sizeof(*vma_priv), GFP_KERNEL);
+	vma_priv = kmalloc_obj(*vma_priv);
 	if (!vma_priv) {
 		mutex_unlock(&image[minor].mutex);
 		return -ENOMEM;
@@ -469,22 +484,41 @@ static int vme_user_master_mmap(unsigned int minor, struct vm_area_struct *vma)
 
 	vma_priv->minor = minor;
 	refcount_set(&vma_priv->refcnt, 1);
-	vma->vm_ops = &vme_user_vm_ops;
-	vma->vm_private_data = vma_priv;
-
+	*vm_private_data = vma_priv;
 	image[minor].mmap_count++;
 
 	mutex_unlock(&image[minor].mutex);
-
 	return 0;
 }
 
-static int vme_user_mmap(struct file *file, struct vm_area_struct *vma)
+static const struct vm_operations_struct vme_user_vm_ops = {
+	.mapped = vme_user_vm_mapped,
+	.open = vme_user_vm_open,
+	.close = vme_user_vm_close,
+};
+
+static int vme_user_master_mmap_prepare(unsigned int minor,
+					struct vm_area_desc *desc)
 {
-	unsigned int minor = iminor(file_inode(file));
+	int err;
+
+	mutex_lock(&image[minor].mutex);
+
+	err = vme_master_mmap_prepare(image[minor].resource, desc);
+	if (!err)
+		desc->vm_ops = &vme_user_vm_ops;
+
+	mutex_unlock(&image[minor].mutex);
+	return err;
+}
+
+static int vme_user_mmap_prepare(struct vm_area_desc *desc)
+{
+	const struct file *file = desc->file;
+	const unsigned int minor = iminor(file_inode(file));
 
 	if (type[minor] == MASTER_MINOR)
-		return vme_user_master_mmap(minor, vma);
+		return vme_user_master_mmap_prepare(minor, desc);
 
 	return -ENODEV;
 }
@@ -495,7 +529,7 @@ static const struct file_operations vme_user_fops = {
 	.llseek = vme_user_llseek,
 	.unlocked_ioctl = vme_user_unlocked_ioctl,
 	.compat_ioctl = compat_ptr_ioctl,
-	.mmap = vme_user_mmap,
+	.mmap_prepare = vme_user_mmap_prepare,
 };
 
 static int vme_user_match(struct vme_dev *vdev)
@@ -540,8 +574,7 @@ static int vme_user_probe(struct vme_dev *vdev)
 	}
 
 	/* Assign major and minor numbers for the driver */
-	err = register_chrdev_region(MKDEV(VME_MAJOR, 0), VME_DEVS,
-				     driver_name);
+	err = register_chrdev_region(MKDEV(VME_MAJOR, 0), VME_DEVS, DRIVER_NAME);
 	if (err) {
 		dev_warn(&vdev->dev, "Error getting Major Number %d for driver.\n",
 			 VME_MAJOR);
@@ -614,10 +647,9 @@ static int vme_user_probe(struct vme_dev *vdev)
 	}
 
 	/* Create sysfs entries - on udev systems this creates the dev files */
-	vme_user_sysfs_class = class_create(driver_name);
-	if (IS_ERR(vme_user_sysfs_class)) {
+	err = class_register(&vme_user_sysfs_class);
+	if (err) {
 		dev_err(&vdev->dev, "Error creating vme_user class.\n");
-		err = PTR_ERR(vme_user_sysfs_class);
 		goto err_master;
 	}
 
@@ -641,7 +673,7 @@ static int vme_user_probe(struct vme_dev *vdev)
 		}
 
 		num = (type[i] == SLAVE_MINOR) ? i - (MASTER_MAX + 1) : i;
-		image[i].device = device_create(vme_user_sysfs_class, NULL,
+		image[i].device = device_create(&vme_user_sysfs_class, NULL,
 						MKDEV(VME_MAJOR, i), NULL,
 						name, num);
 		if (IS_ERR(image[i].device)) {
@@ -656,9 +688,9 @@ static int vme_user_probe(struct vme_dev *vdev)
 err_sysfs:
 	while (i > 0) {
 		i--;
-		device_destroy(vme_user_sysfs_class, MKDEV(VME_MAJOR, i));
+		device_destroy(&vme_user_sysfs_class, MKDEV(VME_MAJOR, i));
 	}
-	class_destroy(vme_user_sysfs_class);
+	class_unregister(&vme_user_sysfs_class);
 
 	/* Ensure counter set correctly to unalloc all master windows */
 	i = MASTER_MAX + 1;
@@ -689,16 +721,16 @@ err_dev:
 	return err;
 }
 
-static void vme_user_remove(struct vme_dev *dev)
+static void vme_user_remove(struct vme_dev *vdev)
 {
 	int i;
 
 	/* Remove sysfs Entries */
 	for (i = 0; i < VME_DEVS; i++) {
 		mutex_destroy(&image[i].mutex);
-		device_destroy(vme_user_sysfs_class, MKDEV(VME_MAJOR, i));
+		device_destroy(&vme_user_sysfs_class, MKDEV(VME_MAJOR, i));
 	}
-	class_destroy(vme_user_sysfs_class);
+	class_unregister(&vme_user_sysfs_class);
 
 	for (i = MASTER_MINOR; i < (MASTER_MAX + 1); i++) {
 		kfree(image[i].kern_buf);
@@ -720,7 +752,7 @@ static void vme_user_remove(struct vme_dev *dev)
 }
 
 static struct vme_driver vme_user_driver = {
-	.name = driver_name,
+	.name = DRIVER_NAME,
 	.match = vme_user_match,
 	.probe = vme_user_probe,
 	.remove = vme_user_remove,

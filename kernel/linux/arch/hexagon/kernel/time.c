@@ -6,6 +6,7 @@
  */
 
 #include <linux/init.h>
+#include <linux/delay.h>
 #include <linux/clockchips.h>
 #include <linux/clocksource.h>
 #include <linux/interrupt.h>
@@ -18,6 +19,7 @@
 #include <linux/module.h>
 
 #include <asm/hexagon_vm.h>
+#include <asm/time.h>
 
 #define TIMER_ENABLE		BIT(0)
 
@@ -160,7 +162,7 @@ static irqreturn_t timer_interrupt(int irq, void *devid)
  * This runs just before the delay loop is calibrated, and
  * is used for delay calibration.
  */
-void __init time_init_deferred(void)
+static void __init time_init_deferred(void)
 {
 	struct resource *resource = NULL;
 	struct clock_event_device *ce_dev = &hexagon_clockevent_dev;
@@ -168,8 +170,7 @@ void __init time_init_deferred(void)
 
 	ce_dev->cpumask = cpu_all_mask;
 
-	if (!resource)
-		resource = rtos_timer_device.resource;
+	resource = rtos_timer_device.resource;
 
 	/*  ioremap here means this has to run later, after paging init  */
 	rtos_timer = ioremap(resource->start, resource_size(resource));
@@ -230,3 +231,9 @@ void __udelay(unsigned long usecs)
 		cpu_relax(); /*  not sure how this improves readability  */
 }
 EXPORT_SYMBOL(__udelay);
+
+bool delay_read_timer(unsigned long *timer_val)
+{
+	*timer_val = __vmgettime();
+	return true;
+}

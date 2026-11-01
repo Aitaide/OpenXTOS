@@ -559,9 +559,8 @@ int mthca_cmd_use_events(struct mthca_dev *dev)
 {
 	int i;
 
-	dev->cmd.context = kmalloc_array(dev->cmd.max_cmds,
-					 sizeof(struct mthca_cmd_context),
-					 GFP_KERNEL);
+	dev->cmd.context = kmalloc_objs(struct mthca_cmd_context,
+					dev->cmd.max_cmds);
 	if (!dev->cmd.context)
 		return -ENOMEM;
 
@@ -611,7 +610,7 @@ struct mthca_mailbox *mthca_alloc_mailbox(struct mthca_dev *dev,
 {
 	struct mthca_mailbox *mailbox;
 
-	mailbox = kmalloc(sizeof *mailbox, gfp_mask);
+	mailbox = kmalloc_obj(*mailbox, gfp_mask);
 	if (!mailbox)
 		return ERR_PTR(-ENOMEM);
 
@@ -635,7 +634,7 @@ void mthca_free_mailbox(struct mthca_dev *dev, struct mthca_mailbox *mailbox)
 
 int mthca_SYS_EN(struct mthca_dev *dev)
 {
-	u64 out;
+	u64 out = 0;
 	int ret;
 
 	ret = mthca_cmd_imm(dev, 0, &out, 0, 0, CMD_SYS_EN, CMD_TIME_CLASS_D);
@@ -1955,7 +1954,7 @@ int mthca_WRITE_MGM(struct mthca_dev *dev, int index,
 int mthca_MGID_HASH(struct mthca_dev *dev, struct mthca_mailbox *mailbox,
 		    u16 *hash)
 {
-	u64 imm;
+	u64 imm = 0;
 	int err;
 
 	err = mthca_cmd_imm(dev, mailbox->dma, &imm, 0, 0, CMD_MGID_HASH,

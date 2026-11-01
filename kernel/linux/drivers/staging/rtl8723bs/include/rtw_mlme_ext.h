@@ -20,51 +20,19 @@
 /* define DISCONNECT_TO	(3000) */
 #define ADDBA_TO			(2000)
 
-#define LINKED_TO (1) /* unit:2 sec, 1x2 =2 sec */
-
 #define REAUTH_LIMIT	(4)
 #define REASSOC_LIMIT	(4)
-#define READDBA_LIMIT	(2)
-
-#define ROAMING_LIMIT	8
-/* define	IOCMD_REG0		0x10250370 */
-/* define	IOCMD_REG1		0x10250374 */
-/* define	IOCMD_REG2		0x10250378 */
-
-/* define	FW_DYNAMIC_FUN_SWITCH	0x10250364 */
-
-/* define	WRITE_BB_CMD		0xF0000001 */
-/* define	SET_CHANNEL_CMD	0xF3000000 */
-/* define	UPDATE_RA_CMD	0xFD0000A2 */
 
 #define DYNAMIC_FUNC_DISABLE		(0x0)
 
 /*  ====== ODM_ABILITY_E ======== */
 /*  BB ODM section BIT 0-15 */
-#define DYNAMIC_BB_DIG				BIT0 /* ODM_BB_DIG */
-#define DYNAMIC_BB_RA_MASK			BIT1 /* ODM_BB_RA_MASK */
-#define DYNAMIC_BB_DYNAMIC_TXPWR	BIT2 /* ODM_BB_DYNAMIC_TXPWR */
-#define DYNAMIC_BB_BB_FA_CNT		BIT3 /* ODM_BB_FA_CNT */
-#define DYNAMIC_BB_RSSI_MONITOR		BIT4 /* ODM_BB_RSSI_MONITOR */
-#define DYNAMIC_BB_CCK_PD			BIT5 /* ODM_BB_CCK_PD */
-#define DYNAMIC_BB_ANT_DIV			BIT6 /* ODM_BB_ANT_DIV */
-#define DYNAMIC_BB_PWR_SAVE			BIT7 /* ODM_BB_PWR_SAVE */
-#define DYNAMIC_BB_PWR_TRAIN		BIT8 /* ODM_BB_PWR_TRAIN */
-#define DYNAMIC_BB_RATE_ADAPTIVE	BIT9 /* ODM_BB_RATE_ADAPTIVE */
-#define DYNAMIC_BB_PATH_DIV			BIT10/* ODM_BB_PATH_DIV */
-#define DYNAMIC_BB_PSD				BIT11/* ODM_BB_PSD */
-#define DYNAMIC_BB_RXHP				BIT12/* ODM_BB_RXHP */
-#define DYNAMIC_BB_ADAPTIVITY		BIT13/* ODM_BB_ADAPTIVITY */
-#define DYNAMIC_BB_DYNAMIC_ATC		BIT14/* ODM_BB_DYNAMIC_ATC */
-
-/*  MAC DM section BIT 16-23 */
-#define DYNAMIC_MAC_EDCA_TURBO		BIT16/* ODM_MAC_EDCA_TURBO */
-#define DYNAMIC_MAC_EARLY_MODE		BIT17/* ODM_MAC_EARLY_MODE */
+#define DYNAMIC_BB_DIG				BIT(0) /* ODM_BB_DIG */
+#define DYNAMIC_BB_DYNAMIC_TXPWR	BIT(2) /* ODM_BB_DYNAMIC_TXPWR */
+#define DYNAMIC_BB_ANT_DIV			BIT(6) /* ODM_BB_ANT_DIV */
 
 /*  RF ODM section BIT 24-31 */
-#define DYNAMIC_RF_TX_PWR_TRACK		BIT24/* ODM_RF_TX_PWR_TRACK */
-#define DYNAMIC_RF_RX_GAIN_TRACK	BIT25/* ODM_RF_RX_GAIN_TRACK */
-#define DYNAMIC_RF_CALIBRATION		BIT26/* ODM_RF_CALIBRATION */
+#define DYNAMIC_RF_CALIBRATION		BIT(26)/* ODM_RF_CALIBRATION */
 
 #define DYNAMIC_ALL_FUNC_ENABLE		0xFFFFFFF
 
@@ -91,11 +59,6 @@
 MCS rate definitions
 *********************************************************/
 #define MCS_RATE_1R	(0x000000ff)
-#define MCS_RATE_2R	(0x0000ffff)
-#define MCS_RATE_3R	(0x00ffffff)
-#define MCS_RATE_4R	(0xffffffff)
-#define MCS_RATE_2R_13TO15_OFF	(0x00001fff)
-
 
 extern unsigned char RTW_WPA_OUI[];
 extern unsigned char WMM_OUI[];
@@ -359,8 +322,8 @@ struct mlme_ext_info {
 
 /*  The channel information about this channel including joining, scanning, and power constraints. */
 struct rt_channel_info {
-	u8 		ChannelNum;		/*  The channel number. */
-	enum rt_scan_type	ScanType;		/*  Scan type such as passive or active scan. */
+	u8 channel_num;		/*  The channel number. */
+	enum rt_scan_type scan_type;		/*  Scan type such as passive or active scan. */
 };
 
 int rtw_ch_set_search_ch(struct rt_channel_info *ch_set, const u32 ch);
@@ -421,8 +384,8 @@ struct mlme_ext_priv {
 	unsigned char default_supported_mcs_set[16];
 
 	struct ss_res		sitesurvey_res;
-	struct mlme_ext_info mlmext_info;/* for sta/adhoc mode, including current scanning/connecting/connected related info. */
-                                                     /* for ap mode, network includes ap's cap_info */
+	struct mlme_ext_info mlmext_info;	/* for sta/adhoc mode, including current scanning/connecting/connected related info. */
+						/* for ap mode, network includes ap's cap_info */
 	struct timer_list		survey_timer;
 	struct timer_list		link_timer;
 	struct timer_list		sa_query_timer;
@@ -453,18 +416,12 @@ struct mlme_ext_priv {
 	u16  action_public_rxseq;
 
 	u8 active_keep_alive_check;
-#ifdef DBG_FIXED_CHAN
-	u8 fixed_chan;
-#endif
-
 };
 
 void init_mlme_default_rate_set(struct adapter *padapter);
 void init_mlme_ext_priv(struct adapter *padapter);
-int init_hw_mlme_ext(struct adapter *padapter);
+void init_hw_mlme_ext(struct adapter *padapter);
 void free_mlme_ext_priv(struct mlme_ext_priv *pmlmeext);
-extern void init_mlme_ext_timer(struct adapter *padapter);
-extern void init_addba_retry_timer(struct adapter *padapter, struct sta_info *psta);
 extern struct xmit_frame *alloc_mgtxmitframe(struct xmit_priv *pxmitpriv);
 
 /* void fill_fwpriv(struct adapter *padapter, struct fw_priv *pfwpriv); */
@@ -473,30 +430,26 @@ u8 networktype_to_raid_ex(struct adapter *adapter, struct sta_info *psta);
 
 void get_rate_set(struct adapter *padapter, unsigned char *pbssrate, int *bssrate_len);
 void set_mcs_rate_by_mask(u8 *mcs_set, u32 mask);
-void UpdateBrateTbl(struct adapter *padapter, u8 *mBratesOS);
-void UpdateBrateTblForSoftAP(u8 *bssrateset, u32 bssratelen);
+void update_basic_rate_table(struct adapter *padapter, u8 *mBratesOS);
+void update_basic_rate_table_soft_ap(u8 *bssrateset, u32 bssratelen);
 
-void Save_DM_Func_Flag(struct adapter *padapter);
-void Restore_DM_Func_Flag(struct adapter *padapter);
-void Switch_DM_Func(struct adapter *padapter, u32 mode, u8 enable);
+void save_dm_func_flag(struct adapter *padapter);
+void restore_dm_func_flag(struct adapter *padapter);
+void switch_dm_func(struct adapter *padapter, u32 mode, u8 enable);
 
-void Set_MSR(struct adapter *padapter, u8 type);
+void set_msr(struct adapter *padapter, u8 type);
 
 u8 rtw_get_oper_ch(struct adapter *adapter);
 void rtw_set_oper_ch(struct adapter *adapter, u8 ch);
-u8 rtw_get_oper_bw(struct adapter *adapter);
 void rtw_set_oper_bw(struct adapter *adapter, u8 bw);
-u8 rtw_get_oper_choffset(struct adapter *adapter);
 void rtw_set_oper_choffset(struct adapter *adapter, u8 offset);
 u8 rtw_get_center_ch(u8 channel, u8 chnl_bw, u8 chnl_offset);
 unsigned long rtw_get_on_cur_ch_time(struct adapter *adapter);
 
 void set_channel_bwmode(struct adapter *padapter, unsigned char channel, unsigned char channel_offset, unsigned short bwmode);
-void SelectChannel(struct adapter *padapter, unsigned char channel);
+void r8723bs_select_channel(struct adapter *padapter, unsigned char channel);
 
 unsigned int decide_wait_for_beacon_timeout(unsigned int bcn_interval);
-
-void read_cam(struct adapter *padapter, u8 entry, u8 *get_key);
 
 /* modify HW only */
 void _write_cam(struct adapter *padapter, u8 entry, u16 ctrl, u8 *mac, u8 *key);
@@ -550,7 +503,7 @@ int update_sta_support_rate(struct adapter *padapter, u8 *pvar_ie, uint var_ie_l
 
 /* for sta/adhoc mode */
 void update_sta_info(struct adapter *padapter, struct sta_info *psta);
-void Update_RA_Entry(struct adapter *padapter, struct sta_info *psta);
+void update_ra_entry(struct adapter *padapter, struct sta_info *psta);
 void set_sta_rate(struct adapter *padapter, struct sta_info *psta);
 
 unsigned int receive_disconnect(struct adapter *padapter, unsigned char *MacAddr, unsigned short reason);
@@ -565,7 +518,6 @@ void rtw_camid_free(struct adapter *adapter, u8 cam_id);
 
 extern void rtw_alloc_macid(struct adapter *padapter, struct sta_info *psta);
 extern void rtw_release_macid(struct adapter *padapter, struct sta_info *psta);
-extern u8 rtw_search_max_mac_id(struct adapter *padapter);
 
 void report_join_res(struct adapter *padapter, int res);
 void report_survey_event(struct adapter *padapter, union recv_frame *precv_frame);
@@ -659,7 +611,7 @@ extern void process_addba_req(struct adapter *padapter, u8 *paddba_req, u8 *addr
 extern void update_TSF(struct mlme_ext_priv *pmlmeext, u8 *pframe, uint len);
 extern void correct_TSF(struct adapter *padapter, struct mlme_ext_priv *pmlmeext);
 extern void adaptive_early_32k(struct mlme_ext_priv *pmlmeext, u8 *pframe, uint len);
-extern u8 traffic_status_watchdog(struct adapter *padapter, u8 from_timer);
+extern bool traffic_status_watchdog(struct adapter *padapter, bool from_timer);
 
 int rtw_chk_start_clnt_join(struct adapter *padapter, u8 *ch, u8 *bw, u8 *offset);
 
@@ -723,39 +675,34 @@ void rtw_dummy_event_callback(struct adapter *adapter, u8 *pbuf);
 void rtw_fwdbg_event_callback(struct adapter *adapter, u8 *pbuf);
 
 enum {
-	GEN_EVT_CODE(_Read_MACREG) = 0, /*0*/
-	GEN_EVT_CODE(_Read_BBREG),
-	GEN_EVT_CODE(_Read_RFREG),
-	GEN_EVT_CODE(_Read_EEPROM),
-	GEN_EVT_CODE(_Read_EFUSE),
-	GEN_EVT_CODE(_Read_CAM),			/*5*/
-	GEN_EVT_CODE(_Get_BasicRate),
-	GEN_EVT_CODE(_Get_DataRate),
-	GEN_EVT_CODE(_Survey),	 /*8*/
-	GEN_EVT_CODE(_SurveyDone),	 /*9*/
+	READ_MACREG_EVENT = 0,		/*0*/
+	READ_BBREG_EVENT,
+	READ_RFREG_EVENT,
+	READ_EEPROM_EVENT,
+	READ_EFUSE_EVENT,
+	READ_CAM_EVENT,			/*5*/
+	GET_BASICRATE_EVENT,
+	GET_DATARATE_EVENT,
+	SURVEY_EVENT,			/*8*/
+	SURVEY_DONE_EVENT,		/*9*/
 
-	GEN_EVT_CODE(_JoinBss), /*10*/
-	GEN_EVT_CODE(_AddSTA),
-	GEN_EVT_CODE(_DelSTA),
-	GEN_EVT_CODE(_AtimDone),
-	GEN_EVT_CODE(_TX_Report),
-	GEN_EVT_CODE(_CCX_Report),			/*15*/
-	GEN_EVT_CODE(_DTM_Report),
-	GEN_EVT_CODE(_TX_Rate_Statistics),
-	GEN_EVT_CODE(_C2HLBK),
-	GEN_EVT_CODE(_FWDBG),
-	GEN_EVT_CODE(_C2HFEEDBACK),               /*20*/
-	GEN_EVT_CODE(_ADDBA),
-	GEN_EVT_CODE(_C2HBCN),
-	GEN_EVT_CODE(_ReportPwrState),		/* filen: only for PCIE, USB */
-	GEN_EVT_CODE(_CloseRF),				/* filen: only for PCIE, work around ASPM */
-	GEN_EVT_CODE(_WMM),					/*25*/
+	JOIN_BSS_EVENT,			/*10*/
+	ADD_STA_EVENT,
+	DEL_STA_EVENT,
+	ATIM_DONE_EVENT,
+	TX_REPORT_EVENT,
+	CCX_REPORT_EVENT,		/*15*/
+	DTM_REPORT_EVENT,
+	TX_RATE_STATISTICS_EVENT,
+	C2HLBK_EVENT,
+	FWDBG_EVENT,
+	C2HFEEDBACK_EVENT,		/*20*/
+	ADDBA_EVENT,
+	C2HBCN_EVENT,
+	REPORT_PWR_STATE_EVENT,		/* filen: only for PCIE, USB */
+	CLOSE_RF_EVENT,			/* filen: only for PCIE, work around ASPM */
+	WMM_EVENT,			/*25*/
 	MAX_C2HEVT
 };
-
-
-#ifdef _RTW_MLME_EXT_C_
-
-#endif/* _RTL8192C_CMD_C_ */
 
 #endif

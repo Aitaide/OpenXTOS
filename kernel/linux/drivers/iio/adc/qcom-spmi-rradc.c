@@ -2,7 +2,7 @@
 /*
  * Copyright (c) 2016-2017, 2019, The Linux Foundation. All rights reserved.
  * Copyright (c) 2022 Linaro Limited.
- *  Author: Caleb Connolly <caleb.connolly@linaro.org>
+ *  Author: Casey Connolly <casey.connolly@linaro.org>
  *
  * This driver is for the Round Robin ADC found in the pmi8998 and pm660 PMICs.
  */
@@ -12,7 +12,6 @@
 #include <linux/kernel.h>
 #include <linux/math64.h>
 #include <linux/module.h>
-#include <linux/mod_devicetable.h>
 #include <linux/platform_device.h>
 #include <linux/property.h>
 #include <linux/regmap.h>
@@ -20,7 +19,7 @@
 #include <linux/types.h>
 #include <linux/units.h>
 
-#include <asm/unaligned.h>
+#include <linux/unaligned.h>
 
 #include <linux/iio/iio.h>
 #include <linux/iio/types.h>
@@ -358,15 +357,15 @@ static int rradc_enable_continuous_mode(struct rradc_chip *chip)
 	int ret;
 
 	/* Clear channel log */
-	ret = regmap_update_bits(chip->regmap, chip->base + RR_ADC_LOG,
-				 RR_ADC_LOG_CLR_CTRL, RR_ADC_LOG_CLR_CTRL);
+	ret = regmap_set_bits(chip->regmap, chip->base + RR_ADC_LOG,
+			      RR_ADC_LOG_CLR_CTRL);
 	if (ret < 0) {
 		dev_err(chip->dev, "log ctrl update to clear failed:%d\n", ret);
 		return ret;
 	}
 
-	ret = regmap_update_bits(chip->regmap, chip->base + RR_ADC_LOG,
-				 RR_ADC_LOG_CLR_CTRL, 0);
+	ret = regmap_clear_bits(chip->regmap, chip->base + RR_ADC_LOG,
+				RR_ADC_LOG_CLR_CTRL);
 	if (ret < 0) {
 		dev_err(chip->dev, "log ctrl update to not clear failed:%d\n",
 			ret);
@@ -374,9 +373,8 @@ static int rradc_enable_continuous_mode(struct rradc_chip *chip)
 	}
 
 	/* Switch to continuous mode */
-	ret = regmap_update_bits(chip->regmap, chip->base + RR_ADC_CTL,
-				 RR_ADC_CTL_CONTINUOUS_SEL,
-				 RR_ADC_CTL_CONTINUOUS_SEL);
+	ret = regmap_set_bits(chip->regmap, chip->base + RR_ADC_CTL,
+			      RR_ADC_CTL_CONTINUOUS_SEL);
 	if (ret < 0)
 		dev_err(chip->dev, "Update to continuous mode failed:%d\n",
 			ret);
@@ -389,8 +387,8 @@ static int rradc_disable_continuous_mode(struct rradc_chip *chip)
 	int ret;
 
 	/* Switch to non continuous mode */
-	ret = regmap_update_bits(chip->regmap, chip->base + RR_ADC_CTL,
-				 RR_ADC_CTL_CONTINUOUS_SEL, 0);
+	ret = regmap_clear_bits(chip->regmap, chip->base + RR_ADC_CTL,
+				RR_ADC_CTL_CONTINUOUS_SEL);
 	if (ret < 0)
 		dev_err(chip->dev, "Update to non-continuous mode failed:%d\n",
 			ret);
@@ -434,8 +432,8 @@ static int rradc_read_status_in_cont_mode(struct rradc_chip *chip,
 		return -EINVAL;
 	}
 
-	ret = regmap_update_bits(chip->regmap, chip->base + chan->trigger_addr,
-				 chan->trigger_mask, chan->trigger_mask);
+	ret = regmap_set_bits(chip->regmap, chip->base + chan->trigger_addr,
+			      chan->trigger_mask);
 	if (ret < 0) {
 		dev_err(chip->dev,
 			"Failed to apply trigger for channel '%s' ret=%d\n",
@@ -469,8 +467,8 @@ static int rradc_read_status_in_cont_mode(struct rradc_chip *chip,
 	rradc_disable_continuous_mode(chip);
 
 disable_trigger:
-	regmap_update_bits(chip->regmap, chip->base + chan->trigger_addr,
-			   chan->trigger_mask, 0);
+	regmap_clear_bits(chip->regmap, chip->base + chan->trigger_addr,
+			  chan->trigger_mask);
 
 	return ret;
 }
@@ -481,17 +479,16 @@ static int rradc_prepare_batt_id_conversion(struct rradc_chip *chip,
 {
 	int ret;
 
-	ret = regmap_update_bits(chip->regmap, chip->base + RR_ADC_BATT_ID_CTRL,
-				 RR_ADC_BATT_ID_CTRL_CHANNEL_CONV,
-				 RR_ADC_BATT_ID_CTRL_CHANNEL_CONV);
+	ret = regmap_set_bits(chip->regmap, chip->base + RR_ADC_BATT_ID_CTRL,
+			      RR_ADC_BATT_ID_CTRL_CHANNEL_CONV);
 	if (ret < 0) {
 		dev_err(chip->dev, "Enabling BATT ID channel failed:%d\n", ret);
 		return ret;
 	}
 
-	ret = regmap_update_bits(chip->regmap,
-				 chip->base + RR_ADC_BATT_ID_TRIGGER,
-				 RR_ADC_TRIGGER_CTL, RR_ADC_TRIGGER_CTL);
+	ret = regmap_set_bits(chip->regmap,
+			      chip->base + RR_ADC_BATT_ID_TRIGGER,
+			      RR_ADC_TRIGGER_CTL);
 	if (ret < 0) {
 		dev_err(chip->dev, "BATT_ID trigger set failed:%d\n", ret);
 		goto out_disable_batt_id;
@@ -500,12 +497,12 @@ static int rradc_prepare_batt_id_conversion(struct rradc_chip *chip,
 	ret = rradc_read_status_in_cont_mode(chip, chan_address);
 
 	/* Reset registers back to default values */
-	regmap_update_bits(chip->regmap, chip->base + RR_ADC_BATT_ID_TRIGGER,
-			   RR_ADC_TRIGGER_CTL, 0);
+	regmap_clear_bits(chip->regmap, chip->base + RR_ADC_BATT_ID_TRIGGER,
+			  RR_ADC_TRIGGER_CTL);
 
 out_disable_batt_id:
-	regmap_update_bits(chip->regmap, chip->base + RR_ADC_BATT_ID_CTRL,
-			   RR_ADC_BATT_ID_CTRL_CHANNEL_CONV, 0);
+	regmap_clear_bits(chip->regmap, chip->base + RR_ADC_BATT_ID_CTRL,
+			  RR_ADC_BATT_ID_CTRL_CHANNEL_CONV);
 
 	return ret;
 }
@@ -771,7 +768,7 @@ static int rradc_read_raw(struct iio_dev *indio_dev,
 static int rradc_read_label(struct iio_dev *indio_dev,
 			    struct iio_chan_spec const *chan, char *label)
 {
-	return snprintf(label, PAGE_SIZE, "%s\n",
+	return sysfs_emit(label, "%s\n",
 			rradc_chans[chan->address].label);
 }
 
@@ -936,20 +933,15 @@ static int rradc_probe(struct platform_device *pdev)
 
 	chip = iio_priv(indio_dev);
 	chip->regmap = dev_get_regmap(pdev->dev.parent, NULL);
-	if (!chip->regmap) {
-		dev_err(dev, "Couldn't get parent's regmap\n");
-		return -EINVAL;
-	}
+	if (!chip->regmap)
+		return dev_err_probe(dev, -EINVAL, "Couldn't get parent's regmap\n");
 
 	chip->dev = dev;
 	mutex_init(&chip->conversion_lock);
 
 	ret = device_property_read_u32(dev, "reg", &chip->base);
-	if (ret < 0) {
-		dev_err(chip->dev, "Couldn't find reg address, ret = %d\n",
-			ret);
-		return ret;
-	}
+	if (ret < 0)
+		return dev_err_probe(dev, ret, "Couldn't find reg address\n");
 
 	batt_id_delay = -1;
 	ret = device_property_read_u32(dev, "qcom,batt-id-delay-ms",
@@ -965,9 +957,9 @@ static int rradc_probe(struct platform_device *pdev)
 
 	if (batt_id_delay >= 0) {
 		batt_id_delay = FIELD_PREP(BATT_ID_SETTLE_MASK, batt_id_delay);
-		ret = regmap_update_bits(chip->regmap,
-					 chip->base + RR_ADC_BATT_ID_CFG,
-					 batt_id_delay, batt_id_delay);
+		ret = regmap_set_bits(chip->regmap,
+				      chip->base + RR_ADC_BATT_ID_CFG,
+				      batt_id_delay);
 		if (ret < 0) {
 			dev_err(chip->dev,
 				"BATT_ID settling time config failed:%d\n",
@@ -977,10 +969,9 @@ static int rradc_probe(struct platform_device *pdev)
 
 	/* Get the PMIC revision, we need it to handle some varying coefficients */
 	chip->pmic = qcom_pmic_get(chip->dev);
-	if (IS_ERR(chip->pmic)) {
-		dev_err(chip->dev, "Unable to get reference to PMIC device\n");
-		return PTR_ERR(chip->pmic);
-	}
+	if (IS_ERR(chip->pmic))
+		return dev_err_probe(dev, PTR_ERR(chip->pmic),
+				     "Unable to get reference to PMIC device\n");
 
 	switch (chip->pmic->subtype) {
 	case PMI8998_SUBTYPE:
@@ -1004,7 +995,7 @@ static int rradc_probe(struct platform_device *pdev)
 static const struct of_device_id rradc_match_table[] = {
 	{ .compatible = "qcom,pm660-rradc" },
 	{ .compatible = "qcom,pmi8998-rradc" },
-	{}
+	{ }
 };
 MODULE_DEVICE_TABLE(of, rradc_match_table);
 
@@ -1018,5 +1009,5 @@ static struct platform_driver rradc_driver = {
 module_platform_driver(rradc_driver);
 
 MODULE_DESCRIPTION("QCOM SPMI PMIC RR ADC driver");
-MODULE_AUTHOR("Caleb Connolly <caleb.connolly@linaro.org>");
+MODULE_AUTHOR("Casey Connolly <casey.connolly@linaro.org>");
 MODULE_LICENSE("GPL");

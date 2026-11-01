@@ -27,7 +27,7 @@
 #define FT1_DA0_MASK	0x8
 #define FT1_DA1_MASK	0xc
 
-#define FT1_N_REG(slize, n, reg)	\
+#define FT1_N_REG(slice, n, reg)	\
 	(offs[slice].ft1_slot_base + FT1_SLOT_SIZE * (n) + (reg))
 
 #define FT1_LEN_MASK		GENMASK(19, 16)
@@ -62,7 +62,7 @@ enum ft1_cfg_type {
 #define FT3_T			0x18
 #define FT3_T_MASK		0x1c
 
-#define FT3_N_REG(slize, n, reg)	\
+#define FT3_N_REG(slice, n, reg)	\
 	(offs[slice].ft3_slot_base + FT3_SLOT_SIZE * (n) + (reg))
 
 /* offsets from rx_class n's base */
@@ -73,6 +73,9 @@ enum ft1_cfg_type {
 
 #define RX_CLASS_N_REG(slice, n, reg)	\
 	(offs[slice].rx_class_base + RX_CLASS_EN_SIZE * (n) + (reg))
+
+#define RX_CLASS_OR_REG(slice, n, reg)	\
+	(offs[slice].rx_class_or_base + RX_CLASS_EN_SIZE * (n) + (reg))
 
 /* RX Class Gates */
 #define RX_CLASS_GATES_SIZE	0x4	/* bytes */
@@ -101,6 +104,22 @@ enum ft1_cfg_type {
 #define RX_CLASS_FT_FT1_MATCH(slot)	\
 	((BIT(slot) << RX_CLASS_FT_FT1_MATCH_SHIFT) & \
 	RX_CLASS_FT_FT1_MATCH_MASK)
+
+/* HSR/PRP protocol frame filtering */
+#define HSR_PTP_ETHERTYPE_OFFSET	0x12
+#define PRP_PTP_ETHERTYPE_OFFSET	0x0C
+#define FT3_PTP_PATTERN			0xF788
+#define FT3_ETHERTYPE_MASK		0xFFFF0000U
+#define FT3_VLAN_MODE_BOTH		0x1
+#define RX_CLASS_OR_DUP_PTP		0x4200
+#define RX_CLASS_OR_HSR_TAG		0x4000
+#define RX_CLASS_GATE_PTP		0x50
+#define RX_CLASS_DISABLE		0x0
+
+/* HSR/PRP classifier indices */
+#define CLASSIFIER_PTP_DUP		10
+#define CLASSIFIER_HSR_TAG		11
+#define FT3_PTP_SLOT			14
 
 /* RX class type */
 enum rx_class_sel_type {
@@ -133,6 +152,7 @@ struct miig_rt_offsets {
 	u32 ft3_p_base;
 	u32 ft_rx_ptr;
 	u32 rx_class_base;
+	u32 rx_class_or_base;
 	u32 rx_class_cfg1;
 	u32 rx_class_cfg2;
 	u32 rx_class_gates_base;
@@ -161,6 +181,7 @@ static const struct miig_rt_offsets offs[] = {
 		0x308,
 		0x408,
 		0x40c,
+		0x410,
 		0x48c,
 		0x490,
 		0x494,
@@ -186,6 +207,7 @@ static const struct miig_rt_offsets offs[] = {
 		0x8d4,
 		0x9d4,
 		0x9d8,
+		0x9dc,
 		0xa58,
 		0xa5c,
 		0xa60,
@@ -274,18 +296,50 @@ static void rx_class_set_or(struct regmap *miig_rt, int slice, int n,
 	regmap_write(miig_rt, offset, data);
 }
 
+static u32 rx_class_get_or(struct regmap *miig_rt, int slice, int n)
+{
+	u32 offset, val;
+
+	offset = RX_CLASS_N_REG(slice, n, RX_CLASS_OR_EN);
+	regmap_read(miig_rt, offset, &val);
+
+	return val;
+}
+
 void icssg_class_set_host_mac_addr(struct regmap *miig_rt, const u8 *mac)
 {
 	regmap_write(miig_rt, MAC_INTERFACE_0, (u32)(mac[0] | mac[1] << 8 |
 		     mac[2] << 16 | mac[3] << 24));
 	regmap_write(miig_rt, MAC_INTERFACE_1, (u32)(mac[4] | mac[5] << 8));
 }
+EXPORT_SYMBOL_GPL(icssg_class_set_host_mac_addr);
 
 void icssg_class_set_mac_addr(struct regmap *miig_rt, int slice, u8 *mac)
 {
 	regmap_write(miig_rt, offs[slice].mac0, (u32)(mac[0] | mac[1] << 8 |
 		     mac[2] << 16 | mac[3] << 24));
 	regmap_write(miig_rt, offs[slice].mac1, (u32)(mac[4] | mac[5] << 8));
+}
+EXPORT_SYMBOL_GPL(icssg_class_set_mac_addr);
+
+static void icssg_class_ft1_add_mcast(struct regmap *miig_rt, int slice,
+				      int slot, const u8 *addr, const u8 *mask)
+{
+	u32 val;
+	int i;
+
+	WARN(slot >= FT1_NUM_SLOTS, "invalid slot: %d\n", slot);
+
+	rx_class_ft1_set_da(miig_rt, slice, slot, addr);
+	rx_class_ft1_set_da_mask(miig_rt, slice, slot, mask);
+	rx_class_ft1_cfg_set_type(miig_rt, slice, slot, FT1_CFG_TYPE_EQ);
+
+	/* Enable the FT1 slot in OR enable for all classifiers */
+	for (i = 0; i < ICSSG_NUM_CLASSIFIERS_IN_USE; i++) {
+		val = rx_class_get_or(miig_rt, slice, i);
+		val |= RX_CLASS_FT_FT1_MATCH(slot);
+		rx_class_set_or(miig_rt, slice, i, val);
+	}
 }
 
 /* disable all RX traffic */
@@ -330,38 +384,151 @@ void icssg_class_disable(struct regmap *miig_rt, int slice)
 	/* clear CFG2 */
 	regmap_write(miig_rt, offs[slice].rx_class_cfg2, 0);
 }
+EXPORT_SYMBOL_GPL(icssg_class_disable);
 
-void icssg_class_default(struct regmap *miig_rt, int slice, bool allmulti)
+void icssg_class_default(struct regmap *miig_rt, int slice, bool allmulti,
+			 bool is_sr1)
 {
+	int num_classifiers = is_sr1 ? ICSSG_NUM_CLASSIFIERS_IN_USE : 1;
 	u32 data;
+	int n;
 
 	/* defaults */
 	icssg_class_disable(miig_rt, slice);
 
 	/* Setup Classifier */
-	/* match on Broadcast or MAC_PRU address */
-	data = RX_CLASS_FT_BC | RX_CLASS_FT_DA_P;
+	for (n = 0; n < num_classifiers; n++) {
+		/* match on Broadcast or MAC_PRU address */
+		data = RX_CLASS_FT_BC | RX_CLASS_FT_DA_P;
 
-	/* multicast */
-	if (allmulti)
-		data |= RX_CLASS_FT_MC;
+		/* multicast */
+		if (allmulti)
+			data |= RX_CLASS_FT_MC;
 
-	rx_class_set_or(miig_rt, slice, 0, data);
+		rx_class_set_or(miig_rt, slice, n, data);
 
-	/* set CFG1 for OR_OR_AND for classifier */
-	rx_class_sel_set_type(miig_rt, slice, 0, RX_CLASS_SEL_TYPE_OR_OR_AND);
+		/* set CFG1 for OR_OR_AND for classifier */
+		rx_class_sel_set_type(miig_rt, slice, n,
+				      RX_CLASS_SEL_TYPE_OR_OR_AND);
+	}
 
 	/* clear CFG2 */
 	regmap_write(miig_rt, offs[slice].rx_class_cfg2, 0);
 }
+EXPORT_SYMBOL_GPL(icssg_class_default);
+
+void icssg_class_promiscuous_sr1(struct regmap *miig_rt, int slice)
+{
+	u32 data, offset;
+	int n;
+
+	/* defaults */
+	icssg_class_disable(miig_rt, slice);
+
+	/* Setup Classifier */
+	for (n = 0; n < ICSSG_NUM_CLASSIFIERS_IN_USE; n++) {
+		/* set RAW_MASK to bypass filters */
+		offset = RX_CLASS_GATES_N_REG(slice, n);
+		regmap_read(miig_rt, offset, &data);
+		data |= RX_CLASS_GATES_RAW_MASK;
+		regmap_write(miig_rt, offset, data);
+	}
+}
+EXPORT_SYMBOL_GPL(icssg_class_promiscuous_sr1);
+
+void icssg_class_add_mcast_sr1(struct regmap *miig_rt, int slice,
+			       struct net_device *ndev)
+{
+	u8 mask_addr[6] = { 0, 0, 0, 0, 0, 0xff };
+	struct netdev_hw_addr *ha;
+	int slot = 2;
+
+	rx_class_ft1_set_start_len(miig_rt, slice, 0, 6);
+	/* reserve first 2 slots for
+	 *	1) 01-80-C2-00-00-XX Known Service Ethernet Multicast addresses
+	 *	2) 01-00-5e-00-00-XX Local Network Control Block
+	 *			      (224.0.0.0 - 224.0.0.255  (224.0.0/24))
+	 */
+	icssg_class_ft1_add_mcast(miig_rt, slice, 0,
+				  eth_reserved_addr_base, mask_addr);
+	icssg_class_ft1_add_mcast(miig_rt, slice, 1,
+				  eth_ipv4_mcast_addr_base, mask_addr);
+	mask_addr[5] = 0;
+	netdev_for_each_mc_addr(ha, ndev) {
+		/* skip addresses matching reserved slots */
+		if (!memcmp(eth_reserved_addr_base, ha->addr, 5) ||
+		    !memcmp(eth_ipv4_mcast_addr_base, ha->addr, 5)) {
+			netdev_dbg(ndev, "mcast skip %pM\n", ha->addr);
+			continue;
+		}
+
+		if (slot >= FT1_NUM_SLOTS) {
+			netdev_dbg(ndev,
+				   "can't add more than %d MC addresses, enabling allmulti\n",
+				   FT1_NUM_SLOTS);
+			icssg_class_default(miig_rt, slice, 1, true);
+			break;
+		}
+
+		netdev_dbg(ndev, "mcast add %pM\n", ha->addr);
+		icssg_class_ft1_add_mcast(miig_rt, slice, slot,
+					  ha->addr, mask_addr);
+		slot++;
+	}
+}
+EXPORT_SYMBOL_GPL(icssg_class_add_mcast_sr1);
 
 /* required for SAV check */
 void icssg_ft1_set_mac_addr(struct regmap *miig_rt, int slice, u8 *mac_addr)
 {
 	const u8 mask_addr[] = { 0, 0, 0, 0, 0, 0, };
 
-	rx_class_ft1_set_start_len(miig_rt, slice, 0, 6);
+	rx_class_ft1_set_start_len(miig_rt, slice, ETH_ALEN, ETH_ALEN);
 	rx_class_ft1_set_da(miig_rt, slice, 0, mac_addr);
 	rx_class_ft1_set_da_mask(miig_rt, slice, 0, mask_addr);
 	rx_class_ft1_cfg_set_type(miig_rt, slice, 0, FT1_CFG_TYPE_EQ);
 }
+EXPORT_SYMBOL_GPL(icssg_ft1_set_mac_addr);
+
+/**
+ * icssg_ft3_hsr_configurations - Configure filter table for HSR/PRP protocol frames
+ * @miig_rt: Pointer to the MII-G register map
+ * @slice: ICSSG slice number (0 or 1)
+ * @prueth: Pointer to prueth structure to determine HSR/PRP mode
+ *
+ * Configures FT3 to detect PTP frames (EtherType 0x88F7) in HSR/PRP tagged packets.
+ * HSR frames have a 6-byte tag, while PRP has no tag offset for EtherType detection.
+ */
+void icssg_ft3_hsr_configurations(struct regmap *miig_rt, int slice,
+				  struct prueth *prueth)
+{
+	u8 offset = (prueth->hsr_prp_version == PRP_V1) ?
+		    PRP_PTP_ETHERTYPE_OFFSET : HSR_PTP_ETHERTYPE_OFFSET;
+
+	regmap_write(miig_rt, FT3_N_REG(slice, FT3_PTP_SLOT, FT3_START), offset);
+	regmap_write(miig_rt, FT3_N_REG(slice, FT3_PTP_SLOT, FT3_START_AUTO), 0);
+	regmap_write(miig_rt, FT3_N_REG(slice, FT3_PTP_SLOT, FT3_START_OFFSET), 0);
+	regmap_write(miig_rt, FT3_N_REG(slice, FT3_PTP_SLOT, FT3_JUMP_OFFSET), 0);
+	regmap_write(miig_rt, FT3_N_REG(slice, FT3_PTP_SLOT, FT3_LEN), 0);
+	regmap_write(miig_rt, FT3_N_REG(slice, FT3_PTP_SLOT, FT3_CFG), FT3_VLAN_MODE_BOTH);
+	regmap_write(miig_rt, FT3_N_REG(slice, FT3_PTP_SLOT, FT3_T), FT3_PTP_PATTERN);
+	regmap_write(miig_rt, FT3_N_REG(slice, FT3_PTP_SLOT, FT3_T_MASK),
+		     FT3_ETHERTYPE_MASK);
+
+	regmap_write(miig_rt, RX_CLASS_N_REG(slice, CLASSIFIER_PTP_DUP, RX_CLASS_AND_EN),
+		     RX_CLASS_DISABLE);
+	regmap_write(miig_rt, RX_CLASS_OR_REG(slice, CLASSIFIER_PTP_DUP, RX_CLASS_AND_EN),
+		     RX_CLASS_OR_DUP_PTP);
+	regmap_write(miig_rt, RX_CLASS_GATES_N_REG(slice, CLASSIFIER_PTP_DUP),
+		     RX_CLASS_GATE_PTP);
+
+	if (prueth->hsr_prp_version != PRP_V1) {
+		regmap_write(miig_rt, RX_CLASS_N_REG(slice, CLASSIFIER_HSR_TAG, RX_CLASS_AND_EN),
+			     RX_CLASS_DISABLE);
+		regmap_write(miig_rt, RX_CLASS_OR_REG(slice, CLASSIFIER_HSR_TAG, RX_CLASS_AND_EN),
+			     RX_CLASS_OR_HSR_TAG);
+		regmap_write(miig_rt, RX_CLASS_GATES_N_REG(slice, CLASSIFIER_HSR_TAG),
+			     RX_CLASS_GATE_PTP);
+	}
+}
+EXPORT_SYMBOL_GPL(icssg_ft3_hsr_configurations);

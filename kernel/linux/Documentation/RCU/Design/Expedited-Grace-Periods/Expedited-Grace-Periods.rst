@@ -181,7 +181,7 @@ operations is carried out at several levels:
    of this wait (or series of waits, as the case may be) is to permit a
    concurrent CPU-hotplug operation to complete.
 #. In the case of RCU-sched, one of the last acts of an outgoing CPU is
-   to invoke ``rcu_report_dead()``, which reports a quiescent state for
+   to invoke ``rcutree_report_cpu_dead()``, which reports a quiescent state for
    that CPU. However, this is likely paranoia-induced redundancy.
 
 +-----------------------------------------------------------------------+
@@ -410,7 +410,7 @@ workqueues (see Documentation/core-api/workqueue.rst).
 
 The requesting task still does counter snapshotting and funnel-lock
 processing, but the task reaching the top of the funnel lock does a
-``schedule_work()`` (from ``_synchronize_rcu_expedited()`` so that a
+``schedule_work()`` (from ``_synchronize_rcu_expedited()``) so that a
 workqueue kthread does the actual grace-period processing. Because
 workqueue kthreads do not accept POSIX signals, grace-period-wait
 processing need not allow for POSIX signals. In addition, this approach

@@ -32,8 +32,7 @@
  *
  */
 
-#define KMSG_COMPONENT "IPVS"
-#define pr_fmt(fmt) KMSG_COMPONENT ": " fmt
+#define pr_fmt(fmt) "IPVS: " fmt
 
 #include <linux/ip.h>
 #include <linux/module.h>
@@ -108,7 +107,7 @@ static void ip_vs_dest_set_insert(struct ip_vs_dest_set *set,
 		}
 	}
 
-	e = kmalloc(sizeof(*e), GFP_ATOMIC);
+	e = kmalloc_obj(*e, GFP_ATOMIC);
 	if (e == NULL)
 		return;
 
@@ -170,8 +169,8 @@ static inline struct ip_vs_dest *ip_vs_dest_set_min(struct ip_vs_dest_set *set)
 		if (least->flags & IP_VS_DEST_F_OVERLOAD)
 			continue;
 
-		if ((atomic_read(&least->weight) > 0)
-		    && (least->flags & IP_VS_DEST_F_AVAILABLE)) {
+		if ((atomic_read(&least->weight) > 0) &&
+		    (least->cflags & IP_VS_DEST_CF_AVAILABLE)) {
 			loh = ip_vs_dest_conn_overhead(least);
 			goto nextstage;
 		}
@@ -187,8 +186,8 @@ static inline struct ip_vs_dest *ip_vs_dest_set_min(struct ip_vs_dest_set *set)
 
 		doh = ip_vs_dest_conn_overhead(dest);
 		if (((__s64)loh * atomic_read(&dest->weight) >
-		     (__s64)doh * atomic_read(&least->weight))
-		    && (dest->flags & IP_VS_DEST_F_AVAILABLE)) {
+		     (__s64)doh * atomic_read(&least->weight)) &&
+		    (dest->cflags & IP_VS_DEST_CF_AVAILABLE)) {
 			least = dest;
 			loh = doh;
 		}
@@ -294,7 +293,6 @@ static struct ctl_table vs_vars_table[] = {
 		.mode		= 0644,
 		.proc_handler	= proc_dointvec_jiffies,
 	},
-	{ }
 };
 #endif
 
@@ -365,7 +363,10 @@ ip_vs_lblcr_new(struct ip_vs_lblcr_table *tbl, const union nf_inet_addr *daddr,
 
 	en = ip_vs_lblcr_get(af, tbl, daddr);
 	if (!en) {
-		en = kmalloc(sizeof(*en), GFP_ATOMIC);
+		if (atomic_read(&tbl->entries) >= tbl->max_size * 3 / 2)
+			return NULL;
+
+		en = kmalloc_obj(*en, GFP_ATOMIC);
 		if (!en)
 			return NULL;
 
@@ -457,7 +458,8 @@ static inline void ip_vs_lblcr_full_check(struct ip_vs_service *svc)
  */
 static void ip_vs_lblcr_check_expire(struct timer_list *t)
 {
-	struct ip_vs_lblcr_table *tbl = from_timer(tbl, t, periodic_timer);
+	struct ip_vs_lblcr_table *tbl = timer_container_of(tbl, t,
+							   periodic_timer);
 	struct ip_vs_service *svc = tbl->svc;
 	unsigned long now = jiffies;
 	int goal;
@@ -511,7 +513,7 @@ static int ip_vs_lblcr_init_svc(struct ip_vs_service *svc)
 	/*
 	 *    Allocate the ip_vs_lblcr_table for this service
 	 */
-	tbl = kmalloc(sizeof(*tbl), GFP_KERNEL);
+	tbl = kmalloc_obj(*tbl);
 	if (tbl == NULL)
 		return -ENOMEM;
 
@@ -749,10 +751,8 @@ static int __net_init __ip_vs_lblcr_init(struct net *net)
 			return -ENOMEM;
 
 		/* Don't export sysctls to unprivileged users */
-		if (net->user_ns != &init_user_ns) {
-			ipvs->lblcr_ctl_table[0].procname = NULL;
+		if (net->user_ns != &init_user_ns)
 			vars_table_size = 0;
-		}
 	} else
 		ipvs->lblcr_ctl_table = vs_vars_table;
 	ipvs->sysctl_lblcr_expiration = DEFAULT_EXPIRATION;
@@ -817,3 +817,4 @@ static void __exit ip_vs_lblcr_cleanup(void)
 module_init(ip_vs_lblcr_init);
 module_exit(ip_vs_lblcr_cleanup);
 MODULE_LICENSE("GPL");
+MODULE_DESCRIPTION("ipvs locality-based least-connection with replication scheduler");

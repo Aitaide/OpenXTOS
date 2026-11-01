@@ -9,6 +9,17 @@
 #include "sparx5_main.h"
 #include "sparx5_qos.h"
 
+enum sparx5_tas_link_speed {
+	TAS_SPEED_NO_GB,
+	TAS_SPEED_10,
+	TAS_SPEED_100,
+	TAS_SPEED_1000,
+	TAS_SPEED_2500,
+	TAS_SPEED_5000,
+	TAS_SPEED_10000,
+	TAS_SPEED_25000,
+};
+
 /* Calculate new base_time based on cycle_time.
  *
  * The hardware requires a base_time that is always in the future.
@@ -73,6 +84,11 @@ static const u32 spx5_hsch_max_group_rate[SPX5_HSCH_LEAK_GRP_CNT] = {
 	10485680, /* 10.486 Gbps */
 	26214200 /* 26.214 Gbps */
 };
+
+u32 sparx5_get_hsch_max_group_rate(int grp)
+{
+	return spx5_hsch_max_group_rate[grp];
+}
 
 static struct sparx5_layer layers[SPX5_HSCH_LAYER_CNT];
 
@@ -362,9 +378,10 @@ static u32 sparx5_weight_to_hw_cost(u32 weight_min, u32 weight)
 static int sparx5_dwrr_conf_set(struct sparx5_port *port,
 				struct sparx5_dwrr *dwrr)
 {
+	u32 layer = is_sparx5(port->sparx5) ? 2 : 1;
 	int i;
 
-	spx5_rmw(HSCH_HSCH_CFG_CFG_HSCH_LAYER_SET(2) |
+	spx5_rmw(HSCH_HSCH_CFG_CFG_HSCH_LAYER_SET(layer) |
 		 HSCH_HSCH_CFG_CFG_CFG_SE_IDX_SET(port->portno),
 		 HSCH_HSCH_CFG_CFG_HSCH_LAYER | HSCH_HSCH_CFG_CFG_CFG_SE_IDX,
 		 port->sparx5, HSCH_HSCH_CFG_CFG);
@@ -385,6 +402,7 @@ static int sparx5_dwrr_conf_set(struct sparx5_port *port,
 
 static int sparx5_leak_groups_init(struct sparx5 *sparx5)
 {
+	const struct sparx5_ops *ops = sparx5->data->ops;
 	struct sparx5_layer *layer;
 	u32 sys_clk_per_100ps;
 	struct sparx5_lg *lg;
@@ -397,7 +415,7 @@ static int sparx5_leak_groups_init(struct sparx5 *sparx5)
 		layer = &layers[i];
 		for (ii = 0; ii < SPX5_HSCH_LEAK_GRP_CNT; ii++) {
 			lg = &layer->leak_groups[ii];
-			lg->max_rate = spx5_hsch_max_group_rate[ii];
+			lg->max_rate = ops->get_hsch_max_group_rate(i);
 
 			/* Calculate the leak time in us, to serve a maximum
 			 * rate of 'max_rate' for this group
@@ -573,4 +591,42 @@ int sparx5_tc_ets_del(struct sparx5_port *port)
 	struct sparx5_dwrr dwrr = {0};
 
 	return sparx5_dwrr_conf_set(port, &dwrr);
+}
+
+void sparx5_tas_speed(struct sparx5_port *port, int speed)
+{
+	struct sparx5 *sparx5 = port->sparx5;
+	u8 spd;
+
+	switch (speed) {
+	case SPEED_10:
+		spd = TAS_SPEED_10;
+		break;
+	case SPEED_100:
+		spd = TAS_SPEED_100;
+		break;
+	case SPEED_1000:
+		spd = TAS_SPEED_1000;
+		break;
+	case SPEED_2500:
+		spd = TAS_SPEED_2500;
+		break;
+	case SPEED_5000:
+		spd = TAS_SPEED_5000;
+		break;
+	case SPEED_10000:
+		spd = TAS_SPEED_10000;
+		break;
+	case SPEED_25000:
+		spd = TAS_SPEED_25000;
+		break;
+	default:
+		netdev_err(port->ndev, "TAS: Unsupported speed: %d\n", speed);
+		return;
+	}
+
+	spx5_rmw(HSCH_TAS_PROFILE_CONFIG_LINK_SPEED_SET(spd),
+		 HSCH_TAS_PROFILE_CONFIG_LINK_SPEED,
+		 sparx5,
+		 HSCH_TAS_PROFILE_CONFIG(port->portno));
 }

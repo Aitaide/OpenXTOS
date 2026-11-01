@@ -23,7 +23,7 @@
 #include <linux/vmalloc.h>
 #include <linux/slab.h>
 #include <linux/delay.h>
-#include <asm/unaligned.h>
+#include <linux/unaligned.h>
 #include <video/udlfb.h>
 #include "edid.h"
 
@@ -321,15 +321,37 @@ static int dlfb_set_video_mode(struct dlfb_data *dlfb,
 	return retval;
 }
 
+static void dlfb_vm_open(struct vm_area_struct *vma)
+{
+	struct dlfb_data *dlfb = vma->vm_private_data;
+
+	atomic_inc(&dlfb->mmap_count);
+}
+
+static void dlfb_vm_close(struct vm_area_struct *vma)
+{
+	struct dlfb_data *dlfb = vma->vm_private_data;
+
+	atomic_dec(&dlfb->mmap_count);
+}
+
+static const struct vm_operations_struct dlfb_vm_ops = {
+	.open  = dlfb_vm_open,
+	.close = dlfb_vm_close,
+};
+
 static int dlfb_ops_mmap(struct fb_info *info, struct vm_area_struct *vma)
 {
 	unsigned long start = vma->vm_start;
 	unsigned long size = vma->vm_end - vma->vm_start;
 	unsigned long offset = vma->vm_pgoff << PAGE_SHIFT;
 	unsigned long page, pos;
+	struct dlfb_data *dlfb = info->par;
 
 	if (info->fbdefio)
 		return fb_deferred_io_mmap(info, vma);
+
+	vma->vm_page_prot = pgprot_decrypted(vma->vm_page_prot);
 
 	if (vma->vm_pgoff > (~0UL >> PAGE_SHIFT))
 		return -EINVAL;
@@ -356,6 +378,9 @@ static int dlfb_ops_mmap(struct fb_info *info, struct vm_area_struct *vma)
 			size = 0;
 	}
 
+	vma->vm_ops = &dlfb_vm_ops;
+	vma->vm_private_data = dlfb;
+	atomic_inc(&dlfb->mmap_count);
 	return 0;
 }
 
@@ -716,68 +741,6 @@ static void dlfb_offload_damage(struct dlfb_data *dlfb, int x, int y, int width,
 }
 
 /*
- * Path triggered by usermode clients who write to filesystem
- * e.g. cat filename > /dev/fb1
- * Not used by X Windows or text-mode console. But useful for testing.
- * Slow because of extra copy and we must assume all pixels dirty.
- */
-static ssize_t dlfb_ops_write(struct fb_info *info, const char __user *buf,
-			  size_t count, loff_t *ppos)
-{
-	ssize_t result;
-	struct dlfb_data *dlfb = info->par;
-	u32 offset = (u32) *ppos;
-
-	result = fb_sys_write(info, buf, count, ppos);
-
-	if (result > 0) {
-		int start = max((int)(offset / info->fix.line_length), 0);
-		int lines = min((u32)((result / info->fix.line_length) + 1),
-				(u32)info->var.yres);
-
-		dlfb_handle_damage(dlfb, 0, start, info->var.xres,
-			lines);
-	}
-
-	return result;
-}
-
-/* hardware has native COPY command (see libdlo), but not worth it for fbcon */
-static void dlfb_ops_copyarea(struct fb_info *info,
-				const struct fb_copyarea *area)
-{
-
-	struct dlfb_data *dlfb = info->par;
-
-	sys_copyarea(info, area);
-
-	dlfb_offload_damage(dlfb, area->dx, area->dy,
-			area->width, area->height);
-}
-
-static void dlfb_ops_imageblit(struct fb_info *info,
-				const struct fb_image *image)
-{
-	struct dlfb_data *dlfb = info->par;
-
-	sys_imageblit(info, image);
-
-	dlfb_offload_damage(dlfb, image->dx, image->dy,
-			image->width, image->height);
-}
-
-static void dlfb_ops_fillrect(struct fb_info *info,
-			  const struct fb_fillrect *rect)
-{
-	struct dlfb_data *dlfb = info->par;
-
-	sys_fillrect(info, rect);
-
-	dlfb_offload_damage(dlfb, rect->dx, rect->dy, rect->width,
-			      rect->height);
-}
-
-/*
  * NOTE: fb_defio.c is holding info->fbdefio.mutex
  *   Touching ANY framebuffer memory that triggers a page fault
  *   in fb_defio will cause a deadlock, when it also tries to
@@ -978,7 +941,7 @@ static int dlfb_ops_open(struct fb_info *info, int user)
 
 		struct fb_deferred_io *fbdefio;
 
-		fbdefio = kzalloc(sizeof(struct fb_deferred_io), GFP_KERNEL);
+		fbdefio = kzalloc_obj(struct fb_deferred_io);
 
 		if (fbdefio) {
 			fbdefio->delay = DL_DEFIO_WRITE_DELAY;
@@ -1077,6 +1040,9 @@ static int dlfb_ops_check_var(struct fb_var_screeninfo *var,
 {
 	struct fb_videomode mode;
 	struct dlfb_data *dlfb = info->par;
+
+	if (!var->pixclock)
+		return -EINVAL;
 
 	/* set device-specific elements of var unrelated to mode */
 	dlfb_var_color_format(var);
@@ -1186,14 +1152,31 @@ static int dlfb_ops_blank(int blank_mode, struct fb_info *info)
 	return 0;
 }
 
+static void dlfb_ops_damage_range(struct fb_info *info, off_t off, size_t len)
+{
+	struct dlfb_data *dlfb = info->par;
+	int start = max((int)(off / info->fix.line_length), 0);
+	int lines = min((u32)((len / info->fix.line_length) + 1), (u32)info->var.yres);
+
+	dlfb_handle_damage(dlfb, 0, start, info->var.xres, lines);
+}
+
+static void dlfb_ops_damage_area(struct fb_info *info, u32 x, u32 y, u32 width, u32 height)
+{
+	struct dlfb_data *dlfb = info->par;
+
+	dlfb_offload_damage(dlfb, x, y, width, height);
+}
+
+FB_GEN_DEFAULT_DEFERRED_SYSMEM_OPS(dlfb_ops,
+				   dlfb_ops_damage_range,
+				   dlfb_ops_damage_area)
+
 static const struct fb_ops dlfb_ops = {
 	.owner = THIS_MODULE,
-	.fb_read = fb_sys_read,
-	.fb_write = dlfb_ops_write,
+	__FB_DEFAULT_DEFERRED_OPS_RDWR(dlfb_ops),
 	.fb_setcolreg = dlfb_ops_setcolreg,
-	.fb_fillrect = dlfb_ops_fillrect,
-	.fb_copyarea = dlfb_ops_copyarea,
-	.fb_imageblit = dlfb_ops_imageblit,
+	__FB_DEFAULT_DEFERRED_OPS_DRAW(dlfb_ops),
 	.fb_mmap = dlfb_ops_mmap,
 	.fb_ioctl = dlfb_ops_ioctl,
 	.fb_open = dlfb_ops_open,
@@ -1207,7 +1190,7 @@ static const struct fb_ops dlfb_ops = {
 
 static void dlfb_deferred_vfree(struct dlfb_data *dlfb, void *mem)
 {
-	struct dlfb_deferred_free *d = kmalloc(sizeof(struct dlfb_deferred_free), GFP_KERNEL);
+	struct dlfb_deferred_free *d = kmalloc_obj(struct dlfb_deferred_free);
 	if (!d)
 		return;
 	d->mem = mem;
@@ -1216,7 +1199,6 @@ static void dlfb_deferred_vfree(struct dlfb_data *dlfb, void *mem)
 
 /*
  * Assumes &info->lock held by caller
- * Assumes no active clients have framebuffer open
  */
 static int dlfb_realloc_framebuffer(struct dlfb_data *dlfb, struct fb_info *info, u32 new_len)
 {
@@ -1228,6 +1210,13 @@ static int dlfb_realloc_framebuffer(struct dlfb_data *dlfb, struct fb_info *info
 	new_len = PAGE_ALIGN(new_len);
 
 	if (new_len > old_len) {
+		if (atomic_read(&dlfb->mmap_count) > 0) {
+			dev_warn(info->dev,
+				"refusing realloc: %d active mmaps\n",
+				atomic_read(&dlfb->mmap_count));
+			return -EBUSY;
+		}
+
 		/*
 		 * Alloc system memory for virtual framebuffer
 		 */
@@ -1459,7 +1448,7 @@ static ssize_t metrics_cpu_kcycles_used_show(struct device *fbdev,
 
 static ssize_t edid_show(
 			struct file *filp,
-			struct kobject *kobj, struct bin_attribute *a,
+			struct kobject *kobj, const struct bin_attribute *a,
 			 char *buf, loff_t off, size_t count) {
 	struct device *fbdev = kobj_to_dev(kobj);
 	struct fb_info *fb_info = dev_get_drvdata(fbdev);
@@ -1481,7 +1470,7 @@ static ssize_t edid_show(
 
 static ssize_t edid_store(
 			struct file *filp,
-			struct kobject *kobj, struct bin_attribute *a,
+			struct kobject *kobj, const struct bin_attribute *a,
 			char *src, loff_t src_off, size_t src_size) {
 	struct device *fbdev = kobj_to_dev(kobj);
 	struct fb_info *fb_info = dev_get_drvdata(fbdev);
@@ -1597,19 +1586,29 @@ static int dlfb_parse_vendor_descriptor(struct dlfb_data *dlfb,
 		desc += 5; /* the fixed header we've already parsed */
 
 		while (desc < desc_end) {
+			char *value;
 			u8 length;
 			u16 key;
 
-			key = *desc++;
-			key |= (u16)*desc++ << 8;
+			if (desc_end - desc < sizeof(key) + sizeof(length))
+				goto unrecognized;
+
+			key = get_unaligned_le16(desc);
+			desc += sizeof(key);
 			length = *desc++;
 
+			if (length > desc_end - desc)
+				goto unrecognized;
+
+			value = desc;
 			switch (key) {
 			case 0x0200: { /* max_area */
-				u32 max_area = *desc++;
-				max_area |= (u32)*desc++ << 8;
-				max_area |= (u32)*desc++ << 16;
-				max_area |= (u32)*desc++ << 24;
+				u32 max_area;
+
+				if (length < sizeof(max_area))
+					goto unrecognized;
+
+				max_area = get_unaligned_le32(value);
 				dev_warn(&intf->dev,
 					 "DL chip limited to %d pixel modes\n",
 					 max_area);
@@ -1649,7 +1648,7 @@ static int dlfb_usb_probe(struct usb_interface *intf,
 	static u8 out_ep[] = {OUT_EP_NUM + USB_DIR_OUT, 0};
 
 	/* usb initialization */
-	dlfb = kzalloc(sizeof(*dlfb), GFP_KERNEL);
+	dlfb = kzalloc_obj(*dlfb);
 	if (!dlfb) {
 		dev_err(&intf->dev, "%s: failed to allocate dlfb\n", __func__);
 		return -ENOMEM;
@@ -1895,7 +1894,7 @@ retry:
 	dlfb->urbs.available = 0;
 
 	while (dlfb->urbs.count * size < wanted_size) {
-		unode = kzalloc(sizeof(*unode), GFP_KERNEL);
+		unode = kzalloc_obj(*unode);
 		if (!unode)
 			break;
 		unode->dlfb = dlfb;

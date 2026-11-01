@@ -28,6 +28,7 @@
 
 #include <asm/io.h>
 #include <linux/uaccess.h>
+#include "irq_impl.h"
 
 volatile unsigned long irq_err_count;
 DEFINE_PER_CPU(unsigned long, irq_pmi_count);
@@ -71,16 +72,16 @@ int arch_show_interrupts(struct seq_file *p, int prec)
 	int j;
 
 #ifdef CONFIG_SMP
-	seq_puts(p, "IPI: ");
+	seq_puts(p, " IPI: ");
 	for_each_online_cpu(j)
 		seq_printf(p, "%10lu ", cpu_data[j].ipi_count);
 	seq_putc(p, '\n');
 #endif
-	seq_puts(p, "PMI: ");
+	seq_puts(p, " PMI: ");
 	for_each_online_cpu(j)
 		seq_printf(p, "%10lu ", per_cpu(irq_pmi_count, j));
-	seq_puts(p, "          Performance Monitoring\n");
-	seq_printf(p, "ERR: %10lu\n", irq_err_count);
+	seq_puts(p, " Performance Monitoring\n");
+	seq_printf(p, " ERR: %10lu\n", irq_err_count);
 	return 0;
 }
 

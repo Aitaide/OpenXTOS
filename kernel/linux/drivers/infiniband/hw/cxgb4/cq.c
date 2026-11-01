@@ -995,15 +995,16 @@ int c4iw_destroy_cq(struct ib_cq *ib_cq, struct ib_udata *udata)
 }
 
 int c4iw_create_cq(struct ib_cq *ibcq, const struct ib_cq_init_attr *attr,
-		   struct ib_udata *udata)
+		   struct uverbs_attr_bundle *attrs)
 {
+	struct ib_udata *udata = &attrs->driver_udata;
 	struct ib_device *ibdev = ibcq->device;
 	int entries = attr->cqe;
 	int vector = attr->comp_vector;
 	struct c4iw_dev *rhp = to_c4iw_dev(ibcq->device);
 	struct c4iw_cq *chp = to_c4iw_cq(ibcq);
 	struct c4iw_create_cq ucmd;
-	struct c4iw_create_cq_resp uresp;
+	struct c4iw_create_cq_resp uresp = {};
 	int ret, wr_len;
 	size_t memsize, hwentries;
 	struct c4iw_mm_entry *mm, *mm2;
@@ -1094,14 +1095,13 @@ int c4iw_create_cq(struct ib_cq *ibcq, const struct ib_cq_init_attr *attr,
 
 	if (ucontext) {
 		ret = -ENOMEM;
-		mm = kmalloc(sizeof(*mm), GFP_KERNEL);
+		mm = kmalloc_obj(*mm);
 		if (!mm)
 			goto err_remove_handle;
-		mm2 = kmalloc(sizeof(*mm2), GFP_KERNEL);
+		mm2 = kmalloc_obj(*mm2);
 		if (!mm2)
 			goto err_free_mm;
 
-		memset(&uresp, 0, sizeof(uresp));
 		uresp.qid_mask = rhp->rdev.cqmask;
 		uresp.cqid = chp->cq.cqid;
 		uresp.size = chp->cq.size;
@@ -1114,24 +1114,28 @@ int c4iw_create_cq(struct ib_cq *ibcq, const struct ib_cq_init_attr *attr,
 		/* communicate to the userspace that
 		 * kernel driver supports 64B CQE
 		 */
-		uresp.flags |= C4IW_64B_CQE;
+		if (!ucontext->is_32b_cqe)
+			uresp.flags |= C4IW_64B_CQE;
 
 		spin_unlock(&ucontext->mmap_lock);
-		ret = ib_copy_to_udata(udata, &uresp,
-				       ucontext->is_32b_cqe ?
-				       sizeof(uresp) - sizeof(uresp.flags) :
-				       sizeof(uresp));
+		ret = ib_respond_udata(udata, uresp);
 		if (ret)
 			goto err_free_mm2;
 
 		mm->key = uresp.key;
-		mm->addr = virt_to_phys(chp->cq.queue);
+		mm->addr = 0;
+		mm->vaddr = chp->cq.queue;
+		mm->dma_addr = chp->cq.dma_addr;
 		mm->len = chp->cq.memsize;
+		insert_flag_to_mmap(&rhp->rdev, mm, mm->addr);
 		insert_mmap(ucontext, mm);
 
 		mm2->key = uresp.gts_key;
 		mm2->addr = chp->cq.bar2_pa;
 		mm2->len = PAGE_SIZE;
+		mm2->vaddr = NULL;
+		mm2->dma_addr = 0;
+		insert_flag_to_mmap(&rhp->rdev, mm2, mm2->addr);
 		insert_mmap(ucontext, mm2);
 	}
 

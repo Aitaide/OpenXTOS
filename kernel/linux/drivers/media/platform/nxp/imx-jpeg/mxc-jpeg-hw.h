@@ -5,6 +5,8 @@
  * Copyright 2018-2019 NXP
  */
 
+#include <linux/bitfield.h>
+
 #ifndef _MXC_JPEG_HW_H
 #define _MXC_JPEG_HW_H
 
@@ -73,6 +75,7 @@
 #define GLB_CTRL_DEC_GO					(0x1 << 2)
 #define GLB_CTRL_L_ENDIAN(le)				((le) << 3)
 #define GLB_CTRL_SLOT_EN(slot)				(0x1 << ((slot) + 4))
+#define GLB_CTRL_CUR_VERSION(r)				FIELD_GET(GENMASK_U32(19, 16), r)
 
 /* COM_STAUS fields */
 #define COM_STATUS_DEC_ONGOING(r)		(((r) & (1 << 31)) >> 31)
@@ -89,6 +92,7 @@
 /* SLOT_STATUS fields for slots 0..3 */
 #define SLOT_STATUS_FRMDONE			(0x1 << 3)
 #define SLOT_STATUS_ENC_CONFIG_ERR		(0x1 << 8)
+#define SLOT_STATUS_ONGOING			(0x1 << 31)
 
 /* SLOT_IRQ_EN fields TBD */
 
@@ -115,28 +119,17 @@ void print_cast_status(struct device *dev, void __iomem *reg,
 void print_wrapper_info(struct device *dev, void __iomem *reg);
 void mxc_jpeg_sw_reset(void __iomem *reg);
 int mxc_jpeg_enable(void __iomem *reg);
-void wait_frmdone(struct device *dev, void __iomem *reg);
 void mxc_jpeg_enc_mode_conf(struct device *dev, void __iomem *reg, u8 extseq);
 void mxc_jpeg_enc_mode_go(struct device *dev, void __iomem *reg, u8 extseq);
 void mxc_jpeg_enc_set_quality(struct device *dev, void __iomem *reg, u8 quality);
 void mxc_jpeg_dec_mode_go(struct device *dev, void __iomem *reg);
-int mxc_jpeg_get_slot(void __iomem *reg);
-u32 mxc_jpeg_get_offset(void __iomem *reg, int slot);
 void mxc_jpeg_enable_slot(void __iomem *reg, int slot);
 void mxc_jpeg_set_l_endian(void __iomem *reg, int le);
 void mxc_jpeg_enable_irq(void __iomem *reg, int slot);
 void mxc_jpeg_disable_irq(void __iomem *reg, int slot);
-int mxc_jpeg_set_input(void __iomem *reg, u32 in_buf, u32 bufsize);
-int mxc_jpeg_set_output(void __iomem *reg, u16 out_pitch, u32 out_buf,
-			u16 w, u16 h);
-void mxc_jpeg_set_config_mode(void __iomem *reg, int config_mode);
-int mxc_jpeg_set_params(struct mxc_jpeg_desc *desc,  u32 bufsize, u16
-			out_pitch, u32 format);
 void mxc_jpeg_set_bufsize(struct mxc_jpeg_desc *desc,  u32 bufsize);
 void mxc_jpeg_set_res(struct mxc_jpeg_desc *desc, u16 w, u16 h);
 void mxc_jpeg_set_line_pitch(struct mxc_jpeg_desc *desc, u32 line_pitch);
 void mxc_jpeg_set_desc(u32 desc, void __iomem *reg, int slot);
 void mxc_jpeg_clr_desc(void __iomem *reg, int slot);
-void mxc_jpeg_set_regs_from_desc(struct mxc_jpeg_desc *desc,
-				 void __iomem *reg);
 #endif

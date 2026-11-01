@@ -1,5 +1,6 @@
 """Current frame source, maintenance entry and shipping closure checks."""
 from pathlib import Path
+import json
 import re
 import unittest
 
@@ -15,8 +16,9 @@ FRAME_PAYLOADS = (
 
 class FrameIntegrationTests(unittest.TestCase):
     def test_patch_embeds_exact_current_frame_sources(self):
+        pin = json.loads((ROOT/'kernel/source-pin.json').read_bytes())
         sections = re.split(rb'(?=^diff --git )',
-                            (ROOT/'kernel/patches/xtos-linux-6.6.patch').read_bytes(), flags=re.M)
+                            (ROOT/pin['xtos_patch']).read_bytes(), flags=re.M)
         payloads = {}
         for section in sections:
             if b'\n--- /dev/null\n' not in section:
@@ -64,6 +66,9 @@ class FrameIntegrationTests(unittest.TestCase):
             (stage/'usr/bin').mkdir(parents=True)
             work.mkdir()
             live.install_sdk(stage, work)
+            self.assertEqual((stage/'usr/bin/xtos-rt-status').read_bytes(),
+                             (ROOT/'system/rootfs/usr/bin/xtos-rt-status').read_bytes())
+            self.assertTrue((stage/'usr/bin/xtos-rt-status').stat().st_mode & 0o111)
             include = stage/'usr/include'
             for name in client.HEADERS:
                 self.assertEqual((include/'xtos'/name).read_bytes(),

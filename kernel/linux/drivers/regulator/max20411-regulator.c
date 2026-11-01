@@ -133,7 +133,7 @@ static int max20411_probe(struct i2c_client *client)
 
 	max20411->rdev = devm_regulator_register(max20411->dev, &max20411->desc, &cfg);
 	if (IS_ERR(max20411->rdev))
-		dev_err(max20411->dev, "Failed to register regulator\n");
+		dev_err(max20411->dev, "Failed to register regulator: %pe\n", max20411->rdev);
 
 	return PTR_ERR_OR_ZERO(max20411->rdev);
 }
@@ -145,8 +145,8 @@ static const struct of_device_id of_max20411_match_tbl[] = {
 MODULE_DEVICE_TABLE(of, of_max20411_match_tbl);
 
 static const struct i2c_device_id max20411_id[] = {
-	{ "max20411", 0 },
-	{ },
+	{ .name = "max20411" },
+	{ }
 };
 MODULE_DEVICE_TABLE(i2c, max20411_id);
 
@@ -161,4 +161,5 @@ static struct i2c_driver max20411_i2c_driver = {
 };
 module_i2c_driver(max20411_i2c_driver);
 
+MODULE_DESCRIPTION("Maxim MAX20411 High-Efficiency Single Step-Down Converter driver");
 MODULE_LICENSE("GPL");

@@ -23,7 +23,6 @@
  */
 
 #include <linux/device.h>
-#include <linux/export.h>
 #include <linux/err.h>
 #include <linux/fs.h>
 #include <linux/sched.h>
@@ -36,6 +35,7 @@
 #include <linux/mm.h>
 #include <linux/mman.h>
 #include <linux/processor.h>
+#include "amdgpu_vm.h"
 
 /*
  * The primary memory I/O features being added for revisions of gfxip
@@ -326,7 +326,7 @@ static void kfd_init_apertures_vi(struct kfd_process_device *pdd, uint8_t id)
 	 * with small reserved space for kernel.
 	 * Set them to CANONICAL addresses.
 	 */
-	pdd->gpuvm_base = SVM_USER_BASE;
+	pdd->gpuvm_base = max(SVM_USER_BASE, AMDGPU_VA_RESERVED_BOTTOM);
 	pdd->gpuvm_limit =
 		pdd->dev->kfd->shared_resources.gpuvm_size - 1;
 
@@ -345,7 +345,7 @@ static void kfd_init_apertures_v9(struct kfd_process_device *pdd, uint8_t id)
 	pdd->lds_base = MAKE_LDS_APP_BASE_V9();
 	pdd->lds_limit = MAKE_LDS_APP_LIMIT(pdd->lds_base);
 
-	pdd->gpuvm_base = PAGE_SIZE;
+	pdd->gpuvm_base = AMDGPU_VA_RESERVED_BOTTOM;
 	pdd->gpuvm_limit =
 		pdd->dev->kfd->shared_resources.gpuvm_size - 1;
 
@@ -356,7 +356,26 @@ static void kfd_init_apertures_v9(struct kfd_process_device *pdd, uint8_t id)
 	 * Place TBA/TMA on opposite side of VM hole to prevent
 	 * stray faults from triggering SVM on these pages.
 	 */
-	pdd->qpd.cwsr_base = pdd->dev->kfd->shared_resources.gpuvm_size;
+	pdd->qpd.cwsr_base = AMDGPU_VA_RESERVED_TRAP_START(pdd->dev->adev);
+}
+
+static void kfd_init_apertures_v12(struct kfd_process_device *pdd, uint8_t id)
+{
+	pdd->lds_base = pdd->dev->adev->gmc.shared_aperture_start;
+	pdd->lds_limit = pdd->dev->adev->gmc.shared_aperture_end;
+
+	pdd->gpuvm_base = AMDGPU_VA_RESERVED_BOTTOM;
+	pdd->gpuvm_limit =
+		pdd->dev->kfd->shared_resources.gpuvm_size - 1;
+
+	pdd->scratch_base = pdd->dev->adev->gmc.private_aperture_start;
+	pdd->scratch_limit = pdd->dev->adev->gmc.private_aperture_end;
+
+	/*
+	 * Place TBA/TMA on opposite side of VM hole to prevent
+	 * stray faults from triggering SVM on these pages.
+	 */
+	pdd->qpd.cwsr_base = AMDGPU_VA_RESERVED_TRAP_START(pdd->dev->adev);
 }
 
 int kfd_init_apertures(struct kfd_process *process)
@@ -379,7 +398,8 @@ int kfd_init_apertures(struct kfd_process *process)
 
 		pdd = kfd_create_process_device_data(dev, process);
 		if (!pdd) {
-			pr_err("Failed to create process device data\n");
+			dev_err(dev->adev->dev,
+				"Failed to create process device data\n");
 			return -ENOMEM;
 		}
 		/*
@@ -405,9 +425,11 @@ int kfd_init_apertures(struct kfd_process *process)
 				kfd_init_apertures_vi(pdd, id);
 				break;
 			default:
-				if (KFD_GC_VERSION(dev) >= IP_VERSION(9, 0, 1))
+				if (KFD_GC_VERSION(dev) >= IP_VERSION(12, 1, 0)) {
+					kfd_init_apertures_v12(pdd, id);
+				} else if (KFD_GC_VERSION(dev) >= IP_VERSION(9, 0, 1)) {
 					kfd_init_apertures_v9(pdd, id);
-				else {
+				} else {
 					WARN(1, "Unexpected ASIC family %u",
 					     dev->adev->asic_type);
 					return -EINVAL;

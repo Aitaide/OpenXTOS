@@ -386,10 +386,6 @@ void __ref vmemmap_free(unsigned long start, unsigned long end,
 }
 
 #endif
-void register_page_bootmem_memmap(unsigned long section_nr,
-				  struct page *start_page, unsigned long size)
-{
-}
 
 #endif /* CONFIG_SPARSEMEM_VMEMMAP */
 
@@ -632,7 +628,9 @@ void __init mmu_early_init_devtree(void)
 
 	of_scan_flat_dt(dt_scan_mmu_pid_width, NULL);
 	if (hvmode && !mmu_lpid_bits) {
-		if (early_cpu_has_feature(CPU_FTR_ARCH_207S))
+		if (early_cpu_has_feature(CPU_FTR_ARCH_32))
+			mmu_lpid_bits = 16; /* POWER12 */
+		else if (early_cpu_has_feature(CPU_FTR_ARCH_207S))
 			mmu_lpid_bits = 12; /* POWER8-10 */
 		else
 			mmu_lpid_bits = 10; /* POWER7 */

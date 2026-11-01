@@ -26,22 +26,24 @@
  *
  * The functions here implement the state management and hardware programming
  * dispatch required by the atomic modeset infrastructure.
- * See intel_atomic_plane.c for the plane-specific atomic functionality.
+ * See intel_plane.c for the plane-specific atomic functionality.
  */
 
+#include <drm/display/drm_dp_tunnel.h>
 #include <drm/drm_atomic.h>
 #include <drm/drm_atomic_helper.h>
 #include <drm/drm_fourcc.h>
+#include <drm/drm_print.h>
 
-#include "i915_drv.h"
-#include "i915_reg.h"
 #include "intel_atomic.h"
 #include "intel_cdclk.h"
+#include "intel_display_core.h"
 #include "intel_display_types.h"
+#include "intel_dp_tunnel.h"
+#include "intel_fb.h"
 #include "intel_global_state.h"
 #include "intel_hdcp.h"
 #include "intel_psr.h"
-#include "intel_fb.h"
 #include "skl_universal_plane.h"
 
 /**
@@ -58,17 +60,16 @@ int intel_digital_connector_atomic_get_property(struct drm_connector *connector,
 						struct drm_property *property,
 						u64 *val)
 {
-	struct drm_device *dev = connector->dev;
-	struct drm_i915_private *dev_priv = to_i915(dev);
-	struct intel_digital_connector_state *intel_conn_state =
+	struct intel_display *display = to_intel_display(connector->dev);
+	const struct intel_digital_connector_state *intel_conn_state =
 		to_intel_digital_connector_state(state);
 
-	if (property == dev_priv->display.properties.force_audio)
+	if (property == display->properties.force_audio)
 		*val = intel_conn_state->force_audio;
-	else if (property == dev_priv->display.properties.broadcast_rgb)
+	else if (property == display->properties.broadcast_rgb)
 		*val = intel_conn_state->broadcast_rgb;
 	else {
-		drm_dbg_atomic(&dev_priv->drm,
+		drm_dbg_atomic(display->drm,
 			       "Unknown property [PROP:%d:%s]\n",
 			       property->base.id, property->name);
 		return -EINVAL;
@@ -91,28 +92,27 @@ int intel_digital_connector_atomic_set_property(struct drm_connector *connector,
 						struct drm_property *property,
 						u64 val)
 {
-	struct drm_device *dev = connector->dev;
-	struct drm_i915_private *dev_priv = to_i915(dev);
+	struct intel_display *display = to_intel_display(connector->dev);
 	struct intel_digital_connector_state *intel_conn_state =
 		to_intel_digital_connector_state(state);
 
-	if (property == dev_priv->display.properties.force_audio) {
+	if (property == display->properties.force_audio) {
 		intel_conn_state->force_audio = val;
 		return 0;
 	}
 
-	if (property == dev_priv->display.properties.broadcast_rgb) {
+	if (property == display->properties.broadcast_rgb) {
 		intel_conn_state->broadcast_rgb = val;
 		return 0;
 	}
 
-	drm_dbg_atomic(&dev_priv->drm, "Unknown property [PROP:%d:%s]\n",
+	drm_dbg_atomic(display->drm, "Unknown property [PROP:%d:%s]\n",
 		       property->base.id, property->name);
 	return -EINVAL;
 }
 
 int intel_digital_connector_atomic_check(struct drm_connector *conn,
-					 struct drm_atomic_state *state)
+					 struct drm_atomic_commit *state)
 {
 	struct drm_connector_state *new_state =
 		drm_atomic_get_new_connector_state(state, conn);
@@ -200,9 +200,8 @@ bool intel_any_crtc_needs_modeset(struct intel_atomic_state *state)
 {
 	struct intel_crtc *crtc;
 	struct intel_crtc_state *crtc_state;
-	int i;
 
-	for_each_new_intel_crtc_in_state(state, crtc, crtc_state, i) {
+	for_each_new_intel_crtc_in_state(state, crtc, crtc_state) {
 		if (intel_crtc_needs_modeset(crtc_state))
 			return true;
 	}
@@ -258,8 +257,13 @@ intel_crtc_duplicate_state(struct drm_crtc *crtc)
 	if (crtc_state->post_csc_lut)
 		drm_property_blob_get(crtc_state->post_csc_lut);
 
+	if (crtc_state->dp_tunnel_ref.tunnel)
+		drm_dp_tunnel_ref_get(crtc_state->dp_tunnel_ref.tunnel,
+				      &crtc_state->dp_tunnel_ref);
+
 	crtc_state->update_pipe = false;
-	crtc_state->disable_lp_wm = false;
+	crtc_state->update_m_n = false;
+	crtc_state->update_lrr = false;
 	crtc_state->disable_cxsr = false;
 	crtc_state->update_wm_pre = false;
 	crtc_state->update_wm_post = false;
@@ -269,7 +273,9 @@ intel_crtc_duplicate_state(struct drm_crtc *crtc)
 	crtc_state->do_async_flip = false;
 	crtc_state->fb_bits = 0;
 	crtc_state->update_planes = 0;
-	crtc_state->dsb = NULL;
+	crtc_state->dsb_color = NULL;
+	crtc_state->dsb_commit = NULL;
+	crtc_state->use_dsb = false;
 
 	return &crtc_state->uapi;
 }
@@ -282,6 +288,12 @@ static void intel_crtc_put_color_blobs(struct intel_crtc_state *crtc_state)
 
 	drm_property_blob_put(crtc_state->pre_csc_lut);
 	drm_property_blob_put(crtc_state->post_csc_lut);
+
+	crtc_state->hw.degamma_lut = NULL;
+	crtc_state->hw.gamma_lut = NULL;
+	crtc_state->hw.ctm = NULL;
+	crtc_state->pre_csc_lut = NULL;
+	crtc_state->post_csc_lut = NULL;
 }
 
 void intel_crtc_free_hw_state(struct intel_crtc_state *crtc_state)
@@ -303,19 +315,22 @@ intel_crtc_destroy_state(struct drm_crtc *crtc,
 {
 	struct intel_crtc_state *crtc_state = to_intel_crtc_state(state);
 
-	drm_WARN_ON(crtc->dev, crtc_state->dsb);
+	drm_WARN_ON(crtc->dev, crtc_state->dsb_color);
+	drm_WARN_ON(crtc->dev, crtc_state->dsb_commit);
 
 	__drm_atomic_helper_crtc_destroy_state(&crtc_state->uapi);
 	intel_crtc_free_hw_state(crtc_state);
+	if (crtc_state->dp_tunnel_ref.tunnel)
+		drm_dp_tunnel_ref_put(&crtc_state->dp_tunnel_ref);
 	kfree(crtc_state);
 }
 
-struct drm_atomic_state *
+struct drm_atomic_commit *
 intel_atomic_state_alloc(struct drm_device *dev)
 {
-	struct intel_atomic_state *state = kzalloc(sizeof(*state), GFP_KERNEL);
+	struct intel_atomic_state *state = kzalloc_obj(*state);
 
-	if (!state || drm_atomic_state_init(dev, &state->base) < 0) {
+	if (!state || drm_atomic_commit_init(dev, &state->base) < 0) {
 		kfree(state);
 		return NULL;
 	}
@@ -323,32 +338,31 @@ intel_atomic_state_alloc(struct drm_device *dev)
 	return &state->base;
 }
 
-void intel_atomic_state_free(struct drm_atomic_state *_state)
+void intel_atomic_state_free(struct drm_atomic_commit *_state)
 {
 	struct intel_atomic_state *state = to_intel_atomic_state(_state);
 
-	drm_atomic_state_default_release(&state->base);
+	drm_atomic_commit_default_release(&state->base);
 	kfree(state->global_objs);
-
-	i915_sw_fence_fini(&state->commit_ready);
-
 	kfree(state);
 }
 
-void intel_atomic_state_clear(struct drm_atomic_state *s)
+void intel_atomic_state_clear(struct drm_atomic_commit *s)
 {
 	struct intel_atomic_state *state = to_intel_atomic_state(s);
 
-	drm_atomic_state_default_clear(&state->base);
+	drm_atomic_commit_default_clear(&state->base);
 	intel_atomic_clear_global_state(state);
 
 	/* state->internal not reset on purpose */
 
 	state->dpll_set = state->modeset = false;
+
+	intel_dp_tunnel_atomic_cleanup_inherited_state(state);
 }
 
 struct intel_crtc_state *
-intel_atomic_get_crtc_state(struct drm_atomic_state *state,
+intel_atomic_get_crtc_state(struct drm_atomic_commit *state,
 			    struct intel_crtc *crtc)
 {
 	struct drm_crtc_state *crtc_state;

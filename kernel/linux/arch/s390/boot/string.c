@@ -1,10 +1,17 @@
 // SPDX-License-Identifier: GPL-2.0
+#define IN_BOOT_STRING_C 1
 #include <linux/ctype.h>
 #include <linux/kernel.h>
 #include <linux/errno.h>
 #undef CONFIG_KASAN
 #undef CONFIG_KASAN_GENERIC
+#undef CONFIG_KMSAN
 #include "../lib/string.c"
+
+/*
+ * Duplicate some functions from the common lib/string.c
+ * instead of fully including it.
+ */
 
 int strncmp(const char *cs, const char *ct, size_t count)
 {
@@ -20,6 +27,23 @@ int strncmp(const char *cs, const char *ct, size_t count)
 		count--;
 	}
 	return 0;
+}
+
+ssize_t sized_strscpy(char *dst, const char *src, size_t count)
+{
+	size_t len;
+
+	if (count == 0)
+		return -E2BIG;
+	len = strnlen(src, count - 1);
+	memcpy(dst, src, len);
+	dst[len] = '\0';
+	return src[len] ? -E2BIG : len;
+}
+
+void *memset64(uint64_t *s, uint64_t v, size_t count)
+{
+	return __memset64(s, v, count * sizeof(v));
 }
 
 char *skip_spaces(const char *str)

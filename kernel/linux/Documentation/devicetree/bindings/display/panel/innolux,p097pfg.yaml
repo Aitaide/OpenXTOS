@@ -10,21 +10,26 @@ maintainers:
   - Lin Huang <hl@rock-chips.com>
 
 allOf:
-  - $ref: panel-common.yaml#
+  - $ref: panel-common-dual.yaml#
 
 properties:
   compatible:
     const: innolux,p097pfg
 
+  reg:
+    maxItems: 1
+
   backlight: true
   enable-gpios: true
-  reg: true
 
   avdd-supply:
     description: The regulator that provides positive voltage
 
   avee-supply:
     description: The regulator that provides negative voltage
+
+  port: true
+  ports: true
 
 required:
   - compatible
@@ -50,6 +55,27 @@ examples:
             avee-supply = <&avee>;
             backlight = <&backlight>;
             enable-gpios = <&gpio1 13 GPIO_ACTIVE_HIGH>;
+
+            ports {
+                #address-cells = <1>;
+                #size-cells = <0>;
+
+                port@0 {
+                    reg = <0>;
+
+                    mipi_in_panel: endpoint {
+                        remote-endpoint = <&mipi_out_panel>;
+                    };
+                };
+
+                port@1 {
+                    reg = <1>;
+
+                    mipi1_in_panel: endpoint {
+                        remote-endpoint = <&mipi1_out_panel>;
+                    };
+                };
+            };
         };
     };
 

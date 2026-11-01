@@ -34,19 +34,22 @@ static const int jack_switch_types[SND_JACK_SWITCH_TYPES] = {
 	SW_JACK_PHYSICAL_INSERT,
 	SW_VIDEOOUT_INSERT,
 	SW_LINEIN_INSERT,
+	SW_USB_INSERT,
 };
 #endif /* CONFIG_SND_JACK_INPUT_DEV */
 
+static void snd_jack_remove_debugfs(struct snd_jack *jack);
+
 static int snd_jack_dev_disconnect(struct snd_device *device)
 {
-#ifdef CONFIG_SND_JACK_INPUT_DEV
 	struct snd_jack *jack = device->device_data;
 
-	mutex_lock(&jack->input_dev_lock);
-	if (!jack->input_dev) {
-		mutex_unlock(&jack->input_dev_lock);
+	snd_jack_remove_debugfs(jack);
+
+#ifdef CONFIG_SND_JACK_INPUT_DEV
+	guard(mutex)(&jack->input_dev_lock);
+	if (!jack->input_dev)
 		return 0;
-	}
 
 	/* If the input device is registered with the input subsystem
 	 * then we need to use a different deallocator. */
@@ -55,7 +58,6 @@ static int snd_jack_dev_disconnect(struct snd_device *device)
 	else
 		input_free_device(jack->input_dev);
 	jack->input_dev = NULL;
-	mutex_unlock(&jack->input_dev_lock);
 #endif /* CONFIG_SND_JACK_INPUT_DEV */
 	return 0;
 }
@@ -92,11 +94,9 @@ static int snd_jack_dev_register(struct snd_device *device)
 	snprintf(jack->name, sizeof(jack->name), "%s %s",
 		 card->shortname, jack->id);
 
-	mutex_lock(&jack->input_dev_lock);
-	if (!jack->input_dev) {
-		mutex_unlock(&jack->input_dev_lock);
+	guard(mutex)(&jack->input_dev_lock);
+	if (!jack->input_dev)
 		return 0;
-	}
 
 	jack->input_dev->name = jack->name;
 
@@ -121,7 +121,6 @@ static int snd_jack_dev_register(struct snd_device *device)
 	if (err == 0)
 		jack->registered = 1;
 
-	mutex_unlock(&jack->input_dev_lock);
 	return err;
 }
 #endif /* CONFIG_SND_JACK_INPUT_DEV */
@@ -243,25 +242,23 @@ static ssize_t jack_kctl_id_read(struct file *file,
 static const char * const jack_events_name[] = {
 	"HEADPHONE(0x0001)", "MICROPHONE(0x0002)", "LINEOUT(0x0004)",
 	"MECHANICAL(0x0008)", "VIDEOOUT(0x0010)", "LINEIN(0x0020)",
-	"", "", "", "BTN_5(0x0200)", "BTN_4(0x0400)", "BTN_3(0x0800)",
-	"BTN_2(0x1000)", "BTN_1(0x2000)", "BTN_0(0x4000)", "",
+	"USB(0x0040)", "", "", "BTN_5(0x0200)", "BTN_4(0x0400)",
+	"BTN_3(0x0800)", "BTN_2(0x1000)", "BTN_1(0x2000)", "BTN_0(0x4000)",
+	"",
 };
 
 /* the recommended buffer size is 256 */
 static int parse_mask_bits(unsigned int mask_bits, char *buf, size_t buf_size)
 {
+	int len = scnprintf(buf, buf_size, "0x%04x", mask_bits);
 	int i;
 
-	scnprintf(buf, buf_size, "0x%04x", mask_bits);
-
 	for (i = 0; i < ARRAY_SIZE(jack_events_name); i++)
-		if (mask_bits & (1 << i)) {
-			strlcat(buf, " ", buf_size);
-			strlcat(buf, jack_events_name[i], buf_size);
-		}
-	strlcat(buf, "\n", buf_size);
+		if (mask_bits & (1 << i))
+			len += scnprintf(buf + len, buf_size - len, " %s", jack_events_name[i]);
+	len += scnprintf(buf + len, buf_size - len, "\n");
 
-	return strlen(buf);
+	return len;
 }
 
 static ssize_t jack_kctl_mask_bits_read(struct file *file,
@@ -306,41 +303,41 @@ static ssize_t jack_type_read(struct file *file,
 }
 
 static const struct file_operations jack_type_fops = {
-	.open = simple_open,
-	.read = jack_type_read,
-	.llseek = default_llseek,
+	.open	=	simple_open,
+	.read	=	jack_type_read,
+	.llseek	=	default_llseek,
 };
 #endif
 
 static const struct file_operations sw_inject_enable_fops = {
-	.open = simple_open,
-	.read = sw_inject_enable_read,
-	.write = sw_inject_enable_write,
-	.llseek = default_llseek,
+	.open	=	simple_open,
+	.read	=	sw_inject_enable_read,
+	.write	=	sw_inject_enable_write,
+	.llseek	=	default_llseek,
 };
 
 static const struct file_operations jackin_inject_fops = {
-	.open = simple_open,
-	.write = jackin_inject_write,
-	.llseek = default_llseek,
+	.open	=	simple_open,
+	.write	=	jackin_inject_write,
+	.llseek	=	default_llseek,
 };
 
 static const struct file_operations jack_kctl_id_fops = {
-	.open = simple_open,
-	.read = jack_kctl_id_read,
-	.llseek = default_llseek,
+	.open	=	simple_open,
+	.read	=	jack_kctl_id_read,
+	.llseek	=	default_llseek,
 };
 
 static const struct file_operations jack_kctl_mask_bits_fops = {
-	.open = simple_open,
-	.read = jack_kctl_mask_bits_read,
-	.llseek = default_llseek,
+	.open	=	simple_open,
+	.read	=	jack_kctl_mask_bits_read,
+	.llseek	=	default_llseek,
 };
 
 static const struct file_operations jack_kctl_status_fops = {
-	.open = simple_open,
-	.read = jack_kctl_status_read,
-	.llseek = default_llseek,
+	.open	=	simple_open,
+	.read	=	jack_kctl_status_read,
+	.llseek	=	default_llseek,
 };
 
 static int snd_jack_debugfs_add_inject_node(struct snd_jack *jack,
@@ -387,10 +384,14 @@ static int snd_jack_debugfs_add_inject_node(struct snd_jack *jack,
 	return 0;
 }
 
-static void snd_jack_debugfs_clear_inject_node(struct snd_jack_kctl *jack_kctl)
+static void snd_jack_remove_debugfs(struct snd_jack *jack)
 {
-	debugfs_remove(jack_kctl->jack_debugfs_root);
-	jack_kctl->jack_debugfs_root = NULL;
+	struct snd_jack_kctl *jack_kctl;
+
+	list_for_each_entry(jack_kctl, &jack->kctl_list, list) {
+		debugfs_remove(jack_kctl->jack_debugfs_root);
+		jack_kctl->jack_debugfs_root = NULL;
+	}
 }
 #else /* CONFIG_SND_JACK_INJECTION_DEBUG */
 static int snd_jack_debugfs_add_inject_node(struct snd_jack *jack,
@@ -399,7 +400,7 @@ static int snd_jack_debugfs_add_inject_node(struct snd_jack *jack,
 	return 0;
 }
 
-static void snd_jack_debugfs_clear_inject_node(struct snd_jack_kctl *jack_kctl)
+static void snd_jack_remove_debugfs(struct snd_jack *jack)
 {
 }
 #endif /* CONFIG_SND_JACK_INJECTION_DEBUG */
@@ -410,7 +411,6 @@ static void snd_jack_kctl_private_free(struct snd_kcontrol *kctl)
 
 	jack_kctl = kctl->private_data;
 	if (jack_kctl) {
-		snd_jack_debugfs_clear_inject_node(jack_kctl);
 		list_del(&jack_kctl->list);
 		kfree(jack_kctl);
 	}
@@ -437,7 +437,7 @@ static struct snd_jack_kctl * snd_jack_kctl_new(struct snd_card *card, const cha
 	if (err < 0)
 		return NULL;
 
-	jack_kctl = kzalloc(sizeof(*jack_kctl), GFP_KERNEL);
+	jack_kctl = kzalloc_obj(*jack_kctl);
 
 	if (!jack_kctl)
 		goto error;
@@ -503,8 +503,8 @@ int snd_jack_new(struct snd_card *card, const char *id, int type,
 		.dev_free = snd_jack_dev_free,
 #ifdef CONFIG_SND_JACK_INPUT_DEV
 		.dev_register = snd_jack_dev_register,
-		.dev_disconnect = snd_jack_dev_disconnect,
 #endif /* CONFIG_SND_JACK_INPUT_DEV */
+		.dev_disconnect = snd_jack_dev_disconnect,
 	};
 
 	if (initial_kctl) {
@@ -513,7 +513,7 @@ int snd_jack_new(struct snd_card *card, const char *id, int type,
 			return -ENOMEM;
 	}
 
-	jack = kzalloc(sizeof(struct snd_jack), GFP_KERNEL);
+	jack = kzalloc_obj(struct snd_jack);
 	if (jack == NULL)
 		return -ENOMEM;
 
@@ -573,30 +573,6 @@ fail_input:
 EXPORT_SYMBOL(snd_jack_new);
 
 #ifdef CONFIG_SND_JACK_INPUT_DEV
-/**
- * snd_jack_set_parent - Set the parent device for a jack
- *
- * @jack:   The jack to configure
- * @parent: The device to set as parent for the jack.
- *
- * Set the parent for the jack devices in the device tree.  This
- * function is only valid prior to registration of the jack.  If no
- * parent is configured then the parent device will be the sound card.
- */
-void snd_jack_set_parent(struct snd_jack *jack, struct device *parent)
-{
-	WARN_ON(jack->registered);
-	mutex_lock(&jack->input_dev_lock);
-	if (!jack->input_dev) {
-		mutex_unlock(&jack->input_dev_lock);
-		return;
-	}
-
-	jack->input_dev->dev.parent = parent;
-	mutex_unlock(&jack->input_dev_lock);
-}
-EXPORT_SYMBOL(snd_jack_set_parent);
-
 /**
  * snd_jack_set_key - Set a key mapping on a jack
  *

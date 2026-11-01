@@ -243,7 +243,6 @@ static int vtpm_proxy_fops_release(struct inode *inode, struct file *filp)
 
 static const struct file_operations vtpm_proxy_fops = {
 	.owner = THIS_MODULE,
-	.llseek = no_llseek,
 	.read = vtpm_proxy_fops_read,
 	.write = vtpm_proxy_fops_write,
 	.poll = vtpm_proxy_fops_poll,
@@ -322,12 +321,14 @@ static int vtpm_proxy_is_driver_command(struct tpm_chip *chip,
  *
  * @chip: tpm chip to use
  * @buf: send buffer
+ * @bufsiz: size of the buffer
  * @count: bytes to send
  *
  * Return:
  *      0 in case of success, negative error value otherwise.
  */
-static int vtpm_proxy_tpm_op_send(struct tpm_chip *chip, u8 *buf, size_t count)
+static int vtpm_proxy_tpm_op_send(struct tpm_chip *chip, u8 *buf, size_t bufsiz,
+				  size_t count)
 {
 	struct proxy_dev *proxy_dev = dev_get_drvdata(&chip->dev);
 
@@ -394,39 +395,35 @@ static bool vtpm_proxy_tpm_req_canceled(struct tpm_chip  *chip, u8 status)
 
 static int vtpm_proxy_request_locality(struct tpm_chip *chip, int locality)
 {
-	struct tpm_buf buf;
 	int rc;
 	const struct tpm_header *header;
 	struct proxy_dev *proxy_dev = dev_get_drvdata(&chip->dev);
 
+	struct tpm_buf *buf __free(kfree) = kzalloc(TPM_BUFSIZE, GFP_KERNEL);
+	if (!buf)
+		return -ENOMEM;
+
+	tpm_buf_init(buf, TPM_BUFSIZE);
 	if (chip->flags & TPM_CHIP_FLAG_TPM2)
-		rc = tpm_buf_init(&buf, TPM2_ST_SESSIONS,
-				  TPM2_CC_SET_LOCALITY);
+		tpm_buf_reset(buf, TPM2_ST_SESSIONS, TPM2_CC_SET_LOCALITY);
 	else
-		rc = tpm_buf_init(&buf, TPM_TAG_RQU_COMMAND,
-				  TPM_ORD_SET_LOCALITY);
-	if (rc)
-		return rc;
-	tpm_buf_append_u8(&buf, locality);
+		tpm_buf_reset(buf, TPM_TAG_RQU_COMMAND, TPM_ORD_SET_LOCALITY);
+
+	tpm_buf_append_u8(buf, locality);
 
 	proxy_dev->state |= STATE_DRIVER_COMMAND;
 
-	rc = tpm_transmit_cmd(chip, &buf, 0, "attempting to set locality");
+	rc = tpm_transmit_cmd(chip, buf, 0, "attempting to set locality");
 
 	proxy_dev->state &= ~STATE_DRIVER_COMMAND;
 
-	if (rc < 0) {
-		locality = rc;
-		goto out;
-	}
+	if (rc < 0)
+		return rc;
 
-	header = (const struct tpm_header *)buf.data;
+	header = (const struct tpm_header *)buf->data;
 	rc = be32_to_cpu(header->return_code);
 	if (rc)
 		locality = -1;
-
-out:
-	tpm_buf_destroy(&buf);
 
 	return locality;
 }
@@ -490,7 +487,7 @@ static struct proxy_dev *vtpm_proxy_create_proxy_dev(void)
 	struct tpm_chip *chip;
 	int err;
 
-	proxy_dev = kzalloc(sizeof(*proxy_dev), GFP_KERNEL);
+	proxy_dev = kzalloc_obj(*proxy_dev);
 	if (proxy_dev == NULL)
 		return ERR_PTR(-ENOMEM);
 
@@ -711,7 +708,7 @@ static void __exit vtpm_module_exit(void)
 module_init(vtpm_module_init);
 module_exit(vtpm_module_exit);
 
-MODULE_AUTHOR("Stefan Berger (stefanb@us.ibm.com)");
+MODULE_AUTHOR("Stefan Berger <stefanb@us.ibm.com>");
 MODULE_DESCRIPTION("vTPM Driver");
 MODULE_VERSION("0.1");
 MODULE_LICENSE("GPL");

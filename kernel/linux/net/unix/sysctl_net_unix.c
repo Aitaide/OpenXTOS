@@ -5,13 +5,15 @@
  * Authors:	Mike Shaver.
  */
 
-#include <linux/mm.h>
 #include <linux/slab.h>
+#include <linux/string.h>
 #include <linux/sysctl.h>
-
 #include <net/af_unix.h>
+#include <net/net_namespace.h>
 
-static struct ctl_table unix_table[] = {
+#include "af_unix.h"
+
+static const struct ctl_table unix_table[] = {
 	{
 		.procname	= "max_dgram_qlen",
 		.data		= &init_net.unx.sysctl_max_dgram_qlen,
@@ -19,21 +21,31 @@ static struct ctl_table unix_table[] = {
 		.mode		= 0644,
 		.proc_handler	= proc_dointvec
 	},
-	{ }
 };
+
+static const struct ctl_table *unix_table_dup(struct net *net)
+{
+	struct ctl_table *table;
+
+	table = kmemdup(unix_table, sizeof(unix_table), GFP_KERNEL);
+	if (!table)
+		return NULL;
+
+	table[0].data = &net->unx.sysctl_max_dgram_qlen;
+
+	return table;
+}
 
 int __net_init unix_sysctl_register(struct net *net)
 {
-	struct ctl_table *table;
+	const struct ctl_table *table;
 
 	if (net_eq(net, &init_net)) {
 		table = unix_table;
 	} else {
-		table = kmemdup(unix_table, sizeof(unix_table), GFP_KERNEL);
+		table = unix_table_dup(net);
 		if (!table)
 			goto err_alloc;
-
-		table[0].data = &net->unx.sysctl_max_dgram_qlen;
 	}
 
 	net->unx.ctl = register_net_sysctl_sz(net, "net/unix", table,
@@ -52,7 +64,7 @@ err_alloc:
 
 void unix_sysctl_unregister(struct net *net)
 {
-	struct ctl_table *table;
+	const struct ctl_table *table;
 
 	table = net->unx.ctl->ctl_table_arg;
 	unregister_net_sysctl_table(net->unx.ctl);

@@ -3,7 +3,7 @@
 // This file is provided under a dual BSD/GPLv2 license. When using or
 // redistributing this file, you may do so under either license.
 //
-// Copyright(c) 2021 Advanced Micro Devices, Inc.
+// Copyright(c) 2021, 2023 Advanced Micro Devices, Inc.
 //
 // Authors: Ajit Kumar Pandey <AjitKumar.Pandey@amd.com>
 //
@@ -19,7 +19,87 @@
 #include "../sof/amd/acp.h"
 #include "mach-config.h"
 
+#define ACP_7_0_REV	0x70
+
 static int acp_quirk_data;
+
+static const struct dmi_system_id acp70_acpi_flag_override_table[] = {
+	{
+		.matches = {
+			DMI_MATCH(DMI_BOARD_VENDOR, "ASUSTeK COMPUTER INC."),
+			DMI_MATCH(DMI_PRODUCT_NAME, "HN7306EA"),
+		},
+	},
+	{
+		/* ASUS EXPERTBOOK AM7406CKA (Kraken Point, ACP 7.0) */
+		.matches = {
+			DMI_MATCH(DMI_BOARD_VENDOR, "ASUSTeK COMPUTER INC."),
+			DMI_MATCH(DMI_PRODUCT_NAME, "ASUS EXPERTBOOK AM7406CKA"),
+		},
+	},
+	{
+		/* ASUS Zenbook S16 UM5606GA (Strix Point, ACP 7.0) */
+		.matches = {
+			DMI_MATCH(DMI_BOARD_VENDOR, "ASUSTeK COMPUTER INC."),
+			DMI_MATCH(DMI_PRODUCT_NAME, "Zenbook S16 UM5606GA"),
+		},
+	},
+	{
+		/* Lenovo Yoga Pro 7 15ASH11 (Strix Halo, ACP 7.0) */
+		.matches = {
+			DMI_MATCH(DMI_BOARD_VENDOR, "LENOVO"),
+			DMI_MATCH(DMI_PRODUCT_NAME, "83W5"),
+		},
+	},
+	{
+		/* Lenovo Legion 7 15ASH11 (Strix Halo, ACP 7.0) */
+		.matches = {
+			DMI_MATCH(DMI_BOARD_VENDOR, "LENOVO"),
+			DMI_MATCH(DMI_PRODUCT_NAME, "83V9"),
+		},
+	},
+	{
+		/* Lenovo Yoga Pro 7 14ASP9 (Strix Point, ACP 7.0) */
+		.matches = {
+			DMI_MATCH(DMI_BOARD_VENDOR, "LENOVO"),
+			DMI_MATCH(DMI_PRODUCT_NAME, "83HN"),
+		},
+	},
+	{
+		.matches = {
+			DMI_MATCH(DMI_BOARD_VENDOR, "ASUSTeK COMPUTER INC"),
+			DMI_MATCH(DMI_PRODUCT_NAME, "FA401EA"),
+		},
+	},
+	{
+		.matches = {
+			DMI_MATCH(DMI_BOARD_VENDOR, "ASUSTeK COMPUTER INC"),
+			DMI_MATCH(DMI_PRODUCT_NAME, "Vivobook 18 M1807GA"),
+		},
+	},
+	{
+		/* ASUS Zenbook S14 UM5406GA (Strix Point, ACP 7.0) */
+		.matches = {
+			DMI_MATCH(DMI_BOARD_VENDOR, "ASUSTeK COMPUTER INC."),
+			DMI_MATCH(DMI_PRODUCT_NAME, "Zenbook S14 UM5406GA"),
+		},
+	},
+	{
+		/* HP OmniBook X Flip 14-kc0xxx (Strix Point, ACP 7.2) */
+		.matches = {
+			DMI_MATCH(DMI_BOARD_VENDOR, "HP"),
+			DMI_MATCH(DMI_BOARD_NAME, "8EA1"),
+		},
+	},
+	{
+		/* HP OmniBook X Flip 16-cc0xxx */
+		.matches = {
+			DMI_MATCH(DMI_BOARD_VENDOR, "HP"),
+			DMI_MATCH(DMI_BOARD_NAME, "8EA2"),
+		},
+	},
+	{}
+};
 
 static const struct config_entry config_table[] = {
 	{
@@ -48,6 +128,19 @@ static const struct config_entry config_table[] = {
 		},
 	},
 	{
+		.flags = FLAG_AMD_LEGACY,
+		.device = ACP_PCI_DEV_ID,
+		.dmi_table = (const struct dmi_system_id []) {
+			{
+				.matches = {
+					DMI_MATCH(DMI_SYS_VENDOR, "Valve"),
+					DMI_MATCH(DMI_PRODUCT_NAME, "Jupiter"),
+				},
+			},
+			{}
+		},
+	},
+	{
 		.flags = FLAG_AMD_SOF,
 		.device = ACP_PCI_DEV_ID,
 		.dmi_table = (const struct dmi_system_id []) {
@@ -55,7 +148,104 @@ static const struct config_entry config_table[] = {
 				.matches = {
 					DMI_MATCH(DMI_SYS_VENDOR, "Valve"),
 					DMI_MATCH(DMI_PRODUCT_NAME, "Galileo"),
-					DMI_MATCH(DMI_PRODUCT_FAMILY, "Sephiroth"),
+				},
+			},
+			{}
+		},
+	},
+	{
+		.flags = FLAG_AMD_LEGACY,
+		.device = ACP_PCI_DEV_ID,
+		.dmi_table = (const struct dmi_system_id []) {
+			{
+				.matches = {
+					DMI_EXACT_MATCH(DMI_BOARD_VENDOR, "HUAWEI"),
+					DMI_EXACT_MATCH(DMI_PRODUCT_NAME, "KLVL-WXXW"),
+					DMI_EXACT_MATCH(DMI_PRODUCT_VERSION, "M1010"),
+				},
+			},
+			{}
+		},
+	},
+	{
+		.flags = FLAG_AMD_LEGACY,
+		.device = ACP_PCI_DEV_ID,
+		.dmi_table = (const struct dmi_system_id []) {
+			{
+				.matches = {
+					DMI_EXACT_MATCH(DMI_BOARD_VENDOR, "HUAWEI"),
+					DMI_EXACT_MATCH(DMI_PRODUCT_NAME, "KLVL-WXX9"),
+					DMI_EXACT_MATCH(DMI_PRODUCT_VERSION, "M1010"),
+				},
+			},
+			{}
+		},
+	},
+	{
+		.flags = FLAG_AMD_LEGACY,
+		.device = ACP_PCI_DEV_ID,
+		.dmi_table = (const struct dmi_system_id []) {
+			{
+				.matches = {
+					DMI_EXACT_MATCH(DMI_BOARD_VENDOR, "HUAWEI"),
+					DMI_EXACT_MATCH(DMI_PRODUCT_NAME, "BOM-WXX9"),
+					DMI_EXACT_MATCH(DMI_PRODUCT_VERSION, "M1010"),
+				},
+			},
+			{}
+		},
+	},
+	{
+		.flags = FLAG_AMD_LEGACY,
+		.device = ACP_PCI_DEV_ID,
+		.dmi_table = (const struct dmi_system_id []) {
+			{
+				.matches = {
+					DMI_EXACT_MATCH(DMI_BOARD_VENDOR, "HUAWEI"),
+					DMI_EXACT_MATCH(DMI_PRODUCT_NAME, "HVY-WXX9"),
+					DMI_EXACT_MATCH(DMI_PRODUCT_VERSION, "M1010"),
+				},
+			},
+			{}
+		},
+	},
+	{
+		.flags = FLAG_AMD_LEGACY,
+		.device = ACP_PCI_DEV_ID,
+		.dmi_table = (const struct dmi_system_id []) {
+			{
+				.matches = {
+					DMI_EXACT_MATCH(DMI_BOARD_VENDOR, "HUAWEI"),
+					DMI_EXACT_MATCH(DMI_PRODUCT_NAME, "HVY-WXX9"),
+					DMI_EXACT_MATCH(DMI_PRODUCT_VERSION, "M1020"),
+				},
+			},
+			{}
+		},
+	},
+	{
+		.flags = FLAG_AMD_LEGACY,
+		.device = ACP_PCI_DEV_ID,
+		.dmi_table = (const struct dmi_system_id []) {
+			{
+				.matches = {
+					DMI_EXACT_MATCH(DMI_BOARD_VENDOR, "HUAWEI"),
+					DMI_EXACT_MATCH(DMI_PRODUCT_NAME, "HVY-WXX9"),
+					DMI_EXACT_MATCH(DMI_PRODUCT_VERSION, "M1040"),
+				},
+			},
+			{}
+		},
+	},
+	{
+		.flags = FLAG_AMD_LEGACY,
+		.device = ACP_PCI_DEV_ID,
+		.dmi_table = (const struct dmi_system_id []) {
+			{
+				.matches = {
+					DMI_EXACT_MATCH(DMI_BOARD_VENDOR, "HUAWEI"),
+					DMI_EXACT_MATCH(DMI_PRODUCT_NAME, "HVY-WXX9"),
+					DMI_EXACT_MATCH(DMI_PRODUCT_VERSION, "M1060"),
 				},
 			},
 			{}
@@ -63,15 +253,36 @@ static const struct config_entry config_table[] = {
 	},
 };
 
+static int snd_amd_acp_acpi_find_config(struct pci_dev *pci)
+{
+	const union acpi_object *obj;
+	int acp_flag = FLAG_AMD_LEGACY_ONLY_DMIC;
+
+	if (!acpi_dev_get_property(ACPI_COMPANION(&pci->dev), "acp-audio-config-flag",
+				   ACPI_TYPE_INTEGER, &obj))
+		acp_flag = obj->integer.value;
+
+	return acp_flag;
+}
+
 int snd_amd_acp_find_config(struct pci_dev *pci)
 {
 	const struct config_entry *table = config_table;
 	u16 device = pci->device;
 	int i;
 
-	/* Do not enable FLAGS on older platforms with Rev id zero */
+	/* Do not enable FLAGS on older platforms with Rev Id zero
+	 * For platforms which has ACP 7.0 or higher, read the acp
+	 * config flag from BIOS ACPI table and for older platforms
+	 * read it from DMI tables.
+	 */
 	if (!pci->revision)
 		return 0;
+	else if (pci->revision >= ACP_7_0_REV) {
+		if (dmi_check_system(acp70_acpi_flag_override_table))
+			return 0;
+		return snd_amd_acp_acpi_find_config(pci);
+	}
 
 	for (i = 0; i < ARRAY_SIZE(config_table); i++, table++) {
 		if (table->device != device)
@@ -193,4 +404,41 @@ struct snd_soc_acpi_mach snd_soc_acpi_amd_rmb_sof_machines[] = {
 };
 EXPORT_SYMBOL(snd_soc_acpi_amd_rmb_sof_machines);
 
+struct snd_soc_acpi_mach snd_soc_acpi_amd_acp63_sof_machines[] = {
+	{
+		.id = "AMDI1019",
+		.drv_name = "acp63-dsp",
+		.pdata = &acp_quirk_data,
+		.fw_filename = "sof-acp_6_3.ri",
+		.sof_tplg_filename = "sof-acp_6_3.tplg",
+	},
+	{},
+};
+EXPORT_SYMBOL(snd_soc_acpi_amd_acp63_sof_machines);
+
+struct snd_soc_acpi_mach snd_soc_acpi_amd_acp70_sof_machines[] = {
+	{
+		.id = "AMDI1010",
+		.drv_name = "acp70-dsp",
+		.pdata = &acp_quirk_data,
+		.fw_filename = "sof-acp_7_0.ri",
+		.sof_tplg_filename = "sof-acp_7_0.tplg",
+	},
+	{},
+};
+EXPORT_SYMBOL(snd_soc_acpi_amd_acp70_sof_machines);
+
+struct snd_soc_acpi_mach snd_soc_acpi_amd_acp7x_sof_machines[] = {
+	{
+		.id = "AMDI1010",
+		.drv_name = "acp7x-dsp",
+		.pdata = &acp_quirk_data,
+		.fw_filename = "sof-acp7x.ri",
+		.sof_tplg_filename = "sof-acp7x.tplg",
+	},
+	{},
+};
+EXPORT_SYMBOL(snd_soc_acpi_amd_acp7x_sof_machines);
+
+MODULE_DESCRIPTION("AMD ACP Machine Configuration Module");
 MODULE_LICENSE("Dual BSD/GPL");

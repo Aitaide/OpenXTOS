@@ -12,9 +12,17 @@ maintainers:
 properties:
   compatible:
     oneOf:
-      - const: fsl,imx-irqsteer
+      - enum:
+          - fsl,imx-irqsteer
+          - nxp,s32n79-irqsteer
       - items:
-          - const: fsl,imx8m-irqsteer
+          - enum:
+              - fsl,imx8m-irqsteer
+              - fsl,imx8mp-irqsteer
+              - fsl,imx8qm-irqsteer
+              - fsl,imx8qxp-irqsteer
+              - fsl,imx94-irqsteer
+              - fsl,imx95-irqsteer
           - const: fsl,imx-irqsteer
 
   reg:
@@ -41,6 +49,9 @@ properties:
 
   clock-names:
     const: ipg
+
+  power-domains:
+    maxItems: 1
 
   interrupt-controller: true
 
@@ -69,6 +80,23 @@ required:
   - "#interrupt-cells"
   - fsl,channel
   - fsl,num-irqs
+
+allOf:
+  - if:
+      properties:
+        compatible:
+          contains:
+            enum:
+              - fsl,imx8mp-irqsteer
+              - fsl,imx8qm-irqsteer
+              - fsl,imx8qxp-irqsteer
+              - fsl,imx95-irqsteer
+    then:
+      required:
+        - power-domains
+    else:
+      properties:
+        power-domains: false
 
 additionalProperties: false
 

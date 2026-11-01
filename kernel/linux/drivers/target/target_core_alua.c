@@ -18,8 +18,10 @@
 #include <linux/fcntl.h>
 #include <linux/file.h>
 #include <linux/fs.h>
+#include <linux/fs_struct.h>
+#include <linux/kthread.h>
 #include <scsi/scsi_proto.h>
-#include <asm/unaligned.h>
+#include <linux/unaligned.h>
 
 #include <target/target_core_base.h>
 #include <target/target_core_backend.h>
@@ -850,16 +852,22 @@ int core_alua_check_nonop_delay(
 	msleep_interruptible(cmd->alua_nonop_delay);
 	return 0;
 }
-EXPORT_SYMBOL(core_alua_check_nonop_delay);
 
 static int core_alua_write_tpg_metadata(
 	const char *path,
 	unsigned char *md_buf,
 	u32 md_buf_len)
 {
-	struct file *file = filp_open(path, O_RDWR | O_CREAT | O_TRUNC, 0600);
+	struct file *file;
 	loff_t pos = 0;
 	int ret;
+
+	if (tsk_is_kthread(current)) {
+		scoped_with_init_fs()
+			file = filp_open(path, O_RDWR | O_CREAT | O_TRUNC, 0600);
+	} else {
+		file = filp_open(path, O_RDWR | O_CREAT | O_TRUNC, 0600);
+	}
 
 	if (IS_ERR(file)) {
 		pr_err("filp_open(%s) for ALUA metadata failed\n", path);

@@ -51,6 +51,8 @@
 &nfc0 {
 	status = "okay";
 
+	#address-cells = <1>;
+	#size-cells = <0>;
 	nand@0 {
 		reg = <0>;
 	};
@@ -97,7 +99,6 @@
 			groups = "gpio0_34_grp";
 			io-standard = <3>;
 			slew-rate = <0>;
-			bias-high-impedance;
 			bias-pull-up;
 		};
 	};

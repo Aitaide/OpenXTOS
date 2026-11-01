@@ -9,25 +9,19 @@ int blkg_rwstat_init(struct blkg_rwstat *rwstat, gfp_t gfp)
 {
 	int i, ret;
 
-	for (i = 0; i < BLKG_RWSTAT_NR; i++) {
-		ret = percpu_counter_init(&rwstat->cpu_cnt[i], 0, gfp);
-		if (ret) {
-			while (--i >= 0)
-				percpu_counter_destroy(&rwstat->cpu_cnt[i]);
-			return ret;
-		}
+	ret = percpu_counter_init_many(rwstat->cpu_cnt, 0, gfp, BLKG_RWSTAT_NR);
+	if (ret)
+		return ret;
+
+	for (i = 0; i < BLKG_RWSTAT_NR; i++)
 		atomic64_set(&rwstat->aux_cnt[i], 0);
-	}
 	return 0;
 }
 EXPORT_SYMBOL_GPL(blkg_rwstat_init);
 
 void blkg_rwstat_exit(struct blkg_rwstat *rwstat)
 {
-	int i;
-
-	for (i = 0; i < BLKG_RWSTAT_NR; i++)
-		percpu_counter_destroy(&rwstat->cpu_cnt[i]);
+	percpu_counter_destroy_many(rwstat->cpu_cnt, BLKG_RWSTAT_NR);
 }
 EXPORT_SYMBOL_GPL(blkg_rwstat_exit);
 
@@ -94,8 +88,7 @@ EXPORT_SYMBOL_GPL(blkg_prfill_rwstat);
  * @sum: blkg_rwstat_sample structure containing the results
  *
  * Collect the blkg_rwstat specified by @blkg, @pol and @off and all its
- * online descendants and their aux counts.  The caller must be holding the
- * queue lock for online tests.
+ * online descendants and their aux counts.
  *
  * If @pol is NULL, blkg_rwstat is at @off bytes into @blkg; otherwise, it
  * is at @off bytes into @blkg's blkg_policy_data of the policy.
@@ -107,24 +100,27 @@ void blkg_rwstat_recursive_sum(struct blkcg_gq *blkg, struct blkcg_policy *pol,
 	struct cgroup_subsys_state *pos_css;
 	unsigned int i;
 
-	lockdep_assert_held(&blkg->q->queue_lock);
+	WARN_ON_ONCE(!rcu_read_lock_held());
 
 	memset(sum, 0, sizeof(*sum));
-	rcu_read_lock();
 	blkg_for_each_descendant_pre(pos_blkg, pos_css, blkg) {
 		struct blkg_rwstat *rwstat;
 
-		if (!pos_blkg->online)
+		if (!data_race(pos_blkg->online))
 			continue;
 
-		if (pol)
-			rwstat = (void *)blkg_to_pd(pos_blkg, pol) + off;
-		else
+		if (pol) {
+			struct blkg_policy_data *pd = blkg_to_pd(pos_blkg, pol);
+
+			if (!pd)
+				continue;
+			rwstat = (void *)pd + off;
+		} else {
 			rwstat = (void *)pos_blkg + off;
+		}
 
 		for (i = 0; i < BLKG_RWSTAT_NR; i++)
 			sum->cnt[i] += blkg_rwstat_read_counter(rwstat, i);
 	}
-	rcu_read_unlock();
 }
 EXPORT_SYMBOL_GPL(blkg_rwstat_recursive_sum);

@@ -27,6 +27,7 @@
 #include <linux/module.h>
 #include <linux/jiffies.h>
 #include <linux/err.h>
+#include <linux/log2.h>
 #include <linux/slab.h>
 #include <linux/string.h>
 #include <linux/blkdev.h>
@@ -197,8 +198,9 @@ static int sas_bsg_initialize(struct Scsi_Host *shost, struct sas_rphy *rphy)
 	}
 
 	if (rphy) {
-		q = bsg_setup_queue(&rphy->dev, dev_name(&rphy->dev),
-				sas_smp_dispatch, NULL, 0);
+		q = bsg_setup_queue(&rphy->dev, dev_name(&rphy->dev), NULL,
+				sas_smp_dispatch, NULL, 0,
+				SCSI_SENSE_BUFFERSIZE);
 		if (IS_ERR(q))
 			return PTR_ERR(q);
 		rphy->q = q;
@@ -206,8 +208,9 @@ static int sas_bsg_initialize(struct Scsi_Host *shost, struct sas_rphy *rphy)
 		char name[20];
 
 		snprintf(name, sizeof(name), "sas_host%d", shost->host_no);
-		q = bsg_setup_queue(&shost->shost_gendev, name,
-				sas_smp_dispatch, NULL, 0);
+		q = bsg_setup_queue(&shost->shost_gendev, name, NULL,
+				sas_smp_dispatch, NULL, 0,
+				SCSI_SENSE_BUFFERSIZE);
 		if (IS_ERR(q))
 			return PTR_ERR(q);
 		to_sas_host_attrs(shost)->q = q;
@@ -220,12 +223,45 @@ static int sas_bsg_initialize(struct Scsi_Host *shost, struct sas_rphy *rphy)
  * SAS host attributes
  */
 
+/*
+ * Set shost->opt_sectors from the DMA optimal mapping size, but only
+ * when dma_opt_mapping_size() is strictly less than dma_max_mapping_size(),
+ * indicating a genuine optimization hint from an IOMMU or DMA backend.
+ * When the two are equal (e.g. IOMMU disabled / passthrough), no real
+ * hint exists, so leave opt_sectors at 0 to avoid bogus optimal_io_size
+ * values that break filesystem geometry (e.g. mkfs.xfs stripe alignment).
+ */
+static void sas_dma_setup_opt_sectors(struct Scsi_Host *shost)
+{
+	struct device *dma_dev = shost->dma_dev;
+	size_t opt = dma_opt_mapping_size(dma_dev);
+	size_t max = dma_max_mapping_size(dma_dev);
+	unsigned int opt_sectors;
+
+	/* opt >= max means no real hint was provided by the DMA layer */
+	if (opt >= max)
+		return;
+
+	/* Clamp to max_sectors to avoid overflow in sector arithmetic */
+	opt_sectors = min_t(unsigned int, opt >> SECTOR_SHIFT,
+			    shost->max_sectors);
+
+	/* Guard against zero before rounddown_pow_of_two() */
+	if (!opt_sectors)
+		return;
+
+	/*
+	 * Round down to power-of-two so filesystem geometry calculations
+	 * (e.g. XFS stripe width/unit) always produce clean divisors.
+	 */
+	shost->opt_sectors = rounddown_pow_of_two(opt_sectors);
+}
+
 static int sas_host_setup(struct transport_container *tc, struct device *dev,
 			  struct device *cdev)
 {
 	struct Scsi_Host *shost = dev_to_shost(dev);
 	struct sas_host_attrs *sas_host = to_sas_host_attrs(shost);
-	struct device *dma_dev = shost->dma_dev;
 
 	INIT_LIST_HEAD(&sas_host->rphy_list);
 	mutex_init(&sas_host->lock);
@@ -237,10 +273,7 @@ static int sas_host_setup(struct transport_container *tc, struct device *dev,
 		dev_printk(KERN_ERR, dev, "fail to a bsg device %d\n",
 			   shost->host_no);
 
-	if (dma_dev->dma_mask) {
-		shost->opt_sectors = min_t(unsigned int, shost->max_sectors,
-				dma_opt_mapping_size(dma_dev) >> SECTOR_SHIFT);
-	}
+	sas_dma_setup_opt_sectors(shost);
 
 	return 0;
 }
@@ -415,6 +448,29 @@ unsigned int sas_is_tlr_enabled(struct scsi_device *sdev)
 	return rdev->tlr_enabled;
 }
 EXPORT_SYMBOL_GPL(sas_is_tlr_enabled);
+
+/**
+ * sas_ata_ncq_prio_supported - Check for ATA NCQ command priority support
+ * @sdev: SCSI device
+ *
+ * Check if an ATA device supports NCQ priority using VPD page 89h (ATA
+ * Information). Since this VPD page is implemented only for ATA devices,
+ * this function always returns false for SCSI devices.
+ */
+bool sas_ata_ncq_prio_supported(struct scsi_device *sdev)
+{
+	struct scsi_vpd *vpd;
+	bool ncq_prio_supported = false;
+
+	rcu_read_lock();
+	vpd = rcu_dereference(sdev->vpd_pg89);
+	if (vpd && vpd->len >= 214)
+		ncq_prio_supported = (vpd->data[213] >> 4) & 1;
+	rcu_read_unlock();
+
+	return ncq_prio_supported;
+}
+EXPORT_SYMBOL_GPL(sas_ata_ncq_prio_supported);
 
 /*
  * SAS Phy attributes
@@ -687,7 +743,7 @@ struct sas_phy *sas_phy_alloc(struct device *parent, int number)
 	struct Scsi_Host *shost = dev_to_shost(parent);
 	struct sas_phy *phy;
 
-	phy = kzalloc(sizeof(*phy), GFP_KERNEL);
+	phy = kzalloc_obj(*phy);
 	if (!phy)
 		return NULL;
 
@@ -865,7 +921,8 @@ static void sas_port_delete_link(struct sas_port *port,
 	sysfs_remove_link(&phy->dev.kobj, "port");
 }
 
-/** sas_port_alloc - allocate and initialize a SAS port structure
+/**
+ * sas_port_alloc - allocate and initialize a SAS port structure
  *
  * @parent:	parent device
  * @port_id:	port number
@@ -874,14 +931,14 @@ static void sas_port_delete_link(struct sas_port *port,
  * below the device specified by @parent which must be either a Scsi_Host
  * or a sas_expander_device.
  *
- * Returns %NULL on error
+ * Returns: %NULL on error
  */
 struct sas_port *sas_port_alloc(struct device *parent, int port_id)
 {
 	struct Scsi_Host *shost = dev_to_shost(parent);
 	struct sas_port *port;
 
-	port = kzalloc(sizeof(*port), GFP_KERNEL);
+	port = kzalloc_obj(*port);
 	if (!port)
 		return NULL;
 
@@ -909,7 +966,8 @@ struct sas_port *sas_port_alloc(struct device *parent, int port_id)
 }
 EXPORT_SYMBOL(sas_port_alloc);
 
-/** sas_port_alloc_num - allocate and initialize a SAS port structure
+/**
+ * sas_port_alloc_num - allocate and initialize a SAS port structure
  *
  * @parent:	parent device
  *
@@ -919,7 +977,7 @@ EXPORT_SYMBOL(sas_port_alloc);
  * the device tree below the device specified by @parent which must be
  * either a Scsi_Host or a sas_expander_device.
  *
- * Returns %NULL on error
+ * Returns: %NULL on error
  */
 struct sas_port *sas_port_alloc_num(struct device *parent)
 {
@@ -1440,7 +1498,7 @@ struct sas_rphy *sas_end_device_alloc(struct sas_port *parent)
 	struct Scsi_Host *shost = dev_to_shost(&parent->dev);
 	struct sas_end_device *rdev;
 
-	rdev = kzalloc(sizeof(*rdev), GFP_KERNEL);
+	rdev = kzalloc_obj(*rdev);
 	if (!rdev) {
 		return NULL;
 	}
@@ -1484,7 +1542,7 @@ struct sas_rphy *sas_expander_alloc(struct sas_port *parent,
 	BUG_ON(type != SAS_EDGE_EXPANDER_DEVICE &&
 	       type != SAS_FANOUT_EXPANDER_DEVICE);
 
-	rdev = kzalloc(sizeof(*rdev), GFP_KERNEL);
+	rdev = kzalloc_obj(*rdev);
 	if (!rdev) {
 		return NULL;
 	}
@@ -1754,7 +1812,7 @@ sas_attach_transport(struct sas_function_template *ft)
 	struct sas_internal *i;
 	int count;
 
-	i = kzalloc(sizeof(struct sas_internal), GFP_KERNEL);
+	i = kzalloc_obj(struct sas_internal);
 	if (!i)
 		return NULL;
 

@@ -48,9 +48,10 @@ static struct snd_soc_codec_conf cs35l41_codec_conf[CS35L41_MAX_AMPS];
 static int cs35l41_init(struct snd_soc_pcm_runtime *rtd)
 {
 	struct snd_soc_card *card = rtd->card;
+	struct snd_soc_dapm_context *dapm = snd_soc_card_to_dapm(card);
 	int ret;
 
-	ret = snd_soc_dapm_new_controls(&card->dapm, cs35l41_dapm_widgets,
+	ret = snd_soc_dapm_new_controls(dapm, cs35l41_dapm_widgets,
 					ARRAY_SIZE(cs35l41_dapm_widgets));
 	if (ret) {
 		dev_err(rtd->dev, "fail to add dapm controls, ret %d\n", ret);
@@ -64,7 +65,7 @@ static int cs35l41_init(struct snd_soc_pcm_runtime *rtd)
 		return ret;
 	}
 
-	ret = snd_soc_dapm_add_routes(&card->dapm, cs35l41_dapm_routes,
+	ret = snd_soc_dapm_add_routes(dapm, cs35l41_dapm_routes,
 				      ARRAY_SIZE(cs35l41_dapm_routes));
 
 	if (ret)
@@ -91,7 +92,7 @@ static const struct {
 static int cs35l41_hw_params(struct snd_pcm_substream *substream,
 			     struct snd_pcm_hw_params *params)
 {
-	struct snd_soc_pcm_runtime *rtd = asoc_substream_to_rtd(substream);
+	struct snd_soc_pcm_runtime *rtd = snd_soc_substream_to_rtd(substream);
 	struct snd_soc_dai *codec_dai;
 	int clk_freq, i, ret;
 
@@ -193,14 +194,14 @@ void cs35l41_set_dai_link(struct snd_soc_dai_link *link)
 	link->init = cs35l41_init;
 	link->ops = &cs35l41_ops;
 }
-EXPORT_SYMBOL_NS(cs35l41_set_dai_link, SND_SOC_INTEL_SOF_CIRRUS_COMMON);
+EXPORT_SYMBOL_NS(cs35l41_set_dai_link, "SND_SOC_INTEL_SOF_CIRRUS_COMMON");
 
 void cs35l41_set_codec_conf(struct snd_soc_card *card)
 {
 	card->codec_conf = cs35l41_codec_conf;
 	card->num_configs = ARRAY_SIZE(cs35l41_codec_conf);
 }
-EXPORT_SYMBOL_NS(cs35l41_set_codec_conf, SND_SOC_INTEL_SOF_CIRRUS_COMMON);
+EXPORT_SYMBOL_NS(cs35l41_set_codec_conf, "SND_SOC_INTEL_SOF_CIRRUS_COMMON");
 
 MODULE_DESCRIPTION("ASoC Intel SOF Cirrus Logic helpers");
 MODULE_LICENSE("GPL");

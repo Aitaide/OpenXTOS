@@ -748,6 +748,17 @@ static int bcm2835_i2s_dai_probe(struct snd_soc_dai *dai)
 	return 0;
 }
 
+static const u64 bcm2835_selectable_formats =
+	SND_SOC_POSSIBLE_DAIFMT_I2S	|
+	SND_SOC_POSSIBLE_DAIFMT_RIGHT_J	|
+	SND_SOC_POSSIBLE_DAIFMT_LEFT_J	|
+	SND_SOC_POSSIBLE_DAIFMT_DSP_A	|
+	SND_SOC_POSSIBLE_DAIFMT_DSP_B	|
+	SND_SOC_POSSIBLE_DAIFMT_NB_NF	|
+	SND_SOC_POSSIBLE_DAIFMT_NB_IF	|
+	SND_SOC_POSSIBLE_DAIFMT_IB_NF	|
+	SND_SOC_POSSIBLE_DAIFMT_IB_IF;
+
 static const struct snd_soc_dai_ops bcm2835_i2s_dai_ops = {
 	.probe		= bcm2835_i2s_dai_probe,
 	.startup	= bcm2835_i2s_startup,
@@ -758,6 +769,8 @@ static const struct snd_soc_dai_ops bcm2835_i2s_dai_ops = {
 	.set_fmt	= bcm2835_i2s_set_dai_fmt,
 	.set_bclk_ratio	= bcm2835_i2s_set_dai_bclk_ratio,
 	.set_tdm_slot	= bcm2835_i2s_set_dai_tdm_slot,
+	.auto_selectable_formats	= &bcm2835_selectable_formats,
+	.num_auto_selectable_formats	= 1,
 };
 
 static struct snd_soc_dai_driver bcm2835_i2s_dai = {
@@ -817,7 +830,7 @@ static const struct regmap_config bcm2835_regmap_config = {
 	.max_register = BCM2835_I2S_GRAY_REG,
 	.precious_reg = bcm2835_i2s_precious_reg,
 	.volatile_reg = bcm2835_i2s_volatile_reg,
-	.cache_type = REGCACHE_RBTREE,
+	.cache_type = REGCACHE_MAPLE,
 };
 
 static const struct snd_soc_component_driver bcm2835_i2s_component = {

@@ -10,7 +10,6 @@
 	thermal-zones {
 		pm6125-thermal {
 			polling-delay-passive = <100>;
-			polling-delay = <0>;
 
 			thermal-sensors = <&pm6125_temp>;
 
@@ -139,7 +138,6 @@
 			reg = <0x6000>, <0x6100>;
 			reg-names = "rtc", "alarm";
 			interrupts = <0x0 0x61 0x1 IRQ_TYPE_EDGE_RISING>;
-			status = "disabled";
 		};
 
 		pm6125_gpios: gpio@c000 {

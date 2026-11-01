@@ -11,11 +11,10 @@
 #include <linux/regulator/of_regulator.h>
 #include <linux/soc/qcom/smd-rpm.h>
 
+static struct qcom_smd_rpm *smd_vreg_rpm;
+
 struct qcom_rpm_reg {
 	struct device *dev;
-
-	struct qcom_smd_rpm *rpm;
-
 	u32 type;
 	u32 id;
 
@@ -70,7 +69,7 @@ static int rpm_reg_write_active(struct qcom_rpm_reg *vreg)
 	if (!reqlen)
 		return 0;
 
-	ret = qcom_rpm_smd_write(vreg->rpm, QCOM_SMD_RPM_ACTIVE_STATE,
+	ret = qcom_rpm_smd_write(smd_vreg_rpm, QCOM_SMD_RPM_ACTIVE_STATE,
 				 vreg->type, vreg->id,
 				 req, sizeof(req[0]) * reqlen);
 	if (!ret) {
@@ -796,6 +795,7 @@ static const struct rpm_regulator_data rpm_mp5496_regulators[] = {
 	{ "s1", QCOM_SMD_RPM_SMPA, 1, &mp5496_smps, "s1" },
 	{ "s2", QCOM_SMD_RPM_SMPA, 2, &mp5496_smps, "s2" },
 	{ "l2", QCOM_SMD_RPM_LDOA, 2, &mp5496_ldoa2, "l2" },
+	{ "l5", QCOM_SMD_RPM_LDOA, 5, &mp5496_ldoa2, "l5" },
 	{}
 };
 
@@ -913,6 +913,60 @@ static const struct rpm_regulator_data rpm_pm660l_regulators[] = {
 	{ }
 };
 
+static const struct rpm_regulator_data rpm_pm8019_regulators[] = {
+	{ "s1", QCOM_SMD_RPM_SMPA, 1, &pma8084_hfsmps, "vdd_s1" },
+	{ "s2", QCOM_SMD_RPM_SMPA, 2, &pma8084_hfsmps, "vdd_s2" },
+	{ "s3", QCOM_SMD_RPM_SMPA, 3, &pma8084_hfsmps, "vdd_s3" },
+	{ "s4", QCOM_SMD_RPM_SMPA, 4, &pma8084_hfsmps, "vdd_s4" },
+	{ "l1", QCOM_SMD_RPM_LDOA, 1, &pm8916_nldo, "vdd_l1" },
+	{ "l2", QCOM_SMD_RPM_LDOA, 2, &pma8084_pldo, "vdd_l2_l3" },
+	{ "l3", QCOM_SMD_RPM_LDOA, 3, &pma8084_pldo, "vdd_l2_l3" },
+	{ "l4", QCOM_SMD_RPM_LDOA, 4, &pma8084_pldo, "vdd_l4_l5_l6" },
+	{ "l5", QCOM_SMD_RPM_LDOA, 5, &pma8084_pldo, "vdd_l4_l5_l6" },
+	{ "l6", QCOM_SMD_RPM_LDOA, 6, &pma8084_pldo, "vdd_l4_l5_l6" },
+	{ "l7", QCOM_SMD_RPM_LDOA, 7, &pma8084_pldo, "vdd_l7_l8_l11" },
+	{ "l8", QCOM_SMD_RPM_LDOA, 8, &pma8084_pldo, "vdd_l7_l8_l11" },
+	{ "l9", QCOM_SMD_RPM_LDOA, 9, &pm8916_nldo, "vdd_l9" },
+	{ "l10", QCOM_SMD_RPM_LDOA, 10, &pm8916_nldo, "vdd_l10"},
+	{ "l11", QCOM_SMD_RPM_LDOA, 11, &pma8084_pldo, "vdd_l7_l8_l11"},
+	{ "l12", QCOM_SMD_RPM_LDOA, 12, &pm8916_nldo, "vdd_l12"},
+	{ "l13", QCOM_SMD_RPM_LDOA, 13, &pma8084_pldo, "vdd_l13_l14"},
+	{ "l14", QCOM_SMD_RPM_LDOA, 14, &pma8084_pldo, "vdd_l13_l14"},
+	{}
+};
+
+static const struct rpm_regulator_data rpm_pm8150_regulators[] = {
+	{ "s1", QCOM_SMD_RPM_SMPA, 1, &pmic5_ftsmps520, "vdd-s1" },
+	{ "s2", QCOM_SMD_RPM_SMPA, 2, &pmic5_ftsmps520, "vdd-s2" },
+	{ "s3", QCOM_SMD_RPM_SMPA, 3, &pmic5_ftsmps520, "vdd-s3" },
+	{ "s4", QCOM_SMD_RPM_SMPA, 4, &pm8998_hfsmps, "vdd-s4" },
+	{ "s5", QCOM_SMD_RPM_SMPA, 5, &pm8998_hfsmps, "vdd-s5" },
+	{ "s6", QCOM_SMD_RPM_SMPA, 6, &pmic5_ftsmps520, "vdd-s6" },
+	{ "s7", QCOM_SMD_RPM_SMPA, 7, &pmic5_ftsmps520, "vdd-s7" },
+	{ "s8", QCOM_SMD_RPM_SMPA, 8, &pmic5_ftsmps520, "vdd-s8" },
+	{ "s9", QCOM_SMD_RPM_SMPA, 9, &pmic5_ftsmps520, "vdd-s9" },
+	{ "s10", QCOM_SMD_RPM_SMPA, 10, &pmic5_ftsmps520, "vdd-s10" },
+	{ "l1", QCOM_SMD_RPM_LDOA, 1, &pm660_nldo660, "vdd-l1-l8-l11" },
+	{ "l2", QCOM_SMD_RPM_LDOA, 2, &pm660_pldo660, "vdd-l2-l10" },
+	{ "l3", QCOM_SMD_RPM_LDOA, 3, &pm660_nldo660, "vdd-l3-l4-l5-l18" },
+	{ "l4", QCOM_SMD_RPM_LDOA, 4, &pm660_nldo660, "vdd-l3-l4-l5-l18" },
+	{ "l5", QCOM_SMD_RPM_LDOA, 5, &pm660_nldo660, "vdd-l3-l4-l5-l18" },
+	{ "l6", QCOM_SMD_RPM_LDOA, 6, &pm660_nldo660, "vdd-l6-l9" },
+	{ "l7", QCOM_SMD_RPM_LDOA, 7, &pm660_pldo660, "vdd-l7-l12-l14-l15" },
+	{ "l8", QCOM_SMD_RPM_LDOA, 8, &pm660_nldo660, "vdd-l1-l8-l11" },
+	{ "l9", QCOM_SMD_RPM_LDOA, 9, &pm660_nldo660, "vdd-l6-l9" },
+	{ "l10", QCOM_SMD_RPM_LDOA, 10, &pm660_pldo660, "vdd-l2-l10" },
+	{ "l11", QCOM_SMD_RPM_LDOA, 11, &pm660_nldo660, "vdd-l1-l8-l11" },
+	{ "l12", QCOM_SMD_RPM_LDOA, 12, &pm660_ht_lvpldo, "vdd-l7-l12-l14-l15" },
+	{ "l13", QCOM_SMD_RPM_LDOA, 13, &pm660_pldo660, "vdd-l13-l16-l17" },
+	{ "l14", QCOM_SMD_RPM_LDOA, 14, &pm660_ht_lvpldo, "vdd-l7-l12-l14-l15" },
+	{ "l15", QCOM_SMD_RPM_LDOA, 15, &pm660_ht_lvpldo, "vdd-l7-l12-l14-l15" },
+	{ "l16", QCOM_SMD_RPM_LDOA, 16, &pm660_pldo660, "vdd-l13-l16-l17" },
+	{ "l17", QCOM_SMD_RPM_LDOA, 17, &pm660_pldo660, "vdd-l13-l16-l17" },
+	{ "l18", QCOM_SMD_RPM_LDOA, 18, &pm660_nldo660, "vdd-l3-l4-l5-l18" },
+	{ }
+};
+
 static const struct rpm_regulator_data rpm_pm8226_regulators[] = {
 	{ "s1", QCOM_SMD_RPM_SMPA, 1, &pm8226_hfsmps, "vdd_s1" },
 	{ "s2", QCOM_SMD_RPM_SMPA, 2, &pm8226_ftsmps, "vdd_s2" },
@@ -1009,6 +1063,39 @@ static const struct rpm_regulator_data rpm_pm8916_regulators[] = {
 	{ "l16", QCOM_SMD_RPM_LDOA, 16, &pm8916_pldo, "vdd_l8_l9_l10_l11_l12_l13_l14_l15_l16_l17_l18"},
 	{ "l17", QCOM_SMD_RPM_LDOA, 17, &pm8916_pldo, "vdd_l8_l9_l10_l11_l12_l13_l14_l15_l16_l17_l18"},
 	{ "l18", QCOM_SMD_RPM_LDOA, 18, &pm8916_pldo, "vdd_l8_l9_l10_l11_l12_l13_l14_l15_l16_l17_l18"},
+	{}
+};
+
+static const struct rpm_regulator_data rpm_pm8937_regulators[] = {
+	{ "s1", QCOM_SMD_RPM_SMPA, 1, &pm8994_hfsmps, "vdd_s1" },
+	{ "s2", QCOM_SMD_RPM_SMPA, 2, &pm8994_hfsmps, "vdd_s2" },
+	{ "s3", QCOM_SMD_RPM_SMPA, 3, &pm8994_hfsmps, "vdd_s3" },
+	{ "s4", QCOM_SMD_RPM_SMPA, 4, &pm8994_hfsmps, "vdd_s4" },
+	/* S5 - S6 are managed by SPMI */
+
+	{ "l1", QCOM_SMD_RPM_LDOA, 1, &pm8953_ult_nldo, "vdd_l1_l19" },
+	{ "l2", QCOM_SMD_RPM_LDOA, 2, &pm8953_ult_nldo, "vdd_l2_l23" },
+	{ "l3", QCOM_SMD_RPM_LDOA, 3, &pm8953_ult_nldo, "vdd_l3" },
+	{ "l4", QCOM_SMD_RPM_LDOA, 4, &pm8950_ult_pldo, "vdd_l4_l5_l6_l7_l16" },
+	{ "l5", QCOM_SMD_RPM_LDOA, 5, &pm8950_ult_pldo, "vdd_l4_l5_l6_l7_l16" },
+	{ "l6", QCOM_SMD_RPM_LDOA, 6, &pm8950_ult_pldo, "vdd_l4_l5_l6_l7_l16" },
+	{ "l7", QCOM_SMD_RPM_LDOA, 7, &pm8950_ult_pldo, "vdd_l4_l5_l6_l7_l16" },
+	{ "l8", QCOM_SMD_RPM_LDOA, 8, &pm8950_ult_pldo, "vdd_l8_l11_l12_l17_l22" },
+	{ "l9", QCOM_SMD_RPM_LDOA, 9, &pm8950_ult_pldo, "vdd_l9_l10_l13_l14_l15_l18" },
+	{ "l10", QCOM_SMD_RPM_LDOA, 10, &pm8950_ult_pldo, "vdd_l9_l10_l13_l14_l15_l18"},
+	{ "l11", QCOM_SMD_RPM_LDOA, 11, &pm8950_ult_pldo, "vdd_l8_l11_l12_l17_l22" },
+	{ "l12", QCOM_SMD_RPM_LDOA, 12, &pm8950_ult_pldo, "vdd_l8_l11_l12_l17_l22" },
+	{ "l13", QCOM_SMD_RPM_LDOA, 13, &pm8950_ult_pldo, "vdd_l9_l10_l13_l14_l15_l18" },
+	{ "l14", QCOM_SMD_RPM_LDOA, 14, &pm8950_ult_pldo, "vdd_l9_l10_l13_l14_l15_l18" },
+	{ "l15", QCOM_SMD_RPM_LDOA, 15, &pm8950_ult_pldo, "vdd_l9_l10_l13_l14_l15_l18" },
+	{ "l16", QCOM_SMD_RPM_LDOA, 16, &pm8950_ult_pldo, "vdd_l4_l5_l6_l7_l16" },
+	{ "l17", QCOM_SMD_RPM_LDOA, 17, &pm8950_ult_pldo, "vdd_l8_l11_l12_l17_l22" },
+	{ "l18", QCOM_SMD_RPM_LDOA, 18, &pm8950_ult_pldo, "vdd_l9_l10_l13_l14_l15_l18" },
+	{ "l19", QCOM_SMD_RPM_LDOA, 19, &pm8953_ult_nldo, "vdd_l1_l19" },
+	{ "l20", QCOM_SMD_RPM_LDOA, 20, &pm8953_lnldo, "vdd_l20_l21" },
+	{ "l21", QCOM_SMD_RPM_LDOA, 21, &pm8953_lnldo, "vdd_l20_l21" },
+	{ "l22", QCOM_SMD_RPM_LDOA, 22, &pm8950_ult_pldo, "vdd_l8_l11_l12_l17_l22" },
+	{ "l23", QCOM_SMD_RPM_LDOA, 23, &pm8994_nldo, "vdd_l2_l23" },
 	{}
 };
 
@@ -1325,10 +1412,13 @@ static const struct of_device_id rpm_of_match[] = {
 	{ .compatible = "qcom,rpm-pm6125-regulators", .data = &rpm_pm6125_regulators },
 	{ .compatible = "qcom,rpm-pm660-regulators", .data = &rpm_pm660_regulators },
 	{ .compatible = "qcom,rpm-pm660l-regulators", .data = &rpm_pm660l_regulators },
+	{ .compatible = "qcom,rpm-pm8019-regulators", .data = &rpm_pm8019_regulators },
+	{ .compatible = "qcom,rpm-pm8150-regulators", .data = &rpm_pm8150_regulators },
 	{ .compatible = "qcom,rpm-pm8226-regulators", .data = &rpm_pm8226_regulators },
 	{ .compatible = "qcom,rpm-pm8841-regulators", .data = &rpm_pm8841_regulators },
 	{ .compatible = "qcom,rpm-pm8909-regulators", .data = &rpm_pm8909_regulators },
 	{ .compatible = "qcom,rpm-pm8916-regulators", .data = &rpm_pm8916_regulators },
+	{ .compatible = "qcom,rpm-pm8937-regulators", .data = &rpm_pm8937_regulators },
 	{ .compatible = "qcom,rpm-pm8941-regulators", .data = &rpm_pm8941_regulators },
 	{ .compatible = "qcom,rpm-pm8950-regulators", .data = &rpm_pm8950_regulators },
 	{ .compatible = "qcom,rpm-pm8953-regulators", .data = &rpm_pm8953_regulators },
@@ -1349,14 +1439,13 @@ MODULE_DEVICE_TABLE(of, rpm_of_match);
  * @dev:		Pointer to the top level qcom_smd-regulator PMIC device
  * @node:		Pointer to the individual qcom_smd-regulator resource
  *			device node
- * @rpm:		Pointer to the rpm bus node
  * @pmic_rpm_data:	Pointer to a null-terminated array of qcom_smd-regulator
  *			resources defined for the top level PMIC device
  *
- * Return: 0 on success, errno on failure
+ * Return: 0 on success, or a negative error number on failure
  */
 static int rpm_regulator_init_vreg(struct qcom_rpm_reg *vreg, struct device *dev,
-				   struct device_node *node, struct qcom_smd_rpm *rpm,
+				   struct device_node *node,
 				   const struct rpm_regulator_data *pmic_rpm_data)
 {
 	struct regulator_config config = {};
@@ -1374,7 +1463,6 @@ static int rpm_regulator_init_vreg(struct qcom_rpm_reg *vreg, struct device *dev
 	}
 
 	vreg->dev	= dev;
-	vreg->rpm	= rpm;
 	vreg->type	= rpm_data->type;
 	vreg->id	= rpm_data->id;
 
@@ -1403,7 +1491,6 @@ static int rpm_reg_probe(struct platform_device *pdev)
 {
 	struct device *dev = &pdev->dev;
 	const struct rpm_regulator_data *vreg_data;
-	struct device_node *node;
 	struct qcom_rpm_reg *vreg;
 	struct qcom_smd_rpm *rpm;
 	int ret;
@@ -1414,23 +1501,23 @@ static int rpm_reg_probe(struct platform_device *pdev)
 		return -ENODEV;
 	}
 
+	if (smd_vreg_rpm && rpm != smd_vreg_rpm)
+		return dev_err_probe(dev, -EINVAL, "RPM mismatch\n");
+
+	smd_vreg_rpm = rpm;
+
 	vreg_data = of_device_get_match_data(dev);
 	if (!vreg_data)
 		return -ENODEV;
 
-	for_each_available_child_of_node(dev->of_node, node) {
+	for_each_available_child_of_node_scoped(dev->of_node, node) {
 		vreg = devm_kzalloc(&pdev->dev, sizeof(*vreg), GFP_KERNEL);
-		if (!vreg) {
-			of_node_put(node);
+		if (!vreg)
 			return -ENOMEM;
-		}
 
-		ret = rpm_regulator_init_vreg(vreg, dev, node, rpm, vreg_data);
-
-		if (ret < 0) {
-			of_node_put(node);
+		ret = rpm_regulator_init_vreg(vreg, dev, node, vreg_data);
+		if (ret < 0)
 			return ret;
-		}
 	}
 
 	return 0;

@@ -98,15 +98,14 @@ static int dw_spi_pci_probe(struct pci_dev *pdev, const struct pci_device_id *en
 	dws->paddr = pci_resource_start(pdev, pci_bar);
 	pci_set_master(pdev);
 
-	ret = pcim_iomap_regions(pdev, 1 << pci_bar, pci_name(pdev));
-	if (ret)
-		return ret;
-
 	ret = pci_alloc_irq_vectors(pdev, 1, 1, PCI_IRQ_ALL_TYPES);
 	if (ret < 0)
 		return ret;
 
-	dws->regs = pcim_iomap_table(pdev)[pci_bar];
+	dws->regs = pcim_iomap_region(pdev, pci_bar, pci_name(pdev));
+	if (IS_ERR(dws->regs))
+		return PTR_ERR(dws->regs);
+
 	dws->irq = pci_irq_vector(pdev, 0);
 
 	/*
@@ -121,16 +120,15 @@ static int dw_spi_pci_probe(struct pci_dev *pdev, const struct pci_device_id *en
 		if (desc->setup) {
 			ret = desc->setup(dws);
 			if (ret)
-				goto err_free_irq_vectors;
+				return ret;
 		}
 	} else {
-		ret = -ENODEV;
-		goto err_free_irq_vectors;
+		return -ENODEV;
 	}
 
-	ret = dw_spi_add_host(&pdev->dev, dws);
+	ret = dw_spi_add_controller(&pdev->dev, dws);
 	if (ret)
-		goto err_free_irq_vectors;
+		return ret;
 
 	/* PCI hook and SPI hook use the same drv data */
 	pci_set_drvdata(pdev, dws);
@@ -144,10 +142,6 @@ static int dw_spi_pci_probe(struct pci_dev *pdev, const struct pci_device_id *en
 	pm_runtime_allow(&pdev->dev);
 
 	return 0;
-
-err_free_irq_vectors:
-	pci_free_irq_vectors(pdev);
-	return ret;
 }
 
 static void dw_spi_pci_remove(struct pci_dev *pdev)
@@ -157,27 +151,24 @@ static void dw_spi_pci_remove(struct pci_dev *pdev)
 	pm_runtime_forbid(&pdev->dev);
 	pm_runtime_get_noresume(&pdev->dev);
 
-	dw_spi_remove_host(dws);
-	pci_free_irq_vectors(pdev);
+	dw_spi_remove_controller(dws);
 }
 
-#ifdef CONFIG_PM_SLEEP
 static int dw_spi_pci_suspend(struct device *dev)
 {
 	struct dw_spi *dws = dev_get_drvdata(dev);
 
-	return dw_spi_suspend_host(dws);
+	return dw_spi_suspend_controller(dws);
 }
 
 static int dw_spi_pci_resume(struct device *dev)
 {
 	struct dw_spi *dws = dev_get_drvdata(dev);
 
-	return dw_spi_resume_host(dws);
+	return dw_spi_resume_controller(dws);
 }
-#endif
 
-static SIMPLE_DEV_PM_OPS(dw_spi_pci_pm_ops, dw_spi_pci_suspend, dw_spi_pci_resume);
+static DEFINE_SIMPLE_DEV_PM_OPS(dw_spi_pci_pm_ops, dw_spi_pci_suspend, dw_spi_pci_resume);
 
 static const struct pci_device_id dw_spi_pci_ids[] = {
 	/* Intel MID platform SPI controller 0 */
@@ -186,15 +177,15 @@ static const struct pci_device_id dw_spi_pci_ids[] = {
 	 * exclusively used by SCU to communicate with MSIC.
 	 */
 	/* Intel MID platform SPI controller 1 */
-	{ PCI_VDEVICE(INTEL, 0x0800), (kernel_ulong_t)&dw_spi_pci_mid_desc_1},
+	{ PCI_VDEVICE(INTEL, 0x0800), .driver_data = (kernel_ulong_t)&dw_spi_pci_mid_desc_1 },
 	/* Intel MID platform SPI controller 2 */
-	{ PCI_VDEVICE(INTEL, 0x0812), (kernel_ulong_t)&dw_spi_pci_mid_desc_2},
+	{ PCI_VDEVICE(INTEL, 0x0812), .driver_data = (kernel_ulong_t)&dw_spi_pci_mid_desc_2 },
 	/* Intel Elkhart Lake PSE SPI controllers */
-	{ PCI_VDEVICE(INTEL, 0x4b84), (kernel_ulong_t)&dw_spi_pci_ehl_desc},
-	{ PCI_VDEVICE(INTEL, 0x4b85), (kernel_ulong_t)&dw_spi_pci_ehl_desc},
-	{ PCI_VDEVICE(INTEL, 0x4b86), (kernel_ulong_t)&dw_spi_pci_ehl_desc},
-	{ PCI_VDEVICE(INTEL, 0x4b87), (kernel_ulong_t)&dw_spi_pci_ehl_desc},
-	{},
+	{ PCI_VDEVICE(INTEL, 0x4b84), .driver_data = (kernel_ulong_t)&dw_spi_pci_ehl_desc },
+	{ PCI_VDEVICE(INTEL, 0x4b85), .driver_data = (kernel_ulong_t)&dw_spi_pci_ehl_desc },
+	{ PCI_VDEVICE(INTEL, 0x4b86), .driver_data = (kernel_ulong_t)&dw_spi_pci_ehl_desc },
+	{ PCI_VDEVICE(INTEL, 0x4b87), .driver_data = (kernel_ulong_t)&dw_spi_pci_ehl_desc },
+	{ },
 };
 MODULE_DEVICE_TABLE(pci, dw_spi_pci_ids);
 
@@ -204,7 +195,7 @@ static struct pci_driver dw_spi_pci_driver = {
 	.probe =	dw_spi_pci_probe,
 	.remove =	dw_spi_pci_remove,
 	.driver         = {
-		.pm     = &dw_spi_pci_pm_ops,
+		.pm     = pm_sleep_ptr(&dw_spi_pci_pm_ops),
 	},
 };
 module_pci_driver(dw_spi_pci_driver);
@@ -212,4 +203,4 @@ module_pci_driver(dw_spi_pci_driver);
 MODULE_AUTHOR("Feng Tang <feng.tang@intel.com>");
 MODULE_DESCRIPTION("PCI interface driver for DW SPI Core");
 MODULE_LICENSE("GPL v2");
-MODULE_IMPORT_NS(SPI_DW_CORE);
+MODULE_IMPORT_NS("SPI_DW_CORE");

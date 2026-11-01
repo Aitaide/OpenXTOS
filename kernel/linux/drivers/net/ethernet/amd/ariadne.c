@@ -693,8 +693,8 @@ static void ariadne_remove_one(struct zorro_dev *z)
 }
 
 static const struct zorro_device_id ariadne_zorro_tbl[] = {
-	{ ZORRO_PROD_VILLAGE_TRONIC_ARIADNE },
-	{ 0 }
+	{ .id = ZORRO_PROD_VILLAGE_TRONIC_ARIADNE },
+	{ }
 };
 MODULE_DEVICE_TABLE(zorro, ariadne_zorro_tbl);
 
@@ -790,4 +790,5 @@ static void __exit ariadne_cleanup_module(void)
 module_init(ariadne_init_module);
 module_exit(ariadne_cleanup_module);
 
+MODULE_DESCRIPTION("Ariadne Ethernet Driver");
 MODULE_LICENSE("GPL");

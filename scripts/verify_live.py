@@ -114,7 +114,7 @@ def validate_mode(candidate,evidence,key,mode,timeout):
     g=Guest(candidate,evidence,key,mode,timeout)
     rows={}
     try:
-        command='set -e; uname -r; cat /sys/kernel/realtime; cat /etc/os-release; test ! -e /usr/sbin/xtos-install; ! grep -qw xtos.installer=1 /proc/cmdline; grep " / overlay " /proc/mounts; grep " /run/live-media " /proc/mounts; grep " /run/live-rw tmpfs " /proc/mounts; test "$(id -u)" = 0; test "$(cat /sys/kernel/realtime)" = 1; '+('test -d /sys/firmware/efi;' if mode.startswith('uefi') else 'test ! -d /sys/firmware/efi;')+' echo LIVE_MOUNTS=PASS'
+        command='set -e; uname -r; /usr/bin/xtos-rt-status; cat /etc/os-release; test ! -e /usr/sbin/xtos-install; ! grep -qw xtos.installer=1 /proc/cmdline; grep " / overlay " /proc/mounts; grep " /run/live-media " /proc/mounts; grep " /run/live-rw tmpfs " /proc/mounts; test "$(id -u)" = 0; test "$(/usr/bin/xtos-rt-status)" = 1; '+('test -d /sys/firmware/efi;' if mode.startswith('uefi') else 'test ! -d /sys/firmware/efi;')+' echo LIVE_MOUNTS=PASS'
         rows['root_mounts']=g.ssh('root',command).stdout
         r=g.ssh('root','/usr/bin/xtos-selftest',timeout=180)
         if 'guest_userspace=pass' not in r.stdout:raise RuntimeError('SDK selftest missing final marker')

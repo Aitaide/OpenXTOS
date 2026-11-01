@@ -120,7 +120,7 @@ txx9_alloc_pci_controller(struct pci_controller *pcic,
 	int min_size = 0x10000;
 
 	if (!pcic) {
-		new = kzalloc(sizeof(*new), GFP_KERNEL);
+		new = kzalloc_obj(*new);
 		if (!new)
 			return NULL;
 		new->r_mem[0].name = "PCI mem";
@@ -348,7 +348,7 @@ static void final_fixup(struct pci_dev *dev)
 	unsigned char bist;
 	int ret;
 
-	/* Do build-in self test */
+	/* Do built-in self test */
 	ret = pci_read_config_byte(dev, PCI_BIST, &bist);
 	if ((ret != PCIBIOS_SUCCESSFUL) || !(bist & PCI_BIST_CAPABLE))
 		return;

@@ -18,9 +18,9 @@
 #undef DEBUGDATA
 #undef DEBUGCCW
 
-#define KMSG_COMPONENT "ctcm"
-#define pr_fmt(fmt) KMSG_COMPONENT ": " fmt
+#define pr_fmt(fmt) "ctcm: " fmt
 
+#include <linux/export.h>
 #include <linux/module.h>
 #include <linux/init.h>
 #include <linux/kernel.h>
@@ -179,7 +179,7 @@ void ctcmpc_dumpit(char *buf, int len)
 			ctcm_pr_debug("   %s (+%s) : %s  [%s]\n",
 					addr, boff, bhex, basc);
 			dup = 0;
-			strcpy(duphex, bhex);
+			strscpy(duphex, bhex);
 		} else
 			dup++;
 
@@ -700,7 +700,6 @@ static void mpc_rcvd_sweep_req(struct mpcg_info *mpcginfo)
 
 	grp->sweep_req_pend_num--;
 	ctcmpc_send_sweep_resp(ch);
-	kfree(mpcginfo);
 	return;
 }
 
@@ -827,7 +826,7 @@ static void mpc_action_go_ready(fsm_instance *fsm, int event, void *arg)
 
 	fsm_deltimer(&grp->timer);
 
-	if (grp->saved_xid2->xid2_flag2 == 0x40) {
+	if (priv->xid->xid2_flag2 == 0x40) {
 		priv->xid->xid2_flag2 = 0x00;
 		if (grp->estconnfunc) {
 			grp->estconnfunc(grp->port_num, 1,
@@ -1164,7 +1163,7 @@ static void ctcmpc_unpack_skb(struct channel *ch, struct sk_buff *pskb)
 			skb_pull(pskb, new_len); /* point to next PDU */
 		}
 	} else {
-		mpcginfo = kmalloc(sizeof(struct mpcg_info), GFP_ATOMIC);
+		mpcginfo = kmalloc_obj(struct mpcg_info, GFP_ATOMIC);
 		if (mpcginfo == NULL)
 					goto done;
 
@@ -1260,7 +1259,7 @@ struct mpc_group *ctcmpc_init_mpc_group(struct ctcm_priv *priv)
 	CTCM_DBF_TEXT_(MPC_SETUP, CTC_DBF_INFO,
 			"Enter %s(%p)", CTCM_FUNTAIL, priv);
 
-	grp = kzalloc(sizeof(struct mpc_group), GFP_KERNEL);
+	grp = kzalloc_obj(struct mpc_group);
 	if (grp == NULL)
 		return NULL;
 
@@ -1637,7 +1636,6 @@ done:
 			"The XID used in the MPC protocol is not valid, "
 			"rc = %d\n", rc);
 		priv->xid->xid2_flag2 = 0x40;
-		grp->saved_xid2->xid2_flag2 = 0x40;
 	}
 
 	return rc;
@@ -1648,6 +1646,7 @@ done:
  * CTCM_PROTO_MPC only
  */
 static void mpc_action_side_xid(fsm_instance *fsm, void *arg, int side)
+__context_unsafe(/* Conditional locking */)
 {
 	struct channel *ch = arg;
 	int rc = 0;
@@ -1708,57 +1707,57 @@ static void mpc_action_side_xid(fsm_instance *fsm, void *arg, int side)
 		ch->ccw[9].cmd_code	= CCW_CMD_WRITE;
 		ch->ccw[9].flags	= CCW_FLAG_SLI | CCW_FLAG_CC;
 		ch->ccw[9].count	= TH_HEADER_LENGTH;
-		ch->ccw[9].cda		= virt_to_phys(ch->xid_th);
+		ch->ccw[9].cda		= virt_to_dma32(ch->xid_th);
 
 		if (ch->xid == NULL)
 				goto done;
 		ch->ccw[10].cmd_code	= CCW_CMD_WRITE;
 		ch->ccw[10].flags	= CCW_FLAG_SLI | CCW_FLAG_CC;
 		ch->ccw[10].count	= XID2_LENGTH;
-		ch->ccw[10].cda		= virt_to_phys(ch->xid);
+		ch->ccw[10].cda		= virt_to_dma32(ch->xid);
 
 		ch->ccw[11].cmd_code	= CCW_CMD_READ;
 		ch->ccw[11].flags	= CCW_FLAG_SLI | CCW_FLAG_CC;
 		ch->ccw[11].count	= TH_HEADER_LENGTH;
-		ch->ccw[11].cda		= virt_to_phys(ch->rcvd_xid_th);
+		ch->ccw[11].cda		= virt_to_dma32(ch->rcvd_xid_th);
 
 		ch->ccw[12].cmd_code	= CCW_CMD_READ;
 		ch->ccw[12].flags	= CCW_FLAG_SLI | CCW_FLAG_CC;
 		ch->ccw[12].count	= XID2_LENGTH;
-		ch->ccw[12].cda		= virt_to_phys(ch->rcvd_xid);
+		ch->ccw[12].cda		= virt_to_dma32(ch->rcvd_xid);
 
 		ch->ccw[13].cmd_code	= CCW_CMD_READ;
-		ch->ccw[13].cda		= virt_to_phys(ch->rcvd_xid_id);
+		ch->ccw[13].cda		= virt_to_dma32(ch->rcvd_xid_id);
 
 	} else { /* side == YSIDE : mpc_action_yside_xid */
 		ch->ccw[9].cmd_code	= CCW_CMD_READ;
 		ch->ccw[9].flags	= CCW_FLAG_SLI | CCW_FLAG_CC;
 		ch->ccw[9].count	= TH_HEADER_LENGTH;
-		ch->ccw[9].cda		= virt_to_phys(ch->rcvd_xid_th);
+		ch->ccw[9].cda		= virt_to_dma32(ch->rcvd_xid_th);
 
 		ch->ccw[10].cmd_code	= CCW_CMD_READ;
 		ch->ccw[10].flags	= CCW_FLAG_SLI | CCW_FLAG_CC;
 		ch->ccw[10].count	= XID2_LENGTH;
-		ch->ccw[10].cda		= virt_to_phys(ch->rcvd_xid);
+		ch->ccw[10].cda		= virt_to_dma32(ch->rcvd_xid);
 
 		if (ch->xid_th == NULL)
 				goto done;
 		ch->ccw[11].cmd_code	= CCW_CMD_WRITE;
 		ch->ccw[11].flags	= CCW_FLAG_SLI | CCW_FLAG_CC;
 		ch->ccw[11].count	= TH_HEADER_LENGTH;
-		ch->ccw[11].cda		= virt_to_phys(ch->xid_th);
+		ch->ccw[11].cda		= virt_to_dma32(ch->xid_th);
 
 		if (ch->xid == NULL)
 				goto done;
 		ch->ccw[12].cmd_code	= CCW_CMD_WRITE;
 		ch->ccw[12].flags	= CCW_FLAG_SLI | CCW_FLAG_CC;
 		ch->ccw[12].count	= XID2_LENGTH;
-		ch->ccw[12].cda		= virt_to_phys(ch->xid);
+		ch->ccw[12].cda		= virt_to_dma32(ch->xid);
 
 		if (ch->xid_id == NULL)
 				goto done;
 		ch->ccw[13].cmd_code	= CCW_CMD_WRITE;
-		ch->ccw[13].cda		= virt_to_phys(ch->xid_id);
+		ch->ccw[13].cda		= virt_to_dma32(ch->xid_id);
 
 	}
 	ch->ccw[13].flags	= CCW_FLAG_SLI | CCW_FLAG_CC;
@@ -1775,9 +1774,6 @@ static void mpc_action_side_xid(fsm_instance *fsm, void *arg, int side)
 	CTCM_D3_DUMP((char *)ch->xid_id, 4);
 
 	if (!in_hardirq()) {
-			 /* Such conditional locking is a known problem for
-			  * sparse because its static undeterministic.
-			  * Warnings should be ignored here. */
 		spin_lock_irqsave(get_ccwdev_lock(ch->cdev), saveflags);
 		gotlock = 1;
 	}
@@ -1785,7 +1781,7 @@ static void mpc_action_side_xid(fsm_instance *fsm, void *arg, int side)
 	fsm_addtimer(&ch->timer, 5000 , CTC_EVENT_TIMER, ch);
 	rc = ccw_device_start(ch->cdev, &ch->ccw[8], 0, 0xff, 0);
 
-	if (gotlock)	/* see remark above about conditional locking */
+	if (gotlock)
 		spin_unlock_irqrestore(get_ccwdev_lock(ch->cdev), saveflags);
 
 	if (rc != 0) {

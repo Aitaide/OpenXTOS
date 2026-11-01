@@ -24,6 +24,7 @@
 enum ieee802154_ongoing {
 	IEEE802154_IS_SCANNING = BIT(0),
 	IEEE802154_IS_BEACONING = BIT(1),
+	IEEE802154_IS_ASSOCIATING = BIT(2),
 };
 
 /* mac802154 device private data */
@@ -73,6 +74,22 @@ struct ieee802154_local {
 	struct work_struct rx_beacon_work;
 	struct list_head rx_mac_cmd_list;
 	struct work_struct rx_mac_cmd_work;
+	/* Serializes rx_beacon_list and rx_mac_cmd_list against the RX
+	 * softirq producer, the mac_wq workers and the teardown flush.
+	 */
+	spinlock_t rx_lock;
+
+	/* Association */
+	/* assoc_lock protects assoc_dev_extended_addr, assoc_addr,
+	 * assoc_status, the assoc_done reinit/complete pairing and the
+	 * IEEE802154_IS_ASSOCIATING bit in @ongoing.
+	 */
+	spinlock_t assoc_lock;
+	__le64 assoc_dev_extended_addr;
+	struct completion assoc_done;
+	__le16 assoc_addr;
+	u8 assoc_status;
+	struct work_struct assoc_work;
 
 	bool started;
 	bool suspended;
@@ -186,9 +203,6 @@ int ieee802154_mlme_tx_locked(struct ieee802154_local *local,
 			      struct ieee802154_sub_if_data *sdata,
 			      struct sk_buff *skb);
 void ieee802154_mlme_op_post(struct ieee802154_local *local);
-int ieee802154_mlme_tx_one(struct ieee802154_local *local,
-			   struct ieee802154_sub_if_data *sdata,
-			   struct sk_buff *skb);
 int ieee802154_mlme_tx_one_locked(struct ieee802154_local *local,
 				  struct ieee802154_sub_if_data *sdata,
 				  struct sk_buff *skb);
@@ -295,6 +309,29 @@ static inline bool mac802154_is_beaconing(struct ieee802154_local *local)
 }
 
 void mac802154_rx_mac_cmd_worker(struct work_struct *work);
+void mac802154_flush_list(struct list_head *list,
+			  struct ieee802154_sub_if_data *sdata);
+void mac802154_flush_queued_pkts(struct ieee802154_local *local,
+				 struct ieee802154_sub_if_data *sdata);
+
+int mac802154_perform_association(struct ieee802154_sub_if_data *sdata,
+				  struct ieee802154_pan_device *coord,
+				  __le16 *short_addr);
+int mac802154_process_association_resp(struct ieee802154_sub_if_data *sdata,
+				       struct sk_buff *skb);
+
+static inline bool mac802154_is_associating(struct ieee802154_local *local)
+{
+	return test_bit(IEEE802154_IS_ASSOCIATING, &local->ongoing);
+}
+
+int mac802154_send_disassociation_notif(struct ieee802154_sub_if_data *sdata,
+					struct ieee802154_pan_device *target,
+					u8 reason);
+int mac802154_process_disassociation_notif(struct ieee802154_sub_if_data *sdata,
+					   struct sk_buff *skb);
+int mac802154_process_association_req(struct ieee802154_sub_if_data *sdata,
+				      struct sk_buff *skb);
 
 /* interface handling */
 int ieee802154_iface_init(void);

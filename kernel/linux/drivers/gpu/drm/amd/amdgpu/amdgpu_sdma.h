@@ -50,6 +50,17 @@ enum amdgpu_sdma_irq {
 
 #define NUM_SDMA(x) hweight32(x)
 
+struct amdgpu_sdma_csa_info {
+	u32 size;
+	u32 alignment;
+};
+
+struct amdgpu_sdma_funcs {
+	int (*stop_kernel_queue)(struct amdgpu_ring *ring);
+	int (*start_kernel_queue)(struct amdgpu_ring *ring);
+	int (*soft_reset_kernel_queue)(struct amdgpu_device *adev, u32 instance_id);
+};
+
 struct amdgpu_sdma_instance {
 	/* SDMA firmware */
 	const struct firmware	*fw;
@@ -59,35 +70,19 @@ struct amdgpu_sdma_instance {
 	struct amdgpu_ring	ring;
 	struct amdgpu_ring	page;
 	bool			burst_nop;
-	uint32_t		aid_id;
-};
+	union {
+	    uint32_t		aid_id;
+	    uint32_t		xcc_id;
+	};
 
-enum amdgpu_sdma_ras_memory_id {
-	AMDGPU_SDMA_MBANK_DATA_BUF0 = 1,
-	AMDGPU_SDMA_MBANK_DATA_BUF1 = 2,
-	AMDGPU_SDMA_MBANK_DATA_BUF2 = 3,
-	AMDGPU_SDMA_MBANK_DATA_BUF3 = 4,
-	AMDGPU_SDMA_MBANK_DATA_BUF4 = 5,
-	AMDGPU_SDMA_MBANK_DATA_BUF5 = 6,
-	AMDGPU_SDMA_MBANK_DATA_BUF6 = 7,
-	AMDGPU_SDMA_MBANK_DATA_BUF7 = 8,
-	AMDGPU_SDMA_MBANK_DATA_BUF8 = 9,
-	AMDGPU_SDMA_MBANK_DATA_BUF9 = 10,
-	AMDGPU_SDMA_MBANK_DATA_BUF10 = 11,
-	AMDGPU_SDMA_MBANK_DATA_BUF11 = 12,
-	AMDGPU_SDMA_MBANK_DATA_BUF12 = 13,
-	AMDGPU_SDMA_MBANK_DATA_BUF13 = 14,
-	AMDGPU_SDMA_MBANK_DATA_BUF14 = 15,
-	AMDGPU_SDMA_MBANK_DATA_BUF15 = 16,
-	AMDGPU_SDMA_UCODE_BUF = 17,
-	AMDGPU_SDMA_RB_CMD_BUF = 18,
-	AMDGPU_SDMA_IB_CMD_BUF = 19,
-	AMDGPU_SDMA_UTCL1_RD_FIFO = 20,
-	AMDGPU_SDMA_UTCL1_RDBST_FIFO = 21,
-	AMDGPU_SDMA_UTCL1_WR_FIFO = 22,
-	AMDGPU_SDMA_DATA_LUT_FIFO = 23,
-	AMDGPU_SDMA_SPLIT_DAT_BUF = 24,
-	AMDGPU_SDMA_MEMORY_BLOCK_LAST,
+	struct amdgpu_bo	*sdma_fw_obj;
+	uint64_t		sdma_fw_gpu_addr;
+	uint32_t		*sdma_fw_ptr;
+	struct mutex		engine_reset_mutex;
+	/* track guilty state of GFX and PAGE queues */
+	bool			gfx_guilty;
+	bool			page_guilty;
+	const struct amdgpu_sdma_funcs   *funcs;
 };
 
 struct amdgpu_sdma_ras {
@@ -98,19 +93,31 @@ struct amdgpu_sdma {
 	struct amdgpu_sdma_instance instance[AMDGPU_MAX_SDMA_INSTANCES];
 	struct amdgpu_irq_src	trap_irq;
 	struct amdgpu_irq_src	illegal_inst_irq;
+	struct amdgpu_irq_src	fence_irq;
 	struct amdgpu_irq_src	ecc_irq;
 	struct amdgpu_irq_src	vm_hole_irq;
 	struct amdgpu_irq_src	doorbell_invalid_irq;
 	struct amdgpu_irq_src	pool_timeout_irq;
 	struct amdgpu_irq_src	srbm_write_irq;
+	struct amdgpu_irq_src	ctxt_empty_irq;
 
 	int			num_instances;
 	uint32_t 		sdma_mask;
-	int			num_inst_per_aid;
+	union {
+	    int			num_inst_per_aid;
+	    int			num_inst_per_xcc;
+	};
 	uint32_t                    srbm_soft_reset;
 	bool			has_page_queue;
 	struct ras_common_if	*ras_if;
 	struct amdgpu_sdma_ras	*ras;
+	uint32_t		*ip_dump;
+	uint32_t 		supported_reset;
+	struct list_head	reset_callback_list;
+	bool			no_user_submission;
+	bool			disable_uq;
+	void (*get_csa_info)(struct amdgpu_device *adev,
+			     struct amdgpu_sdma_csa_info *csa_info);
 };
 
 /*
@@ -132,7 +139,7 @@ struct amdgpu_buffer_funcs {
 				 uint64_t dst_offset,
 				 /* number of byte to transfer */
 				 uint32_t byte_count,
-				 bool tmz);
+				 uint32_t copy_flags);
 
 	/* maximum bytes in a single operation */
 	uint32_t	fill_max_bytes;
@@ -149,6 +156,9 @@ struct amdgpu_buffer_funcs {
 				 /* number of byte to fill */
 				 uint32_t byte_count);
 };
+
+int amdgpu_sdma_reset_engine(struct amdgpu_device *adev, uint32_t instance_id,
+			     bool caller_handles_kernel_queues);
 
 #define amdgpu_emit_copy_buffer(adev, ib, s, d, b, t) (adev)->mman.buffer_funcs->emit_copy_buffer((ib),  (s), (d), (b), (t))
 #define amdgpu_emit_fill_buffer(adev, ib, s, d, b) (adev)->mman.buffer_funcs->emit_fill_buffer((ib), (s), (d), (b))
@@ -169,7 +179,11 @@ int amdgpu_sdma_init_microcode(struct amdgpu_device *adev, u32 instance,
 			       bool duplicate);
 void amdgpu_sdma_destroy_inst_ctx(struct amdgpu_device *adev,
         bool duplicate);
-void amdgpu_sdma_unset_buffer_funcs_helper(struct amdgpu_device *adev);
 int amdgpu_sdma_ras_sw_init(struct amdgpu_device *adev);
-
+void amdgpu_debugfs_sdma_sched_mask_init(struct amdgpu_device *adev);
+int amdgpu_sdma_sysfs_reset_mask_init(struct amdgpu_device *adev);
+void amdgpu_sdma_sysfs_reset_mask_fini(struct amdgpu_device *adev);
+bool amdgpu_sdma_is_shared_inv_eng(struct amdgpu_device *adev, struct amdgpu_ring *ring);
+struct amdgpu_ring *amdgpu_sdma_get_shared_ring(struct amdgpu_device *adev,
+	struct amdgpu_ring *ring);
 #endif

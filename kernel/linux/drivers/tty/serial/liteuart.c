@@ -96,7 +96,7 @@ static void liteuart_stop_rx(struct uart_port *port)
 	struct liteuart_port *uart = to_liteuart_port(port);
 
 	/* just delete timer */
-	del_timer(&uart->timer);
+	timer_delete(&uart->timer);
 }
 
 static void liteuart_rx_chars(struct uart_port *port)
@@ -152,7 +152,7 @@ static irqreturn_t liteuart_interrupt(int irq, void *data)
 
 static void liteuart_timer(struct timer_list *t)
 {
-	struct liteuart_port *uart = from_timer(uart, t, timer);
+	struct liteuart_port *uart = timer_container_of(uart, t, timer);
 	struct uart_port *port = &uart->port;
 
 	liteuart_interrupt(0, port);
@@ -220,7 +220,7 @@ static void liteuart_shutdown(struct uart_port *port)
 	if (port->irq)
 		free_irq(port->irq, port);
 	else
-		del_timer_sync(&uart->timer);
+		timer_delete_sync(&uart->timer);
 }
 
 static void liteuart_set_termios(struct uart_port *port, struct ktermios *new,
@@ -336,15 +336,13 @@ err_erase_id:
 	return ret;
 }
 
-static int liteuart_remove(struct platform_device *pdev)
+static void liteuart_remove(struct platform_device *pdev)
 {
 	struct uart_port *port = platform_get_drvdata(pdev);
 	unsigned int line = port->line;
 
 	uart_remove_one_port(&liteuart_driver, port);
 	xa_erase(&liteuart_array, line);
-
-	return 0;
 }
 
 static const struct of_device_id liteuart_of_match[] = {

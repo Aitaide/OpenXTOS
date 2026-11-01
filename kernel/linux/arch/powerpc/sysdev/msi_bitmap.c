@@ -21,7 +21,7 @@ int msi_bitmap_alloc_hwirqs(struct msi_bitmap *bmp, int num)
 
 	offset = bitmap_find_next_zero_area(bmp->bitmap, bmp->irq_count, 0,
 					    num, (1 << order) - 1);
-	if (offset > bmp->irq_count)
+	if (offset >= bmp->irq_count)
 		goto err;
 
 	bitmap_set(bmp->bitmap, offset, num);
@@ -124,10 +124,7 @@ int __ref msi_bitmap_alloc(struct msi_bitmap *bmp, unsigned int irq_count,
 	if (bmp->bitmap_from_slab)
 		bmp->bitmap = kzalloc(size, GFP_KERNEL);
 	else {
-		bmp->bitmap = memblock_alloc(size, SMP_CACHE_BYTES);
-		if (!bmp->bitmap)
-			panic("%s: Failed to allocate %u bytes\n", __func__,
-			      size);
+		bmp->bitmap = memblock_alloc_or_panic(size, SMP_CACHE_BYTES);
 		/* the bitmap won't be freed from memblock allocator */
 		kmemleak_not_leak(bmp->bitmap);
 	}

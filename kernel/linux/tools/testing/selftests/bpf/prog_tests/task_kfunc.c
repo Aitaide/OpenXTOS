@@ -68,19 +68,133 @@ cleanup:
 	task_kfunc_success__destroy(skel);
 }
 
+static void run_syscall_success_test(const char *prog_name)
+{
+	LIBBPF_OPTS(bpf_test_run_opts, opts);
+	struct task_kfunc_success *skel;
+	struct bpf_program *prog;
+	int err;
+
+	skel = open_load_task_kfunc_skel();
+	if (!ASSERT_OK_PTR(skel, "open_load_skel"))
+		return;
+
+	if (!ASSERT_OK(skel->bss->err, "pre_run_err"))
+		goto cleanup;
+
+	prog = bpf_object__find_program_by_name(skel->obj, prog_name);
+	if (!ASSERT_OK_PTR(prog, "bpf_object__find_program_by_name"))
+		goto cleanup;
+
+	err = bpf_prog_test_run_opts(bpf_program__fd(prog), &opts);
+	if (!ASSERT_OK(err, "bpf_prog_test_run_opts"))
+		goto cleanup;
+	if (!ASSERT_EQ(opts.retval, 0, "retval"))
+		goto cleanup;
+
+	ASSERT_OK(skel->bss->err, "post_run_err");
+
+cleanup:
+	task_kfunc_success__destroy(skel);
+}
+
+static int run_vpid_test(void *prog_name)
+{
+	struct task_kfunc_success *skel;
+	struct bpf_program *prog;
+	int prog_fd, err = 0;
+
+	if (getpid() != 1)
+		return 1;
+
+	skel = open_load_task_kfunc_skel();
+	if (!skel)
+		return 2;
+
+	if (skel->bss->err) {
+		err = 3;
+		goto cleanup;
+	}
+
+	prog = bpf_object__find_program_by_name(skel->obj, prog_name);
+	if (!prog) {
+		err = 4;
+		goto cleanup;
+	}
+
+	prog_fd = bpf_program__fd(prog);
+	if (prog_fd < 0) {
+		err = 5;
+		goto cleanup;
+	}
+
+	if (bpf_prog_test_run_opts(prog_fd, NULL)) {
+		err = 6;
+		goto cleanup;
+	}
+
+	if (skel->bss->err)
+		err = 7 + skel->bss->err;
+cleanup:
+	task_kfunc_success__destroy(skel);
+	return err;
+}
+
+static void run_vpid_success_test(const char *prog_name)
+{
+	const int stack_size = 1024 * 1024;
+	int child_pid, wstatus;
+	char *stack;
+
+	stack = (char *)malloc(stack_size);
+	if (!ASSERT_OK_PTR(stack, "clone_stack"))
+		return;
+
+	child_pid = clone(run_vpid_test, stack + stack_size,
+			  CLONE_NEWPID | SIGCHLD, (void *)prog_name);
+	if (!ASSERT_GT(child_pid, -1, "child_pid"))
+		goto cleanup;
+
+	if (!ASSERT_GT(waitpid(child_pid, &wstatus, 0), -1, "waitpid"))
+		goto cleanup;
+
+	if (WEXITSTATUS(wstatus) > 7)
+		ASSERT_OK(WEXITSTATUS(wstatus) - 7, "vpid_test_failure");
+	else
+		ASSERT_OK(WEXITSTATUS(wstatus), "run_vpid_test_err");
+cleanup:
+	free(stack);
+}
+
 static const char * const success_tests[] = {
 	"test_task_acquire_release_argument",
 	"test_task_acquire_release_current",
 	"test_task_acquire_leave_in_map",
-	"test_task_xchg_release",
 	"test_task_map_acquire_release",
 	"test_task_current_acquire_release",
 	"test_task_from_pid_arg",
 	"test_task_from_pid_current",
 	"test_task_from_pid_invalid",
 	"task_kfunc_acquire_trusted_walked",
+	"task_kfunc_acquire_after_spin_unlock_non_sleepable",
+	"task_kfunc_acquire_after_spin_unlock_explicit_rcu",
+	"task_kfunc_acquire_after_spin_unlock_preempt_disabled",
+	"task_kfunc_acquire_after_spin_unlock_irq_disabled",
+	"task_kfunc_acquire_after_rcu_unlock_preempt_disabled",
+	"task_kfunc_acquire_after_rcu_unlock_irq_disabled",
+	"task_kfunc_acquire_after_preempt_enable_explicit_rcu",
+	"task_kfunc_acquire_after_irq_restore_explicit_rcu",
 	"test_task_kfunc_flavor_relo",
 	"test_task_kfunc_flavor_relo_not_found",
+};
+
+static const char * const syscall_success_tests[] = {
+	"test_task_xchg_release",
+};
+
+static const char * const vpid_success_tests[] = {
+	"test_task_from_vpid_current",
+	"test_task_from_vpid_invalid",
 };
 
 void test_task_kfunc(void)
@@ -92,6 +206,20 @@ void test_task_kfunc(void)
 			continue;
 
 		run_success_test(success_tests[i]);
+	}
+
+	for (i = 0; i < ARRAY_SIZE(syscall_success_tests); i++) {
+		if (!test__start_subtest(syscall_success_tests[i]))
+			continue;
+
+		run_syscall_success_test(syscall_success_tests[i]);
+	}
+
+	for (i = 0; i < ARRAY_SIZE(vpid_success_tests); i++) {
+		if (!test__start_subtest(vpid_success_tests[i]))
+			continue;
+
+		run_vpid_success_test(vpid_success_tests[i]);
 	}
 
 	RUN_TESTS(task_kfunc_failure);

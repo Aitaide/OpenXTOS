@@ -13,7 +13,6 @@
 #include <linux/slab.h>
 #include <linux/types.h>
 #include <linux/delay.h>
-#include <linux/vmalloc.h>
 #include "vpu.h"
 #include "vpu_defs.h"
 #include "vpu_cmds.h"
@@ -32,6 +31,7 @@ struct vpu_cmd_t {
 	struct vpu_cmd_request *request;
 	struct vpu_rpc_event *pkt;
 	unsigned long key;
+	atomic_long_t *last_response_cmd;
 };
 
 static struct vpu_cmd_request vpu_cmd_requests[] = {
@@ -83,13 +83,13 @@ static struct vpu_cmd_t *vpu_alloc_cmd(struct vpu_inst *inst, u32 id, void *data
 	int i;
 	int ret;
 
-	cmd = vzalloc(sizeof(*cmd));
+	cmd = kzalloc_obj(*cmd);
 	if (!cmd)
 		return NULL;
 
-	cmd->pkt = vzalloc(sizeof(*cmd->pkt));
+	cmd->pkt = kzalloc_obj(*cmd->pkt);
 	if (!cmd->pkt) {
-		vfree(cmd);
+		kfree(cmd);
 		return NULL;
 	}
 
@@ -97,8 +97,8 @@ static struct vpu_cmd_t *vpu_alloc_cmd(struct vpu_inst *inst, u32 id, void *data
 	ret = vpu_iface_pack_cmd(inst->core, cmd->pkt, inst->id, id, data);
 	if (ret) {
 		dev_err(inst->dev, "iface pack cmd %s fail\n", vpu_id_name(id));
-		vfree(cmd->pkt);
-		vfree(cmd);
+		kfree(cmd->pkt);
+		kfree(cmd);
 		return NULL;
 	}
 	for (i = 0; i < ARRAY_SIZE(vpu_cmd_requests); i++) {
@@ -115,8 +115,10 @@ static void vpu_free_cmd(struct vpu_cmd_t *cmd)
 {
 	if (!cmd)
 		return;
-	vfree(cmd->pkt);
-	vfree(cmd);
+	if (cmd->last_response_cmd)
+		atomic_long_set(cmd->last_response_cmd, cmd->key);
+	kfree(cmd->pkt);
+	kfree(cmd);
 }
 
 static int vpu_session_process_cmd(struct vpu_inst *inst, struct vpu_cmd_t *cmd)
@@ -172,7 +174,8 @@ static int vpu_request_cmd(struct vpu_inst *inst, u32 id, void *data,
 		return -ENOMEM;
 
 	mutex_lock(&core->cmd_lock);
-	cmd->key = core->cmd_seq++;
+	cmd->key = ++inst->cmd_seq;
+	cmd->last_response_cmd = &inst->last_response_cmd;
 	if (key)
 		*key = cmd->key;
 	if (sync)
@@ -246,26 +249,12 @@ void vpu_clear_request(struct vpu_inst *inst)
 
 static bool check_is_responsed(struct vpu_inst *inst, unsigned long key)
 {
-	struct vpu_core *core = inst->core;
-	struct vpu_cmd_t *cmd;
-	bool flag = true;
+	unsigned long last_response = atomic_long_read(&inst->last_response_cmd);
 
-	mutex_lock(&core->cmd_lock);
-	cmd = inst->pending;
-	if (cmd && key == cmd->key) {
-		flag = false;
-		goto exit;
-	}
-	list_for_each_entry(cmd, &inst->cmd_q, list) {
-		if (key == cmd->key) {
-			flag = false;
-			break;
-		}
-	}
-exit:
-	mutex_unlock(&core->cmd_lock);
+	if (key <= last_response && (last_response - key) < (ULONG_MAX >> 1))
+		return true;
 
-	return flag;
+	return false;
 }
 
 static int sync_session_response(struct vpu_inst *inst, unsigned long key, long timeout, int try)

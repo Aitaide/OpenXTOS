@@ -56,7 +56,7 @@ struct dm_stat {
 	size_t percpu_alloc_size;
 	size_t histogram_alloc_size;
 	struct dm_stat_percpu *stat_percpu[NR_CPUS];
-	struct dm_stat_shared stat_shared[];
+	struct dm_stat_shared stat_shared[] __counted_by(n_entries);
 };
 
 #define STAT_PRECISE_TIMESTAMPS		1
@@ -65,6 +65,9 @@ struct dm_stats_last_position {
 	sector_t last_sector;
 	unsigned int last_rw;
 };
+
+#define DM_STAT_MAX_ENTRIES		8388608
+#define DM_STAT_MAX_HISTOGRAM_ENTRIES	134217728
 
 /*
  * A typo on the command line could possibly make the kernel run out of memory
@@ -175,8 +178,10 @@ static void dm_stat_free(struct rcu_head *head)
 	kfree(s->program_id);
 	kfree(s->aux_data);
 	for_each_possible_cpu(cpu) {
-		dm_kvfree(s->stat_percpu[cpu][0].histogram, s->histogram_alloc_size);
-		dm_kvfree(s->stat_percpu[cpu], s->percpu_alloc_size);
+		if (s->stat_percpu[cpu]) {
+			dm_kvfree(s->stat_percpu[cpu][0].histogram, s->histogram_alloc_size);
+			dm_kvfree(s->stat_percpu[cpu], s->percpu_alloc_size);
+		}
 	}
 	dm_kvfree(s->stat_shared[0].tmp.histogram, s->histogram_alloc_size);
 	dm_kvfree(s, s->shared_alloc_size);
@@ -285,6 +290,9 @@ static int dm_stats_create(struct dm_stats *stats, sector_t start, sector_t end,
 	if (n_entries != (size_t)n_entries || !(size_t)(n_entries + 1))
 		return -EOVERFLOW;
 
+	if (n_entries > DM_STAT_MAX_ENTRIES)
+		return -EOVERFLOW;
+
 	shared_alloc_size = struct_size(s, stat_shared, n_entries);
 	if ((shared_alloc_size - sizeof(struct dm_stat)) / sizeof(struct dm_stat_shared) != n_entries)
 		return -EOVERFLOW;
@@ -295,6 +303,9 @@ static int dm_stats_create(struct dm_stats *stats, sector_t start, sector_t end,
 
 	histogram_alloc_size = (n_histogram_entries + 1) * (size_t)n_entries * sizeof(unsigned long long);
 	if (histogram_alloc_size / (n_histogram_entries + 1) != (size_t)n_entries * sizeof(unsigned long long))
+		return -EOVERFLOW;
+
+	if ((n_histogram_entries + 1) * (size_t)n_entries > DM_STAT_MAX_HISTOGRAM_ENTRIES)
 		return -EOVERFLOW;
 
 	if (!check_shared_memory(shared_alloc_size + histogram_alloc_size +
@@ -683,10 +694,8 @@ void dm_stats_account_io(struct dm_stats *stats, unsigned long bi_rw,
 		 */
 		last = raw_cpu_ptr(stats->last);
 		stats_aux->merged =
-			(bi_sector == (READ_ONCE(last->last_sector) &&
-				       ((bi_rw == WRITE) ==
-					(READ_ONCE(last->last_rw) == WRITE))
-				       ));
+			bi_sector == READ_ONCE(last->last_sector) &&
+				(bi_rw == WRITE) == (READ_ONCE(last->last_rw) == WRITE);
 		WRITE_ONCE(last->last_sector, end_sector);
 		WRITE_ONCE(last->last_rw, bi_rw);
 	} else
@@ -833,10 +842,10 @@ static unsigned long long dm_jiffies_to_msec64(struct dm_stat *s, unsigned long 
 		result = jiffies_to_msecs(j & 0x3fffff);
 	if (j >= 1 << 22) {
 		mult = jiffies_to_msecs(1 << 22);
-		result += (unsigned long long)mult * (unsigned long long)jiffies_to_msecs((j >> 22) & 0x3fffff);
+		result += (unsigned long long)mult * ((j >> 22) & 0x3fffff);
 	}
 	if (j >= 1ULL << 44)
-		result += (unsigned long long)mult * (unsigned long long)mult * (unsigned long long)jiffies_to_msecs(j >> 44);
+		result += (unsigned long long)mult * (unsigned long long)(1 << 22) * (j >> 44);
 
 	return result;
 }
@@ -962,9 +971,8 @@ static int parse_histogram(const char *h, unsigned int *n_histogram_entries,
 		if (*q == ',')
 			(*n_histogram_entries)++;
 
-	*histogram_boundaries = kmalloc_array(*n_histogram_entries,
-					      sizeof(unsigned long long),
-					      GFP_KERNEL);
+	*histogram_boundaries = kmalloc_objs(unsigned long long,
+					     *n_histogram_entries);
 	if (!*histogram_boundaries)
 		return -ENOMEM;
 

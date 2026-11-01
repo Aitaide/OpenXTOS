@@ -15,6 +15,7 @@
 #include <linux/clk.h>
 #include <linux/module.h>
 #include <linux/dma-mapping.h>
+#include <linux/regulator/consumer.h>
 
 struct fsl_usb2_dev_data {
 	char *dr_mode;		/* controller mode */
@@ -183,7 +184,7 @@ static int fsl_usb2_mph_dr_of_probe(struct platform_device *ofdev)
 	const struct of_device_id *match;
 	const unsigned char *prop;
 	static unsigned int idx;
-	int i;
+	int i, err;
 
 	if (!of_device_is_available(np))
 		return -ENODEV;
@@ -246,6 +247,10 @@ static int fsl_usb2_mph_dr_of_probe(struct platform_device *ofdev)
 		}
 	}
 
+	err = devm_regulator_get_enable_optional(&ofdev->dev, "vbus");
+	if (err)
+		return dev_err_probe(&ofdev->dev, err, "failed to get vbus regulator\n");
+
 	for (i = 0; i < ARRAY_SIZE(dev_data->drivers); i++) {
 		if (!dev_data->drivers[i])
 			continue;
@@ -288,7 +293,7 @@ static void fsl_usb2_mph_dr_of_remove(struct platform_device *ofdev)
 #define PHYCTRL_LSFE		(1 << 1)	/* Line State Filter Enable */
 #define PHYCTRL_PXE		(1 << 0)	/* PHY oscillator enable */
 
-int fsl_usb2_mpc5121_init(struct platform_device *pdev)
+static int fsl_usb2_mpc5121_init(struct platform_device *pdev)
 {
 	struct fsl_usb2_platform_data *pdata = dev_get_platdata(&pdev->dev);
 	struct clk *clk;
@@ -327,8 +332,7 @@ static void fsl_usb2_mpc5121_exit(struct platform_device *pdev)
 
 	pdata->regs = NULL;
 
-	if (pdata->clk)
-		clk_disable_unprepare(pdata->clk);
+	clk_disable_unprepare(pdata->clk);
 }
 
 static struct fsl_usb2_platform_data fsl_usb2_mpc5121_pd = {
@@ -362,7 +366,7 @@ static struct platform_driver fsl_usb2_mph_dr_driver = {
 		.of_match_table = fsl_usb2_mph_dr_of_match,
 	},
 	.probe	= fsl_usb2_mph_dr_of_probe,
-	.remove_new = fsl_usb2_mph_dr_of_remove,
+	.remove = fsl_usb2_mph_dr_of_remove,
 };
 
 module_platform_driver(fsl_usb2_mph_dr_driver);

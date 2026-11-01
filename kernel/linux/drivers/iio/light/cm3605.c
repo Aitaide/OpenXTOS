@@ -10,7 +10,6 @@
  */
 
 #include <linux/module.h>
-#include <linux/mod_devicetable.h>
 #include <linux/iio/iio.h>
 #include <linux/iio/sysfs.h>
 #include <linux/iio/events.h>
@@ -233,10 +232,8 @@ static int cm3605_probe(struct platform_device *pdev)
 
 	ret = devm_request_threaded_irq(dev, irq, cm3605_prox_irq,
 					NULL, 0, "cm3605", indio_dev);
-	if (ret) {
-		dev_err(dev, "unable to request IRQ\n");
+	if (ret)
 		goto out_disable_aset;
-	}
 
 	/* Just name the trigger the same as the driver */
 	led_trigger_register_simple("cm3605", &cm3605->led);
@@ -266,7 +263,7 @@ out_disable_vdd:
 	return ret;
 }
 
-static int cm3605_remove(struct platform_device *pdev)
+static void cm3605_remove(struct platform_device *pdev)
 {
 	struct iio_dev *indio_dev = platform_get_drvdata(pdev);
 	struct cm3605 *cm3605 = iio_priv(indio_dev);
@@ -276,8 +273,6 @@ static int cm3605_remove(struct platform_device *pdev)
 	gpiod_set_value_cansleep(cm3605->aset, 0);
 	iio_device_unregister(indio_dev);
 	regulator_disable(cm3605->vdd);
-
-	return 0;
 }
 
 static int cm3605_pm_suspend(struct device *dev)
@@ -309,7 +304,7 @@ static DEFINE_SIMPLE_DEV_PM_OPS(cm3605_dev_pm_ops, cm3605_pm_suspend,
 
 static const struct of_device_id cm3605_of_match[] = {
 	{.compatible = "capella,cm3605"},
-	{ },
+	{ }
 };
 MODULE_DEVICE_TABLE(of, cm3605_of_match);
 
@@ -327,3 +322,4 @@ module_platform_driver(cm3605_driver);
 MODULE_AUTHOR("Linus Walleij <linus.walleij@linaro.org>");
 MODULE_DESCRIPTION("CM3605 ambient light and proximity sensor driver");
 MODULE_LICENSE("GPL");
+MODULE_IMPORT_NS("IIO_CONSUMER");

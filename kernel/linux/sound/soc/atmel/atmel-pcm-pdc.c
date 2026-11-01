@@ -140,12 +140,12 @@ static int atmel_pcm_hw_params(struct snd_soc_component *component,
 {
 	struct snd_pcm_runtime *runtime = substream->runtime;
 	struct atmel_runtime_data *prtd = runtime->private_data;
-	struct snd_soc_pcm_runtime *rtd = asoc_substream_to_rtd(substream);
+	struct snd_soc_pcm_runtime *rtd = snd_soc_substream_to_rtd(substream);
 
 	/* this may get called several times by oss emulation
 	 * with different params */
 
-	prtd->params = snd_soc_dai_get_dma_data(asoc_rtd_to_cpu(rtd, 0), substream);
+	prtd->params = snd_soc_dai_get_dma_data(snd_soc_rtd_to_cpu(rtd, 0), substream);
 	prtd->params->dma_intr_handler = atmel_pcm_dma_irq;
 
 	prtd->dma_buffer = runtime->dma_addr;
@@ -288,7 +288,7 @@ static int atmel_pcm_open(struct snd_soc_component *component,
 	if (ret < 0)
 		goto out;
 
-	prtd = kzalloc(sizeof(struct atmel_runtime_data), GFP_KERNEL);
+	prtd = kzalloc_obj(struct atmel_runtime_data);
 	if (prtd == NULL) {
 		ret = -ENOMEM;
 		goto out;
@@ -316,7 +316,7 @@ static const struct snd_soc_component_driver atmel_soc_platform = {
 	.prepare	= atmel_pcm_prepare,
 	.trigger	= atmel_pcm_trigger,
 	.pointer	= atmel_pcm_pointer,
-	.pcm_construct	= atmel_pcm_new,
+	.pcm_new	= atmel_pcm_new,
 };
 
 int atmel_pcm_pdc_platform_register(struct device *dev)

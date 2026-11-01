@@ -6,7 +6,8 @@
  */
 
 #include <linux/clk.h>
-
+#include <linux/interrupt.h>
+#include <linux/overflow.h>
 #include "dev.h"
 #include "fence.h"
 #include "intr.h"
@@ -17,7 +18,7 @@ static void host1x_intr_add_fence_to_list(struct host1x_fence_list *list,
 	struct host1x_syncpt_fence *fence_in_list;
 
 	list_for_each_entry_reverse(fence_in_list, &list->list, list) {
-		if ((s32)(fence_in_list->threshold - fence->threshold) <= 0) {
+		if ((s32)wrapping_sub(u32, fence_in_list->threshold, fence->threshold) <= 0) {
 			/* Fence in list is before us, we can insert here */
 			list_add(&fence->list, &fence_in_list->list);
 			return;
@@ -83,7 +84,7 @@ void host1x_intr_handle_interrupt(struct host1x *host, unsigned int id)
 	spin_lock(&sp->fences.lock);
 
 	list_for_each_entry_safe(fence, tmp, &sp->fences.list, list) {
-		if (((value - fence->threshold) & 0x80000000U) != 0U) {
+		if ((wrapping_sub(u32, value, fence->threshold) & 0x80000000U) != 0U) {
 			/* Fence is not yet expired, we are done */
 			break;
 		}
@@ -92,23 +93,44 @@ void host1x_intr_handle_interrupt(struct host1x *host, unsigned int id)
 		host1x_fence_signal(fence);
 	}
 
-	/* Re-enable interrupt if necessary */
-	host1x_intr_update_hw_state(host, sp);
+	/*
+	 * Re-enable interrupt if necessary. The ISR already disabled the interrupt,
+	 * so if no fences remain, no update is needed.
+	 */
+	if (!list_empty(&sp->fences.list))
+		host1x_intr_update_hw_state(host, sp);
 
 	spin_unlock(&sp->fences.lock);
 }
 
 int host1x_intr_init(struct host1x *host)
 {
+	struct host1x_intr_irq_data *irq_data;
 	unsigned int id;
-
-	mutex_init(&host->intr_mutex);
+	int i, err;
 
 	for (id = 0; id < host1x_syncpt_nb_pts(host); ++id) {
 		struct host1x_syncpt *syncpt = &host->syncpt[id];
 
 		spin_lock_init(&syncpt->fences.lock);
 		INIT_LIST_HEAD(&syncpt->fences.list);
+	}
+
+	irq_data = devm_kcalloc(host->dev, host->num_syncpt_irqs, sizeof(irq_data[0]), GFP_KERNEL);
+	if (!irq_data)
+		return -ENOMEM;
+
+	host1x_hw_intr_disable_all_syncpt_intrs(host);
+
+	for (i = 0; i < host->num_syncpt_irqs; i++) {
+		irq_data[i].host = host;
+		irq_data[i].offset = i;
+
+		err = devm_request_irq(host->dev, host->syncpt_irqs[i],
+				       host->intr_op->isr, IRQF_SHARED,
+				       "host1x_syncpt", &irq_data[i]);
+		if (err < 0)
+			return err;
 	}
 
 	return 0;

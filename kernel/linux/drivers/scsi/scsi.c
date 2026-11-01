@@ -55,7 +55,7 @@
 #include <linux/notifier.h>
 #include <linux/cpu.h>
 #include <linux/mutex.h>
-#include <asm/unaligned.h>
+#include <linux/unaligned.h>
 
 #include <scsi/scsi.h>
 #include <scsi/scsi_cmnd.h>
@@ -216,6 +216,9 @@ int scsi_device_max_queue_depth(struct scsi_device *sdev)
  */
 int scsi_change_queue_depth(struct scsi_device *sdev, int depth)
 {
+	if (!sdev->budget_map.map)
+		return -EINVAL;
+
 	depth = min_t(int, depth, scsi_device_max_queue_depth(sdev));
 
 	if (depth > 0) {
@@ -242,9 +245,11 @@ EXPORT_SYMBOL(scsi_change_queue_depth);
  * 		specific SCSI device to determine if and when there is a
  * 		need to adjust the queue depth on the device.
  *
- * Returns:	0 - No change needed, >0 - Adjust queue depth to this new depth,
- * 		-1 - Drop back to untagged operation using host->cmd_per_lun
- * 			as the untagged command depth
+ * Returns:
+ * * 0 - No change needed
+ * * >0 - Adjust queue depth to this new depth,
+ * * -1 - Drop back to untagged operation using host->cmd_per_lun as the
+ *   untagged command depth
  *
  * Lock Status:	None held on entry
  *
@@ -253,6 +258,8 @@ EXPORT_SYMBOL(scsi_change_queue_depth);
  */
 int scsi_track_queue_full(struct scsi_device *sdev, int depth)
 {
+	if (!sdev->budget_map.map)
+		return 0;
 
 	/*
 	 * Don't let QUEUE_FULLs on the same
@@ -328,21 +335,46 @@ static int scsi_vpd_inquiry(struct scsi_device *sdev, unsigned char *buffer,
 	return result + 4;
 }
 
+enum scsi_vpd_parameters {
+	SCSI_VPD_HEADER_SIZE = 4,
+	SCSI_VPD_LIST_SIZE = 36,
+};
+
 static int scsi_get_vpd_size(struct scsi_device *sdev, u8 page)
 {
-	unsigned char vpd_header[SCSI_VPD_HEADER_SIZE] __aligned(4);
+	unsigned char vpd[SCSI_VPD_LIST_SIZE] __aligned(4);
 	int result;
 
 	if (sdev->no_vpd_size)
 		return SCSI_DEFAULT_VPD_LEN;
 
 	/*
+	 * Fetch the supported pages VPD and validate that the requested page
+	 * number is present.
+	 */
+	if (page != 0) {
+		result = scsi_vpd_inquiry(sdev, vpd, 0, sizeof(vpd));
+		if (result < SCSI_VPD_HEADER_SIZE)
+			return 0;
+
+		if (result > sizeof(vpd)) {
+			dev_warn_once(&sdev->sdev_gendev,
+				      "%s: long VPD page 0 length: %d bytes\n",
+				      __func__, result);
+			result = sizeof(vpd);
+		}
+
+		result -= SCSI_VPD_HEADER_SIZE;
+		if (!memchr(&vpd[SCSI_VPD_HEADER_SIZE], page, result))
+			return 0;
+	}
+	/*
 	 * Fetch the VPD page header to find out how big the page
 	 * is. This is done to prevent problems on legacy devices
 	 * which can not handle allocation lengths as large as
 	 * potentially requested by the caller.
 	 */
-	result = scsi_vpd_inquiry(sdev, vpd_header, page, sizeof(vpd_header));
+	result = scsi_vpd_inquiry(sdev, vpd, page, SCSI_VPD_HEADER_SIZE);
 	if (result < 0)
 		return 0;
 
@@ -485,20 +517,34 @@ void scsi_attach_vpd(struct scsi_device *sdev)
 		return;
 
 	for (i = 4; i < vpd_buf->len; i++) {
-		if (vpd_buf->data[i] == 0x0)
+		switch (vpd_buf->data[i]) {
+		case 0x0:
 			scsi_update_vpd_page(sdev, 0x0, &sdev->vpd_pg0);
-		if (vpd_buf->data[i] == 0x80)
+			break;
+		case 0x80:
 			scsi_update_vpd_page(sdev, 0x80, &sdev->vpd_pg80);
-		if (vpd_buf->data[i] == 0x83)
+			break;
+		case 0x83:
 			scsi_update_vpd_page(sdev, 0x83, &sdev->vpd_pg83);
-		if (vpd_buf->data[i] == 0x89)
+			break;
+		case 0x89:
 			scsi_update_vpd_page(sdev, 0x89, &sdev->vpd_pg89);
-		if (vpd_buf->data[i] == 0xb0)
+			break;
+		case 0xb0:
 			scsi_update_vpd_page(sdev, 0xb0, &sdev->vpd_pgb0);
-		if (vpd_buf->data[i] == 0xb1)
+			break;
+		case 0xb1:
 			scsi_update_vpd_page(sdev, 0xb1, &sdev->vpd_pgb1);
-		if (vpd_buf->data[i] == 0xb2)
+			break;
+		case 0xb2:
 			scsi_update_vpd_page(sdev, 0xb2, &sdev->vpd_pgb2);
+			break;
+		case 0xb7:
+			scsi_update_vpd_page(sdev, 0xb7, &sdev->vpd_pgb7);
+			break;
+		default:
+			break;
+		}
 	}
 	kfree(vpd_buf);
 }
@@ -646,6 +692,13 @@ void scsi_cdl_check(struct scsi_device *sdev)
 		sdev->use_10_for_rw = 0;
 
 		sdev->cdl_supported = 1;
+
+		/*
+		 * If the device supports CDL, make sure that the current drive
+		 * feature status is consistent with the user controlled
+		 * cdl_enable state.
+		 */
+		scsi_cdl_enable(sdev, sdev->cdl_enable);
 	} else {
 		sdev->cdl_supported = 0;
 	}
@@ -661,27 +714,20 @@ void scsi_cdl_check(struct scsi_device *sdev)
  */
 int scsi_cdl_enable(struct scsi_device *sdev, bool enable)
 {
-	struct scsi_mode_data data;
-	struct scsi_sense_hdr sshdr;
-	struct scsi_vpd *vpd;
-	bool is_ata = false;
 	char buf[64];
 	int ret;
 
 	if (!sdev->cdl_supported)
 		return -EOPNOTSUPP;
 
-	rcu_read_lock();
-	vpd = rcu_dereference(sdev->vpd_pg89);
-	if (vpd)
-		is_ata = true;
-	rcu_read_unlock();
-
 	/*
 	 * For ATA devices, CDL needs to be enabled with a SET FEATURES command.
 	 */
-	if (is_ata) {
+	if (sdev->is_ata) {
+		struct scsi_mode_data data;
+		struct scsi_sense_hdr sshdr;
 		char *buf_data;
+		size_t avail, offset;
 		int len;
 
 		ret = scsi_mode_sense(sdev, 0x08, 0x0a, 0xf2, buf, sizeof(buf),
@@ -689,27 +735,55 @@ int scsi_cdl_enable(struct scsi_device *sdev, bool enable)
 		if (ret)
 			return -EINVAL;
 
-		/* Enable CDL using the ATA feature page */
-		len = min_t(size_t, sizeof(buf),
-			    data.length - data.header_length -
-			    data.block_descriptor_length);
-		buf_data = buf + data.header_length +
-			data.block_descriptor_length;
-		if (enable)
-			buf_data[4] = 0x02;
-		else
-			buf_data[4] = 0;
+		/* Enable or disable CDL using the ATA feature page */
+		avail = min_t(size_t, data.length, sizeof(buf));
+		if (data.header_length > avail)
+			return -EINVAL;
+
+		offset = data.header_length;
+		avail -= data.header_length;
+
+		if (data.block_descriptor_length > avail)
+			return -EINVAL;
+
+		offset += data.block_descriptor_length;
+		avail -= data.block_descriptor_length;
+
+		if (avail < 5)
+			return -EINVAL;
+
+		buf_data = buf + offset;
+		len = avail;
+
+		/*
+		 * If we want to enable CDL and CDL is already enabled on the
+		 * device, do nothing. This avoids needlessly resetting the CDL
+		 * statistics on the device as that is implied by the CDL enable
+		 * action. Similar to this, there is no need to do anything if
+		 * we want to disable CDL and CDL is already disabled.
+		 */
+		if (enable) {
+			if ((buf_data[4] & 0x03) == 0x02)
+				goto out;
+			buf_data[4] &= ~0x03;
+			buf_data[4] |= 0x02;
+		} else {
+			if ((buf_data[4] & 0x03) == 0x00)
+				goto out;
+			buf_data[4] &= ~0x03;
+		}
 
 		ret = scsi_mode_select(sdev, 1, 0, buf_data, len, 5 * HZ, 3,
 				       &data, &sshdr);
 		if (ret) {
-			if (scsi_sense_valid(&sshdr))
+			if (ret > 0 && scsi_sense_valid(&sshdr))
 				scsi_print_sense_hdr(sdev,
 					dev_name(&sdev->sdev_gendev), &sshdr);
 			return ret;
 		}
 	}
 
+out:
 	sdev->cdl_enable = enable;
 
 	return 0;
@@ -771,8 +845,11 @@ struct scsi_device *__scsi_iterate_devices(struct Scsi_Host *shost,
 	spin_lock_irqsave(shost->host_lock, flags);
 	while (list->next != &shost->__devices) {
 		next = list_entry(list->next, struct scsi_device, siblings);
-		/* skip devices that we can't get a reference to */
-		if (!scsi_device_get(next))
+		/*
+		 * Skip pseudo devices and also devices we can't get a
+		 * reference to.
+		 */
+		if (!scsi_device_is_pseudo_dev(next) && !scsi_device_get(next))
 			break;
 		next = NULL;
 		list = list->next;

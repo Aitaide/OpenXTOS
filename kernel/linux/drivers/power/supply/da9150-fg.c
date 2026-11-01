@@ -247,9 +247,9 @@ static int da9150_fg_current_avg(struct da9150_fg *fg,
 				      DA9150_QIF_SD_GAIN_SIZE);
 	da9150_fg_read_sync_end(fg);
 
-	div = (u64) (sd_gain * shunt_val * 65536ULL);
+	div = 65536ULL * sd_gain * shunt_val;
 	do_div(div, 1000000);
-	res = (u64) (iavg * 1000000ULL);
+	res = 1000000ULL * iavg;
 	do_div(res, div);
 
 	val->intval = (int) res;
@@ -524,10 +524,8 @@ static int da9150_fg_probe(struct platform_device *pdev)
 
 	ret = devm_request_threaded_irq(dev, irq, NULL, da9150_fg_irq,
 					IRQF_ONESHOT, "FG", fg);
-	if (ret) {
-		dev_err(dev, "Failed to request IRQ %d: %d\n", irq, ret);
+	if (ret)
 		return ret;
-	}
 
 	return 0;
 }

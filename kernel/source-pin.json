@@ -1,0 +1,15 @@
+{
+  "schema": "xtos.kernel.source.v1",
+  "version": "7.3.1",
+  "upstream": "https://cdn.kernel.org/pub/linux/kernel/v7.x/linux-7.3.1.tar.xz",
+  "archive_sha256": "fa595aad93734f829c963c2a90ef7c3673224fd7fdae7b49406e397cde2de231",
+  "archive_bytes": 162406920,
+  "source_signer_fingerprint": "647F28654894E3BD457199BE38DBBDC86092693E",
+  "rt_mode": "mainline",
+  "rt_config": "CONFIG_PREEMPT_RT=y",
+  "rt_patch": null,
+  "xtos_patch": "kernel/patches/xtos-linux-7.3.1.patch",
+  "xtos_patch_sha256": "46e980b60ac3e04b37b1c3d2fd2cc59648cdaeba016b2a122dfac5dbebf8ee85",
+  "previous_baseline": "6.6.0-rt15",
+  "status": "source_pin_not_runtime_acceptance"
+}

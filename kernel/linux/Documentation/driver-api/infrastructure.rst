@@ -17,6 +17,10 @@ The Basic Device Driver-Model Structures
 .. kernel-doc:: include/linux/device/driver.h
    :identifiers: probe_type device_driver
 
+.. kernel-doc:: include/linux/property.h
+
+.. kernel-doc:: include/linux/fwnode.h
+
 Device Drivers Base
 -------------------
 
@@ -39,6 +43,12 @@ Device Drivers Base
    :no-identifiers: class
 
 .. kernel-doc:: drivers/base/class.c
+   :export:
+
+.. kernel-doc:: include/linux/device/faux.h
+   :internal:
+
+.. kernel-doc:: drivers/base/faux.c
    :export:
 
 .. kernel-doc:: drivers/base/node.c

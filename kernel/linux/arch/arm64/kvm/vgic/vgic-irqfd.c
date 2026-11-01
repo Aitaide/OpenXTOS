@@ -9,7 +9,7 @@
 #include <kvm/arm_vgic.h>
 #include "vgic.h"
 
-/**
+/*
  * vgic_irqfd_set_irq: inject the IRQ corresponding to the
  * irqchip routing entry
  *
@@ -20,10 +20,16 @@ static int vgic_irqfd_set_irq(struct kvm_kernel_irq_routing_entry *e,
 			int level, bool line_status)
 {
 	unsigned int spi_id = e->irqchip.pin + VGIC_NR_PRIVATE_IRQS;
+	int ret;
 
 	if (!vgic_valid_spi(kvm, spi_id))
 		return -EINVAL;
-	return kvm_vgic_inject_irq(kvm, 0, spi_id, level, NULL);
+
+	ret = vgic_lazy_init(kvm);
+	if (ret)
+		return ret;
+
+	return kvm_vgic_inject_irq(kvm, NULL, spi_id, level, NULL);
 }
 
 /**
@@ -75,7 +81,8 @@ static void kvm_populate_msi(struct kvm_kernel_irq_routing_entry *e,
 	msi->flags = e->msi.flags;
 	msi->devid = e->msi.devid;
 }
-/**
+
+/*
  * kvm_set_msi: inject the MSI corresponding to the
  * MSI routing entry
  *
@@ -98,7 +105,7 @@ int kvm_set_msi(struct kvm_kernel_irq_routing_entry *e,
 	return vgic_its_inject_msi(kvm, &msi);
 }
 
-/**
+/*
  * kvm_arch_set_irq_inatomic: fast-path for irqfd injection
  */
 int kvm_arch_set_irq_inatomic(struct kvm_kernel_irq_routing_entry *e,
@@ -139,7 +146,7 @@ int kvm_vgic_setup_default_irq_routing(struct kvm *kvm)
 	u32 nr = dist->nr_spis;
 	int i, ret;
 
-	entries = kcalloc(nr, sizeof(*entries), GFP_KERNEL_ACCOUNT);
+	entries = kzalloc_objs(*entries, nr, GFP_KERNEL_ACCOUNT);
 	if (!entries)
 		return -ENOMEM;
 

@@ -575,7 +575,6 @@ static void dce60_opp_program_clamping_and_pixel_encoding(
 }
 #endif
 
-
 static void program_formatter_420_memory(struct output_pixel_processor *opp)
 {
 	struct dce110_opp *opp110 = TO_DCE110_OPP(opp);
@@ -601,6 +600,7 @@ void dce110_opp_set_dyn_expansion(
 	enum dc_color_depth color_dpth,
 	enum signal_type signal)
 {
+	(void)color_sp;
 	struct dce110_opp *opp110 = TO_DCE110_OPP(opp);
 
 	REG_UPDATE_2(FMT_DYNAMIC_EXP_CNTL,

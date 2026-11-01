@@ -87,24 +87,24 @@ static int ath10k_ahb_clock_init(struct ath10k *ar)
 	dev = &ar_ahb->pdev->dev;
 
 	ar_ahb->cmd_clk = devm_clk_get(dev, "wifi_wcss_cmd");
-	if (IS_ERR_OR_NULL(ar_ahb->cmd_clk)) {
+	if (IS_ERR(ar_ahb->cmd_clk)) {
 		ath10k_err(ar, "failed to get cmd clk: %ld\n",
 			   PTR_ERR(ar_ahb->cmd_clk));
-		return ar_ahb->cmd_clk ? PTR_ERR(ar_ahb->cmd_clk) : -ENODEV;
+		return PTR_ERR(ar_ahb->cmd_clk);
 	}
 
 	ar_ahb->ref_clk = devm_clk_get(dev, "wifi_wcss_ref");
-	if (IS_ERR_OR_NULL(ar_ahb->ref_clk)) {
+	if (IS_ERR(ar_ahb->ref_clk)) {
 		ath10k_err(ar, "failed to get ref clk: %ld\n",
 			   PTR_ERR(ar_ahb->ref_clk));
-		return ar_ahb->ref_clk ? PTR_ERR(ar_ahb->ref_clk) : -ENODEV;
+		return PTR_ERR(ar_ahb->ref_clk);
 	}
 
 	ar_ahb->rtc_clk = devm_clk_get(dev, "wifi_wcss_rtc");
-	if (IS_ERR_OR_NULL(ar_ahb->rtc_clk)) {
+	if (IS_ERR(ar_ahb->rtc_clk)) {
 		ath10k_err(ar, "failed to get rtc clk: %ld\n",
 			   PTR_ERR(ar_ahb->rtc_clk));
-		return ar_ahb->rtc_clk ? PTR_ERR(ar_ahb->rtc_clk) : -ENODEV;
+		return PTR_ERR(ar_ahb->rtc_clk);
 	}
 
 	return 0;
@@ -394,14 +394,14 @@ static irqreturn_t ath10k_ahb_interrupt_handler(int irq, void *arg)
 	if (!ath10k_pci_irq_pending(ar))
 		return IRQ_NONE;
 
-	ath10k_pci_disable_and_clear_legacy_irq(ar);
+	ath10k_pci_disable_and_clear_intx_irq(ar);
 	ath10k_pci_irq_msi_fw_mask(ar);
 	napi_schedule(&ar->napi);
 
 	return IRQ_HANDLED;
 }
 
-static int ath10k_ahb_request_irq_legacy(struct ath10k *ar)
+static int ath10k_ahb_request_irq_intx(struct ath10k *ar)
 {
 	struct ath10k_pci *ar_pci = ath10k_pci_priv(ar);
 	struct ath10k_ahb *ar_ahb = ath10k_ahb_priv(ar);
@@ -415,12 +415,12 @@ static int ath10k_ahb_request_irq_legacy(struct ath10k *ar)
 			    ar_ahb->irq, ret);
 		return ret;
 	}
-	ar_pci->oper_irq_mode = ATH10K_PCI_IRQ_LEGACY;
+	ar_pci->oper_irq_mode = ATH10K_PCI_IRQ_INTX;
 
 	return 0;
 }
 
-static void ath10k_ahb_release_irq_legacy(struct ath10k *ar)
+static void ath10k_ahb_release_irq_intx(struct ath10k *ar)
 {
 	struct ath10k_ahb *ar_ahb = ath10k_ahb_priv(ar);
 
@@ -430,7 +430,7 @@ static void ath10k_ahb_release_irq_legacy(struct ath10k *ar)
 static void ath10k_ahb_irq_disable(struct ath10k *ar)
 {
 	ath10k_ce_disable_interrupts(ar);
-	ath10k_pci_disable_and_clear_legacy_irq(ar);
+	ath10k_pci_disable_and_clear_intx_irq(ar);
 }
 
 static int ath10k_ahb_resource_init(struct ath10k *ar)
@@ -497,7 +497,7 @@ static int ath10k_ahb_resource_init(struct ath10k *ar)
 
 	ath10k_dbg(ar, ATH10K_DBG_BOOT, "irq: %d\n", ar_ahb->irq);
 
-	ath10k_dbg(ar, ATH10K_DBG_BOOT, "mem: 0x%pK mem_len: %lu gcc mem: 0x%pK tcsr_mem: 0x%pK\n",
+	ath10k_dbg(ar, ATH10K_DBG_BOOT, "mem: 0x%p mem_len: %lu gcc mem: 0x%p tcsr_mem: 0x%p\n",
 		   ar_ahb->mem, ar_ahb->mem_len,
 		   ar_ahb->gcc_mem, ar_ahb->tcsr_mem);
 	return 0;
@@ -621,7 +621,7 @@ static int ath10k_ahb_hif_start(struct ath10k *ar)
 
 	ath10k_core_napi_enable(ar);
 	ath10k_ce_enable_interrupts(ar);
-	ath10k_pci_enable_legacy_irq(ar);
+	ath10k_pci_enable_intx_irq(ar);
 
 	ath10k_pci_rx_post(ar);
 
@@ -775,7 +775,7 @@ static int ath10k_ahb_probe(struct platform_device *pdev)
 
 	ath10k_pci_init_napi(ar);
 
-	ret = ath10k_ahb_request_irq_legacy(ar);
+	ret = ath10k_ahb_request_irq_intx(ar);
 	if (ret)
 		goto err_free_pipes;
 
@@ -806,7 +806,7 @@ err_halt_device:
 	ath10k_ahb_clock_disable(ar);
 
 err_free_irq:
-	ath10k_ahb_release_irq_legacy(ar);
+	ath10k_ahb_release_irq_intx(ar);
 
 err_free_pipes:
 	ath10k_pci_release_resource(ar);
@@ -828,7 +828,7 @@ static void ath10k_ahb_remove(struct platform_device *pdev)
 
 	ath10k_core_unregister(ar);
 	ath10k_ahb_irq_disable(ar);
-	ath10k_ahb_release_irq_legacy(ar);
+	ath10k_ahb_release_irq_intx(ar);
 	ath10k_pci_release_resource(ar);
 	ath10k_ahb_halt_chip(ar);
 	ath10k_ahb_clock_disable(ar);
@@ -837,12 +837,12 @@ static void ath10k_ahb_remove(struct platform_device *pdev)
 }
 
 static struct platform_driver ath10k_ahb_driver = {
-	.driver         = {
-		.name   = "ath10k_ahb",
+	.driver = {
+		.name = "ath10k_ahb",
 		.of_match_table = ath10k_ahb_of_match,
 	},
-	.probe  = ath10k_ahb_probe,
-	.remove_new = ath10k_ahb_remove,
+	.probe = ath10k_ahb_probe,
+	.remove = ath10k_ahb_remove,
 };
 
 int ath10k_ahb_init(void)

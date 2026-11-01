@@ -50,10 +50,6 @@ static void uc_expand_default_options(struct intel_uc *uc)
 
 	/* Default: enable HuC authentication and GuC submission */
 	i915->params.enable_guc = ENABLE_GUC_LOAD_HUC | ENABLE_GUC_SUBMISSION;
-
-	/* XEHPSDV and PVC do not use HuC */
-	if (IS_XEHPSDV(i915) || IS_PONTEVECCHIO(i915))
-		i915->params.enable_guc &= ~ENABLE_GUC_LOAD_HUC;
 }
 
 /* Reset GuC providing us with fresh state for both GuC and HuC.
@@ -63,10 +59,6 @@ static int __intel_uc_reset_hw(struct intel_uc *uc)
 	struct intel_gt *gt = uc_to_gt(uc);
 	int ret;
 	u32 guc_status;
-
-	ret = i915_inject_probe_error(gt->i915, -ENXIO);
-	if (ret)
-		return ret;
 
 	ret = intel_reset_guc(gt);
 	if (ret) {
@@ -103,13 +95,8 @@ static void __confirm_options(struct intel_uc *uc)
 	}
 
 	if (!intel_uc_supports_guc(uc))
-		gt_info(gt,  "Incompatible option enable_guc=%d - %s\n",
-			i915->params.enable_guc, "GuC is not supported!");
-
-	if (i915->params.enable_guc & ENABLE_GUC_LOAD_HUC &&
-	    !intel_uc_supports_huc(uc))
 		gt_info(gt, "Incompatible option enable_guc=%d - %s\n",
-			i915->params.enable_guc, "HuC is not supported!");
+			i915->params.enable_guc, "GuC is not supported!");
 
 	if (i915->params.enable_guc & ENABLE_GUC_SUBMISSION &&
 	    !intel_uc_supports_guc_submission(uc))
@@ -145,6 +132,7 @@ void intel_uc_init_late(struct intel_uc *uc)
 
 void intel_uc_driver_late_release(struct intel_uc *uc)
 {
+	intel_huc_fini_late(&uc->huc);
 }
 
 /**
@@ -228,14 +216,9 @@ static void guc_handle_mmio_msg(struct intel_guc *guc)
 static int guc_enable_communication(struct intel_guc *guc)
 {
 	struct intel_gt *gt = guc_to_gt(guc);
-	struct drm_i915_private *i915 = gt->i915;
 	int ret;
 
 	GEM_BUG_ON(intel_guc_ct_enabled(&guc->ct));
-
-	ret = i915_inject_probe_error(i915, -ENXIO);
-	if (ret)
-		return ret;
 
 	ret = intel_guc_ct_enable(&guc->ct);
 	if (ret)
@@ -331,9 +314,6 @@ static int __uc_init(struct intel_uc *uc)
 	if (!intel_uc_uses_guc(uc))
 		return 0;
 
-	if (i915_inject_probe_failure(uc_to_gt(uc)->i915))
-		return -ENOMEM;
-
 	ret = intel_guc_init(guc);
 	if (ret)
 		return ret;
@@ -346,6 +326,7 @@ static int __uc_init(struct intel_uc *uc)
 
 	return 0;
 }
+ALLOW_ERROR_INJECTION(__uc_init, ERRNO);
 
 static void __uc_fini(struct intel_uc *uc)
 {
@@ -388,10 +369,6 @@ static int uc_init_wopcm(struct intel_uc *uc)
 	GEM_BUG_ON(base & ~GUC_WOPCM_OFFSET_MASK);
 	GEM_BUG_ON(!(size & GUC_WOPCM_SIZE_MASK));
 	GEM_BUG_ON(size & ~GUC_WOPCM_SIZE_MASK);
-
-	err = i915_inject_probe_error(gt->i915, -ENXIO);
-	if (err)
-		return err;
 
 	mask = GUC_WOPCM_SIZE_MASK | GUC_WOPCM_SIZE_LOCKED;
 	err = intel_uncore_write_and_verify(uncore, GUC_WOPCM_SIZE, size, mask,
@@ -521,7 +498,7 @@ static int __uc_init_hw(struct intel_uc *uc)
 		       ERR_PTR(ret), attempts);
 	}
 
-	/* Did we succeded or run out of retries? */
+	/* Did we succeed or run out of retries? */
 	if (ret)
 		goto err_log_capture;
 
@@ -642,10 +619,14 @@ void intel_uc_reset_finish(struct intel_uc *uc)
 {
 	struct intel_guc *guc = &uc->guc;
 
+	/*
+	 * NB: The wedge code path results in prepare -> prepare -> finish -> finish.
+	 * So this function is sometimes called with the in-progress flag not set.
+	 */
 	uc->reset_in_progress = false;
 
 	/* Firmware expected to be running when this function is called */
-	if (intel_guc_is_fw_running(guc) && intel_uc_uses_guc_submission(uc))
+	if (intel_uc_uses_guc_submission(uc))
 		intel_guc_submission_reset_finish(guc);
 }
 
@@ -688,10 +669,14 @@ void intel_uc_suspend(struct intel_uc *uc)
 	/* flush the GSC worker */
 	intel_gsc_uc_flush_work(&uc->gsc);
 
+	wake_up_all_tlb_invalidate(guc);
+
 	if (!intel_guc_is_ready(guc)) {
 		guc->interrupts.enabled = false;
 		return;
 	}
+
+	intel_guc_submission_flush_work(guc);
 
 	with_intel_runtime_pm(&uc_to_gt(uc)->i915->runtime_pm, wakeref) {
 		err = intel_guc_suspend(guc);
@@ -735,6 +720,11 @@ static int __uc_resume(struct intel_uc *uc, bool enable_communication)
 	}
 
 	intel_gsc_uc_resume(&uc->gsc);
+
+	if (intel_guc_tlb_invalidation_is_available(guc)) {
+		intel_guc_invalidate_tlb_engines(guc);
+		intel_guc_invalidate_tlb_guc(guc);
+	}
 
 	return 0;
 }

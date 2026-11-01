@@ -6,7 +6,6 @@
 #include <linux/err.h>
 #include <linux/init.h>
 #include <linux/io.h>
-#include <linux/mod_devicetable.h>
 #include <linux/module.h>
 #include <linux/pinctrl/pinctrl.h>
 #include <linux/platform_device.h>
@@ -252,6 +251,7 @@ static const struct of_device_id imx8ulp_pinctrl_of_match[] = {
 	{ .compatible = "fsl,imx8ulp-iomuxc1", },
 	{ /* sentinel */ }
 };
+MODULE_DEVICE_TABLE(of, imx8ulp_pinctrl_of_match);
 
 static int imx8ulp_pinctrl_probe(struct platform_device *pdev)
 {

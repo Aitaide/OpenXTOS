@@ -16,6 +16,8 @@
 #include <linux/blk-crypto-profile.h>
 #include <linux/blk-mq.h>
 #include <linux/devfreq.h>
+#include <linux/fault-inject.h>
+#include <linux/debugfs.h>
 #include <linux/msi.h>
 #include <linux/pm_runtime.h>
 #include <linux/dma-direction.h>
@@ -28,6 +30,7 @@
 
 #define UFSHCD "ufshcd"
 
+struct scsi_device;
 struct ufs_hba;
 
 enum dev_cmd_type {
@@ -71,11 +74,11 @@ enum ufs_event_type {
  * @done: UIC command completion
  */
 struct uic_command {
-	u32 command;
-	u32 argument1;
+	const u32 command;
+	const u32 argument1;
 	u32 argument2;
 	u32 argument3;
-	int cmd_active;
+	bool cmd_active;
 	struct completion done;
 };
 
@@ -158,19 +161,17 @@ struct ufs_pm_lvl_states {
  * @ucd_prdt_dma_addr: PRDT dma address for debug
  * @ucd_rsp_dma_addr: UPIU response dma address for debug
  * @ucd_req_dma_addr: UPIU request dma address for debug
- * @cmd: pointer to SCSI command
  * @scsi_status: SCSI status of the command
  * @command_type: SCSI, UFS, Query.
- * @task_tag: Task tag of the command
  * @lun: LUN of the command
  * @intr_cmd: Interrupt command (doesn't participate in interrupt aggregation)
+ * @req_abort_skip: skip request abort task flag
  * @issue_time_stamp: time stamp for debug purposes (CLOCK_MONOTONIC)
  * @issue_time_stamp_local_clock: time stamp for debug purposes (local_clock)
  * @compl_time_stamp: time stamp for statistics (CLOCK_MONOTONIC)
  * @compl_time_stamp_local_clock: time stamp for debug purposes (local_clock)
  * @crypto_key_slot: the key slot to use for inline crypto (-1 if none)
  * @data_unit_num: the data unit number for the first block for inline crypto
- * @req_abort_skip: skip request abort task flag
  */
 struct ufshcd_lrb {
 	struct utp_transfer_req_desc *utr_descriptor_ptr;
@@ -183,13 +184,12 @@ struct ufshcd_lrb {
 	dma_addr_t ucd_rsp_dma_addr;
 	dma_addr_t ucd_prdt_dma_addr;
 
-	struct scsi_cmnd *cmd;
 	int scsi_status;
 
 	int command_type;
-	int task_tag;
 	u8 lun; /* UPIU LUN id field is only 8-bit wide */
 	bool intr_cmd;
+	bool req_abort_skip;
 	ktime_t issue_time_stamp;
 	u64 issue_time_stamp_local_clock;
 	ktime_t compl_time_stamp;
@@ -198,8 +198,6 @@ struct ufshcd_lrb {
 	int crypto_key_slot;
 	u64 data_unit_num;
 #endif
-
-	bool req_abort_skip;
 };
 
 /**
@@ -213,8 +211,7 @@ struct ufs_query_req {
 };
 
 /**
- * struct ufs_query_resp - UPIU QUERY
- * @response: device response code
+ * struct ufs_query_res - UPIU QUERY
  * @upiu_res: query response data
  */
 struct ufs_query_res {
@@ -237,14 +234,14 @@ struct ufs_query {
  * struct ufs_dev_cmd - all assosiated fields with device management commands
  * @type: device management command type - Query, NOP OUT
  * @lock: lock to allow one command at a time
- * @complete: internal commands completion
  * @query: Device management query information
+ * @tag: tag of the reserved request in use
  */
 struct ufs_dev_cmd {
 	enum dev_cmd_type type;
 	struct mutex lock;
-	struct completion *complete;
 	struct ufs_query query;
+	u8 tag;
 };
 
 /**
@@ -290,11 +287,97 @@ struct ufs_pwr_mode_info {
 	struct ufs_pa_layer_attr info;
 };
 
+#define UFS_MAX_LANES	2
+
+/**
+ * struct tx_eqtr_iter - TX Equalization Training iterator
+ * @preshoot_bitmap: PreShoot bitmap
+ * @deemphasis_bitmap: DeEmphasis bitmap
+ * @preshoot: PreShoot value
+ * @deemphasis: DeEmphasis value
+ * @fom: Figure-of-Merit read out from RX_FOM
+ * @is_updated: Flag to indicate if updated since previous iteration
+ */
+struct tx_eqtr_iter {
+	unsigned long preshoot_bitmap;
+	unsigned long deemphasis_bitmap;
+	u8 preshoot;
+	u8 deemphasis;
+	u8 fom[UFS_MAX_LANES];
+	bool is_updated;
+};
+
+/**
+ * struct ufshcd_tx_eq_settings - TX Equalization settings
+ * @preshoot: PreShoot value
+ * @deemphasis: DeEmphasis value
+ * @fom_val: Figure-of-Merit value read out from RX_FOM (Bit[6:0])
+ * @precode_en: Flag to indicate whether need to enable pre-coding
+ */
+struct ufshcd_tx_eq_settings {
+	u8 preshoot;
+	u8 deemphasis;
+	u8 fom_val;
+	bool precode_en;
+};
+
+/**
+ * struct ufshcd_tx_eqtr_data - Data used during TX Equalization Training procedure
+ * @host: Optimal TX EQ settings identified for host TX Lanes during TX EQTR
+ * @device: Optimal TX EQ settings identified for device TX Lanes during TX EQTR
+ * @host_fom: Host TX EQTR FOM record
+ * @device_fom: Device TX EQTR FOM record
+ */
+struct ufshcd_tx_eqtr_data {
+	struct ufshcd_tx_eq_settings host[UFS_MAX_LANES];
+	struct ufshcd_tx_eq_settings device[UFS_MAX_LANES];
+	u8 host_fom[UFS_MAX_LANES][TX_HS_NUM_PRESHOOT][TX_HS_NUM_DEEMPHASIS];
+	u8 device_fom[UFS_MAX_LANES][TX_HS_NUM_PRESHOOT][TX_HS_NUM_DEEMPHASIS];
+};
+
+/**
+ * struct ufshcd_tx_eqtr_record - TX Equalization Training record
+ * @host_fom: Host TX EQTR FOM record
+ * @device_fom: Device TX EQTR FOM record
+ * @last_record_ts: Timestamp of the most recent TX EQTR record
+ * @last_record_index: Index of the most recent TX EQTR record
+ * @saved_adapt_eqtr: Saved Adaptation length setting for TX EQTR
+ */
+struct ufshcd_tx_eqtr_record {
+	u8 host_fom[UFS_MAX_LANES][TX_HS_NUM_PRESHOOT][TX_HS_NUM_DEEMPHASIS];
+	u8 device_fom[UFS_MAX_LANES][TX_HS_NUM_PRESHOOT][TX_HS_NUM_DEEMPHASIS];
+	ktime_t last_record_ts;
+	u16 last_record_index;
+	u16 saved_adapt_eqtr;
+};
+
+/**
+ * struct ufshcd_tx_eq_params - TX Equalization parameters structure
+ * @host: TX EQ settings for host TX Lanes
+ * @device: TX EQ settings for device TX Lanes
+ * @eqtr_record: Pointer to TX EQTR record
+ * @is_valid: True if parameter contains valid TX Equalization settings
+ * @is_applied: True if settings have been applied to UniPro of both sides
+ * @is_trained: True if parameters obtained from TX EQTR procedure
+ * @from_dt: True if settings are from Device Tree
+ */
+struct ufshcd_tx_eq_params {
+	struct ufshcd_tx_eq_settings host[UFS_MAX_LANES];
+	struct ufshcd_tx_eq_settings device[UFS_MAX_LANES];
+	struct ufshcd_tx_eqtr_record *eqtr_record;
+	bool is_valid;
+	bool is_applied;
+	bool is_trained;
+	bool from_dt;
+};
+
 /**
  * struct ufs_hba_variant_ops - variant specific callbacks
  * @name: variant name
  * @init: called when the driver is initialized
  * @exit: called to cleanup everything done in init
+ * @set_dma_mask: For setting another DMA mask than indicated by the 64AS
+ *	capability bit.
  * @get_ufs_hci_version: called to get UFS HCI version
  * @clk_scale_notify: notifies that clks are scaled up/down
  * @setup_clocks: called before touching any of the controller registers
@@ -302,6 +385,7 @@ struct ufs_pwr_mode_info {
  *                     variant specific Uni-Pro initialization.
  * @link_startup_notify: called before and after Link startup is carried out
  *                       to allow variant specific Uni-Pro initialization.
+ * @negotiate_pwr_mode: called to negotiate power mode.
  * @pwr_change_notify: called before and after a power mode change
  *			is carried out to allow vendor spesific capabilities
  *			to be set.
@@ -318,32 +402,45 @@ struct ufs_pwr_mode_info {
  * @phy_initialization: used to initialize phys
  * @device_reset: called to issue a reset pulse on the UFS device
  * @config_scaling_param: called to configure clock scaling parameters
- * @program_key: program or evict an inline encryption key
+ * @fill_crypto_prdt: initialize crypto-related fields in the PRDT
  * @event_notify: called to notify important events
- * @reinit_notify: called to notify reinit of UFSHCD during max gear switch
  * @mcq_config_resource: called to configure MCQ platform resources
- * @get_hba_mac: called to get vendor specific mac value, mandatory for mcq mode
+ * @get_hba_mac: reports maximum number of outstanding commands supported by
+ *	the controller. Should be implemented for UFSHCI 4.0 or later
+ *	controllers that are not compliant with the UFSHCI 4.0 specification.
  * @op_runtime_config: called to config Operation and runtime regs Pointers
  * @get_outstanding_cqs: called to get outstanding completion queues
  * @config_esi: called to config Event Specific Interrupt
+ * @config_scsi_dev: called to configure SCSI device parameters
+ * @freq_to_gear_speed: called to map clock frequency to the max supported gear speed
+ * @apply_tx_eqtr_settings: called to apply settings for TX Equalization
+ *	Training settings.
+ * @get_rx_fom: called to get Figure of Merit (FOM) value.
+ * @tx_eqtr_notify: called before and after TX Equalization Training procedure
+ *	to allow platform vendor specific configs to take place.
+ * @get_hba_nortt: called to get maximum number of outstanding RTTs supported by
+ *	the controller.
  */
 struct ufs_hba_variant_ops {
 	const char *name;
 	int	(*init)(struct ufs_hba *);
 	void    (*exit)(struct ufs_hba *);
 	u32	(*get_ufs_hci_version)(struct ufs_hba *);
-	int	(*clk_scale_notify)(struct ufs_hba *, bool,
-				    enum ufs_notify_change_status);
+	int	(*set_dma_mask)(struct ufs_hba *);
+	int	(*clk_scale_notify)(struct ufs_hba *, bool, unsigned long,
+				enum ufs_notify_change_status);
 	int	(*setup_clocks)(struct ufs_hba *, bool,
 				enum ufs_notify_change_status);
 	int	(*hce_enable_notify)(struct ufs_hba *,
 				     enum ufs_notify_change_status);
 	int	(*link_startup_notify)(struct ufs_hba *,
 				       enum ufs_notify_change_status);
-	int	(*pwr_change_notify)(struct ufs_hba *,
-					enum ufs_notify_change_status status,
-					struct ufs_pa_layer_attr *,
-					struct ufs_pa_layer_attr *);
+	int	(*negotiate_pwr_mode)(struct ufs_hba *hba,
+				      const struct ufs_pa_layer_attr *desired_pwr_mode,
+				      struct ufs_pa_layer_attr *final_params);
+	int	(*pwr_change_notify)(struct ufs_hba *hba,
+				     enum ufs_notify_change_status status,
+				     struct ufs_pa_layer_attr *final_params);
 	void	(*setup_xfer_req)(struct ufs_hba *hba, int tag,
 				  bool is_scsi_cmd);
 	void	(*setup_task_mgmt)(struct ufs_hba *, int, u8);
@@ -360,17 +457,31 @@ struct ufs_hba_variant_ops {
 	void	(*config_scaling_param)(struct ufs_hba *hba,
 				struct devfreq_dev_profile *profile,
 				struct devfreq_simple_ondemand_data *data);
-	int	(*program_key)(struct ufs_hba *hba,
-			       const union ufs_crypto_cfg_entry *cfg, int slot);
+	int	(*fill_crypto_prdt)(struct ufs_hba *hba,
+				    const struct bio_crypt_ctx *crypt_ctx,
+				    void *prdt, unsigned int num_segments);
 	void	(*event_notify)(struct ufs_hba *hba,
 				enum ufs_event_type evt, void *data);
-	void	(*reinit_notify)(struct ufs_hba *);
 	int	(*mcq_config_resource)(struct ufs_hba *hba);
 	int	(*get_hba_mac)(struct ufs_hba *hba);
 	int	(*op_runtime_config)(struct ufs_hba *hba);
 	int	(*get_outstanding_cqs)(struct ufs_hba *hba,
 				       unsigned long *ocqs);
 	int	(*config_esi)(struct ufs_hba *hba);
+	void	(*config_scsi_dev)(struct scsi_device *sdev);
+	u32	(*freq_to_gear_speed)(struct ufs_hba *hba, unsigned long freq);
+	int	(*get_rx_fom)(struct ufs_hba *hba,
+			      struct ufs_pa_layer_attr *pwr_mode,
+			      struct tx_eqtr_iter *h_iter,
+			      struct tx_eqtr_iter *d_iter);
+	int	(*apply_tx_eqtr_settings)(struct ufs_hba *hba,
+					  struct ufs_pa_layer_attr *pwr_mode,
+					  struct tx_eqtr_iter *h_iter,
+					  struct tx_eqtr_iter *d_iter);
+	int	(*tx_eqtr_notify)(struct ufs_hba *hba,
+				  enum ufs_notify_change_status status,
+				  struct ufs_pa_layer_attr *pwr_mode);
+	int	(*get_hba_nortt)(struct ufs_hba *hba);
 };
 
 /* clock gating state  */
@@ -387,6 +498,9 @@ enum clk_gating_state {
  * delay_ms
  * @ungate_work: worker to turn on clocks that will be used in case of
  * interrupt context
+ * @clk_gating_workq: workqueue for clock gating work.
+ * @lock: serialize access to some struct ufs_clk_gating members. An outer lock
+ * relative to the host lock
  * @state: the current clocks state
  * @delay_ms: gating delay in ms
  * @is_suspended: clk gating is suspended when set to 1 which can be used
@@ -397,11 +511,14 @@ enum clk_gating_state {
  * @is_initialized: Indicates whether clock gating is initialized or not
  * @active_reqs: number of requests that are pending and should be waited for
  * completion before gating clocks.
- * @clk_gating_workq: workqueue for clock gating work.
  */
 struct ufs_clk_gating {
 	struct delayed_work gate_work;
 	struct work_struct ungate_work;
+	struct workqueue_struct *clk_gating_workq;
+
+	spinlock_t lock;
+
 	enum clk_gating_state state;
 	unsigned long delay_ms;
 	bool is_suspended;
@@ -410,11 +527,14 @@ struct ufs_clk_gating {
 	bool is_enabled;
 	bool is_initialized;
 	int active_reqs;
-	struct workqueue_struct *clk_gating_workq;
 };
 
 /**
  * struct ufs_clk_scaling - UFS clock scaling related data
+ * @workq: workqueue to schedule devfreq suspend/resume work
+ * @suspend_work: worker to suspend devfreq
+ * @resume_work: worker to resume devfreq
+ * @lock: serialize access to some struct ufs_clk_scaling members
  * @active_reqs: number of requests that are pending. If this is zero when
  * devfreq ->target() function is called then schedule "suspend_work" to
  * suspend devfreq.
@@ -424,10 +544,10 @@ struct ufs_clk_gating {
  * @enable_attr: sysfs attribute to enable/disable clock scaling
  * @saved_pwr_info: UFS power mode may also be changed during scaling and this
  * one keeps track of previous power mode.
- * @workq: workqueue to schedule devfreq suspend/resume work
- * @suspend_work: worker to suspend devfreq
- * @resume_work: worker to resume devfreq
+ * @target_freq: frequency requested by devfreq framework
  * @min_gear: lowest HS gear to scale down to
+ * @wb_gear: enable Write Booster when HS gear scales above or equal to it, else
+ *		disable Write Booster
  * @is_enabled: tracks if scaling is currently enabled or not, controlled by
  *		clkscale_enable sysfs node
  * @is_allowed: tracks if scaling is currently allowed or not, used to block
@@ -435,23 +555,30 @@ struct ufs_clk_gating {
  * @is_initialized: Indicates whether clock scaling is initialized or not
  * @is_busy_started: tracks if busy period has started or not
  * @is_suspended: tracks if devfreq is suspended or not
+ * @suspend_on_no_request: suspend clock scaling only when no request
  */
 struct ufs_clk_scaling {
+	struct workqueue_struct *workq;
+	struct work_struct suspend_work;
+	struct work_struct resume_work;
+
+	spinlock_t lock;
+
 	int active_reqs;
 	unsigned long tot_busy_t;
 	ktime_t window_start_t;
 	ktime_t busy_start_t;
 	struct device_attribute enable_attr;
 	struct ufs_pa_layer_attr saved_pwr_info;
-	struct workqueue_struct *workq;
-	struct work_struct suspend_work;
-	struct work_struct resume_work;
+	unsigned long target_freq;
 	u32 min_gear;
+	u32 wb_gear;
 	bool is_enabled;
 	bool is_allowed;
 	bool is_initialized;
 	bool is_busy_started;
 	bool is_suspended;
+	bool suspend_on_no_request;
 };
 
 #define UFS_EVENT_HIST_LENGTH 8
@@ -471,8 +598,6 @@ struct ufs_event_hist {
 
 /**
  * struct ufs_stats - keeps usage/err statistics
- * @last_intr_status: record the last interrupt status.
- * @last_intr_ts: record the last interrupt timestamp.
  * @hibern8_exit_cnt: Counter to keep track of number of exits,
  *		reset this after link-startup.
  * @last_hibern8_exit_tstamp: Set time after the hibern8 exit.
@@ -480,9 +605,6 @@ struct ufs_event_hist {
  * @event: array with event history.
  */
 struct ufs_stats {
-	u32 last_intr_status;
-	u64 last_intr_ts;
-
 	u32 hibern8_exit_cnt;
 	u64 last_hibern8_exit_tstamp;
 	struct ufs_event_hist event[UFS_EVT_CNT];
@@ -507,6 +629,17 @@ enum ufshcd_state {
 	UFSHCD_STATE_EH_SCHEDULED_NON_FATAL,
 	UFSHCD_STATE_EH_SCHEDULED_FATAL,
 	UFSHCD_STATE_ERROR,
+};
+
+/**
+ * enum ufshcd_pmc_policy - Power Mode change policy
+ * @UFSHCD_PMC_POLICY_DONT_FORCE: Do not force a Power Mode change.
+ * @UFSHCD_PMC_POLICY_FORCE: Force a Power Mode change even if current Power
+ *	Mode is same as target Power Mode.
+ */
+enum ufshcd_pmc_policy {
+	UFSHCD_PMC_POLICY_DONT_FORCE,
+	UFSHCD_PMC_POLICY_FORCE,
 };
 
 enum ufshcd_quirks {
@@ -597,11 +730,6 @@ enum ufshcd_quirks {
 	UFSHCD_QUIRK_SKIP_DEF_UNIPRO_TIMEOUT_SETTING = 1 << 13,
 
 	/*
-	 * Align DMA SG entries on a 4 KiB boundary.
-	 */
-	UFSHCD_QUIRK_4KB_DMA_ALIGNMENT			= 1 << 14,
-
-	/*
 	 * This quirk needs to be enabled if the host controller does not
 	 * support UIC command
 	 */
@@ -612,12 +740,6 @@ enum ufshcd_quirks {
 	 * support physical host configuration.
 	 */
 	UFSHCD_QUIRK_SKIP_PH_CONFIGURATION		= 1 << 16,
-
-	/*
-	 * This quirk needs to be enabled if the host controller has
-	 * 64-bit addressing supported capability but it doesn't work.
-	 */
-	UFSHCD_QUIRK_BROKEN_64BIT_ADDRESS		= 1 << 17,
 
 	/*
 	 * This quirk needs to be enabled if the host controller has
@@ -643,6 +765,58 @@ enum ufshcd_quirks {
 	 * thus need this quirk to skip related flow.
 	 */
 	UFSHCD_QUIRK_MCQ_BROKEN_RTC			= 1 << 21,
+
+	/*
+	 * This quirk needs to be enabled if the host controller supports inline
+	 * encryption but it needs to initialize the crypto capabilities in a
+	 * nonstandard way and/or needs to override blk_crypto_ll_ops.  If
+	 * enabled, the standard code won't initialize the blk_crypto_profile;
+	 * ufs_hba_variant_ops::init() must do it instead.
+	 */
+	UFSHCD_QUIRK_CUSTOM_CRYPTO_PROFILE		= 1 << 22,
+
+	/*
+	 * This quirk needs to be enabled if the host controller supports inline
+	 * encryption but does not support the CRYPTO_GENERAL_ENABLE bit, i.e.
+	 * host controller initialization fails if that bit is set.
+	 */
+	UFSHCD_QUIRK_BROKEN_CRYPTO_ENABLE		= 1 << 23,
+
+	/*
+	 * This quirk needs to be enabled if the host controller driver copies
+	 * cryptographic keys into the PRDT in order to send them to hardware,
+	 * and therefore the PRDT should be zeroized after each request (as per
+	 * the standard best practice for managing keys).
+	 */
+	UFSHCD_QUIRK_KEYS_IN_PRDT			= 1 << 24,
+
+	/*
+	 * This quirk indicates that the controller reports the value 1 (not
+	 * supported) in the Legacy Single DoorBell Support (LSDBS) bit of the
+	 * Controller Capabilities register although it supports the legacy
+	 * single doorbell mode.
+	 */
+	UFSHCD_QUIRK_BROKEN_LSDBS_CAP			= 1 << 25,
+
+	/*
+	 * This quirk indicates that DME_LINKSTARTUP should not be issued a 2nd
+	 * time (refer link_startup_again) after the 1st time was successful,
+	 * because it causes link startup to become unreliable.
+	 */
+	UFSHCD_QUIRK_PERFORM_LINK_STARTUP_ONCE		= 1 << 26,
+
+	/*
+	 * On some platforms, the VCC regulator has a slow ramp-up time. Add a
+	 * delay after enabling VCC to ensure it's stable.
+	 */
+	UFSHCD_QUIRK_VCC_ON_DELAY			= 1 << 27,
+
+	/*
+	 * This quirk indicates that Host supports TX Equalization Training
+	 * (EQTR) using Adapt L0L1L2L3 length which is larger than what is
+	 * allowed by M-PHY spec ver 6.0.
+	 */
+	UFSHCD_QUIRK_EXTENDED_TX_EQTR_ADAPT_LENGTH_L0L1L2L3	= 1 << 28,
 };
 
 enum ufshcd_caps {
@@ -720,6 +894,13 @@ enum ufshcd_caps {
 	 * WriteBooster when scaling the clock down.
 	 */
 	UFSHCD_CAP_WB_WITH_CLK_SCALING			= 1 << 12,
+
+	/*
+	 * This capability allows the host controller driver to apply TX
+	 * Equalization settings discovered from UFS attributes, variant
+	 * specific operations and TX Equaliztion Training procedure.
+	 */
+	UFSHCD_CAP_TX_EQUALIZATION			= 1 << 13,
 };
 
 struct ufs_hba_variant_params {
@@ -749,30 +930,6 @@ struct ufs_hba_monitor {
 };
 
 /**
- * struct ufshcd_res_info_t - MCQ related resource regions
- *
- * @name: resource name
- * @resource: pointer to resource region
- * @base: register base address
- */
-struct ufshcd_res_info {
-	const char *name;
-	struct resource *resource;
-	void __iomem *base;
-};
-
-enum ufshcd_res {
-	RES_UFS,
-	RES_MCQ,
-	RES_MCQ_SQD,
-	RES_MCQ_SQIS,
-	RES_MCQ_CQD,
-	RES_MCQ_CQIS,
-	RES_MCQ_VS,
-	RES_MAX,
-};
-
-/**
  * struct ufshcd_mcq_opr_info_t - Operation and Runtime registers
  *
  * @offset: Doorbell Address Offset
@@ -799,28 +956,33 @@ enum ufshcd_mcq_opr {
  * @ucdl_base_addr: UFS Command Descriptor base address
  * @utrdl_base_addr: UTP Transfer Request Descriptor base address
  * @utmrdl_base_addr: UTP Task Management Descriptor base address
+ * @devman_ucd_base_addr: UFS Command Descriptor base address for the reserved
+ *	device management tag (has a larger response area)
  * @ucdl_dma_addr: UFS Command Descriptor DMA address
  * @utrdl_dma_addr: UTRDL DMA address
  * @utmrdl_dma_addr: UTMRDL DMA address
+ * @devman_ucd_dma_addr: UFS Command Descriptor DMA address for the reserved
+ *	device management tag
  * @host: Scsi_Host instance of the driver
  * @dev: device handle
  * @ufs_device_wlun: WLUN that controls the entire UFS device.
+ * @ufs_rpmb_wlun: RPMB WLUN SCSI device
  * @hwmon_device: device instance registered with the hwmon core.
  * @curr_dev_pwr_mode: active UFS device power mode.
  * @uic_link_state: active state of the link to the UFS device.
  * @rpm_lvl: desired UFS power management level during runtime PM.
  * @spm_lvl: desired UFS power management level during system PM.
+ * @pm_lvl_min: minimum supported power management level.
  * @pm_op_in_progress: whether or not a PM operation is in progress.
  * @ahit: value of Auto-Hibernate Idle Timer register.
- * @lrb: local reference block
  * @outstanding_tasks: Bits representing outstanding task requests
  * @outstanding_lock: Protects @outstanding_reqs.
  * @outstanding_reqs: Bits representing outstanding transfer requests
  * @capabilities: UFS Controller Capabilities
  * @mcq_capabilities: UFS Multi Circular Queue capabilities
  * @nutrs: Transfer Request Queue depth supported by controller
+ * @nortt: Max outstanding RTTs supported by controller
  * @nutmrs: Task Management Queue depth supported by controller
- * @reserved_slot: Used to submit device commands. Protected by @dev_cmd.lock.
  * @ufs_version: UFS Version to which controller complies
  * @vops: pointer to variant specific operations
  * @vps: pointer to variant specific parameters
@@ -834,9 +996,10 @@ enum ufshcd_mcq_opr {
  * @tmf_tag_set: TMF tag set.
  * @tmf_queue: Used to allocate TMF tags.
  * @tmf_rqs: array with pointers to TMF requests while these are in progress.
- * @active_uic_cmd: handle of active UIC command
- * @uic_cmd_mutex: mutex for UIC command
- * @uic_async_done: completion used during UIC processing
+ * @active_uic_cmd: pointer to active UIC command.
+ * @uic_cmd_mutex: mutex used for serializing UIC command processing.
+ * @uic_async_done: completion used to wait for power mode or hibernation state
+ *	changes.
  * @ufshcd_state: UFSHCD state
  * @eh_flags: Error handling flags
  * @intr_mask: Interrupt Mask Bits
@@ -856,7 +1019,6 @@ enum ufshcd_mcq_opr {
  * @saved_uic_err: sticky UIC error mask
  * @ufs_stats: various error counters
  * @force_reset: flag to force eh_work perform a full reset
- * @force_pmc: flag to force a power mode change
  * @silence_err_logs: flag to silence error logs
  * @dev_cmd: ufs device management command information
  * @last_dme_cmd_tstamp: time stamp of the last completed DME command
@@ -865,6 +1027,7 @@ enum ufshcd_mcq_opr {
  * @auto_bkops_enabled: to track whether bkops is enabled in device
  * @vreg_info: UFS device voltage regulator information
  * @clk_list_head: UFS host controller clocks list node head
+ * @use_pm_opp: Indicates whether OPP based scaling is used or not
  * @req_abort_count: number of times ufshcd_abort() has been called
  * @lanes_per_direction: number of lanes per data direction between the UFS
  *	controller and the UFS device.
@@ -874,16 +1037,12 @@ enum ufshcd_mcq_opr {
  * @caps: bitmask with information about UFS controller capabilities
  * @devfreq: frequency scaling information owned by the devfreq core
  * @clk_scaling: frequency scaling information owned by the UFS driver
- * @system_suspending: system suspend has been started and system resume has
- *	not yet finished.
  * @is_sys_suspended: UFS device has been suspended because of system suspend
  * @urgent_bkops_lvl: keeps track of urgent bkops level for device
  * @is_urgent_bkops_lvl_checked: keeps track if the urgent bkops level for
  *  device is known or not.
  * @wb_mutex: used to serialize devfreq and sysfs write booster toggling
  * @clk_scaling_lock: used to serialize device commands and clock scaling
- * @desc_size: descriptor sizes reported by device
- * @scsi_block_reqs_cnt: reference counting for scsi block requests
  * @bsg_dev: struct device associated with the BSG queue
  * @bsg_queue: BSG queue associated with the UFS controller
  * @rpm_dev_flush_recheck_work: used to suspend from RPM (runtime power
@@ -898,19 +1057,45 @@ enum ufshcd_mcq_opr {
  * @debugfs_ee_work: used to restore ee_ctrl_mask after a delay
  * @debugfs_ee_rate_limit_ms: user configurable delay after which to restore
  *	ee_ctrl_mask
+ * @trigger_eh_attr: fault attributes for the fault injection trigger EH
+ * @timeout_attr: fault attributes for the timeout fault injection trigger
  * @luns_avail: number of regular and well known LUNs supported by the UFS
  *	device
  * @nr_hw_queues: number of hardware queues configured
  * @nr_queues: number of Queues of different queue types
  * @complete_put: whether or not to call ufshcd_rpm_put() from inside
  *	ufshcd_resume_complete()
- * @ext_iid_sup: is EXT_IID is supported by UFSHC
+ * @scsi_host_added: indicates that scsi_add_host() has been called
  * @mcq_sup: is mcq supported by UFSHC
+ * @lsdb_sup: LSDBS capability
  * @mcq_enabled: is mcq ready to accept requests
- * @res: array of resource info of MCQ registers
+ * @mcq_esi_enabled: is mcq ESI configured
  * @mcq_base: Multi circular queue registers base address
  * @uhq: array of supported hardware queues
- * @dev_cmd_queue: Queue for issuing device management commands
+ * @mcq_opr: MCQ operation and runtime registers
+ * @ufs_rtc_update_work: A work for UFS RTC periodic update
+ * @pm_qos_req: PM QoS request handle
+ * @pm_qos_enabled: flag to check if pm qos is enabled
+ * @pm_qos_mutex: synchronizes PM QoS request and status updates
+ * @critical_health_count: count of critical health exceptions
+ * @dev_lvl_exception_count: count of device level exceptions since last reset
+ * @dev_lvl_exception_id: vendor specific information about the device level exception event.
+ * @dme_qos_notification: Bitfield of pending DME Quality of Service (QoS)
+ *	events. Bits[3:1] reflect the corresponding bits of UIC DME Error Code
+ *	field within the Host Controller's UECDME register. Bit[0] is a flag
+ *	indicating that the DME QoS Monitor has been reset by the host.
+ * @dme_qos_sysfs_handle: handle for 'dme_qos_notification' sysfs entry
+ * @vcc_off_delay_us: length of delay after VCC is powered off
+ * @rpmbs: list of OP-TEE RPMB devices (one per RPMB region)
+ * @host_preshoot_cap: a bitfield to indicate supported PreShoot dBs of host's TX lanes, cache of
+ *	host M-PHY TX_HS_PreShoot_Setting_Capability Attribute (ID 0x15)
+ * @host_deemphasis_cap: a bitfield to indicate supported DeEmphasis dBs of host's TX lanes, cache
+ *	of host M-PHY TX_HS_DeEmphasis_Setting_Capability Attribute (ID 0x12)
+ * @device_preshoot_cap: a bitfield to indicate supported PreShoot dBs of device's TX lanes, cache
+ *	of device M-PHY TX_HS_PreShoot_Setting_Capability Attribute (ID 0x15)
+ * @device_deemphasis_cap: a bitfield to indicate supported DeEmphasis dBs of device's TX lanes,
+ *	cache of device M-PHY TX_HS_DeEmphasis_Setting_Capability Attribute (ID 0x12)
+ * @tx_eq_params: TX Equalization settings
  */
 struct ufs_hba {
 	void __iomem *mmio_base;
@@ -919,15 +1104,18 @@ struct ufs_hba {
 	struct utp_transfer_cmd_desc *ucdl_base_addr;
 	struct utp_transfer_req_desc *utrdl_base_addr;
 	struct utp_task_req_desc *utmrdl_base_addr;
+	struct utp_devman_cmd_desc *devman_ucd_base_addr;
 
 	/* DMA memory reference */
 	dma_addr_t ucdl_dma_addr;
 	dma_addr_t utrdl_dma_addr;
 	dma_addr_t utmrdl_dma_addr;
+	dma_addr_t devman_ucd_dma_addr;
 
 	struct Scsi_Host *host;
 	struct device *dev;
 	struct scsi_device *ufs_device_wlun;
+	struct scsi_device *ufs_rpmb_wlun;
 
 #ifdef CONFIG_SCSI_UFS_HWMON
 	struct device *hwmon_device;
@@ -939,12 +1127,11 @@ struct ufs_hba {
 	enum ufs_pm_level rpm_lvl;
 	/* Desired UFS power management level during system PM */
 	enum ufs_pm_level spm_lvl;
+	enum ufs_pm_level pm_lvl_min;
 	int pm_op_in_progress;
 
 	/* Auto-Hibernate Idle Timer register value */
 	u32 ahit;
-
-	struct ufshcd_lrb *lrb;
 
 	unsigned long outstanding_tasks;
 	spinlock_t outstanding_lock;
@@ -952,9 +1139,9 @@ struct ufs_hba {
 
 	u32 capabilities;
 	int nutrs;
+	int nortt;
 	u32 mcq_capabilities;
 	int nutmrs;
-	u32 reserved_slot;
 	u32 ufs_version;
 	const struct ufs_hba_variant_ops *vops;
 	struct ufs_hba_variant_params *vps;
@@ -1002,7 +1189,6 @@ struct ufs_hba {
 	u32 saved_uic_err;
 	struct ufs_stats ufs_stats;
 	bool force_reset;
-	bool force_pmc;
 	bool silence_err_logs;
 
 	/* Device management request data */
@@ -1015,6 +1201,7 @@ struct ufs_hba {
 	bool auto_bkops_enabled;
 	struct ufs_vreg_info vreg_info;
 	struct list_head clk_list_head;
+	bool use_pm_opp;
 
 	/* Number of requests aborts */
 	int req_abort_count;
@@ -1030,7 +1217,6 @@ struct ufs_hba {
 
 	struct devfreq *devfreq;
 	struct ufs_clk_scaling clk_scaling;
-	bool system_suspending;
 	bool is_sys_suspended;
 
 	enum bkops_status urgent_bkops_lvl;
@@ -1038,7 +1224,6 @@ struct ufs_hba {
 
 	struct mutex wb_mutex;
 	struct rw_semaphore clk_scaling_lock;
-	atomic_t scsi_block_reqs_cnt;
 
 	struct device		bsg_dev;
 	struct request_queue	*bsg_queue;
@@ -1057,19 +1242,44 @@ struct ufs_hba {
 	struct delayed_work debugfs_ee_work;
 	u32 debugfs_ee_rate_limit_ms;
 #endif
+#ifdef CONFIG_SCSI_UFS_FAULT_INJECTION
+	struct fault_attr trigger_eh_attr;
+	struct fault_attr timeout_attr;
+#endif
 	u32 luns_avail;
 	unsigned int nr_hw_queues;
 	unsigned int nr_queues[HCTX_MAX_TYPES];
 	bool complete_put;
-	bool ext_iid_sup;
 	bool scsi_host_added;
 	bool mcq_sup;
+	bool lsdb_sup;
 	bool mcq_enabled;
-	struct ufshcd_res_info res[RES_MAX];
+	bool mcq_esi_enabled;
 	void __iomem *mcq_base;
 	struct ufs_hw_queue *uhq;
-	struct ufs_hw_queue *dev_cmd_queue;
 	struct ufshcd_mcq_opr_info_t mcq_opr[OPR_MAX];
+
+	struct delayed_work ufs_rtc_update_work;
+	struct pm_qos_request pm_qos_req;
+	bool pm_qos_enabled;
+	/* synchronizes PM QoS request and status updates */
+	struct mutex pm_qos_mutex;
+
+	int critical_health_count;
+	atomic_t dev_lvl_exception_count;
+	u64 dev_lvl_exception_id;
+
+	atomic_t dme_qos_notification;
+	struct kernfs_node *dme_qos_sysfs_handle;
+
+	u32 vcc_off_delay_us;
+	struct list_head rpmbs;
+
+	u8 host_preshoot_cap;
+	u8 host_deemphasis_cap;
+	u8 device_preshoot_cap;
+	u8 device_deemphasis_cap;
+	struct ufshcd_tx_eq_params tx_eq_params[UFS_HS_GEAR_MAX];
 };
 
 /**
@@ -1084,7 +1294,7 @@ struct ufs_hba {
  * @cqe_dma_addr: completion queue dma address
  * @max_entries: max number of slots in this hardware queue
  * @id: hardware queue ID
- * @sq_tp_slot: current slot to which SQ tail pointer is pointing
+ * @sq_tail_slot: current slot to which SQ tail pointer is pointing
  * @sq_lock: serialize submission queue access
  * @cq_tail_slot: current slot to which CQ tail pointer is pointing
  * @cq_head_slot: current slot to which CQ head pointer is pointing
@@ -1112,9 +1322,17 @@ struct ufs_hw_queue {
 	struct mutex sq_mutex;
 };
 
-static inline bool is_mcq_enabled(struct ufs_hba *hba)
+#define MCQ_QCFG_SIZE		0x40
+
+static inline unsigned int ufshcd_mcq_opr_offset(struct ufs_hba *hba,
+		enum ufshcd_mcq_opr opr, int idx)
 {
-	return hba->mcq_enabled;
+	return hba->mcq_opr[opr].offset + hba->mcq_opr[opr].stride * idx;
+}
+
+static inline unsigned int ufshcd_mcq_cfg_offset(unsigned int reg, int idx)
+{
+	return reg + MCQ_QCFG_SIZE * idx;
 }
 
 #ifdef CONFIG_SCSI_UFS_VARIABLE_SG_ENTRY_SIZE
@@ -1138,9 +1356,29 @@ static inline size_t ufshcd_sg_entry_size(const struct ufs_hba *hba)
 	({ (void)(hba); BUILD_BUG_ON(sg_entry_size != sizeof(struct ufshcd_sg_entry)); })
 #endif
 
+#ifdef CONFIG_SCSI_UFS_CRYPTO
+static inline struct ufs_hba *
+ufs_hba_from_crypto_profile(struct blk_crypto_profile *profile)
+{
+	return container_of(profile, struct ufs_hba, crypto_profile);
+}
+#endif
+
 static inline size_t ufshcd_get_ucd_size(const struct ufs_hba *hba)
 {
 	return sizeof(struct utp_transfer_cmd_desc) + SG_ALL * ufshcd_sg_entry_size(hba);
+}
+
+/*
+ * Two entries should be enough for the largest devman PRDT transfer (4 KiB),
+ * like advanced RPMB.
+ */
+#define UFSHCD_DEVMAN_SG_ENTRIES	2
+
+static inline size_t ufshcd_get_devman_ucd_size(const struct ufs_hba *hba)
+{
+	return sizeof(struct utp_devman_cmd_desc) +
+		UFSHCD_DEVMAN_SG_ENTRIES * ufshcd_sg_entry_size(hba);
 }
 
 /* Returns true if clocks can be gated. Otherwise false */
@@ -1198,6 +1436,13 @@ static inline bool ufshcd_enable_wb_if_scaling_up(struct ufs_hba *hba)
 	return hba->caps & UFSHCD_CAP_WB_WITH_CLK_SCALING;
 }
 
+static inline bool ufshcd_is_tx_eq_supported(struct ufs_hba *hba)
+{
+	return hba->caps & UFSHCD_CAP_TX_EQUALIZATION &&
+	       hba->ufs_version >= ufshci_version(5, 0) &&
+	       hba->dev_info.wspecversion >= 0x500;
+}
+
 #define ufsmcq_writel(hba, val, reg)	\
 	writel((val), (hba)->mcq_base + (reg))
 #define ufsmcq_readl(hba, reg)	\
@@ -1212,6 +1457,18 @@ static inline bool ufshcd_enable_wb_if_scaling_up(struct ufs_hba *hba)
 	writel((val), (hba)->mmio_base + (reg))
 #define ufshcd_readl(hba, reg)	\
 	readl((hba)->mmio_base + (reg))
+
+static inline const char *ufs_hs_rate_to_str(enum ufs_hs_gear_rate rate)
+{
+	switch (rate) {
+	case PA_HS_MODE_A:
+		return "A";
+	case PA_HS_MODE_B:
+		return "B";
+	default:
+		return "Unknown";
+	}
+}
 
 /**
  * ufshcd_rmwl - perform read/modify/write for a controller register
@@ -1230,8 +1487,9 @@ static inline void ufshcd_rmwl(struct ufs_hba *hba, u32 mask, u32 val, u32 reg)
 	ufshcd_writel(hba, tmp, reg);
 }
 
+void ufshcd_enable_irq(struct ufs_hba *hba);
+void ufshcd_disable_irq(struct ufs_hba *hba);
 int ufshcd_alloc_host(struct device *, struct ufs_hba **);
-void ufshcd_dealloc_host(struct ufs_hba *);
 int ufshcd_hba_enable(struct ufs_hba *hba);
 int ufshcd_init(struct ufs_hba *, void __iomem *, unsigned int);
 int ufshcd_link_recovery(struct ufs_hba *hba);
@@ -1245,14 +1503,19 @@ void ufshcd_update_evt_hist(struct ufs_hba *hba, u32 id, u32 val);
 void ufshcd_hba_stop(struct ufs_hba *hba);
 void ufshcd_schedule_eh_work(struct ufs_hba *hba);
 void ufshcd_mcq_config_mac(struct ufs_hba *hba, u32 max_active_cmds);
+unsigned int ufshcd_mcq_queue_cfg_addr(struct ufs_hba *hba);
 u32 ufshcd_mcq_read_cqis(struct ufs_hba *hba, int i);
 void ufshcd_mcq_write_cqis(struct ufs_hba *hba, u32 val, int i);
 unsigned long ufshcd_mcq_poll_cqe_lock(struct ufs_hba *hba,
 					 struct ufs_hw_queue *hwq);
 void ufshcd_mcq_make_queues_operational(struct ufs_hba *hba);
+void ufshcd_mcq_enable(struct ufs_hba *hba);
 void ufshcd_mcq_enable_esi(struct ufs_hba *hba);
 void ufshcd_mcq_config_esi(struct ufs_hba *hba, struct msi_msg *msg);
 
+int ufshcd_opp_config_clks(struct device *dev, struct opp_table *opp_table,
+			   struct dev_pm_opp *opp, void *data,
+			   bool scaling_down);
 /**
  * ufshcd_set_variant - set variant specific data to the hba
  * @hba: per adapter instance
@@ -1267,6 +1530,8 @@ static inline void ufshcd_set_variant(struct ufs_hba *hba, void *variant)
 /**
  * ufshcd_get_variant - get variant specific data from the hba
  * @hba: per adapter instance
+ *
+ * Returns: pointer to the hba's private data area
  */
 static inline void *ufshcd_get_variant(struct ufs_hba *hba)
 {
@@ -1274,18 +1539,16 @@ static inline void *ufshcd_get_variant(struct ufs_hba *hba)
 	return hba->priv;
 }
 
-#ifdef CONFIG_PM
 extern int ufshcd_runtime_suspend(struct device *dev);
 extern int ufshcd_runtime_resume(struct device *dev);
-#endif
-#ifdef CONFIG_PM_SLEEP
 extern int ufshcd_system_suspend(struct device *dev);
 extern int ufshcd_system_resume(struct device *dev);
 extern int ufshcd_system_freeze(struct device *dev);
 extern int ufshcd_system_thaw(struct device *dev);
 extern int ufshcd_system_restore(struct device *dev);
-#endif
 
+extern int ufshcd_dme_reset(struct ufs_hba *hba);
+extern int ufshcd_dme_enable(struct ufs_hba *hba);
 extern int ufshcd_dme_configure_adapt(struct ufs_hba *hba,
 				      int agreed_gear,
 				      int adapt_val);
@@ -1293,9 +1556,16 @@ extern int ufshcd_dme_set_attr(struct ufs_hba *hba, u32 attr_sel,
 			       u8 attr_set, u32 mib_val, u8 peer);
 extern int ufshcd_dme_get_attr(struct ufs_hba *hba, u32 attr_sel,
 			       u32 *mib_val, u8 peer);
+extern int ufshcd_change_power_mode(struct ufs_hba *hba,
+				    struct ufs_pa_layer_attr *pwr_mode,
+				    enum ufshcd_pmc_policy pmc_policy);
 extern int ufshcd_config_pwr_mode(struct ufs_hba *hba,
-			struct ufs_pa_layer_attr *desired_pwr_mode);
+				  struct ufs_pa_layer_attr *desired_pwr_mode,
+				  enum ufshcd_pmc_policy pmc_policy);
 extern int ufshcd_uic_change_pwr_mode(struct ufs_hba *hba, u8 mode);
+extern int ufshcd_apply_tx_eq_settings(struct ufs_hba *hba,
+				       struct ufshcd_tx_eq_params *params,
+				       u32 gear);
 
 /* UIC command interfaces for DME primitives */
 #define DME_LOCAL	0
@@ -1343,7 +1613,7 @@ static inline int ufshcd_dme_peer_get(struct ufs_hba *hba,
 	return ufshcd_dme_get_attr(hba, attr_sel, mib_val, DME_PEER);
 }
 
-static inline bool ufshcd_is_hs_mode(struct ufs_pa_layer_attr *pwr_info)
+static inline bool ufshcd_is_hs_mode(const struct ufs_pa_layer_attr *pwr_info)
 {
 	return (pwr_info->pwr_rx == FAST_MODE ||
 		pwr_info->pwr_rx == FASTAUTO_MODE) &&
@@ -1356,21 +1626,14 @@ static inline int ufshcd_disable_host_tx_lcc(struct ufs_hba *hba)
 	return ufshcd_dme_set(hba, UIC_ARG_MIB(PA_LOCAL_TX_LCC_ENABLE), 0);
 }
 
-void ufshcd_auto_hibern8_enable(struct ufs_hba *hba);
 void ufshcd_auto_hibern8_update(struct ufs_hba *hba, u32 ahit);
 void ufshcd_fixup_dev_quirks(struct ufs_hba *hba,
 			     const struct ufs_dev_quirk *fixups);
-#define SD_ASCII_STD true
-#define SD_RAW false
-int ufshcd_read_string_desc(struct ufs_hba *hba, u8 desc_index,
-			    u8 **buf, bool ascii);
 
 void ufshcd_hold(struct ufs_hba *hba);
 void ufshcd_release(struct ufs_hba *hba);
 
 void ufshcd_clkgate_delay_set(struct device *dev, unsigned long value);
-
-u32 ufshcd_get_local_unipro_ver(struct ufs_hba *hba);
 
 int ufshcd_get_vreg(struct device *dev, struct ufs_vreg *vreg);
 
@@ -1382,10 +1645,14 @@ int ufshcd_advanced_rpmb_req_handler(struct ufs_hba *hba, struct utp_upiu_req *r
 				     struct scatterlist *sg_list, enum dma_data_direction dir);
 int ufshcd_wb_toggle(struct ufs_hba *hba, bool enable);
 int ufshcd_wb_toggle_buf_flush(struct ufs_hba *hba, bool enable);
+int ufshcd_wb_set_resize_en(struct ufs_hba *hba, enum wb_resize_en en_mode);
 int ufshcd_suspend_prepare(struct device *dev);
 int __ufshcd_suspend_prepare(struct device *dev, bool rpm_ok_for_spm);
 void ufshcd_resume_complete(struct device *dev);
 bool ufshcd_is_hba_active(struct ufs_hba *hba);
+void ufshcd_pm_qos_init(struct ufs_hba *hba);
+void ufshcd_pm_qos_exit(struct ufs_hba *hba);
+int ufshcd_dme_rmw(struct ufs_hba *hba, u32 mask, u32 val, u32 attr);
 
 /* Wrapper functions for safely calling variant operations */
 static inline int ufshcd_vops_init(struct ufs_hba *hba)
@@ -1413,5 +1680,8 @@ int __ufshcd_write_ee_control(struct ufs_hba *hba, u32 ee_ctrl_mask);
 int ufshcd_write_ee_control(struct ufs_hba *hba);
 int ufshcd_update_ee_control(struct ufs_hba *hba, u16 *mask,
 			     const u16 *other_mask, u16 set, u16 clr);
+void ufshcd_force_error_recovery(struct ufs_hba *hba);
+void ufshcd_pm_qos_update(struct ufs_hba *hba, bool on);
+u32 ufshcd_us_to_ahit(unsigned int timer);
 
 #endif /* End of Header */

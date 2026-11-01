@@ -8,7 +8,6 @@
 
 #include <linux/spi/spi.h>
 #include <linux/interrupt.h>
-#include <linux/mod_devicetable.h>
 #include <linux/module.h>
 #include <linux/regmap.h>
 #include <linux/ieee802154.h>
@@ -388,7 +387,7 @@ static const struct regmap_config mrf24j40_short_regmap = {
 	.pad_bits = 1,
 	.write_flag_mask = MRF24J40_SHORT_WRITE,
 	.read_flag_mask = MRF24J40_SHORT_READ,
-	.cache_type = REGCACHE_RBTREE,
+	.cache_type = REGCACHE_MAPLE,
 	.max_register = MRF24J40_SHORT_NUMREGS,
 	.writeable_reg = mrf24j40_short_reg_writeable,
 	.readable_reg = mrf24j40_short_reg_readable,
@@ -495,7 +494,7 @@ static const struct regmap_config mrf24j40_long_regmap = {
 	.pad_bits = 5,
 	.write_flag_mask = MRF24J40_LONG_ACCESS,
 	.read_flag_mask = MRF24J40_LONG_ACCESS,
-	.cache_type = REGCACHE_RBTREE,
+	.cache_type = REGCACHE_MAPLE,
 	.max_register = MRF24J40_LONG_NUMREGS,
 	.writeable_reg = mrf24j40_long_reg_writeable,
 	.readable_reg = mrf24j40_long_reg_readable,

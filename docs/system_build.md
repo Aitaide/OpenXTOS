@@ -2,7 +2,7 @@
 
 ## 源码范围
 
-仓库直接包含 Linux 6.6.0、PREEMPT_RT 6.6-rt15、XTOS 内核组件、BusyBox 1.37.0、用户态 SDK、EEG 工具、测试、开发计划和设计文档。构建不会下载 Linux 或 BusyBox，也不依赖已删除的开发目录。
+仓库直接包含 Linux 7.3.1（主线 PREEMPT_RT）、XTOS 内核组件、BusyBox 1.37.0、用户态 SDK、EEG 工具、测试、开发计划和设计文档。上游版本、官方归档摘要和 XTOS 集成补丁由 `kernel/source-pin.json` 固定。构建不会下载 Linux 或 BusyBox；旧 6.6/rt15 补丁仅保留历史用途，不参与当前构建。迁移状态见 `kernel-7.3.1-migration.md`。
 
 当前完整系统目标是 x86_64 开发系统：可启动的实时 Linux 内核和 initramfs 根文件系统，提供本地命令行、模块加载和 XTOS 用户态工具。它不是桌面发行版、硬盘安装器或医疗产品。ARM64/RISC-V 构建脚本保留，但不代表对应完整系统或真实板卡已验证。
 
@@ -20,7 +20,7 @@ JOBS=2 ./scripts/build_system.sh
 
 输出：
 
-- `.build/images/xtos-bzImage`：Linux 6.6.0-rt15 + XTOS 内核。
+- `.build/images/xtos-bzImage`：Linux 7.3.1、主线 PREEMPT_RT 与 XTOS 内核组件。
 - `.build/images/xtos-rootfs.cpio.gz`：BusyBox、所有配置模块、XTOS SDK 静态库/头文件、EEG 工具和测试程序。
 - `.build/images/kernel.config`：实际解析后的内核配置。
 - `.build/system-qemu.log`：启动验证日志，不提交到 Git。
@@ -37,7 +37,7 @@ JOBS=2 ./scripts/build_system.sh
 
 `verify_system.sh` 使用同一组系统镜像，设置 `xtos.selftest=1`：
 
-1. 检查 `/sys/kernel/realtime=1`、`CONFIG_PREEMPT_RT=y` 和 `CONFIG_XTOS_SCHED=y`。
+1. 检查运行中内核的 RT 证据、`CONFIG_PREEMPT_RT=y` 和 `CONFIG_XTOS_SCHED=y`。7.3.1 主线不提供旧 RT 补丁的 `/sys/kernel/realtime` 节点；不得以节点缺失判定 RT 关闭或伪造节点。状态工具按显式证据判定，证据不足拒绝。
 2. 加载 BCI 核心、缓冲区和 OpenBCI 模块并检查 `/sys/module`。
 3. 执行 RT 辅助库、SPSC、信号处理和调度队列测试。
 4. 执行虚拟 EEG 数据管线和信号处理基准。
@@ -47,7 +47,7 @@ JOBS=2 ./scripts/build_system.sh
 
 ```text
 QEMU x86_64 / future target hardware
-  Linux 6.6.0 + PREEMPT_RT 6.6-rt15
+  Linux 7.3.1 + mainline PREEMPT_RT
     standard Linux real-time scheduling
     optional XTOS priority-queue helper (not a replacement sched_class)
     XTOS BCI core + buffer + OpenBCI serdev modules

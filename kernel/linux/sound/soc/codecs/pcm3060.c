@@ -2,7 +2,7 @@
 //
 // PCM3060 codec driver
 //
-// Copyright (C) 2018 Kirill Marinushkin <kmarinushkin@birdec.com>
+// Copyright (C) 2018 Kirill Marinushkin <k.marinushkin@gmail.com>
 
 #include <linux/module.h>
 #include <sound/pcm_params.h>
@@ -164,10 +164,18 @@ val_ready:
 	return 0;
 }
 
+static const u64 pcm3060_selectable_formats =
+	SND_SOC_POSSIBLE_DAIFMT_I2S	|
+	SND_SOC_POSSIBLE_DAIFMT_RIGHT_J	|
+	SND_SOC_POSSIBLE_DAIFMT_LEFT_J	|
+	SND_SOC_POSSIBLE_DAIFMT_NB_NF;
+
 static const struct snd_soc_dai_ops pcm3060_dai_ops = {
 	.set_sysclk = pcm3060_set_sysclk,
 	.set_fmt = pcm3060_set_fmt,
 	.hw_params = pcm3060_hw_params,
+	.auto_selectable_formats = &pcm3060_selectable_formats,
+	.num_auto_selectable_formats = 1,
 };
 
 #define PCM3060_DAI_RATES_ADC	(SNDRV_PCM_RATE_16000 | SNDRV_PCM_RATE_32000 | \
@@ -343,5 +351,5 @@ int pcm3060_probe(struct device *dev)
 EXPORT_SYMBOL(pcm3060_probe);
 
 MODULE_DESCRIPTION("PCM3060 codec driver");
-MODULE_AUTHOR("Kirill Marinushkin <kmarinushkin@birdec.com>");
+MODULE_AUTHOR("Kirill Marinushkin <k.marinushkin@gmail.com>");
 MODULE_LICENSE("GPL v2");

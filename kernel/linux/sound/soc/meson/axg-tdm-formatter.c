@@ -157,20 +157,19 @@ static int axg_tdm_formatter_attach(struct axg_tdm_formatter *formatter)
 	struct axg_tdm_stream *ts = formatter->stream;
 	int ret = 0;
 
-	mutex_lock(&ts->lock);
+	guard(mutex)(&ts->lock);
 
 	/* Catch up if the stream is already running when we attach */
 	if (ts->ready) {
 		ret = axg_tdm_formatter_enable(formatter);
 		if (ret) {
 			pr_err("failed to enable formatter\n");
-			goto out;
+			return ret;
 		}
 	}
 
 	list_add_tail(&formatter->list, &ts->formatter_list);
-out:
-	mutex_unlock(&ts->lock);
+
 	return ret;
 }
 
@@ -178,9 +177,8 @@ static void axg_tdm_formatter_dettach(struct axg_tdm_formatter *formatter)
 {
 	struct axg_tdm_stream *ts = formatter->stream;
 
-	mutex_lock(&ts->lock);
-	list_del(&formatter->list);
-	mutex_unlock(&ts->lock);
+	scoped_guard(mutex, &ts->lock)
+		list_del(&formatter->list);
 
 	axg_tdm_formatter_disable(formatter);
 }
@@ -330,7 +328,7 @@ int axg_tdm_stream_start(struct axg_tdm_stream *ts)
 	struct axg_tdm_formatter *formatter;
 	int ret = 0;
 
-	mutex_lock(&ts->lock);
+	guard(mutex)(&ts->lock);
 	ts->ready = true;
 
 	/* Start all the formatters attached to the stream */
@@ -338,12 +336,10 @@ int axg_tdm_stream_start(struct axg_tdm_stream *ts)
 		ret = axg_tdm_formatter_enable(formatter);
 		if (ret) {
 			pr_err("failed to start tdm stream\n");
-			goto out;
+			return ret;
 		}
 	}
 
-out:
-	mutex_unlock(&ts->lock);
 	return ret;
 }
 EXPORT_SYMBOL_GPL(axg_tdm_stream_start);
@@ -352,15 +348,13 @@ void axg_tdm_stream_stop(struct axg_tdm_stream *ts)
 {
 	struct axg_tdm_formatter *formatter;
 
-	mutex_lock(&ts->lock);
+	guard(mutex)(&ts->lock);
 	ts->ready = false;
 
 	/* Stop all the formatters attached to the stream */
 	list_for_each_entry(formatter, &ts->formatter_list, list) {
 		axg_tdm_formatter_disable(formatter);
 	}
-
-	mutex_unlock(&ts->lock);
 }
 EXPORT_SYMBOL_GPL(axg_tdm_stream_stop);
 
@@ -368,7 +362,7 @@ struct axg_tdm_stream *axg_tdm_stream_alloc(struct axg_tdm_iface *iface)
 {
 	struct axg_tdm_stream *ts;
 
-	ts = kzalloc(sizeof(*ts), GFP_KERNEL);
+	ts = kzalloc_obj(*ts);
 	if (ts) {
 		INIT_LIST_HEAD(&ts->formatter_list);
 		mutex_init(&ts->lock);
@@ -391,6 +385,46 @@ void axg_tdm_stream_free(struct axg_tdm_stream *ts)
 	kfree(ts);
 }
 EXPORT_SYMBOL_GPL(axg_tdm_stream_free);
+
+int axg_tdm_stream_set_cont_clocks(struct axg_tdm_stream *ts,
+				   unsigned int fmt)
+{
+	int ret = 0;
+
+	if (fmt & SND_SOC_DAIFMT_CONT) {
+		/* Clock are already enabled - skipping */
+		if (ts->clk_enabled)
+			return 0;
+
+		ret = clk_prepare_enable(ts->iface->mclk);
+		if (ret)
+			return ret;
+
+		ret = clk_prepare_enable(ts->iface->sclk);
+		if (ret)
+			goto err_sclk;
+
+		ret = clk_prepare_enable(ts->iface->lrclk);
+		if (ret)
+			goto err_lrclk;
+
+		ts->clk_enabled = true;
+		return 0;
+	}
+
+	/* Clocks are already disabled - skipping */
+	if (!ts->clk_enabled)
+		return 0;
+
+	clk_disable_unprepare(ts->iface->lrclk);
+err_lrclk:
+	clk_disable_unprepare(ts->iface->sclk);
+err_sclk:
+	clk_disable_unprepare(ts->iface->mclk);
+	ts->clk_enabled = false;
+	return ret;
+}
+EXPORT_SYMBOL_GPL(axg_tdm_stream_set_cont_clocks);
 
 MODULE_DESCRIPTION("Amlogic AXG TDM formatter driver");
 MODULE_AUTHOR("Jerome Brunet <jbrunet@baylibre.com>");

@@ -34,6 +34,7 @@
 #include <linux/memblock.h>
 #include <linux/highmem.h>
 #include <linux/slab.h>
+#include <net/flow.h>
 #include <net/net_namespace.h>
 #include <net/protocol.h>
 #include <net/ip.h>
@@ -43,7 +44,9 @@
 #include <net/addrconf.h>
 #include <net/inet_common.h>
 #include <net/inet_ecn.h>
+#include <net/inet_sock.h>
 #include <net/udp_tunnel.h>
+#include <net/inet_dscp.h>
 
 #define MAX_SCTP_PORT_HASH_ENTRIES (64 * 1024)
 
@@ -83,7 +86,7 @@ static void sctp_v4_copy_addrlist(struct list_head *addrlist,
 
 	in_dev_for_each_ifa_rcu(ifa, in_dev) {
 		/* Add the address to the local list.  */
-		addr = kzalloc(sizeof(*addr), GFP_ATOMIC);
+		addr = kzalloc_obj(*addr, GFP_ATOMIC);
 		if (addr) {
 			addr->a.v4.sin_family = AF_INET;
 			addr->a.v4.sin_addr.s_addr = ifa->ifa_local;
@@ -183,12 +186,9 @@ static void sctp_v4_copy_ip_options(struct sock *sk, struct sock *newsk)
 	rcu_read_lock();
 	inet_opt = rcu_dereference(inet->inet_opt);
 	if (inet_opt) {
-		newopt = sock_kmalloc(newsk, sizeof(*inet_opt) +
+		newopt = sock_kmemdup(newsk, inet_opt, sizeof(*inet_opt) +
 				      inet_opt->opt.optlen, GFP_ATOMIC);
-		if (newopt)
-			memcpy(newopt, inet_opt, sizeof(*inet_opt) +
-			       inet_opt->opt.optlen);
-		else
+		if (!newopt)
 			pr_err("%s: Failed to copy ip options\n", __func__);
 	}
 	RCU_INIT_POINTER(newinet->inet_opt, newopt);
@@ -426,16 +426,19 @@ static void sctp_v4_get_dst(struct sctp_transport *t, union sctp_addr *saddr,
 	struct dst_entry *dst = NULL;
 	union sctp_addr *daddr = &t->ipaddr;
 	union sctp_addr dst_saddr;
-	__u8 tos = inet_sk(sk)->tos;
+	dscp_t dscp;
 
 	if (t->dscp & SCTP_DSCP_SET_MASK)
-		tos = t->dscp & SCTP_DSCP_VAL_MASK;
+		dscp = inet_dsfield_to_dscp(t->dscp);
+	else
+		dscp = inet_sk_dscp(inet_sk(sk));
+
 	memset(&_fl, 0x0, sizeof(_fl));
 	fl4->daddr  = daddr->v4.sin_addr.s_addr;
 	fl4->fl4_dport = daddr->v4.sin_port;
 	fl4->flowi4_proto = IPPROTO_SCTP;
 	if (asoc) {
-		fl4->flowi4_tos = RT_TOS(tos);
+		fl4->flowi4_dscp = dscp;
 		fl4->flowi4_scope = ip_sock_rt_scope(asoc->base.sk);
 		fl4->flowi4_oif = asoc->base.sk->sk_bound_dev_if;
 		fl4->fl4_sport = htons(asoc->base.bind_addr.port);
@@ -552,7 +555,7 @@ static void sctp_v4_get_saddr(struct sctp_sock *sk,
 			      struct flowi *fl)
 {
 	union sctp_addr *saddr = &t->saddr;
-	struct rtable *rt = (struct rtable *)t->dst;
+	struct rtable *rt = dst_rtable(t->dst);
 
 	if (rt) {
 		saddr->v4.sin_family = AF_INET;
@@ -577,38 +580,6 @@ static int sctp_v4_is_ce(const struct sk_buff *skb)
 	return INET_ECN_is_ce(ip_hdr(skb)->tos);
 }
 
-/* Create and initialize a new sk for the socket returned by accept(). */
-static struct sock *sctp_v4_create_accept_sk(struct sock *sk,
-					     struct sctp_association *asoc,
-					     bool kern)
-{
-	struct sock *newsk = sk_alloc(sock_net(sk), PF_INET, GFP_KERNEL,
-			sk->sk_prot, kern);
-	struct inet_sock *newinet;
-
-	if (!newsk)
-		goto out;
-
-	sock_init_data(NULL, newsk);
-
-	sctp_copy_sock(newsk, sk, asoc);
-	sock_reset_flag(newsk, SOCK_ZAPPED);
-
-	sctp_v4_copy_ip_options(sk, newsk);
-
-	newinet = inet_sk(newsk);
-
-	newinet->inet_daddr = asoc->peer.primary_addr.v4.sin_addr.s_addr;
-
-	if (newsk->sk_prot->init(newsk)) {
-		sk_common_release(newsk);
-		newsk = NULL;
-	}
-
-out:
-	return newsk;
-}
-
 static int sctp_v4_addr_to_user(struct sctp_sock *sp, union sctp_addr *addr)
 {
 	/* No address mapping for V4 sockets */
@@ -629,7 +600,7 @@ static void sctp_v4_ecn_capable(struct sock *sk)
 
 static void sctp_addr_wq_timeout_handler(struct timer_list *t)
 {
-	struct net *net = from_timer(net, t, sctp.addr_wq_timer);
+	struct net *net = timer_container_of(net, t, sctp.addr_wq_timer);
 	struct sctp_sockaddr_entry *addrw, *temp;
 	struct sctp_sock *sp;
 
@@ -692,8 +663,9 @@ static void sctp_free_addr_wq(struct net *net)
 	struct sctp_sockaddr_entry *addrw;
 	struct sctp_sockaddr_entry *temp;
 
+	timer_shutdown_sync(&net->sctp.addr_wq_timer);
+
 	spin_lock_bh(&net->sctp.addr_wq_lock);
-	del_timer(&net->sctp.addr_wq_timer);
 	list_for_each_entry_safe(addrw, temp, &net->sctp.addr_waitq, list) {
 		list_del(&addrw->list);
 		kfree(addrw);
@@ -737,6 +709,20 @@ void sctp_addr_wq_mgmt(struct net *net, struct sctp_sockaddr_entry *addr, int cm
 	 */
 
 	spin_lock_bh(&net->sctp.addr_wq_lock);
+
+	/* Avoid searching the queue or modifying it if there are no consumers,
+	 * as it can lead to performance degradation if addresses are modified
+	 * en-masse.
+	 *
+	 * If the queue already contains some events, update it anyway to avoid
+	 * ugly races between new sessions and new address events.
+	 */
+	if (list_empty(&net->sctp.auto_asconf_splist) &&
+	    list_empty(&net->sctp.addr_waitq)) {
+		spin_unlock_bh(&net->sctp.addr_wq_lock);
+		return;
+	}
+
 	/* Offsets existing events in addr_wq */
 	addrw = sctp_addr_wq_lookup(net, addr);
 	if (addrw) {
@@ -789,7 +775,7 @@ static int sctp_inetaddr_event(struct notifier_block *this, unsigned long ev,
 
 	switch (ev) {
 	case NETDEV_UP:
-		addr = kzalloc(sizeof(*addr), GFP_ATOMIC);
+		addr = kzalloc_obj(*addr, GFP_ATOMIC);
 		if (addr) {
 			addr->a.v4.sin_family = AF_INET;
 			addr->a.v4.sin_addr.s_addr = ifa->ifa_local;
@@ -807,10 +793,10 @@ static int sctp_inetaddr_event(struct notifier_block *this, unsigned long ev,
 			if (addr->a.sa.sa_family == AF_INET &&
 					addr->a.v4.sin_addr.s_addr ==
 					ifa->ifa_local) {
-				sctp_addr_wq_mgmt(net, addr, SCTP_ADDR_DEL);
 				found = 1;
 				addr->valid = 0;
 				list_del_rcu(&addr->list);
+				sctp_addr_wq_mgmt(net, addr, SCTP_ADDR_DEL);
 				break;
 			}
 		}
@@ -879,7 +865,7 @@ int sctp_udp_sock_start(struct net *net)
 	tuncfg.encap_type = 1;
 	tuncfg.encap_rcv = sctp_udp_rcv;
 	tuncfg.encap_err_lookup = sctp_udp_v4_err;
-	setup_udp_tunnel_sock(net, sock, &tuncfg);
+	setup_udp_tunnel_sock(net, sock->sk, &tuncfg);
 	net->sctp.udp4_sock = sock->sk;
 
 #if IS_ENABLED(CONFIG_IPV6)
@@ -893,7 +879,7 @@ int sctp_udp_sock_start(struct net *net)
 	err = udp_sock_create(net, &udp_conf, &sock);
 	if (err) {
 		pr_err("Failed to create the SCTP UDP tunneling v6 sock\n");
-		udp_tunnel_sock_release(net->sctp.udp4_sock->sk_socket);
+		udp_tunnel_sock_release(net->sctp.udp4_sock);
 		net->sctp.udp4_sock = NULL;
 		return err;
 	}
@@ -901,7 +887,7 @@ int sctp_udp_sock_start(struct net *net)
 	tuncfg.encap_type = 1;
 	tuncfg.encap_rcv = sctp_udp_rcv;
 	tuncfg.encap_err_lookup = sctp_udp_v6_err;
-	setup_udp_tunnel_sock(net, sock, &tuncfg);
+	setup_udp_tunnel_sock(net, sock->sk, &tuncfg);
 	net->sctp.udp6_sock = sock->sk;
 #endif
 
@@ -911,11 +897,11 @@ int sctp_udp_sock_start(struct net *net)
 void sctp_udp_sock_stop(struct net *net)
 {
 	if (net->sctp.udp4_sock) {
-		udp_tunnel_sock_release(net->sctp.udp4_sock->sk_socket);
+		udp_tunnel_sock_release(net->sctp.udp4_sock);
 		net->sctp.udp4_sock = NULL;
 	}
 	if (net->sctp.udp6_sock) {
-		udp_tunnel_sock_release(net->sctp.udp6_sock->sk_socket);
+		udp_tunnel_sock_release(net->sctp.udp6_sock);
 		net->sctp.udp6_sock = NULL;
 	}
 }
@@ -1057,7 +1043,7 @@ static inline int sctp_v4_xmit(struct sk_buff *skb, struct sctp_transport *t)
 	struct flowi4 *fl4 = &t->fl.u.ip4;
 	struct sock *sk = skb->sk;
 	struct inet_sock *inet = inet_sk(sk);
-	__u8 dscp = inet->tos;
+	__u8 dscp = READ_ONCE(inet->tos);
 	__be16 df = 0;
 
 	pr_debug("%s: skb:%p, len:%d, src:%pI4, dst:%pI4\n", __func__, skb,
@@ -1085,9 +1071,12 @@ static inline int sctp_v4_xmit(struct sk_buff *skb, struct sctp_transport *t)
 	skb_reset_inner_mac_header(skb);
 	skb_reset_inner_transport_header(skb);
 	skb_set_inner_ipproto(skb, IPPROTO_SCTP);
-	udp_tunnel_xmit_skb((struct rtable *)dst, sk, skb, fl4->saddr,
+	local_bh_disable();
+	udp_tunnel_xmit_skb(dst_rtable(dst), sk, skb, fl4->saddr,
 			    fl4->daddr, dscp, ip4_dst_hoplimit(dst), df,
-			    sctp_sk(sk)->udp_port, t->encap_port, false, false);
+			    sctp_sk(sk)->udp_port, t->encap_port, false, false,
+			    0);
+	local_bh_enable();
 	return 0;
 }
 
@@ -1101,7 +1090,6 @@ static struct sctp_pf sctp_pf_inet = {
 	.bind_verify   = sctp_inet_bind_verify,
 	.send_verify   = sctp_inet_send_verify,
 	.supported_addrs = sctp_inet_supported_addrs,
-	.create_accept_sk = sctp_v4_create_accept_sk,
 	.addr_to_user  = sctp_v4_addr_to_user,
 	.to_sk_saddr   = sctp_v4_to_sk_saddr,
 	.to_sk_daddr   = sctp_v4_to_sk_daddr,
@@ -1276,12 +1264,18 @@ static void sctp_v4_protosw_exit(void)
 
 static int sctp_v4_add_protocol(void)
 {
+	int ret;
+
 	/* Register notifier for inet address additions/deletions. */
-	register_inetaddr_notifier(&sctp_inetaddr_notifier);
+	ret = register_inetaddr_notifier(&sctp_inetaddr_notifier);
+	if (ret)
+		return ret;
 
 	/* Register SCTP with inet layer.  */
-	if (inet_add_protocol(&sctp_protocol, IPPROTO_SCTP) < 0)
+	if (inet_add_protocol(&sctp_protocol, IPPROTO_SCTP) < 0) {
+		unregister_inetaddr_notifier(&sctp_inetaddr_notifier);
 		return -EAGAIN;
+	}
 
 	return 0;
 }
@@ -1317,14 +1311,9 @@ static int __net_init sctp_defaults_init(struct net *net)
 	/* Whether Cookie Preservative is enabled(1) or not(0) */
 	net->sctp.cookie_preserve_enable 	= 1;
 
-	/* Default sctp sockets to use md5 as their hmac alg */
-#if defined (CONFIG_SCTP_DEFAULT_COOKIE_HMAC_MD5)
-	net->sctp.sctp_hmac_alg			= "md5";
-#elif defined (CONFIG_SCTP_DEFAULT_COOKIE_HMAC_SHA1)
-	net->sctp.sctp_hmac_alg			= "sha1";
-#else
-	net->sctp.sctp_hmac_alg			= NULL;
-#endif
+	/* Whether cookie authentication is enabled(1) or not(0) */
+	net->sctp.cookie_auth_enable =
+		!IS_ENABLED(CONFIG_SCTP_DEFAULT_COOKIE_HMAC_NONE);
 
 	/* Max.Burst		    - 4 */
 	net->sctp.max_burst			= SCTP_DEFAULT_MAX_BURST;
@@ -1394,10 +1383,6 @@ static int __net_init sctp_defaults_init(struct net *net)
 	net->sctp.l3mdev_accept = 1;
 #endif
 
-	status = sctp_sysctl_net_register(net);
-	if (status)
-		goto err_sysctl_register;
-
 	/* Allocate and initialise sctp mibs.  */
 	status = init_sctp_mibs(net);
 	if (status)
@@ -1431,8 +1416,6 @@ err_init_proc:
 	cleanup_sctp_mibs(net);
 #endif
 err_init_mibs:
-	sctp_sysctl_net_unregister(net);
-err_sysctl_register:
 	return status;
 }
 
@@ -1447,7 +1430,6 @@ static void __net_exit sctp_defaults_exit(struct net *net)
 	net->sctp.proc_net_sctp = NULL;
 #endif
 	cleanup_sctp_mibs(net);
-	sctp_sysctl_net_unregister(net);
 }
 
 static struct pernet_operations sctp_defaults_ops = {
@@ -1461,16 +1443,28 @@ static int __net_init sctp_ctrlsock_init(struct net *net)
 
 	/* Initialize the control inode/socket for handling OOTB packets.  */
 	status = sctp_ctl_sock_init(net);
-	if (status)
+	if (status) {
 		pr_err("Failed to initialize the SCTP control sock\n");
+		return status;
+	}
+
+	status = sctp_sysctl_net_register(net);
+	if (status) {
+		inet_ctl_sock_destroy(net->sctp.ctl_sock);
+		net->sctp.ctl_sock = NULL;
+	}
 
 	return status;
 }
 
 static void __net_exit sctp_ctrlsock_exit(struct net *net)
 {
+	sctp_sysctl_net_unregister(net);
+	sctp_udp_sock_stop(net);
+
 	/* Free the control endpoint.  */
 	inet_ctl_sock_destroy(net->sctp.ctl_sock);
+	net->sctp.ctl_sock = NULL;
 }
 
 static struct pernet_operations sctp_ctrlsock_ops = {
@@ -1495,17 +1489,11 @@ static __init int sctp_init(void)
 
 	/* Allocate bind_bucket and chunk caches. */
 	status = -ENOBUFS;
-	sctp_bucket_cachep = kmem_cache_create("sctp_bind_bucket",
-					       sizeof(struct sctp_bind_bucket),
-					       0, SLAB_HWCACHE_ALIGN,
-					       NULL);
+	sctp_bucket_cachep = KMEM_CACHE(sctp_bind_bucket, SLAB_HWCACHE_ALIGN);
 	if (!sctp_bucket_cachep)
 		goto out;
 
-	sctp_chunk_cachep = kmem_cache_create("sctp_chunk",
-					       sizeof(struct sctp_chunk),
-					       0, SLAB_HWCACHE_ALIGN,
-					       NULL);
+	sctp_chunk_cachep = KMEM_CACHE(sctp_chunk, SLAB_HWCACHE_ALIGN);
 	if (!sctp_chunk_cachep)
 		goto err_chunk_cachep;
 
@@ -1564,7 +1552,7 @@ static __init int sctp_init(void)
 	/* Allocate and initialize the endpoint hash table.  */
 	sctp_ep_hashsize = 64;
 	sctp_ep_hashtable =
-		kmalloc_array(64, sizeof(struct sctp_hashbucket), GFP_KERNEL);
+		kmalloc_objs(struct sctp_hashbucket, 64);
 	if (!sctp_ep_hashtable) {
 		pr_err("Failed endpoint_hash alloc\n");
 		status = -ENOMEM;
