@@ -192,7 +192,7 @@ COMPONENTS = [
     },
     {
         "name": "xtos-ai-runtime",
-        "version": "1.0.1",
+        "version": "1.1.0",
         "license": LICENSE_APACHE,
         "description": "Bounded local AF_UNIX model runtime and signed model trust source",
         "scope": "required",

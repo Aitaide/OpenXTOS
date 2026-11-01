@@ -12,6 +12,7 @@ import sys
 import tempfile
 import unittest
 import hashlib
+from unittest.mock import patch
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -19,7 +20,16 @@ SCRIPT = ROOT / 'scripts' / 'userspace_repo.py'
 
 
 def run_repo(*args, key=None):
-    cmd = [sys.executable, str(SCRIPT), *args]
+    # Execute the unchanged production CLI in a child, replacing only its
+    # network seam. Invalid/missing fixture cache must never contact Debian.
+    code = ('import sys\n'
+            'sys.path.insert(0,sys.argv[1])\nimport userspace_repo as repo\n'
+            'def offline(*args, **kwargs):\n'
+            '    raise RuntimeError("offline fixture forbids network")\n'
+            'repo.fetch_into=offline\n'
+            'sys.argv=[repo.__file__]+sys.argv[2:]\n'
+            'raise SystemExit(repo.main())\n')
+    cmd = [sys.executable, '-B', '-c', code, str(SCRIPT.parent), *args]
     env = dict(os.environ)
     if key:
         env['XTOS_USERSPACE_REPO_KEY'] = str(key)
@@ -190,6 +200,26 @@ class UserspaceRepoTests(unittest.TestCase):
         result = run_repo('create', '--lock', str(self.lock), '--repo', str(repo2),
                           '--cache-dir', str(poisoned), '--key', str(self.key))
         self.assertNotEqual(result.returncode, 0, 'cache bytes with wrong hash were accepted')
+
+    def test_13_fixture_subprocess_blocks_network_before_transport(self):
+        hook = self.base / 'network-observer'
+        hook.mkdir()
+        marker = hook / 'transport-entered'
+        (hook / 'sitecustomize.py').write_text(
+            'import urllib.request\nfrom pathlib import Path\n'
+            'def observe(*args, **kwargs):\n'
+            f'    Path({str(marker)!r}).write_text("unexpected transport entry")\n'
+            '    raise RuntimeError("outer fixture network observer")\n'
+            'urllib.request.urlopen = observe\n')
+        offline_lock = self.base / 'offline-lock.json'
+        write_lock(offline_lock, [self.packages[0]])
+        with patch.dict(os.environ, {'PYTHONPATH': str(hook)}):
+            result = run_repo('create', '--lock', str(offline_lock),
+                              '--repo', str(self.base / 'repo-offline'),
+                              '--key', str(self.key))
+        self.assertNotEqual(result.returncode, 0)
+        self.assertFalse(marker.exists(), 'fixture reached the URL transport')
+        self.assertIn('offline fixture forbids network', result.stderr)
 
 
 if __name__ == '__main__':

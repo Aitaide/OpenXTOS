@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import math
+import re
 import struct
 from dataclasses import dataclass
 from numbers import Real
@@ -42,6 +43,69 @@ class ThreadSpec:
 
 
 @dataclass(frozen=True, slots=True)
+class ExecutionProfile:
+    """Signed provider configuration, detached from caller-owned JSON."""
+
+    onnxruntime_version: str
+    python_abi: str
+    device_id: int
+    memory_limit_bytes: int
+    runtime_files: tuple[tuple[str, str], ...]
+    cpu_affinity: tuple[int, ...]
+    scheduler: str
+
+
+def validate_execution_profile(provider: str, raw: Any) -> ExecutionProfile:
+    """Validate provider configuration structurally, without filesystem access."""
+    if provider == "ROCMExecutionProvider":
+        raise ManifestError("provider_deprecated")
+    if type(provider) is not str or provider not in ("CPUExecutionProvider", "CUDAExecutionProvider", "MIGraphXExecutionProvider"):
+        raise ManifestError("provider_unsupported")
+    _keys(raw, {"onnxruntime_version", "python_abi", "device_id", "memory_limit_bytes",
+                "runtime_files", "cpu_affinity", "scheduler"}, "execution")
+    version = raw["onnxruntime_version"]
+    if (type(version) is not str or len(version) > 32 or
+            not re.fullmatch(r"(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)", version) or
+            any(int(part) > 2_147_483_647 for part in version.split("."))):
+        raise ManifestError("execution.onnxruntime_version must be canonical semver")
+    abi = raw["python_abi"]
+    if type(abi) is not str or len(abi) > 64 or not re.fullmatch(r"cpython-[1-9][0-9]*", abi):
+        raise ManifestError("execution.python_abi must be canonical cpython ABI")
+    gpu = provider != "CPUExecutionProvider"
+    _integer(raw["device_id"], "execution.device_id", 0, 31 if gpu else 0)
+    _integer(raw["memory_limit_bytes"], "execution.memory_limit_bytes", 1048576 if gpu else 0,
+             68719476736 if gpu else 0)
+    if type(raw["scheduler"]) is not str or raw["scheduler"] != "SCHED_OTHER":
+        raise ManifestError("execution.scheduler must be SCHED_OTHER")
+    files = raw["runtime_files"]
+    if type(files) is not dict or not 1 <= len(files) <= 32:
+        raise ManifestError("execution.runtime_files must contain 1..32 files")
+    for path, digest in files.items():
+        if (type(path) is not str or not 1 <= len(path) <= 256 or
+                path.startswith("/") or "\\" in path or "\x00" in path or
+                any(part in ("", ".", "..") for part in path.split("/"))):
+            raise ManifestError("execution.runtime_files path must be a safe relative path")
+        if type(digest) is not str or not re.fullmatch(r"[0-9a-f]{64}", digest):
+            raise ManifestError("execution.runtime_files digest must be lowercase SHA256")
+    if not any(re.fullmatch(r"capi/onnxruntime_pybind11_state[^/]*\.so", path) for path in files):
+        raise ManifestError("execution.runtime_files requires pybind library")
+    vendor_file = {"CUDAExecutionProvider": "capi/libonnxruntime_providers_cuda.so",
+                   "MIGraphXExecutionProvider": "capi/libonnxruntime_providers_migraphx.so"}.get(provider)
+    if vendor_file is not None and vendor_file not in files:
+        raise ManifestError("execution.runtime_files requires requested provider library")
+    cpus = raw["cpu_affinity"]
+    if type(cpus) is not list or not 1 <= len(cpus) <= 256:
+        raise ManifestError("execution.cpu_affinity must contain 1..256 CPU IDs")
+    for cpu in cpus:
+        _integer(cpu, "execution.cpu_affinity CPU", 0, 4095)
+    if cpus != sorted(set(cpus)):
+        raise ManifestError("execution.cpu_affinity must be sorted and unique")
+    return ExecutionProfile(raw["onnxruntime_version"], raw["python_abi"], raw["device_id"],
+                            raw["memory_limit_bytes"], tuple(sorted(raw["runtime_files"].items())),
+                            tuple(raw["cpu_affinity"]), raw["scheduler"])
+
+
+@dataclass(frozen=True, slots=True)
 class ModelManifest:
     """Immutable, validated model metadata and tensor contract."""
 
@@ -58,6 +122,7 @@ class ModelManifest:
     output_name: str
     output_dtype: str
     output_shape: tuple[int, int]
+    execution: ExecutionProfile | None = None
 
     @property
     def input(self) -> TensorSpec:
@@ -134,12 +199,15 @@ def _model_file(root_value: Any, path_value: Any) -> Path:
 
 def validate_manifest(raw: Any, model_root: str | Path) -> ModelManifest:
     """Validate exact schema, policy bounds, root containment, and SHA-256."""
-    _keys(raw, _MANIFEST_KEYS, "manifest")
+    v2 = type(raw) is dict and raw.get("schema") == "xtos-ai-manifest-v2"
+    _keys(raw, _MANIFEST_KEYS | {"schema", "execution"} if v2 else _MANIFEST_KEYS, "manifest")
     name = _string(raw["name"], "name")
     version = _string(raw["version"], "version")
     provider = _string(raw["provider"], "provider")
-    if provider != "CPUExecutionProvider":
-        raise ManifestError("provider must be CPUExecutionProvider")
+    if not v2:
+        if provider != "CPUExecutionProvider":
+            raise ManifestError("provider must be CPUExecutionProvider")
+    execution = validate_execution_profile(provider, raw["execution"]) if v2 else None
 
     _keys(raw["threads"], _THREAD_KEYS, "threads")
     intra = _integer(raw["threads"]["intra_op"], "threads.intra_op", 1, 64)
@@ -164,7 +232,7 @@ def validate_manifest(raw: Any, model_root: str | Path) -> ModelManifest:
 
     return ModelManifest(
         name, version, path, actual, provider, intra, inter,
-        in_name, in_dtype, in_shape, out_name, out_dtype, out_shape,
+        in_name, in_dtype, in_shape, out_name, out_dtype, out_shape, execution,
     )
 
 

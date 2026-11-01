@@ -90,14 +90,19 @@ both staged files and the kernel/initramfs/rootfs actually embedded in the ISO.
 A previous candidate's report cannot validate a new ISO or a newer source SHA.
 Physical GPU/BCI/camera, sustained load and Secure Boot remain separate gates.
 
-## Local unified inference service (P1.1)
+## Local unified inference service
 
-The first unified runtime is a local-only, fail-closed control plane:
+The service is a local-only, fail-closed control plane. The original P1 contract
+below remains the v1 CPU baseline. The provider-aware v2 extension is defined
+in [ai-provider-runtime-v2.md](ai-provider-runtime-v2.md); its source, runtime,
+installed-image and physical GPU acceptance remain separate gates.
 
-- `tools/xtos-ai-runtime/xtos_ai_runtime/protocol.py` accepts only an exact
+- `tools/xtos-ai-runtime/xtos_ai_runtime/protocol.py` accepts an exact versioned
   manifest schema, a root-contained regular ONNX file, a matching SHA-256,
-  `CPUExecutionProvider`, bounded float32 rank-2 tensors and explicit thread
-  counts. The digest binds bytes to metadata; it is not a publisher signature.
+  bounded float32 rank-2 tensors and explicit thread counts. The original
+  eight-field v1 manifest remains CPU-only; v2 adds a provider execution
+  profile. Structural validation and a digest alone do not authorize execution:
+  production still requires the versioned publisher signature and trust policy.
 - `worker.py` starts ONNX Runtime only in a separate process group. It validates
   provider and tensor metadata, performs a smoke inference, rejects any runtime
   diagnostics, and terminates/reaps the child on deadline or cancellation.
@@ -116,12 +121,16 @@ explicitly):
 
 ```sh
 export PYTHONPATH="$PWD/tools/xtos-ai-runtime"
-export XTOS_TEST_AI_PYTHON="$PWD/.build/p0-clean-864fd92c2/scripts/ai-python-qemu.sh"
-python3 -m unittest tests.test_ai_runtime tests.test_ai_service tests.test_ai_client -v
-python3 -m unittest tests.test_ai_service_real tests.test_ai_worker -v
+export XTOS_TEST_AI_PYTHON="$PWD/scripts/ai-python-qemu.sh"
+for suite in test_ai_runtime.py test_ai_service.py test_ai_client.py; do
+  python3 -B -m unittest discover -s tests -p "$suite" -v || exit 1
+done
+for suite in test_ai_service_real.py test_ai_worker.py; do
+  python3 -B -m unittest discover -s tests -p "$suite" -v || exit 1
+done
 ```
 
-The first command is fixture/control-plane evidence; the second runs the fixed
+The first loop is fixture/control-plane evidence; the second runs the fixed
 ONNX model through the locked runtime and is CPU functional evidence, not GPU,
 real-time worst-case, domain-accuracy, medical-safety or physical-device
 acceptance. The service is not yet an agent/action executor: every rejected,

@@ -1,10 +1,10 @@
 {
   "bomFormat": "CycloneDX",
   "specVersion": "1.5",
-  "serialNumber": "urn:uuid:7c81d53d96c33f62e1d1769bd0429239dd37",
+  "serialNumber": "urn:uuid:68810acf006ccedaea5c35771895d48c504e",
   "version": 1,
   "metadata": {
-    "timestamp": "2026-10-31T19:17:41.330380+00:00",
+    "timestamp": "2026-11-01T05:30:52.966820+00:00",
     "component": {
       "type": "application",
       "bom-ref": "xtos-component-xtos-system",
@@ -30,7 +30,7 @@
     "properties": [
       {
         "name": "xtos:git-commit",
-        "value": "41683a1411d262ded48735f2978113fe66857f90"
+        "value": "5cb533e4be467dc7e93bec684aec1367a1bb1784"
       },
       {
         "name": "xtos:kernel-release",
@@ -724,7 +724,7 @@
       "type": "library",
       "bom-ref": "xtos-component-xtos-ai-runtime",
       "name": "xtos-ai-runtime",
-      "version": "1.0.1",
+      "version": "1.1.0",
       "licenses": [
         {
           "license": {
@@ -734,7 +734,7 @@
       ],
       "description": "Bounded local AF_UNIX model runtime and signed model trust source",
       "scope": "required",
-      "purl": "pkg:generic/xtos-ai-runtime@1.0.1",
+      "purl": "pkg:generic/xtos-ai-runtime@1.1.0",
       "properties": [
         {
           "name": "xtos:source-path",
@@ -744,7 +744,7 @@
       "hashes": [
         {
           "alg": "SHA-256",
-          "content": "c6250699e654aacc96d061ff45ef967b4ea6b00c1dcb9a6592145f63689d4e00"
+          "content": "ede4d210119567fd85a70fa2c2ae3e500a184eeb952194327ec2451b18501794"
         },
         {
           "alg": "SHA-256",
@@ -752,23 +752,23 @@
         },
         {
           "alg": "SHA-256",
-          "content": "6b7df44013e5d93328eb90fd60c29a3f820c344cd74b50be2a3f124fb63d5060"
+          "content": "ee75084c34983121f711d24c94db4becdd498a3c7ba479547d657b84e4257733"
         },
         {
           "alg": "SHA-256",
-          "content": "a2d6273a721b39f54a3862d9bccf51c5eeef51c629b05216d2a180b14c7553a0"
+          "content": "53520c8d3f3882be69319f2a6127ae04fdcee4b621d93c7076a6e7cddb5a2635"
         },
         {
           "alg": "SHA-256",
-          "content": "d5567826439c46ac17ef774dd19c6aa6785589d5ae93815a71426b790efad5c8"
+          "content": "f431d043240cb3371336cfeebb5bd905e27ce82f791c2a67342fff866c1d911d"
         },
         {
           "alg": "SHA-256",
-          "content": "1bd9265fc98bd6daeac3db41225943baeb8db4b197695c9d2bd9f98f39a8d89e"
+          "content": "67ca5f1156810a11c76cfa6a9a060c3b637316d9131525255c845e2cbce04278"
         },
         {
           "alg": "SHA-256",
-          "content": "f7ef14e185302d9ff14ce30b032b745078b2d4245891b32e6e071dd27e8f3cbb"
+          "content": "0588b9c7cb98d12f4daf4651f1a0bd0bb4e1f3cc78c0ba6371059f1cc02d0186"
         }
       ]
     },

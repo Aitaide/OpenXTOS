@@ -508,6 +508,8 @@ class InferenceService:
         self._recovery_threads: dict[Worker, threading.Thread] = {}
         self._dispatch_threads: set[threading.Thread] = set()
         self._recovery_errors: dict[Worker, str] = {}
+        # Weak worker ownership keeps retired generations out of the registry.
+        self._recovery_budgets = weakref.WeakKeyDictionary()
         self._management = threading.Lock()
         # Trust I/O never runs while this admission gate is held. It orders
         # the non-I/O failure publication with worker factory/start entry.
@@ -744,7 +746,18 @@ class InferenceService:
                     if isinstance(exc, TrustError):
                         self._deny_reasons[candidate] = exc.reason
                         ticket.deny_event.set()
-            reason = exc.reason if isinstance(exc, TrustError) else "model_load_failed"
+            if isinstance(exc, TrustError):
+                reason = exc.reason
+            else:
+                # Preserve only the closed set of production worker refusal
+                # codes, not arbitrary exception attributes from a factory.
+                from .worker import WorkerError
+                worker_reason = getattr(exc, "reason", None)
+                reason = (worker_reason if isinstance(exc, WorkerError) and worker_reason in (
+                    "provider_unavailable", "provider_mismatch", "runtime_abi_mismatch",
+                    "runtime_version_mismatch", "runtime_file_mismatch",
+                    "runtime_environment_override", "cpu_affinity_unavailable",
+                    "execution_mismatch") else "model_load_failed")
             result = _envelope(request.get("id"), "unavailable", reason)
             if not isinstance(exc, TrustError):
                 result["diagnostics"] = str(exc)[-2000:]
@@ -918,6 +931,11 @@ class InferenceService:
 
     def _infer(self, request: dict[str, Any]) -> dict[str, Any]:
         request_id = request["id"]
+        if "expected_provider" in request:
+            provider = request["expected_provider"]
+            if type(provider) is not str or provider not in (
+                    "CPUExecutionProvider", "CUDAExecutionProvider", "MIGraphXExecutionProvider"):
+                return _envelope(request_id, "invalid", "invalid_provider")
         if "expected_model_sha256" in request:
             if not _valid_model_digest(request["expected_model_sha256"]):
                 return _envelope(request_id, "invalid", "invalid_model_digest")
@@ -964,6 +982,7 @@ class InferenceService:
             if self._closed:
                 self._inflight.pop(request_id, None)
                 self._inflight_tickets.pop(request_id, None)
+                self._request_denials.pop(request_id, None)
                 return _envelope(request_id, "unavailable", "service_closed")
             if event.is_set():
                 self._inflight.pop(request_id, None)
@@ -989,6 +1008,13 @@ class InferenceService:
                 self._condition.notify_all()
                 return _envelope(request_id, "unavailable", "policy_unavailable")
             expected_digest = request.get("expected_model_sha256")
+            if request.get("expected_provider", "CPUExecutionProvider") != ticket.manifest.provider:
+                self._active_id = None
+                self._inflight.pop(request_id, None)
+                self._inflight_tickets.pop(request_id, None)
+                self._request_denials.pop(request_id, None)
+                self._condition.notify_all()
+                return _envelope(request_id, "unavailable", "provider_mismatch")
             if expected_digest is not None and expected_digest != ticket.manifest.sha256:
                 self._active_id = None
                 self._inflight.pop(request_id, None)
@@ -1004,6 +1030,10 @@ class InferenceService:
                 self._safe_close(worker)
                 return _envelope(request_id, "unavailable", reason)
             with self._condition:
+                budget = self._recovery_budget(worker)
+                if not worker.alive and budget["used"] >= 2:
+                    budget["last_reason"] = "recovery_budget_exhausted"
+                    return _envelope(request_id, "unavailable", "recovery_budget_exhausted")
                 if worker in self._recovering or worker in self._recovery_errors:
                     reason = "worker_recovering" if worker in self._recovering else "worker_unavailable"
                     return _envelope(request_id, "unavailable", reason)
@@ -1044,16 +1074,32 @@ class InferenceService:
                         # cannot race or leave an active dispatch blocked.
                         close_worker = True
                     elif not worker.alive and not self._closed and worker not in self._recovering:
-                        cancel = threading.Event()
-                        self._recovering[worker] = cancel
-                        recovery_thread = threading.Thread(
-                            target=self._recover, args=(worker, cancel), daemon=True)
-                        self._recovery_threads[worker] = recovery_thread
-                        recovery_thread.start()
+                        budget = self._recovery_budget(worker)
+                        if not ticket.deny_event.is_set() and not self._trust_failure:
+                            if budget["used"] >= 2:
+                                budget["last_reason"] = "recovery_budget_exhausted"
+                            else:
+                                budget["used"] += 1
+                                budget["last_reason"] = "worker_unavailable"
+                                cancel = threading.Event()
+                                self._recovering[worker] = cancel
+                                recovery_thread = threading.Thread(
+                                    target=self._recover, args=(worker, cancel), daemon=True)
+                                self._recovery_threads[worker] = recovery_thread
+                                recovery_thread.start()
                 self._condition.notify_all()
             self._release_closed_ticket(worker)
             if close_worker:
                 self._safe_close(worker)
+
+    def _recovery_budget(self, worker):
+        """Access only under _condition; a new ticket defines a new generation."""
+        ticket = self._worker_tickets.get(worker)
+        budget = self._recovery_budgets.get(worker)
+        if budget is None or budget["ticket"] is not ticket:
+            budget = {"ticket": ticket, "used": 0, "last_reason": None}
+            self._recovery_budgets[worker] = budget
+        return budget
 
     def _recover(self, worker, cancel):
         error = None
@@ -1082,6 +1128,9 @@ class InferenceService:
                 self._recovering.pop(worker, None)
                 if error:
                     self._recovery_errors[worker] = error
+                    self._recovery_budget(worker)["last_reason"] = error
+                else:
+                    self._recovery_errors.pop(worker, None)
                 close_now = (self._closed or worker in self._retired or
                              (ticket is not None and ticket.deny_event.is_set()))
                 if close_now:
@@ -1118,7 +1167,7 @@ class InferenceService:
             if self._closed:
                 return _envelope(request_id, "unavailable", "service_closed")
         op = request.get("op")
-        if "expected_model_sha256" in request and op != "infer":
+        if ("expected_model_sha256" in request or "expected_provider" in request) and op != "infer":
             return _envelope(request_id, "invalid", "invalid_request")
         if op == "list":
             with self._condition:
@@ -1149,7 +1198,11 @@ class InferenceService:
             with self._condition:
                 health = {name: {"alive": worker.alive, "pid": worker.pid,
                                  "recovering": worker in self._recovering,
-                                 "diagnostics": self._recovery_errors.get(worker, "")}
+                                 "diagnostics": self._recovery_errors.get(worker, ""),
+                                 "recovery_limit": 2,
+                                 "recovery_used": self._recovery_budget(worker)["used"],
+                                 "recovery_remaining": 2 - self._recovery_budget(worker)["used"],
+                                 "recovery_last_reason": self._recovery_budget(worker)["last_reason"]}
                           for name, worker in self._models.items()}
                 inflight, queued = int(self._active_id is not None), int(self._queued_id is not None)
             return {"schema": SCHEMA, "id": request_id, "status": "ok",

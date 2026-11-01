@@ -28,10 +28,12 @@ from pathlib import Path
 from types import MappingProxyType
 from typing import Any, Mapping, Protocol
 
-from .protocol import ManifestError, ModelManifest, validate_manifest
+from .protocol import ManifestError, ModelManifest, validate_execution_profile, validate_manifest
 
 from . import RUNTIME_VERSION
 MODEL_SCHEMA = "xtos-ai-model-v1"
+MODEL_SCHEMA_V2 = "xtos-ai-model-v2"
+MODEL_DOMAIN_V2 = b"XTOS-AI-MODEL-v2\x00"
 POLICY_SCHEMA = "xtos-ai-policy-v1"
 MODEL_DOMAIN = b"XTOS-AI-MODEL-v1\x00"
 POLICY_DOMAIN = b"XTOS-AI-POLICY-v1\x00"
@@ -789,20 +791,29 @@ def _claim_tensor(value: Any, label: str) -> dict[str, Any]:
 
 
 def _validate_model_claims(claims: dict[str, Any], snapshot: PolicySnapshot, now: int,
-                           expected_arch: str) -> None:
-    _exact(claims, {"name", "version", "model_path", "sha256", "format", "provider",
+                           expected_arch: str, *, v2: bool = False) -> None:
+    expected = {"name", "version", "model_path", "sha256", "format", "provider",
                     "min_runtime_version", "license", "architecture", "threads", "input",
-                    "output", "not_before", "expires_at"}, "model claims")
+                    "output", "not_before", "expires_at"}
+    _exact(claims, expected | {"execution"} if v2 else expected, "model claims")
     _text(claims["name"], "name", 128)
     _semver(claims["version"], "version")
     _validate_relative_model_path(claims["model_path"])
     _hex(claims["sha256"], "sha256")
     if claims["format"] != "onnx":
         raise TrustError("model_format_unsupported")
-    if claims["provider"] != "CPUExecutionProvider":
-        raise TrustError("malformed_envelope")
+    if v2:
+        try:
+            validate_execution_profile(claims["provider"], claims["execution"])
+        except ManifestError as exc:
+            raise TrustError("provider_deprecated" if str(exc) == "provider_deprecated" else "malformed_envelope") from exc
+    else:
+        if claims["provider"] != "CPUExecutionProvider":
+            raise TrustError("malformed_envelope")
     minimum = _text(claims["min_runtime_version"], "min_runtime_version", 64)
     _semver(minimum, "min_runtime_version")
+    if v2 and not _version_at_least(minimum, "1.1.0"):
+        raise TrustError("runtime_version_unsupported")
     if not _version_at_least(RUNTIME_VERSION, minimum):
         raise TrustError("runtime_version_unsupported")
     license_value = _text(claims["license"], "license", 256)
@@ -1102,7 +1113,11 @@ class ProductionTrustPolicy:
             except TrustError as error:
                 self._deny_all(error.reason)
                 raise
-            doc, body_bytes, key_id = _parse_envelope(raw, MODEL_SCHEMA, MODEL_DOMAIN)
+            parsed, _ = _json_load(raw)
+            schema = parsed.get("schema")
+            domain = MODEL_DOMAIN_V2 if schema == MODEL_SCHEMA_V2 else MODEL_DOMAIN
+            selected_schema = MODEL_SCHEMA_V2 if schema == MODEL_SCHEMA_V2 else MODEL_SCHEMA
+            doc, body_bytes, key_id = _parse_envelope(parsed, selected_schema, domain)
             # The model verifier key is selected only after policy validation;
             # parse_envelope's dummy check is replaced by the real key check.
             claims = doc["claims"]
@@ -1119,8 +1134,9 @@ class ProductionTrustPolicy:
             # Re-verify with the policy-selected publisher key.  The first
             # parse above intentionally performs no trust decision for a model.
             signature = _signature(doc["signature"])
-            _verify(self.verifier, public_key, MODEL_DOMAIN + body_bytes, signature)
-            _validate_model_claims(claims, snapshot, reading.utc_seconds, self.expected_arch)
+            _verify(self.verifier, public_key, domain + body_bytes, signature)
+            _validate_model_claims(claims, snapshot, reading.utc_seconds, self.expected_arch,
+                                   v2=schema == MODEL_SCHEMA_V2)
             root = Path(model_root).resolve()
             path_text = _safe_model_path(root, claims["model_path"])
             manifest_raw = {
@@ -1129,6 +1145,8 @@ class ProductionTrustPolicy:
                 "provider": claims["provider"], "threads": claims["threads"],
                 "input": claims["input"], "output": claims["output"],
             }
+            if schema == MODEL_SCHEMA_V2:
+                manifest_raw.update(schema="xtos-ai-manifest-v2", execution=claims["execution"])
             try:
                 manifest = validate_manifest(manifest_raw, root)
             except ManifestError as exc:

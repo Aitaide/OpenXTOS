@@ -42,6 +42,12 @@ def request(socket_path: str | Path, document: dict[str, Any], timeout: float = 
         raise ValueError("request id must be a string of length 1..128")
     expected_model = document.get("model")
     expected_digest = document.get("expected_model_sha256")
+    allowed_providers = ("CPUExecutionProvider", "CUDAExecutionProvider", "MIGraphXExecutionProvider")
+    expected_provider = document.get("expected_provider", "CPUExecutionProvider")
+    if "expected_provider" in document:
+        if (document.get("op") != "infer" or type(expected_provider) is not str
+                or expected_provider not in allowed_providers):
+            raise ValueError("invalid expected provider")
     if "expected_model_sha256" in document:
         if document.get("op") != "infer":
             raise ValueError("model digest pinning requires infer")
@@ -97,8 +103,10 @@ def request(socket_path: str | Path, document: dict[str, Any], timeout: float = 
         if field in response and response[field] is not None and (
                 type(response[field]) is not str or not response[field]):
             raise ValueError(f"response {field} is invalid")
-    if response.get("provider") not in (None, "CPUExecutionProvider"):
+    if response.get("provider") not in (None, *allowed_providers):
         raise ValueError("response provider is invalid")
+    if response.get("provider") is not None and response["provider"] != expected_provider:
+        raise ValueError("response provider identity mismatch")
     if "latency_ms" in response:
         latency = response["latency_ms"]
         try:
@@ -117,7 +125,7 @@ def request(socket_path: str | Path, document: dict[str, Any], timeout: float = 
             raise ValueError("infer request requires a non-empty model identity for action_allowed")
         if response["model"] != expected_model:
             raise ValueError("success response model identity mismatch")
-        if response.get("provider") != "CPUExecutionProvider" or "latency_ms" not in response:
+        if response.get("provider") != expected_provider or "latency_ms" not in response:
             raise ValueError("success response lacks provider or latency")
         _validate_output(response["output"])
         if expected_digest is not None and response.get("model_sha256") != expected_digest:

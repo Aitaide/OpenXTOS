@@ -61,7 +61,13 @@ Ganglion Linux BLE 异步传输与会话的源码检查点 `894d7321f6412ac31b52
 
 P4 已安装设备镜像切片已在准确 clean 提交 `41683a1411d262ded48735f2978113fe66857f90` 验收，索引 `.build/p4-image-41683a141/acceptance-index.json` 为 `ACCEPTED_LOCAL_SOFTWARE_IMAGE_SLICE`。完整维护108组1456次执行，零失败/跳过（含11项AI），另一次严格 clean-source 11项AI通过。candidate-60 ISO `72073a052bbfc8a60b1df3b7200fbfd2e51e502e205a1803723cd572b531638f` 完整嵌入载荷读回、八个已安装模块路径/哈希、普通xtos用户normal与优化模式各5项设备case、错误哈希导入前拒绝及BIOS/UEFI×CD/USB四模式均通过。SDK/原生工具为本提交重新编译，内核/31模块和BusyBox按未变相关源树及实际产物绑定复用c026f55ef原编译；不宣称fresh kernel。持久ISO位于 `.build/clean-source-41683a141/.build/retained-candidate-60-p4-devices/images/`，19项验收输入及9项保存文件已由父代理读回。四次测试端早期失败保留，最终a5通过后才写验收索引。
 
-该PASS仅绑定上述历史提交和ISO；本状态文件更新与后续网络源码不继承它。P4整体仍为 `in_progress`。当前按 `docs/device-network-transport-v1.md` 开发显式IP/端口TCP字节传输；协议插件、认证会话、完整维护、新镜像及物理设备分别验收。PTY和注入GATT输入保持 `fixture_replay`、`physical_device_evidence=false`、`no_action`；物理USB/UART、BLE持续采样/断连恢复、设备身份仍未验收。GPU、XR与调度类实机决策按计划保留，当前自定义 `sched_class` 尚未实现。
+该PASS仅绑定上述历史提交和ISO，后续网络源码不继承它。显式IP/端口TCP字节传输随后在准确提交 `5cb533e4be467dc7e93bec684aec1367a1bb1784` 完成独立SPEC/QUALITY、完整维护111组1476次执行（含11项AI）、零失败/跳过，已私有提交并读回main。源码验收索引 `.build/p4-network-next/acceptance-index.json`；历史TDD快照覆盖PARTIAL保留，不补造RED。
+
+同一clean提交的candidate-61已完成本地已安装TCP镜像验收，索引 `.build/p4-image-5cb533e4b/acceptance-index.json` 为 `ACCEPTED_LOCAL_SOFTWARE_IMAGE_SLICE`。ISO `2a98b39468e575eeb444eae8053b462dae1b382425ea079d00c656ef158ebc53` 的三个嵌入载荷、九个设备模块路径/哈希、普通xtos用户normal与优化模式各6项case（含真实IPv4 TCP loopback）、错误哈希导入前拒绝、严格clean-source11项AI及BIOS/UEFI×CD/USB四模式通过；sentinel均未变。SDK/原生工具重新编译，内核/31模块与BusyBox继续按相关源树、配置和实际产物绑定复用c026f55ef，不宣称fresh kernel。持久ISO在 `.build/clean-source-5cb533e4b/.build/retained-candidate-61-p4-tcp/images/`。guest测试工具的合法短读误判原FAIL、独立修复与增量PASS均保留。
+
+P4已支持的本地软件交付矩阵在 `.build/p4-image-5cb533e4b/p4-delivery-matrix.json`；未知厂商网络线协议和认证会话仍是未实现项，不能改称只有硬件未验证。PTY、注入GATT和guest loopback保持 `fixture_replay`、`physical_device_evidence=false`、`no_action`。物理USB/UART、BLE持续采样/断连恢复、设备身份和物理时延未验收，P4整体不宣称完成。
+
+P5生产签名provider路径现按 `docs/ai-provider-runtime-v2.md` 实施：保留v1 CPU-only兼容，新增v2显式provider/依赖/CPU放置合同与有限恢复。签名/profile与客户端独立SPEC/QUALITY通过；合并后的实际签名CPU子进程和UDS数值、provider pin、缺失CUDA/MIGraphX拒绝、deadline/cancel kill+reap、两次恢复额度及reload重置聚焦回归通过，厂商API控制另以mock明确标注。worker/server及包装仍需最终独立审查、完整维护、准确提交和新安装产物验收，P5整体保持in_progress。candidate-61 PASS不覆盖P5和本状态更新。CUDA/MIGraphX实际推理、性能、外部驱动供应链与RT共存未验证；CPU依赖锁不变，不安装可选vendor包。XR应用层与调度类实机决策按计划保留，当前自定义 `sched_class` 尚未实现。
 
 ## 历史状态记录
 
