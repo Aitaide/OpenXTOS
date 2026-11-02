@@ -5,6 +5,7 @@ Status: focused software slices, not phase acceptance and not P4 phase acceptanc
 The installed source package is deliberately separate from the existing fixture-only `xtos_devices.py` contract. It contains:
 
 - `network_transport.py`: explicit numeric-IP TCP byte transport with nonblocking connect/read/write, absolute deadlines, owner-only operations and cross-thread cancellation. It performs no DNS, discovery, peer authentication or device-protocol decoding. Real loopback tests and installed-source checks are separate from ISO and physical-device acceptance. See [the TCP contract](../../docs/device-network-transport-v1.md).
+- `tls_transport.py`: explicit TLS 1.3 byte transport with trusted CA and SAN hostname verification, optional mTLS, nonblocking handshake/I/O, inherited owner/cancellation rules and absolute deadlines. No plaintext fallback, vendor protocol or physical identity claim. Source and installed-loopback checks are not image acceptance; independent review is pending. See [the TLS contract](../../docs/device-tls-transport-v1.md).
 - `serial_transport.py`: explicit Linux tty path, nonblocking raw 115200 8N1, TIOCEXCL, absolute deadlines, bounded reads/writes, owner-only close, cross-thread cancellation wakeup, and full fd/termios cleanup.
 - `cyton_protocol.py`: text-only validation of the pinned Cyton v3.1.2 banner and the fixed default Board ADS register profile.
 - `cyton_serial_plugin.py`: explicit `reset_defaults=True` session, `s`/`v`/`?` profile readback before `b`, canonical `openbci_cyton.CytonPacketParser` reuse, generation fencing, cancellation, bounded lifecycle events, and fail-closed cleanup.
@@ -24,6 +25,9 @@ Focused commands:
 ```sh
 python3 -B -m unittest discover -s tests -p 'test_xtos_devices.py' -v
 python3 -B -m unittest discover -s tests -p 'test_xtos_network_transport.py' -v
+python3 -B -m unittest discover -s tests -p 'test_xtos_tls_transport.py' -v
+python3 -B -m unittest discover -s tests -p 'test_device_tls_install.py' -v
+python3 -B -m unittest discover -s tests -p 'test_device_tls_integration.py' -v
 python3 -B -m unittest discover -s tests -p 'test_device_network_install.py' -v
 python3 -B -m unittest discover -s tests -p 'test_device_network_integration.py' -v
 python3 -B -m unittest discover -s tests -p 'test_xtos_serial_transport.py' -v
@@ -43,3 +47,16 @@ python3 -B -O -m unittest discover -s tests -p 'test_xtos_ganglion_ble.py' -v
 ```
 
 The shared maintenance runner and source-only Live installer are separate gates. A source package can be imported with the locked runtime, but that does not prove it entered an ISO or that a physical board works. No credentials, signing keys, fixtures, test evidence, or authority state are installed.
+
+## Optional offline BLE runtime
+
+`scripts/install_ble_runtime.py` provisions the separately locked Bleak/dbus-fast wheels into `/opt/xtos-ble` in an explicitly selected, fresh, trusted owned staging root. The root must already supply CPython 3.13 and all required native libraries, including the wheel's additional ELF dependencies. This helper does not provide the interpreter or BlueZ, alter the CPU runtime lock, or configure Bluetooth services.
+
+    /usr/bin/python3.13 -B scripts/install_ble_runtime.py --root /absolute/owned/staging-root --wheel-dir /absolute/offline-wheel-cache
+
+The default lock is `system/packages/ble-runtime-cp313-x86_64.json`. Installation validates wheel bytes, RECORD, metadata and licenses, executes isolated imports with the target interpreter, revalidates the payload, and publishes without replacing an existing bundle. The resulting manifest and import probe prove only that dependency boundary; callers must explicitly select the bundle. No default Live-image membership, radio operation or physical board acceptance is claimed. The SBOM lists the optional provisioner and lock as excluded from the default image.
+
+    XTOS_BLE_WHEEL_DIR=/absolute/offline-wheel-cache /usr/bin/python3.13 -B tests/test_ble_runtime_install.py -v
+    /usr/bin/python3.13 -B tests/test_ble_runtime_integration.py -v
+
+The real offline suite requires root/chroot and actual CPython 3.13. Without `XTOS_BLE_WHEEL_DIR`, its 2 schema checks execute and 10 optional wheel/runtime methods skip; that default run is not BLE acceptance. With an explicit cache, all 12 methods must execute without skips. Test roots are private and cleaned; imports do not scan, connect or pair. Historical TDD coverage remains qualified separately from the current component SPEC/QUALITY results.

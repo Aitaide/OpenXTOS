@@ -11,6 +11,7 @@ import shutil
 import socket
 import subprocess
 import time
+import shlex
 
 MODES=('bios-cd','uefi-cd','bios-usb','uefi-usb')
 info_version_marker='1.0.1'
@@ -110,6 +111,84 @@ class Guest:
         if sha(self.disk)!=self.before:raise RuntimeError('internal file disk changed')
 
 
+def validate_xr_guest_report(report):
+    """Accept installed software smoke only, not runtime_unverified device data."""
+    if not isinstance(report, dict) or report.get('authority_store_created') is not False:
+        raise ValueError('XR guest authority boundary mismatch')
+    python = report.get('python')
+    if (not isinstance(python, dict) or python.get('executable') != '/usr/bin/python3'
+            or python.get('implementation') != 'cpython'):
+        raise ValueError('XR guest did not execute the target interpreter')
+    commands = report.get('commands')
+    if not isinstance(commands, dict) or set(commands) != {'native_missing_loader', 'eye_missing_loader', 'launcher_argv', 'demo'}:
+        raise ValueError('XR guest command inventory mismatch')
+    expected = {
+        'native_missing_loader': (['/usr/bin/xr-probe', '--loader', '/__xtos_live_xr_missing_loader__.so'], 3),
+        'eye_missing_loader': (['/usr/bin/xr-eye-probe', '--loader', '/__xtos_live_xr_missing_loader__.so', '--accept-eye-data'], 1),
+        'launcher_argv': (['/usr/bin/xr-feedback-demo', '--not-a-demo'], 2),
+        'demo': (['/usr/bin/xr-feedback-demo', '--demo'], 0),
+    }
+    for name, (argv, exit_code) in expected.items():
+        row = commands[name]
+        if (not isinstance(row, dict) or row.get('argv') != argv
+                or type(row.get('exit')) is not int or row['exit'] != exit_code
+                or type(row.get('stdout')) is not str or type(row.get('stderr')) is not str
+                or len(row['stdout']) + len(row['stderr']) > 16384):
+            raise ValueError('XR guest execution mismatch: ' + name)
+    if 'usage:' not in commands['launcher_argv']['stderr']:
+        raise ValueError('XR guest launcher did not forward argv')
+    native, demo = (json.loads(commands[name]['stdout']) for name in ('native_missing_loader', 'demo'))
+    if (commands['native_missing_loader']['stderr'] or commands['demo']['stderr']
+            or not isinstance(native, dict) or native.get('physical_acceptance') is not False
+            or native != {'status': 'unavailable', 'safe_action': 'no_action', 'physical_acceptance': False}
+            or not isinstance(demo, dict) or demo.get('safe_action') != 'no_action'
+            or demo.get('physical_acceptance') is not False
+            or demo.get('runtime_mode') != 'simulated'):
+        raise ValueError('XR guest crossed the unavailable/no-action boundary')
+    eye = json.loads(commands['eye_missing_loader']['stdout'])
+    if (commands['eye_missing_loader']['stderr'] or not isinstance(eye, dict)
+            or eye.get('status') != 'runtime_unavailable'
+            or eye.get('source_kind') != 'runtime_unverified'
+            or eye.get('safe_action') != 'no_action' or eye.get('physical_acceptance') is not False
+            or type(eye.get('sample_count')) is not int or eye['sample_count'] != 0
+            or eye.get('samples') != []):
+        raise ValueError('XR guest eye sampler refusal mismatch')
+    return report
+
+
+def validate_xr_installed_inventory(report, build):
+    """Bind actual ordinary-user file readbacks to the installed-build receipt."""
+    if (not isinstance(report, dict) or not isinstance(build, dict)
+            or build.get('schema') != 'xtos.xr.live-install.v1'
+            or report.get('physical_acceptance') is not False
+            or build.get('physical_acceptance') is not False):
+        raise ValueError('XR installed inventory boundary mismatch')
+    for inventory in (report.get('payload_inventory'), build.get('payload_inventory')):
+        if not isinstance(inventory, dict) or not 1 <= len(inventory) <= 65:
+            raise ValueError('XR installed payload inventory missing')
+        for name, row in inventory.items():
+            if (type(name) is not str or not isinstance(row, dict)
+                    or set(row) != {'sha256', 'bytes', 'mode'}
+                    or type(row['sha256']) is not str or re.fullmatch('[a-f0-9]{64}', row['sha256']) is None
+                    or type(row['bytes']) is not int or not 0 <= row['bytes'] <= 4 * 1024 * 1024
+                    or type(row['mode']) is not int or row['mode'] not in (0o644, 0o755)):
+                raise ValueError('XR installed payload binding is malformed')
+    if report['payload_inventory'] != build['payload_inventory']:
+        raise ValueError('XR installed payload differs from build receipt')
+    sources = build.get('source_inventory')
+    observed = report.get('source_hashes')
+    if not isinstance(sources, dict) or not sources or not isinstance(observed, dict) or not observed:
+        raise ValueError('XR installed source binding is missing')
+    for name, row in sources.items():
+        if (type(name) is not str or not isinstance(row, dict) or set(row) != {'sha256', 'bytes'}
+                or type(row['sha256']) is not str or re.fullmatch('[a-f0-9]{64}', row['sha256']) is None
+                or type(row['bytes']) is not int or row['bytes'] < 0):
+            raise ValueError('XR installed source binding is malformed')
+    if observed != {name: row['sha256'] for name, row in sources.items()}:
+        raise ValueError('XR installed source differs from build receipt')
+    return report
+
+
 def validate_mode(candidate,evidence,key,mode,timeout):
     g=Guest(candidate,evidence,key,mode,timeout)
     rows={}
@@ -133,6 +212,14 @@ def validate_mode(candidate,evidence,key,mode,timeout):
         # Prove medium is read-only and default write state is RAM.
         r=g.ssh('root','set -e; if touch /run/live-media/LIVE_MUST_BE_READONLY 2>/run/readonly-error; then exit 1; fi; test -s /run/readonly-error; echo LIVE_READONLY=PASS')
         rows['readonly_media']=r.stdout
+        xr_script = (Path(__file__).resolve().parents[1] / 'tests/fixtures/live_xr_guest_check.py').read_text()
+        xr_result = g.ssh('xtos', '/usr/bin/python3 -I -B -c ' + shlex.quote(xr_script), timeout=90)
+        rows['xr_in_guest'] = validate_xr_guest_report(json.loads(xr_result.stdout))
+        xr_inventory_script = (Path(__file__).resolve().parents[1] / 'tests/fixtures/live_xr_inventory.py').read_text()
+        xr_inventory_result = g.ssh('xtos', '/usr/bin/python3 -I -B -c ' + shlex.quote(xr_inventory_script), timeout=90)
+        build_manifest = json.loads((candidate / 'images/build-manifest.json').read_text())
+        rows['xr_installed_inventory'] = validate_xr_installed_inventory(
+            json.loads(xr_inventory_result.stdout), build_manifest.get('xr_runtime'))
         if mode=='bios-cd':
             # Interactive console checks: arrow-key history + XTOS branding on ttyS0.
             # The console prompt may have appeared before earlier SSH matches consumed it.

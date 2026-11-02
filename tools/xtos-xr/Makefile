@@ -5,14 +5,20 @@ CFLAGS ?= -O2
 CFLAGS += -std=c11 -Wall -Wextra -Werror
 LDLIBS += -ldl
 SOURCES = src/runtime_adapter.c src/xr_probe.c
+EYE_SOURCES = src/runtime_adapter.c src/eye_session.c src/xr_eye_probe.c
 HEADERS = include/xtos_xr/runtime_adapter.h vendor/openxr/include/openxr/openxr.h vendor/openxr/include/openxr/openxr_platform.h vendor/openxr/include/openxr/openxr_platform_defines.h
+EYE_HEADERS = $(HEADERS) include/xtos_xr/eye_session.h
 
 .PHONY: all clean
-all: $(BUILD_DIR)/xr-probe
+all: $(BUILD_DIR)/xr-probe $(BUILD_DIR)/xr-eye-probe
 
 $(BUILD_DIR)/xr-probe: $(SOURCES) $(HEADERS) Makefile
 	mkdir -p $(BUILD_DIR)
 	$(CC) $(CPPFLAGS) $(CFLAGS) $(SOURCES) $(LDFLAGS) $(LDLIBS) -o $@
 
+$(BUILD_DIR)/xr-eye-probe: $(EYE_SOURCES) $(EYE_HEADERS) Makefile
+	mkdir -p $(BUILD_DIR)
+	$(CC) $(CPPFLAGS) $(CFLAGS) $(EYE_SOURCES) $(LDFLAGS) $(LDLIBS) -lm -o $@
+
 clean:
-	rm -f $(BUILD_DIR)/xr-probe
+	rm -f $(BUILD_DIR)/xr-probe $(BUILD_DIR)/xr-eye-probe

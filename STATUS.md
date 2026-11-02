@@ -1,12 +1,24 @@
 # XTOS 当前状态
 
-最后更新：2026-11-01
+最后更新：2026-11-02
 
 本文件保留各历史候选的验收范围。当前工作树的源码实现、维护测试、镜像验收和物理硬件验收分别记录；历史镜像的 PASS 不自动覆盖本次提交。
 
 唯一开发目录：`/root/xtos-development/xtos`。
 
-当前源码已迁移为官方签名核验的 Linux 7.3.1 与主线 PREEMPT_RT；版本和补丁来源见 `kernel/source-pin.json`。x86_64、ARM64、RISC-V 64 完整内核与生产 BCI 三模块均已实际构建；三个架构的合成设备 QEMU 已验证运行中 RT 模型、配置查询、旧/逐帧 ioctl、只读 mmap、SDK、解绑与模块卸载。新整机、完整维护、集成独立审查及精确提交验收仍在进行，本次升级保持 `in_progress`，不继承旧镜像 PASS。证据与失败记录在 `.build/kernel-7.3.1/`，范围见 `docs/kernel-7.3.1-migration.md`。
+源码基线已迁移为官方签名核验的 Linux 7.3.1 与主线 PREEMPT_RT；版本和补丁来源见 `kernel/source-pin.json`。x86_64、ARM64、RISC-V 64 完整内核与生产 BCI 三模块均已实际构建；三个架构的合成设备 QEMU 已验证运行中 RT 模型、配置查询、旧/逐帧 ioctl、只读 mmap、SDK、解绑与模块卸载。该内核升级的精确提交、本地 Live 镜像与完整维护已完成验收，准确范围见下一节。后续功能开发正在进行，不把既有快照的 PASS 直接授予新源码。
+
+## Linux 7.3.1 已验收快照与后续开发
+
+- 已验收源码提交：`32a8bd3903eda24bd44d7e1a19dea4156014d062`；验收状态 `ACCEPTED_LOCAL_KERNEL_UPGRADE_AND_QEMU_LIVE_IMAGE`，索引 `.build/kernel-7.3.1/acceptance-index.json`，独立收尾与最终读回分别保留。
+- 完整维护：133 组、1656 次测试方法执行，零失败、错误和跳过；其中已包含 AI11，另有干净提交 AI11 验证。该计数是执行次数，不冒称互不重复的方法数。
+- candidate-62：ISO SHA256 `96df3627bf79364192d502453904f0d78f112d3ba83a934bc28c0084a3b0c53f`，持久产物 `.build/kernel-7.3.1/retained-candidate-62-kernel731/images/xtos-developer-live-x86_64.iso`。实际内核、initramfs、rootfs 完整读回与 BIOS/UEFI × CD/USB 四模式通过；另有 x86 正常系统启动。ARM64/RISC-V 本次运行证据是合成设备 guest，不能扩张为实板验收。
+- 内核和 BusyBox 是提交前相同候选内容的实际编译产物，在干净提交中按完整相关输入哈希绑定复用；Live SDK 与原生工具重新编译。不将复用表述为整机所有组件都重新编译。
+- 后续新增源码不继承该 PASS。当前继续完善 XR 会话/眼动采样和 Live 安装执行路径；新功能必须经过自己的独立审查、维护、干净提交及产物验证，不能仅改状态文字即宣称通过。
+- 尚未关闭：厂商网络线协议/认证、真实 XR 图形会话及实际应用控制、领域脑电模型效果、物理板卡/GPU/头显联调与持续 RT，以及 M0 实机决策约束下尚未实现的自定义 `sched_class`。缺硬件与缺实现分开记录；模拟输入继续 `no_action`。
+- i915 在当前上游 7.3.1 的 PREEMPT_RT 约束下不可启用，已启用的 Xe 不覆盖全部旧 Intel 核显。Secure Boot、实体部署和公开镜像发布不属于本次 PASS。原 FAIL/PARTIAL/RED 保留在 `.build/kernel-7.3.1/`。
+
+本轮新增功能的组件审查进度记录在 `.build/remaining-closure-v2/acceptance-ledger.json`。headless 眼动 native 四项修复、CLI 非阻塞输出、XR Live 安装执行助手及可选离线 BLE 运行依赖均已通过各自冻结版本的 SPEC/QUALITY。native 新跑 12/4/16 项，CLI 在修复后 native 上的父回归为普通、优化、ASan/UBSan 各 19 项；后者不替代当前组合的独立集成审查。TLS 生产、夹具 SPEC 与组件 QUALITY 均已通过。共享安装接线、最终组合依赖的独立审查、完整维护、干净提交与新镜像验收仍未关闭。BLE 为显式可选目标安装，不进入默认 Live 镜像；历史 TDD PARTIAL、native OBS-001 诊断覆盖观察和原始失败均保留。
 
 下列早期构建、跨架构和镜像记录均保留其原始内核与源码范围，不代表当前 7.3.1 候选通过。BusyBox、根文件系统、SDK、工具和测试继续在仓库维护，输出隔离在 `.build/`。
 

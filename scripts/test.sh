@@ -19,6 +19,9 @@ python3 "$ROOT/tests/test_eeg_device_contract.py"
 python3 -B -m unittest discover -s "$ROOT/tests" -p 'test_xtos_devices.py' -v
 python3 -B -m unittest discover -s "$ROOT/tests" -p 'test_xtos_serial_transport.py' -v
 python3 -B -m unittest discover -s "$ROOT/tests" -p 'test_xtos_network_transport.py' -v
+python3 -B -m unittest discover -s "$ROOT/tests" -p 'test_xtos_tls_transport.py' -v
+python3 -B -m unittest discover -s "$ROOT/tests" -p 'test_device_tls_install.py' -v
+python3 -B -m unittest discover -s "$ROOT/tests" -p 'test_device_tls_integration.py' -v
 python3 -B -m unittest discover -s "$ROOT/tests" -p 'test_device_network_install.py' -v
 python3 -B -m unittest discover -s "$ROOT/tests" -p 'test_device_network_integration.py' -v
 python3 -B -m unittest discover -s "$ROOT/tests" -p 'test_xtos_cyton_protocol.py' -v
@@ -27,6 +30,8 @@ python3 -B -m unittest discover -s "$ROOT/tests" -p 'test_xtos_ganglion_protocol
 python3 -B -m unittest discover -s "$ROOT/tests" -p 'test_xtos_ganglion_plugin.py' -v
 python3 -B -m unittest discover -s "$ROOT/tests" -p 'test_xtos_ganglion_stream.py' -v
 python3 -B -m unittest discover -s "$ROOT/tests" -p 'test_xtos_ganglion_ble.py' -v
+python3 -B -m unittest discover -s "$ROOT/tests" -p 'test_ble_runtime_install.py' -v
+python3 -B -m unittest discover -s "$ROOT/tests" -p 'test_ble_runtime_integration.py' -v
 python3 -B -m unittest discover -s "$ROOT/tests" -p 'test_device_serial_install.py' -v
 python3 -B -m unittest discover -s "$ROOT/tests" -p 'test_p4_device_plugin_integration.py' -v
 python3 "$ROOT/tests/test_cyton_runtime.py"
@@ -106,7 +111,7 @@ python3 "$ROOT/tests/test_verify_xpkg.py"
 python3 "$ROOT/tests/test_make_xpkg.py"
 python3 -m unittest discover -s "$ROOT/tests" -p 'test_userspace_repo.py' -v
 python3 -m unittest discover -s "$ROOT/tests" -p 'test_release_index.py' -v
-for suite in test_xr_native.py test_xr_multimodal.py test_xr_feedback.py test_xr_runtime.py test_xr_install.py test_xr_integration.py; do
+for suite in test_current_delivery_status.py test_live_xr.py test_live_xr_integration.py test_live_xr_payload.py test_xr_eye_session.py test_xr_eye_spec.py test_xr_eye_cli.py test_xr_native.py test_xr_multimodal.py test_xr_feedback.py test_xr_runtime.py test_xr_install.py test_xr_integration.py; do
     python3 -B -m unittest discover -s "$ROOT/tests" -p "$suite" -v
 done
 for suite in test_ai_runtime.py test_ai_provider_experiment.py test_ai_provider_trust.py test_ai_provider_client.py test_ai_provider_worker.py test_ai_recovery_budget.py test_ai_provider_install.py test_ai_provider_service_real.py test_ai_provider_integration.py test_ai_service.py test_ai_client.py test_ai_worker.py test_ai_service_real.py test_ai_model_trust.py test_ai_model_revocation.py test_ai_signed_lifecycle.py test_ai_ticket_lifecycle.py test_ai_runtime_bundle.py test_ai_runtime_assembly.py; do

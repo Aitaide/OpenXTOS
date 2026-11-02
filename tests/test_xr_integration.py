@@ -54,6 +54,7 @@ class XrIntegrationTests(unittest.TestCase):
         self.assertEqual(entry['version'],'0.1.0')
         self.assertEqual(set(entry['hash_globs']),{'Makefile',
             'include/xtos_xr/runtime_adapter.h','src/runtime_adapter.c','src/xr_probe.c',
+            'include/xtos_xr/eye_session.h','src/eye_session.c','src/xr_eye_probe.c',
             'xtos_xr/__init__.py','xtos_xr/__main__.py','xtos_xr/runtime_events.py'})
         self.assertEqual(entry['requires'],['openxr-headers','xtos-action-gate'])
 

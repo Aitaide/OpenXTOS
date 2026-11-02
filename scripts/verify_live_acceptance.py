@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import importlib.util
 from pathlib import Path
 import re
 import subprocess
@@ -75,7 +76,19 @@ def verify_artifacts(candidate: Path, expected_source: str,
     config = Path(kernel_config) if kernel_config is not None else candidate / 'images/kernel.config'
     if not config.is_file() or sha256(config) != manifest.get('kernel_config_sha256'):
         raise ValueError('kernel config missing or hash mismatch')
+    xr_required = 'xr_runtime' in manifest
+    if xr_required:
+        xr = manifest['xr_runtime']
+        if (not isinstance(xr, dict) or xr.get('schema') != 'xtos.xr.live-install.v1'
+                or xr.get('status') != 'installed_source_only'
+                or xr.get('physical_acceptance') is not False
+                or xr.get('vendor_runtime_bundled') is not False
+                or not isinstance(xr.get('payload_inventory'), dict) or not xr['payload_inventory']
+                or not isinstance(xr.get('source_inventory'), dict) or not xr['source_inventory']):
+            raise ValueError('candidate XR runtime manifest is malformed')
     return {
+        'xr_runtime_required': xr_required,
+        'xr_runtime': manifest.get('xr_runtime'),
         'source_commit': expected_source,
         'source_state': 'clean',
         'candidate': str(candidate),
@@ -149,6 +162,14 @@ def verify_boot_evidence(evidence: Path, artifacts: dict) -> list[str]:
             value = checks.get(key)
             if not isinstance(value, str) or marker not in value:
                 raise ValueError(f'{mode} missing required result: {key}')
+        if artifacts.get('xr_runtime_required') is True:
+            spec = importlib.util.spec_from_file_location('xtos_live_xr_boot_validator', ROOT / 'scripts/verify_live.py')
+            if spec is None or spec.loader is None:
+                raise ValueError('XR guest verifier is unavailable')
+            validator = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(validator)
+            validator.validate_xr_guest_report(checks.get('xr_in_guest'))
+            validator.validate_xr_installed_inventory(checks.get('xr_installed_inventory'), artifacts.get('xr_runtime'))
         if read_document(evidence / f'{mode}.result.json') != row:
             raise ValueError(f'{mode} per-mode result does not match aggregate')
         serial = (evidence / f'{mode}.serial.log').read_text(errors='replace')

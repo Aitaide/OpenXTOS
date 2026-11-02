@@ -1,6 +1,6 @@
 # Linux 7.3.1 内核迁移
 
-状态：in_progress。源码、构建、guest、完整维护、精确提交与整机镜像分别验收，不能继承旧 candidate-61 或历史 6.6/rt15 的 PASS。
+状态：内核升级与本地 Live 镜像切片已验收，后续功能继续开发。验收仅绑定干净提交 `32a8bd3903eda24bd44d7e1a19dea4156014d062` 与下述 candidate-62，不继承旧 candidate-61 或历史 6.6/rt15 的 PASS；后续新增源码不继承该 PASS。源码、构建、guest、完整维护、精确提交与整机镜像分别保留证据。
 
 ## 来源与边界
 
@@ -19,13 +19,19 @@ x86_64、ARM64 与 RISC-V 64 的真实 Linux QEMU guest 已运行生产 core/buf
 
 7.3.1 主线不提供旧 RT 补丁的 `/sys/kernel/realtime`。本次 guest 除读取运行中 `/proc/config.gz` 外，编译并加载只读测试模块，调用 `preempt_model_rt()` 验证实际内核 RT 模型为 1。测试模块仅存在于诊断 initramfs，不成为产品设备或实时性能证明。缺旧 sysfs 节点不等于 RT 关闭；显式节点值 0、配置关闭或证据不足均不得通过。
 
-## 尚未关闭的交付门
+## 已关闭的本地交付门
 
-- 三架构正常系统启动与新整机依赖闭包（合成设备诊断 guest 已通过）。
-- 全部源码准入、SBOM、跨架构构建、原生诊断与启动检查的维护接线和独立 SPEC/QUALITY。
-- 冻结升级候选的完整维护、精确源码提交和干净提交验证。
-- 新整机依赖闭包、正常启动与 Live 四模式；旧镜像不覆盖新源码。
-- 目标板、物理串口/BLE、GPU、真实头显和持续物理实时负载。
+- 内核 API 移植、源码准入、SBOM、跨架构缓存配置、原生诊断与启动检查均通过独立 SPEC/QUALITY；冻结候选完整维护 133 组、1656 次方法执行，无失败、错误或跳过，AI11 已包含。
+- 准确源码提交已私有推送，远端读回一致；另有干净提交 AI11 验证。内核与 BusyBox 复用提交前同候选内容的实际编译产物，相关源码/配置/模块摘要完整绑定；Live SDK 与原生工具重新编译。
+- candidate-62 ISO SHA256：`96df3627bf79364192d502453904f0d78f112d3ba83a934bc28c0084a3b0c53f`。三个嵌入载荷完整读回、BIOS/UEFI × CD/USB 四模式与 x86 正常系统启动通过。ARM64/RISC-V 本轮证据为真实内核合成设备 guest，不表示正常整机或实板均已验收。
+- 父验收索引 `.build/kernel-7.3.1/acceptance-index.json`，状态 `ACCEPTED_LOCAL_KERNEL_UPGRADE_AND_QEMU_LIVE_IMAGE`；独立收尾报告与最终 `acceptance-readback.json` 均已保留。磁盘上的最终 ISO 在 `.build/kernel-7.3.1/retained-candidate-62-kernel731/images/`。
+
+## 仍开放的功能与外部验收门
+
+- 厂商网络线协议及认证、XR 图形会话和实际应用控制、领域脑电模型效果不在内核升级范围；后续实现按新候选验证。
+- 真实目标板、物理串口/BLE、GPU 推理与 RT 共存、真实头显/EEG/EMG、同步校准及持续物理实时负载未验收。
+- 当前 i915 与上游 PREEMPT_RT 约束不兼容，Xe 不覆盖所有旧 Intel 核显；不宣称兼容范围不变。
+- Secure Boot、物理磁盘部署和完整三架构发布包/公开镜像发布均未由该 ISO 验收关闭。
 
 本次不升级或重启开发主机内核，不写物理磁盘，不改 BIOS/IRQ/电源策略，不公开发布。`XTOS_SCHED` 仍为辅助队列，不是 Linux sched_class；M0 实机收益门未过，不借升级实现或宣称专用调度器。
 

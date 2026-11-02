@@ -1,10 +1,10 @@
 {
   "bomFormat": "CycloneDX",
   "specVersion": "1.5",
-  "serialNumber": "urn:uuid:a9da0f4b7b79f99e870472abbdd6a0c562b2",
+  "serialNumber": "urn:uuid:b51557a6466d51f33fea7a11274eb382f920",
   "version": 1,
   "metadata": {
-    "timestamp": "2026-11-01T15:45:56.414211+00:00",
+    "timestamp": "2026-11-02T06:19:44.953489+00:00",
     "component": {
       "type": "application",
       "bom-ref": "xtos-component-xtos-system",
@@ -30,7 +30,7 @@
     "properties": [
       {
         "name": "xtos:git-commit",
-        "value": "155beef4e3eadb0824bf4dd7fd3ead73765b4bb2"
+        "value": "32a8bd3903eda24bd44d7e1a19dea4156014d062"
       },
       {
         "name": "xtos:kernel-release",
@@ -118,7 +118,7 @@
           }
         }
       ],
-      "description": "Application OpenXR loader/event/time adapter and bounded multimodal software-only confirmation; no rendering session or headset evidence",
+      "description": "Application OpenXR loader/event/time and opt-in headless eye session adapter, bounded multimodal software-only confirmation; no rendering or headset evidence",
       "scope": "required",
       "purl": "pkg:generic/xtos-xr@0.1.0",
       "properties": [
@@ -130,19 +130,31 @@
       "hashes": [
         {
           "alg": "SHA-256",
-          "content": "1d089be62eb5867958c302c5ed80260d2cd469a65e4d114e7136fd4f8a3a4ceb"
+          "content": "d0b3b6518d15c1dd54e8459d8fdcb8510756bb020ef0ce79fdb236a917c477bd"
         },
         {
           "alg": "SHA-256",
-          "content": "91dcd9eded7628c9be6b110b58e35c438ce838c1f1e27858e442cf21c6778ca6"
+          "content": "1166a53d59cfd87f61a206d76bd82b8643e6fc2b3ff5eeb8a3873f5bd924b38f"
         },
         {
           "alg": "SHA-256",
-          "content": "dd65a1f5cbd29c9a9a9c7e95286ada9345fd58026d0228748761aec3a803a2cd"
+          "content": "cc031745808d0e2d03a874b3cf590463cac0e53c3be90bf4cf462fdb063fbb60"
         },
         {
           "alg": "SHA-256",
           "content": "afdf4deda50142d0661e0dfab95ab7b16b8dbb46ab11fa040e3da6d220254a95"
+        },
+        {
+          "alg": "SHA-256",
+          "content": "ba9f807ff9ce63019e6affd3ccdf954fbad10fb744e054b62000accde49c8ff6"
+        },
+        {
+          "alg": "SHA-256",
+          "content": "46fe79b02e88c62472e60f3c56c24951cc5fde70b3a6069780ad9dfd790398f3"
+        },
+        {
+          "alg": "SHA-256",
+          "content": "1b47b9e7e31c1132853071bafb852766484bbf6959dda6ab7bbd9eee62e06a93"
         },
         {
           "alg": "SHA-256",
@@ -943,6 +955,42 @@
         {
           "alg": "SHA-256",
           "content": "a7b5df6e1630f673a71e487c0bcfcb96bc6f07ae1ed528e2c526a0c98daca512"
+        },
+        {
+          "alg": "SHA-256",
+          "content": "dd5f4a63102e446d9851ebcd5eb9d8e6e14ed73b1e114b936df79b0b9b6abb24"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "bom-ref": "xtos-component-xtos-ble-runtime-provisioner",
+      "name": "xtos-ble-runtime-provisioner",
+      "version": "0.1.0",
+      "licenses": [
+        {
+          "license": {
+            "id": "Apache-2.0"
+          }
+        }
+      ],
+      "description": "Explicit offline CPython 3.13 Linux x86_64 BLE wheel provisioner and lock; not part of the default image, no BlueZ or radio acceptance",
+      "scope": "excluded",
+      "purl": "pkg:generic/xtos-ble-runtime-provisioner@0.1.0",
+      "properties": [
+        {
+          "name": "xtos:source-path",
+          "value": "."
+        }
+      ],
+      "hashes": [
+        {
+          "alg": "SHA-256",
+          "content": "1973e791ba10779ebf227c5bc80f748a9eb6de731e557c83a4ac46bceb33d5d9"
+        },
+        {
+          "alg": "SHA-256",
+          "content": "2d0b956f91d2b12182898ff4dd234d74b8d621f339da8d14b6c09981af3a7d70"
         }
       ]
     },
@@ -1386,6 +1434,10 @@
       "dependsOn": [
         "xtos-component-xtos-eeg-pipeline"
       ]
+    },
+    {
+      "ref": "xtos-component-xtos-ble-runtime-provisioner",
+      "dependsOn": []
     },
     {
       "ref": "xtos-component-xtos-eeg-loop",

@@ -48,6 +48,25 @@ class XrInstallTests(unittest.TestCase):
             self.assertTrue((stage/'usr/bin/xr-probe').is_file())
             self.assertFalse((stage/'var/lib/xtos/action-gate').exists())
 
+    def test_headless_eye_cli_is_packaged_with_complete_source_bindings(self):
+        with tempfile.TemporaryDirectory(prefix='xr-eye-install-') as directory:
+            stage = Path(directory)
+            record = installer().install(stage, ROOT)
+            binary = stage / 'usr/bin/xr-eye-probe'
+            self.assertTrue(binary.is_file(), 'headless eye command was not installed')
+            self.assertTrue(binary.read_bytes().startswith(b'\x7fELF'))
+            self.assertEqual(binary.stat().st_mode & 0o7777, 0o755)
+            for name in ('src/eye_session.c', 'src/xr_eye_probe.c', 'include/xtos_xr/eye_session.h'):
+                self.assertIn('tools/xtos-xr/' + name, record['source_hashes'])
+            refused = subprocess.run([str(binary), '--loader', '/__xtos_missing_eye_loader__.so',
+                '--accept-eye-data'], capture_output=True, text=True, timeout=5)
+            self.assertNotEqual(refused.returncode, 0)
+            output = json.loads(refused.stdout)
+            self.assertEqual(output['status'], 'runtime_unavailable')
+            self.assertEqual(output['safe_action'], 'no_action')
+            self.assertIs(output['physical_acceptance'], False)
+            self.assertEqual(output['samples'], [])
+
     def test_identical_retry_and_conflict_preserve_caller_files(self):
         with tempfile.TemporaryDirectory(prefix='xr-install-reuse-') as directory:
             stage=Path(directory);module=installer();first=module.install(stage,ROOT)

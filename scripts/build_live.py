@@ -20,6 +20,7 @@ from userspace_root import open_owned_root
 from live_ai import install_runtime, validate_runtime
 from install_eeg_loop import install as install_eeg_loop
 from install_devices import install as install_devices
+from live_xr import install_and_verify as install_xr_runtime
 
 REQUIRED_CONFIG=['CONFIG_PREEMPT_RT=y','CONFIG_SQUASHFS=y','CONFIG_SQUASHFS_ZLIB=y','CONFIG_OVERLAY_FS=y','CONFIG_BLK_DEV_LOOP=y','CONFIG_ISO9660_FS=y','CONFIG_USB_STORAGE=y','CONFIG_DEVTMPFS=y']
 REQUIRED_CONFIG += ['CONFIG_SECURITY=y','CONFIG_SECURITY_LANDLOCK=y','CONFIG_SECCOMP=y',
@@ -367,6 +368,7 @@ def build(args):
         cyton_runtime['profile_sha256']=sha(ROOT/'system/profiles/live-developer.json')
         device_plugins=install_devices(runtime, ROOT)
         eeg_loop_sources = install_eeg_loop(runtime, ROOT)
+        xr_runtime = install_xr_runtime(runtime, ROOT)
         ai_runtime=install_runtime(runtime,ai_root,ai_descriptor,ROOT,ai_lock) if ai_root else None
         # liblsl (Lab Streaming Layer) from the pinned upstream build; the lock
         # covers the .so hash (see tools/lsl/build_lsl.sh + tests/test_lsl_build.py).
@@ -488,6 +490,7 @@ def build(args):
         build_manifest['native_bci_runtime']=native_bci_runtime
         build_manifest['eeg_loop_sources']=eeg_loop_sources
         build_manifest['eeg_stream_sources']=eeg_stream_sources
+        build_manifest['xr_runtime']=xr_runtime
         shutil.copy2(kernel/'.config', images/'kernel.config')
         write(stage,'images/build-manifest.json',json.dumps(build_manifest,sort_keys=True,indent=2)+'\n')
         write(stage,'images/SHA256SUMS',sha(product)+'  '+product.name+'\n'+sha(images/'build-manifest.json')+'  build-manifest.json\n')

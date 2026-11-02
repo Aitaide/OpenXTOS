@@ -23,7 +23,7 @@ class DeviceSerialInstallTests(unittest.TestCase):
             self.assertNotIn('bleak', name)
             self.assertNotIn('dbus', name)
             self.assertNotIn('fixture', name)
-        self.assertEqual(len(installer.SOURCES), 9)
+        self.assertEqual(len(installer.SOURCES), 10)
 
     def test_source_only_install_runs_exact_api_and_preserves_existing_destinations(self):
         sys.path.insert(0, str(ROOT/'scripts'))
@@ -39,7 +39,7 @@ class DeviceSerialInstallTests(unittest.TestCase):
             expected = {'xtos_devices.py', 'serial_transport.py', 'cyton_protocol.py',
                         'cyton_serial_plugin.py', 'ganglion_protocol.py',
                         'ganglion_plugin.py', 'ganglion_ble.py', 'network_transport.py',
-                        'openbci_cyton.py'}
+                        'openbci_cyton.py', 'tls_transport.py'}
             package = stage/'usr/lib/xtos/devices'
             self.assertEqual({p.name for p in package.iterdir()}, expected)
             code = ('import sys; sys.path.insert(0, sys.argv[1]); '

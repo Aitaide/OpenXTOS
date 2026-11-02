@@ -36,6 +36,8 @@ def install(stage,repo):
         inputs['tools/xtos_action_gate/'+name]=source_bytes(repo,'tools/xtos_action_gate/'+name)
     native=['tools/xtos-xr/Makefile','tools/xtos-xr/src/runtime_adapter.c',
         'tools/xtos-xr/src/xr_probe.c','tools/xtos-xr/include/xtos_xr/runtime_adapter.h',
+        'tools/xtos-xr/src/eye_session.c','tools/xtos-xr/src/xr_eye_probe.c',
+        'tools/xtos-xr/include/xtos_xr/eye_session.h',
         'tools/xtos-xr/vendor/openxr/include/openxr/openxr.h',
         'tools/xtos-xr/vendor/openxr/include/openxr/openxr_platform.h',
         'tools/xtos-xr/vendor/openxr/include/openxr/openxr_platform_defines.h']
@@ -51,6 +53,7 @@ def install(stage,repo):
         for name in GATE_NAMES:
             payload['usr/lib/xtos/xtos_action_gate/'+name]=(0o644,inputs['tools/xtos_action_gate/'+name])
         payload['usr/bin/xr-probe']=(0o755,(tmp/'build/xr-probe').read_bytes())
+        payload['usr/bin/xr-eye-probe']=(0o755,(tmp/'build/xr-eye-probe').read_bytes())
         payload['usr/libexec/xtos/xr-feedback-entry.py']=(0o755,
             b'#!/usr/bin/python3\nfrom pathlib import Path\nimport runpy,sys\nsys.path.insert(0,str(Path(__file__).resolve().parents[2]/"lib/xtos"))\nrunpy.run_module("xtos_xr",run_name="__main__")\n')
         payload['usr/bin/xr-feedback-demo']=(0o755,

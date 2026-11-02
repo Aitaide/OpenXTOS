@@ -12,6 +12,7 @@
 #include <openxr/openxr_platform.h>
 #define XTOS_XR_MAX_EXTENSIONS 128u
 #define XTOS_XR_MAX_EVENTS 256u
+#define XTOS_XR_FEATURE_HEADLESS_EYE 1u
 enum { XTOS_XR_OK=0, XTOS_XR_EMPTY=1, XTOS_XR_UNAVAILABLE=-1, XTOS_XR_INVALID=-2, XTOS_XR_RUNTIME=-3, XTOS_XR_LIMIT=-4, XTOS_XR_NO_CONVERSION=-5 };
 /* Zero-initialize before first open. Single owner; externally serialize calls. */
 typedef struct xtos_xr_adapter {
@@ -25,10 +26,17 @@ typedef struct xtos_xr_adapter {
  uint64_t generation, sequence, barrier;
  XrResult last_result;
  int timespec_enabled;
+ unsigned features;
+ unsigned active_children;
+ int blocked_by_child;
  /* Failed destruction retains instance/library; only close retry is allowed. */
  int cleanup_failed;
+ int child_cleanup_failed,parent_cleanup_failed;
+ int terminal_lost;
 } xtos_xr_adapter;
 int xtos_xr_open(xtos_xr_adapter *a, const char *absolute_loader_path);
+/* Explicit opt-in; both eye gaze and headless must be advertised before create. */
+int xtos_xr_open_features(xtos_xr_adapter *a,const char *absolute_loader_path,unsigned features);
 void xtos_xr_close(xtos_xr_adapter *a);
 typedef struct xtos_xr_event {
  uint64_t generation,sequence,barrier;

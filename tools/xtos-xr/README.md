@@ -12,11 +12,17 @@
 
     make -C tools/xtos-xr all
 
-输出 `.build/xr/xr-probe`。只有可信运营配置才能提供绝对 loader 路径：
+输出 `.build/xr/xr-probe` 和 `.build/xr/xr-eye-probe`。只有可信运营配置才能提供绝对 loader 路径：
 
     .build/xr/xr-probe --loader /absolute/operator-selected/libopenxr_loader.so.1
 
-没有 loader/runtime 时返回非零 unavailable/no_action。probe 仅创建 instance、读取有界事件并可使用已枚举的 timespec 扩展逐点转换；没有图形会话、渲染或真实 eye action/space 采集。`--simulated` 只标注调用方选择的测试库，不能据此证明库来自真实设备。
+没有 loader/runtime 时返回非零 unavailable/no_action。`xr-probe` 仅创建 instance、读取有界事件并使用已枚举的 timespec 扩展逐点转换。
+
+新增 `xr-eye-probe` 通过显式 opt-in 的 `XR_MND_headless`、`XR_EXT_eye_gaze_interaction` 和 timespec 扩展建立真实 API 会话、pose action 与 space。运行前必须明确同意眼动数据访问：
+
+    .build/xr/xr-eye-probe --loader /absolute/operator-selected/libopenxr_loader.so.1 --accept-eye-data --max-samples 1 --duration-ms 1000
+
+扩展、HMD 或眼动能力不满足时拒绝；没有图形渲染。命令最多采样64条、持续5000毫秒，只有取得请求的全部样本且完成清理才报告 complete；部分采样、中断、清理或输出失败均非零。周期休眠和非阻塞 stdout 约束合作式循环与管道背压，不能约束第三方 runtime 内部阻塞或物理实时延迟。输出失败后的 stderr 诊断只做一次非阻塞写入；管道写满可省略诊断，仍非零退出。输出分别保留 query time 和 runtime pose time，后者可能由预测、插值或clamp产生，不能冒称原始采集时间。`--simulated` 只标注调用方选择的测试库，不能据此证明库或设备来源。两种命令均保持 no_action、非物理验收；新增会话尚处独立复核/集成中，见 `docs/xr-headless-live-v2.md`。
 
 聚焦维护：
 
@@ -36,6 +42,6 @@ Native测试把真实 Khronos ABI 的编译注入库标记为模拟，结果不�
 
     python3 -B scripts/install_xr.py --rootfs /absolute/staging/root
 
-安装 native `xr-probe`、Python应用源码与既有 ActionGate源码、两个固定入口及 hash manifest，不包含loader/runtime/测试/设备凭据。Python入口固定 `/usr/bin/python3`；目标需独立满足Python标准库和native动态链接闭包。安装副本测试会实际执行模块demo；隔离chroot sentinel另验证生成launcher选用的解释器和argv，不能把sentinel当实际Python执行。重复安装只接受精确相同字节和权限；冲突拒绝而保留调用方文件。该 source-only 安装路径不自动进入 Live ISO。
+安装 native `xr-probe`、`xr-eye-probe`、Python应用与既有 ActionGate源码、固定入口及 hash manifest，不包含loader/runtime/测试/设备凭据。Python入口固定 `/usr/bin/python3`；`live_xr.py` 在新 staging 中实际运行目标Python、两种native命令的缺loader拒绝路径及无动作demo，同时核对精确源清单、payload与launcher。重复安装只接受精确相同字节和权限；冲突保留调用方文件。Live构建已接线，新的精确提交ISO仍须完成完整维护、库存读回、普通用户guest与四模式启动，旧镜像不覆盖新增代码。
 
-未关闭的范围：图形绑定/会话、真实眼动action与space、vendor runtime/头显、物理EEG/EMG、同步不确定度校准、跟踪精度、GPU和物理实时延迟。sample中的live_device标签只是未认证metadata，不能授予生产动作权限。
+未关闭的范围：图形绑定/渲染、vendor runtime/真实头显、物理EEG/EMG、同步不确定度校准、跟踪精度、GPU和物理实时延迟。headless native、CLI及Live助手已各自通过冻结组件审查；修复后依赖的最终组合审查与新镜像验收仍在进行。sample中的live_device标签只是未认证metadata，不能授予生产动作权限。

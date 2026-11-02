@@ -52,20 +52,27 @@ int xtos_xr_poll(xtos_xr_adapter *a,xtos_xr_event *event) {
 }
 void xtos_xr_close(xtos_xr_adapter *a) {
  if (!a) return;
+ if (a->active_children) {
+  if(a->cleanup_failed && !a->child_cleanup_failed && !a->blocked_by_child)a->parent_cleanup_failed=1;
+  a->last_result=XR_ERROR_HANDLE_INVALID;a->cleanup_failed=1;a->blocked_by_child=1;return;
+ }
  if (a->instance) {
   XrResult result=a->destroy?a->destroy(a->instance):XR_ERROR_FUNCTION_UNSUPPORTED;
   if(result!=XR_SUCCESS) {
-   a->last_result=result;a->cleanup_failed=1;return;
+   a->last_result=result;a->cleanup_failed=1;a->parent_cleanup_failed=1;return;
   }
   if(a->cleanup_failed) a->last_result=result;
  }
- a->cleanup_failed=0;
+ a->cleanup_failed=0; a->blocked_by_child=0;
+ a->child_cleanup_failed=0;a->parent_cleanup_failed=0;
+ a->terminal_lost=0;
  a->instance=XR_NULL_HANDLE;
  if (a->library) dlclose(a->library);
  a->library=0; a->gipa=0; a->destroy=0; a->poll=0;
- a->to_host=0; a->to_xr=0; a->timespec_enabled=0;
+ a->to_host=0; a->to_xr=0; a->timespec_enabled=0; a->features=0;
 }
-int xtos_xr_open(xtos_xr_adapter *a, const char *path) {
+int xtos_xr_open_features(xtos_xr_adapter *a, const char *path,unsigned features) {
+ if(features & ~XTOS_XR_FEATURE_HEADLESS_EYE) return XTOS_XR_INVALID;
  if (!a || !path || path[0]!='/') return XTOS_XR_INVALID;
  if (a->library || a->instance) return XTOS_XR_INVALID;
  a->library=dlopen(path,RTLD_NOW|RTLD_LOCAL);
@@ -89,15 +96,19 @@ int xtos_xr_open(xtos_xr_adapter *a, const char *path) {
   if(a->last_result!=XR_SUCCESS || filled>count) goto fail;
   count=filled;
  }
+ int headless=0,eye=0;
  for(uint32_t i=0;i<count;i++) {
   if(!memchr(properties[i].extensionName,0,XR_MAX_EXTENSION_NAME_SIZE)) goto fail;
+  if(!strcmp(properties[i].extensionName,XR_MND_HEADLESS_EXTENSION_NAME)) headless=1;
+  if(!strcmp(properties[i].extensionName,XR_EXT_EYE_GAZE_INTERACTION_EXTENSION_NAME)) eye=1;
   if(!strcmp(properties[i].extensionName,XR_KHR_CONVERT_TIMESPEC_TIME_EXTENSION_NAME)) a->timespec_enabled=1;
  }
- const char *extension=XR_KHR_CONVERT_TIMESPEC_TIME_EXTENSION_NAME;
+ if(features && (!headless || !eye || !a->timespec_enabled)) goto fail;
+ const char *extensions[]={XR_KHR_CONVERT_TIMESPEC_TIME_EXTENSION_NAME,XR_MND_HEADLESS_EXTENSION_NAME,XR_EXT_EYE_GAZE_INTERACTION_EXTENSION_NAME};
  XrInstanceCreateInfo ci={0};ci.type=XR_TYPE_INSTANCE_CREATE_INFO;
  strcpy(ci.applicationInfo.applicationName,"xtos-xr-probe");strcpy(ci.applicationInfo.engineName,"xtos-xr");
  ci.applicationInfo.apiVersion=XR_MAKE_VERSION(1,0,0);
- ci.enabledExtensionCount=a->timespec_enabled?1:0;ci.enabledExtensionNames=a->timespec_enabled?&extension:0;
+ ci.enabledExtensionCount=features?3:(a->timespec_enabled?1:0);ci.enabledExtensionNames=ci.enabledExtensionCount?extensions:0;
  a->last_result=create(&ci,&a->instance);
  if(a->instance) {
   /* Resolve destruction before every other instance function, even if create failed with an owned handle. */
@@ -115,8 +126,9 @@ int xtos_xr_open(xtos_xr_adapter *a, const char *path) {
  do {
   if(previous==UINT64_MAX) {xtos_xr_close(a);return XTOS_XR_LIMIT;}
  } while(!atomic_compare_exchange_weak(&generations,&previous,previous+1));
- a->generation=previous+1;a->sequence=0;a->barrier=0;
+ a->generation=previous+1;a->sequence=0;a->barrier=0;a->features=features;
  return XTOS_XR_OK;
 fail:
  xtos_xr_close(a);return XTOS_XR_UNAVAILABLE;
 }
+int xtos_xr_open(xtos_xr_adapter *a,const char *path) {return xtos_xr_open_features(a,path,0);}
