@@ -1,12 +1,21 @@
 # XTOS 当前状态
 
-最后更新：2026-11-02
+最后更新：2026-11-03
 
 本文件保留各历史候选的验收范围。当前工作树的源码实现、维护测试、镜像验收和物理硬件验收分别记录；历史镜像的 PASS 不自动覆盖本次提交。
 
 唯一开发目录：`/root/xtos-development/xtos`。
 
 源码基线已迁移为官方签名核验的 Linux 7.3.1 与主线 PREEMPT_RT；版本和补丁来源见 `kernel/source-pin.json`。x86_64、ARM64、RISC-V 64 完整内核与生产 BCI 三模块均已实际构建；三个架构的合成设备 QEMU 已验证运行中 RT 模型、配置查询、旧/逐帧 ioctl、只读 mmap、SDK、解绑与模块卸载。该内核升级的精确提交、本地 Live 镜像与完整维护已完成验收，准确范围见下一节。后续功能开发正在进行，不把既有快照的 PASS 直接授予新源码。
+
+## candidate-64 安全加固已验收镜像与当前交付范围
+
+- 本轮安全加固源码提交 `5455b2fe09dbc2b9d6933e9bc6000eb5fc600892`（17 个文件）经独立增量 SPEC/QUALITY 复核（防火墙链健康与规则漂移检测、更新严格整数 size 与签名快照重验、显式失败恢复、启动门、测试观察器修正），并推送私有 main（fast-forward `fc03edfd2..5455b2fe0`，远端 `refs/heads/main` 读回一致）。
+- 完整维护：148 组、1790 次测试方法执行，仅 2 项显式 opt-in loop 写盘跳过，AI 验收 11/11 零跳过；主目录与隔离副本源码运行前后逐字节核验未变。a2–a5 历史失败记录全部原样保留。
+- candidate-64-hardened：ISO SHA256 `f836c27d78f0430de9867f271305cbf19a90971ba348bfb6d35132db6d72bbed`（1,067,184,128 字节）。由加固内核 `7.3.1-xtos-live.1`（`kernel/xtos_defconfig` 加固项经 builder 校验）与该 clean 提交按 `--require-clean` 构建；manifest 的 `source_git_head/source_state/iso_sha256` 与实测逐字一致。
+- 四模式限定安全冒烟 PASS（BIOS/UEFI × CD/USB）：串口防火墙守卫与就绪标记在位；普通 xtos 用户 UID 1000 登录且 `xtos-rt-status` 输出 1；root SSH 公钥拒绝（exit 255，stderr 含 `Permission denied` 与 `publickey`）；非特权 `fw status` 拒绝（exit 1，`fw: requires root`）；每模式哨盘强制关机后未变。检查器 22 项控制器回归普通/优化模式各通过，并经独立 SPEC/QUALITY 复核（6 个反例探针全部被拒）。
+- 更新失败恢复：生产版 `update` 在 QEMU 来宾 `/dev/vdb` 注入虚拟块写 EIO 后正确记录 journal 并拒绝继续；同一虚拟磁盘重启后 `recover` 重新验签、完整重写并读回 SHA256 与已签名产物一致，旁路哨盘未变。该证据限于虚拟块设备与正常重启路径，不覆盖突然掉电、物理盘或 A/B 自动回滚。
+- 证据与报告封存 `.build/production-hardening-v1/`（`full-maintenance-a6/`、`candidate-64-security-smoke-a1/`、`checker-review-a1/`、`update-block-guest-a1/`、各 SPEC/QUALITY 增量报告）。本状态为验收后的记录更新；新提交不改变已验收镜像的源码身份，后续新增源码不继承该 PASS。干净关机、旧版四模式全功能验收、物理设备（Cyton/BLE/GPU/头显）、厂商协议会话、持续硬实时、模型效果、Secure Boot 与公开发布仍单列未验收。
 
 ## candidate-63 已验收镜像与当前交付范围
 
