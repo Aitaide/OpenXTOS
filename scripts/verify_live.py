@@ -14,7 +14,7 @@ import time
 import shlex
 
 MODES=('bios-cd','uefi-cd','bios-usb','uefi-usb')
-info_version_marker='1.0.1'
+info_version_marker='1.0.2'
 
 
 def sha(path):

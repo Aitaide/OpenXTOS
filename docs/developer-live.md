@@ -18,7 +18,7 @@
 - 存储：只读 Live 介质 + tmpfs 内存写层，`persistence=0`，介质不可写，无安装器
 - SSH：仅公钥认证（`-s -g` 禁用所有密码方式），host key 每次启动在 RAM 中新生成
 - 时钟：如实报告"未同步"；`xtos-clock sync SERVER` 显式一次性同步
-- 版本显示：XTOS Bate版本 1.0.1（Stable 1，2026-10-23）
+- 版本显示：XTOS Bate版本 1.0.2（Stable 2，2026-11-03）
 
 ## 构建与验证命令
 
