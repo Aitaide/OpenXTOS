@@ -10,7 +10,7 @@ ISO_SHA256 = '96df3627bf79364192d502453904f0d78f112d3ba83a934bc28c0084a3b0c53f'
 class CurrentDeliveryStatusTests(unittest.TestCase):
     def test_status_records_the_exact_accepted_kernel_slice(self):
         text = (ROOT / 'STATUS.md').read_text()
-        self.assertIn('## Linux 7.3.1 已验收快照与后续开发', text)
+        self.assertIn('## Linux 7.3.1 历史已验收快照', text)
         for required in (ACCEPTED_COMMIT, ISO_SHA256,
                          '133 组、1656 次', 'candidate-62',
                          'ACCEPTED_LOCAL_KERNEL_UPGRADE_AND_QEMU_LIVE_IMAGE'):

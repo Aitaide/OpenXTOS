@@ -207,15 +207,18 @@ class CytonRuntimeTests(unittest.TestCase):
             return path.parent.parent == Path('/proc') and path.name == 'status'
         def observed_present(path, *args, **kwargs):
             return True if is_child_status(path) else original_exists(path, *args, **kwargs)
-        def vanished_during_read(path, *args, **kwargs):
-            if is_child_status(path):
-                intercepted.append(str(path))
-                raise FileNotFoundError(2, 'process exited while reading status', str(path))
-            return original_read(path, *args, **kwargs)
-        with mock.patch.object(Path, 'exists', observed_present), \
-             mock.patch.object(Path, 'read_text', vanished_during_read):
-            self.test_timeout_kills_real_process_group_and_reaps_parent()
-        self.assertTrue(intercepted, 'process-status disappearance boundary was not reached')
+        for disappearance in (FileNotFoundError, ProcessLookupError):
+            with self.subTest(disappearance=disappearance.__name__):
+                intercepted = []
+                def vanished_during_read(path, *args, **kwargs):
+                    if is_child_status(path):
+                        intercepted.append(str(path))
+                        raise disappearance('process exited while reading status')
+                    return original_read(path, *args, **kwargs)
+                with mock.patch.object(Path, 'exists', observed_present), \
+                     mock.patch.object(Path, 'read_text', vanished_during_read):
+                    self.test_timeout_kills_real_process_group_and_reaps_parent()
+                self.assertTrue(intercepted, 'process-status disappearance boundary was not reached')
 
     def test_timeout_kills_real_process_group_and_reaps_parent(self):
         import time
@@ -247,7 +250,7 @@ class CytonRuntimeTests(unittest.TestCase):
                 for _ in range(20):
                     try:
                         stopped = "State:\tZ" in status.read_text()
-                    except FileNotFoundError:
+                    except (FileNotFoundError, ProcessLookupError):
                         stopped = True
                     if stopped:
                         break

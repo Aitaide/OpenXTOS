@@ -1,24 +1,23 @@
 #!/usr/bin/env python3
-"""Extended fw tests: allow/deny/list/delete/flush lifecycle against real nftables.
+"""Production-C fw lifecycle regression, strictly in a fresh network namespace.
 
-Runs the actual static fw binary. Requires nft CLI on PATH and root (or
-CAP_NET_ADMIN). Skips gracefully when not root or nft missing.
+Unavailable isolation returns 77 (guest pending), never an all-pass verdict.
 """
+import os
 import shutil
 import subprocess
 import sys
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
-FW = ROOT / "tools" / "xtos-native" / "fw" / "fw.c"
+FW = ROOT / "tools/xtos-native/fw/fw.c"
 
 
 def build_fw(tmpdir: Path) -> Path:
     out = tmpdir / "fw"
-    subprocess.run(
-        ["gcc", "-O2", "-Wall", "-Wextra", "-Werror", "-static", "-I", str(ROOT / "tools" / "xtos-native" / "common"), "-o", str(out), str(FW)],
-        check=True,
-    )
+    subprocess.run(["gcc", "-O2", "-Wall", "-Wextra", "-Werror", "-static",
+                    "-I", str(ROOT / "tools/xtos-native/common"),
+                    "-o", str(out), str(FW)], check=True)
     return out
 
 
@@ -27,74 +26,63 @@ def run(binary: Path, *args: str):
 
 
 def main() -> int:
-    if sys.platform != "linux":
-        print("skip: linux only")
-        return 0
-    if shutil.which("nft") is None:
-        print("skip: nft CLI not available")
-        return 0
-    if subprocess.run(["id", "-u"], capture_output=True, text=True).stdout.strip() != "0":
-        print("skip: needs root for netfilter netlink")
-        return 0
+    if len(sys.argv) == 3 and sys.argv[1] == "--inside":
+        assert os.readlink('/proc/self/ns/net') != sys.argv[2], 'refusing host netns'
+    else:
+        if sys.platform != "linux" or not all(shutil.which(p) for p in ('nft', 'unshare')):
+            print("SKIP guest pending: linux/nft/unshare unavailable")
+            return 77
+        probe = subprocess.run(['unshare', '-Urn', 'nft', 'list', 'ruleset'],
+                               capture_output=True, text=True)
+        if probe.returncode:
+            print("SKIP guest pending: isolation/CAP_NET_ADMIN unavailable: " + probe.stderr)
+            return 77
+        return subprocess.run(['unshare', '-Urn', sys.executable, __file__, '--inside',
+                               os.readlink('/proc/self/ns/net')], timeout=60).returncode
 
     import tempfile
     failures = []
-    with tempfile.TemporaryDirectory() as td:
-        fw = build_fw(Path(td))
+    with tempfile.TemporaryDirectory(prefix='fw-extended-', dir=ROOT / '.build') as directory:
+        fw = build_fw(Path(directory))
+        def check(name, args, want_rc=0, marker=None, absent=None):
+            result = run(fw, *args)
+            good = (result.returncode == want_rc and
+                    (marker is None or marker in result.stdout) and
+                    (absent is None or absent not in result.stdout))
+            print(f"{'PASS' if good else 'FAIL'} {name}")
+            if not good:
+                failures.append((name, result.returncode, result.stdout, result.stderr))
         try:
-            run(fw, "disable", "--confirm")  # clean slate
-
-            checks = [
-                ("enable", run(fw, "enable"), 0, "XTOS_FW_ENABLE"),
-                ("allow tcp 22", run(fw, "allow", "--proto", "tcp", "--port", "22"), 0, "FW_ALLOW"),
-                ("allow udp 53", run(fw, "allow", "--proto", "udp", "--port", "53"), 0, "FW_ALLOW"),
-                ("deny tcp 8080", run(fw, "deny", "--proto", "tcp", "--port", "8080"), 0, "FW_DENY"),
-                ("list shows rules", run(fw, "list"), 0, "dport 22"),
-                ("list shows deny", run(fw, "list"), 0, "dport 8080 drop"),
-                ("delete 8080", run(fw, "delete", "--proto", "tcp", "--port", "8080"), 0, "FW_DELETE"),
-                ("deleted gone", run(fw, "list"), 0, None),
-                ("flush", run(fw, "flush"), 0, "FW_FLUSH"),
-                ("status enabled", run(fw, "status"), 0, "enabled=true"),
-                ("disable", run(fw, "disable", "--confirm"), 0, "XTOS_FW_DISABLE"),
-                ("status disabled", run(fw, "status"), 0, "enabled=false"),
-            ]
-            for name, r, want_rc, marker in checks:
-                if r.returncode != want_rc:
-                    failures.append(f"{name}: rc={r.returncode} want={want_rc} stderr={r.stderr[:120]}")
-                elif marker and marker not in r.stdout:
-                    if name == "deleted gone" and "dport 8080" in r.stdout:
-                        failures.append(f"{name}: rule still present after delete")
-                print(f"  {'PASS' if not failures or failures[-1].split(':')[0] != name else 'FAIL'} {name}")
-
-            # deleted rule must really be gone
-            r = run(fw, "list")
-            if "dport 8080" in r.stdout:
-                failures.append("post-delete list still contains dport 8080")
-
-            # bad input rejection
-            bad = [
-                ("bad proto", run(fw, "allow", "--proto", "sctp", "--port", "22"), 1),
-                ("bad port high", run(fw, "allow", "--proto", "tcp", "--port", "70000"), 1),
-                ("port zero", run(fw, "allow", "--proto", "tcp", "--port", "0"), 1),
-            ]
-            for name, r, want in bad:
-                ok = r.returncode == want and r.stderr.startswith("fw:")
-                print(f"  {'PASS' if ok else 'FAIL'} reject {name}")
-                if not ok:
-                    failures.append(f"reject {name}: rc={r.returncode} want={want}")
-
-            run(fw, "disable", "--confirm")
+            check('enable', ('enable',), marker='XTOS_FW_ENABLE')
+            check('allow tcp 22', ('allow', '--proto', 'tcp', '--port', '22', '--from', '192.0.2.2/32'), marker='FW_ALLOW')
+            check('allow udp 53', ('allow', '--proto', 'udp', '--port', '53'), marker='FW_ALLOW')
+            check('deny tcp 8080', ('deny', '--proto', 'tcp', '--port', '8080'), marker='FW_DENY')
+            check('list shows rules', ('list',), marker='dport 22')
+            check('list shows deny', ('list',), marker='dport 8080 drop')
+            check('delete 8080', ('delete', '--proto', 'tcp', '--port', '8080'), marker='FW_DELETE')
+            check('deleted gone', ('list',), absent='dport 8080')
+            check('flush', ('flush',), marker='FW_FLUSH')
+            check('status enabled', ('status',), marker='enabled=true')
+            check('disable', ('disable', '--confirm'), marker='XTOS_FW_DISABLE')
+            check('status disabled', ('status',), marker='enabled=false')
+            for name, proto, port in [('bad proto', 'sctp', '22'),
+                                      ('bad port high', 'tcp', '70000'),
+                                      ('port zero', 'tcp', '0')]:
+                result = run(fw, 'allow', '--proto', proto, '--port', port)
+                good = result.returncode == 1 and result.stderr.startswith('fw:')
+                print(f"{'PASS' if good else 'FAIL'} reject {name}")
+                if not good:
+                    failures.append((name, result.returncode, result.stdout, result.stderr))
         finally:
-            run(fw, "disable", "--confirm")
-
+            run(fw, 'disable', '--confirm')
     if failures:
         print(f"FAIL: {len(failures)}")
-        for f in failures:
-            print(f"  {f}")
+        for failure in failures:
+            print(failure)
         return 1
-    print("ALL PASS")
+    print('ALL PASS (isolated network namespace)')
     return 0
 
 
-if __name__ == "__main__":
-    sys.exit(main())
+if __name__ == '__main__':
+    raise SystemExit(main())

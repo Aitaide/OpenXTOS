@@ -27,4 +27,19 @@ CONFIG_SECCOMP_FILTER=y
 CONFIG_SECURITY=y
 CONFIG_SECURITYFS=y
 CONFIG_SECURITY_LANDLOCK=y
+
+# Production hardening prerequisites. Actual resolved config/build/latency and
+# platform-specific pstore backend must be accepted separately. Signing trust
+# and firmware enrollment are not implied by these software protections.
+CONFIG_STACKPROTECTOR_STRONG=y
+CONFIG_FORTIFY_SOURCE=y
+CONFIG_HARDENED_USERCOPY=y
+CONFIG_SLAB_FREELIST_HARDENED=y
+CONFIG_SLAB_FREELIST_RANDOM=y
+CONFIG_SECURITY_DMESG_RESTRICT=y
+CONFIG_SECURITY_YAMA=y
+CONFIG_MEMCG=y
+CONFIG_CGROUP_PIDS=y
+CONFIG_PSTORE=y
+CONFIG_PSTORE_RAM=y
 CONFIG_LSM="landlock,lockdown,yama,loadpin,safesetid,selinux,smack,tomoyo,apparmor,bpf"

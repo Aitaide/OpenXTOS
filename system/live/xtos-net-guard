@@ -1,0 +1,30 @@
+#!/bin/sh
+# Establish packet filtering before network activation or remote service readiness.
+set -eu
+FW=/usr/bin/fw
+READY=/run/xtos-security.ready
+POLICY=/etc/xtos/ssh-allow-from
+rm -f "$READY"
+[ -x "$FW" ] || { echo 'XTOS_SECURITY_ERROR firewall missing' >&2; exit 1; }
+"$FW" enable
+if [ -f "$POLICY" ]; then
+    [ ! -L "$POLICY" ] || { echo 'XTOS_SECURITY_ERROR symlink policy' >&2; exit 1; }
+    count=0
+    while IFS= read -r source || [ -n "$source" ]; do
+        [ -n "$source" ] || continue
+        count=$((count + 1))
+        [ "$count" -le 16 ] || { echo 'XTOS_SECURITY_ERROR too many management networks' >&2; exit 1; }
+        case "$source" in *[!0-9a-fA-F:./]*|'') echo 'XTOS_SECURITY_ERROR invalid management network' >&2; exit 1 ;; esac
+        [ "${#source}" -le 64 ] || exit 1
+        "$FW" allow --proto tcp --port 22 --from "$source"
+    done <"$POLICY"
+fi
+state=$("$FW" status)
+printf '%s\n' "$state"
+case "$state" in
+    'XTOS_FW_STATUS enabled=true table=xtos_fw policy=drop') ;;
+    *) echo 'XTOS_SECURITY_ERROR firewall state is not effective' >&2; exit 1 ;;
+esac
+umask 077
+printf '%s\n' 'firewall=ready' >"$READY"
+echo 'XTOS_SECURITY network_guard=ready default_inbound=drop'

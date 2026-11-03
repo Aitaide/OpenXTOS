@@ -107,6 +107,12 @@ python3 "$ROOT/tests/test_native_modelverify.py"
 python3 "$ROOT/tests/test_runner_kernel_config.py"
 python3 "$ROOT/tests/test_native_tools_xpkg.py"
 python3 "$ROOT/tests/test_native_tools_update.py"
+python3 -B -m unittest discover -s "$ROOT/tests" -p 'test_update_apply_security.py' -v
+python3 -B -m unittest discover -s "$ROOT/tests" -p 'test_update_recovery.py' -v
+# These programs own private user/network namespaces; exit 77 is an explicit
+# missing integration prerequisite, never silently promoted to a passing suite.
+python3 -B "$ROOT/tests/test_native_tools_fw_extended.py"
+python3 -B "$ROOT/tests/test_native_fw_security.py"
 python3 "$ROOT/tests/test_verify_xpkg.py"
 python3 "$ROOT/tests/test_make_xpkg.py"
 python3 -m unittest discover -s "$ROOT/tests" -p 'test_userspace_repo.py' -v
@@ -121,6 +127,7 @@ python3 "$ROOT/tests/test_live_build.py"
 python3 "$ROOT/tests/test_live_ai.py"
 python3 "$ROOT/tests/test_live_acceptance.py"
 python3 "$ROOT/tests/test_live_runtime.py"
+python3 -B "$ROOT/tests/test_live_hardening.py"
 python3 "$ROOT/tests/test_live_devices.py"
 python3 "$ROOT/tests/test_verify_live_gpu.py"
 python3 "$ROOT/tests/test_userspace_fetch.py"

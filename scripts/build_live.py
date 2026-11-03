@@ -3,6 +3,7 @@
 import argparse
 import base64
 import hashlib
+import ipaddress
 import json
 import os
 from pathlib import Path
@@ -26,7 +27,13 @@ REQUIRED_CONFIG=['CONFIG_PREEMPT_RT=y','CONFIG_SQUASHFS=y','CONFIG_SQUASHFS_ZLIB
 REQUIRED_CONFIG += ['CONFIG_SECURITY=y','CONFIG_SECURITY_LANDLOCK=y','CONFIG_SECCOMP=y',
                     'CONFIG_SECCOMP_FILTER=y','CONFIG_SECURITYFS=y','CONFIG_NAMESPACES=y',
                     'CONFIG_UTS_NS=y','CONFIG_IPC_NS=y','CONFIG_PID_NS=y','CONFIG_NET_NS=y','CONFIG_USER_NS=y']
+REQUIRED_CONFIG += ['CONFIG_STACKPROTECTOR_STRONG=y','CONFIG_FORTIFY_SOURCE=y',
+                    'CONFIG_HARDENED_USERCOPY=y','CONFIG_SLAB_FREELIST_HARDENED=y',
+                    'CONFIG_SLAB_FREELIST_RANDOM=y','CONFIG_SECURITY_DMESG_RESTRICT=y',
+                    'CONFIG_SECURITY_YAMA=y','CONFIG_MEMCG=y','CONFIG_CGROUP_PIDS=y',
+                    'CONFIG_PSTORE=y','CONFIG_PSTORE_RAM=y']
 RUNTIME_FILES={'xtos-start':'sbin/xtos-start','xtos-dhcp':'usr/libexec/xtos/xtos-dhcp','xtos-ssh':'usr/libexec/xtos/xtos-ssh','xtos-console':'usr/libexec/xtos/xtos-console'}
+RUNTIME_FILES['xtos-net-guard']='usr/libexec/xtos/xtos-net-guard'
 NATIVE_TOOLS={'info':'usr/bin/info','net':'usr/bin/net','hw':'usr/bin/hw','clock':'usr/bin/clock','pkg':'usr/bin/pkg','fw':'usr/bin/fw','rt':'usr/bin/rt','persist':'usr/bin/persist','events':'usr/bin/events','update':'usr/bin/update','cgroup':'usr/bin/cgroup'}
 NATIVE_TOOLS['runner']='usr/libexec/xtos/runner'
 NATIVE_TOOLS['modelverify']='usr/libexec/xtos/modelverify'
@@ -55,6 +62,25 @@ def validate_public_key(path):
         if algorithm!=fields[0] or len(raw)<=4+length:raise ValueError('key algorithm/blob mismatch')
     except (ValueError,struct.error,UnicodeError) as exc:raise ValueError('invalid SSH public key') from exc
     return fields[0]+' '+fields[1]+'\n'
+
+
+def management_networks(values):
+    if not isinstance(values, list) or len(values) > 16:
+        raise ValueError('at most 16 explicit management networks are permitted')
+    networks = []
+    for value in values:
+        if not isinstance(value, str) or not value or len(value) > 64:
+            raise ValueError('invalid management network')
+        try:
+            network = ipaddress.ip_network(value, strict=False)
+        except ValueError as exc:
+            raise ValueError('management source must be an IP address or CIDR') from exc
+        if network.prefixlen == 0 or network.is_multicast or network.is_unspecified:
+            raise ValueError('management source cannot be unrestricted or multicast')
+        canonical = str(network)
+        if canonical not in networks:
+            networks.append(canonical)
+    return networks
 
 
 def account_passwd():
@@ -316,6 +342,11 @@ def build(args):
     for name in ['init','xtos-persist-check',*RUNTIME_FILES]:
         if not (ROOT/'system/live'/name).is_file():raise ValueError('Live runtime source missing: '+name)
     key=validate_public_key(args.authorized_key) if args.authorized_key else None
+    management=management_networks(getattr(args,'ssh_allow_from',[]))
+    if key and not management:
+        raise ValueError('SSH key requires explicit --ssh-allow-from management CIDR')
+    if management and not key:
+        raise ValueError('management CIDR requires --authorized-key')
     for tool in ['grub-mkrescue','xorriso','cpio','gzip']:
         if not shutil.which(tool):raise ValueError('host build tool missing: '+tool)
     for path in ['/usr/bin/mksquashfs','/usr/sbin/dropbear','/usr/bin/dropbearkey','/usr/sbin/chronyd','/usr/bin/sudo']:
@@ -452,11 +483,12 @@ def build(args):
               'rtcsync\n')
         sshline=''
         if key:
-            for base,uid in [('root',0),('home/xtos',1000)]:
+            for base,uid in [('home/xtos',1000)]:
                 directory=runtime/base/'.ssh';directory.mkdir(parents=True,exist_ok=True);directory.chmod(0o700)
                 write(runtime,base+'/.ssh/authorized_keys',key,0o600)
                 os.chown(directory,uid,uid);os.chown(directory/'authorized_keys',uid,uid)
             sshline='::respawn:/usr/libexec/xtos/xtos-ssh\n'
+        write(runtime,'etc/xtos/ssh-allow-from',''.join(network+'\n' for network in management),0o600)
         write(runtime,'etc/inittab','::sysinit:/sbin/xtos-start\n'+sshline+'ttyS0::respawn:/usr/libexec/xtos/busybox getty -L 115200 ttyS0 -n -l /usr/libexec/xtos/xtos-console\ntty1::respawn:/usr/libexec/xtos/busybox getty -L 38400 tty1 -n -l /usr/libexec/xtos/xtos-console\n::ctrlaltdel:/usr/libexec/xtos/busybox reboot\n::shutdown:/usr/libexec/xtos/busybox umount -a -r\n')
         write(runtime,'sbin/xtos-init','#!/bin/sh\nexec /usr/libexec/xtos/busybox init\n',0o755)
         # Source root remains immutable: only this candidate staging is normalized.
@@ -518,6 +550,7 @@ def main():
     p.add_argument('--output-dir',type=Path,required=True)
     p.add_argument('--kernel-extra',default='',help='plain ASCII kernel args separated by ordinary spaces; safe characters A-Z a-z 0-9 . _ + , : = / @ - only; no lsm= overrides or GRUB quoting/expansion')
     p.add_argument('--authorized-key',type=Path,help='explicit public key only; never a private key')
+    p.add_argument('--ssh-allow-from',action='append',default=[],help='explicit management IP/CIDR; repeatable, never /0; SSH root login is disabled')
     p.add_argument('--epoch',type=int)
     p.add_argument('--require-clean',action='store_true',help='reject uncommitted or untracked source')
     p.add_argument('--expected-source',help='require this complete source commit SHA')

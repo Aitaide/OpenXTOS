@@ -6,7 +6,7 @@ set -e
 case "${1-}" in ''|--prepare) ;; *) echo 'usage: xtos-ssh [--prepare]' >&2; exit 2 ;; esac
 [ "$#" -le 1 ] || exit 2
 enabled=0
-for key in /root/.ssh/authorized_keys /home/xtos/.ssh/authorized_keys; do
+for key in /home/xtos/.ssh/authorized_keys; do
     if [ -s "$key" ] && "$BB" grep -Eq '^(ssh-(ed25519|rsa)|ecdsa-sha2-[^ ]+)[[:space:]]+[A-Za-z0-9+/]+=*([[:space:]].*)?$' "$key"; then
         enabled=1
     fi
@@ -27,6 +27,12 @@ echo 'XTOS_SSH_HOSTKEY_BEGIN'
 /usr/bin/dropbearkey -y -f "$key"
 echo 'XTOS_SSH_HOSTKEY_END auth=publickey persistence=0'
 [ "${1-}" != --prepare ] || exit 0
+# PID1 may respawn independently of a failed sysinit. Never listen without guard.
+if [ ! -f /run/xtos-security.ready ]; then
+    echo 'XTOS_SSH_DISABLED reason=network-guard-not-ready'
+    "$BB" sleep 10
+    exit 1
+fi
 # -s disables every password login, -g additionally prohibits root passwords.
 # -j/-k disable forwarding; host private key and pid are strictly in RAM.
-exec /usr/sbin/dropbear -F -E -s -g -j -k -r "$key" -P /run/xtos-ssh/dropbear.pid -b /etc/issue
+exec /usr/sbin/dropbear -F -E -s -g -w -j -k -r "$key" -P /run/xtos-ssh/dropbear.pid -b /etc/issue

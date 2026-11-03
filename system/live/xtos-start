@@ -64,6 +64,7 @@ done
 modloaded=$("$BB" cat "$modloaded_file")
 echo "XTOS_MODULES modalias=auto-loaded count=$modloaded policy=present-hardware-only"
 "$BB" hostname xtos-live
+/usr/libexec/xtos/xtos-net-guard
 /usr/sbin/ip link set lo up
 # Read the RTC for diagnosis only: a present RTC is not proof of synchronized time.
 "$BB" hwclock -u -r 2>/dev/null || echo 'XTOS_RTC unavailable'

@@ -147,7 +147,9 @@ class BootContractTests(unittest.TestCase):
         text = ssh.read_text()
         self.assertIn('authorized_keys', text)
         self.assertIn('XTOS_SSH_DISABLED', text)
-        self.assertIn('-F -E -s -g -j -k', text)
+        command = next(line for line in text.splitlines() if line.startswith('exec /usr/sbin/dropbear '))
+        for option in ['-F', '-E', '-s', '-g', '-w', '-j', '-k']:
+            self.assertIn(option, command.split())
         self.assertIn('/run/xtos-ssh', text)
         self.assertIn('XTOS_SSH_HOSTKEY', text)
 

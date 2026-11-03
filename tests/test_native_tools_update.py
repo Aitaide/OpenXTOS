@@ -91,7 +91,9 @@ class UpdateToolTests(unittest.TestCase):
         subprocess.run(['openssl', 'pkey', '-in', str(KEY), '-pubout', '-out', str(pub)], check=True)
         cls.pub = pub
         BUILD = cls.base / 'update'
-        subprocess.run(['bash', str(ROOT / 'scripts' / 'build_mbedtls.sh')], check=True)
+        archive = ROOT / '.build' / 'mbedtls' / 'libmbedtls_xtos.a'
+        if not archive.is_file():
+            raise RuntimeError('prebuilt mbedTLS archive required; refusing shared rebuild')
         mb = ROOT / 'tools' / 'xtos-native' / 'vendor' / 'mbedtls'
         subprocess.run(['gcc', '-O2', '-Wall', '-Wextra', '-Werror', '-static',
                         '-DMBEDTLS_CONFIG_FILE="xtos_mbedtls_config.h"',
@@ -329,6 +331,10 @@ class UpdateToolTests(unittest.TestCase):
     def test_14_download_writes_manifest(self):
         iso = bytes(range(256)) * 4096  # exactly 1 MiB, deterministic
         dest = self.make_download(iso)
+        self.assertEqual((dest / 'release-index.json').read_bytes(),
+                         (self.mirror / 'release-index.json').read_bytes())
+        self.assertEqual((dest / 'release-index.json.sig').read_bytes(),
+                         (self.mirror / 'release-index.json.sig').read_bytes())
         manifest = dest / 'download-manifest.json'
         self.assertTrue(manifest.is_file())
         data = json.loads(manifest.read_text())
@@ -390,6 +396,8 @@ class UpdateToolTests(unittest.TestCase):
 
     def loop_targets(self):
         """Root-only: yields (device, backing_file) loop pairs, or skips."""
+        if os.environ.get('XTOS_UPDATE_ISOLATED_LOOP_TESTS') != '1':
+            self.skipTest('loop writes require explicit isolated test environment')
         if os.geteuid() != 0:
             self.skipTest('apply loop tests need root')
         if not Path('/sbin/losetup').is_file() and not Path('/usr/sbin/losetup').is_file():

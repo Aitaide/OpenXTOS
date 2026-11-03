@@ -32,6 +32,7 @@
 #include <dirent.h>
 #include <errno.h>
 #include <fcntl.h>
+#include <limits.h>
 #include <linux/fs.h>
 #include <netdb.h>
 #include <poll.h>
@@ -184,23 +185,24 @@ static int sha256_file(const char *path, char *outhex) {
     return 0;
 }
 
-/* Hash the first `limit` bytes of `path` (used for read-back verification of a
- * device that was just written: only the image extent belongs to the image). */
-static int sha256_prefix(const char *path, long long limit, char *outhex) {
-    int fd = open(path, O_RDONLY);
-    if (fd < 0) return -1;
+static ssize_t retry_read(int fd, void *buf, size_t n);
+
+/* Read back only the authenticated image extent, through the retained target. */
+static int sha256_prefix_fd(int fd, long long limit, char *outhex) {
+    if (limit <= 0 || lseek(fd, 0, SEEK_SET) < 0) return -1;
     sha256_ctx ctx; sha256_init(&ctx);
     unsigned char buf[65536];
     long long total = 0;
-    ssize_t n;
-    while (total < limit && (n = read(fd, buf, sizeof(buf))) > 0) {
+    while (total < limit) {
+        size_t want = (size_t)(limit - total);
+        if (want > sizeof(buf)) want = sizeof(buf);
+        ssize_t n = retry_read(fd, buf, want);
+        if (n <= 0) return -1;
         size_t take = (size_t)n;
-        if ((long long)take > limit - total) take = (size_t)(limit - total);
         sha256_update(&ctx, buf, take);
         total += (long long)take;
     }
-    close(fd);
-    if (n < 0 || total != limit) return -1;
+
     unsigned char hash[32];
     sha256_final(&ctx, hash);
     for (int i = 0; i < 32; i++)
@@ -227,6 +229,29 @@ static int json_str(const char *line, const char *key, char *out, size_t outsize
     memcpy(out, p, len);
     out[len] = '\0';
     return 1;
+}
+
+/* Artifact sizes are positive JSON integers, bounded by their long storage.
+ * Never normalize signed metadata by accepting a numeric prefix or rounding. */
+static int json_artifact_size(const char *line, long *out) {
+    const char *p = strstr(line, "\"size\"");
+    if (!p) return -1;
+    p += strlen("\"size\"");
+    p += strspn(p, " \t\r\n");
+    if (*p++ != ':') return -1;
+    p += strspn(p, " \t\r\n");
+    if (*p < '1' || *p > '9') return -1;
+    unsigned long value = 0;
+    do {
+        unsigned digit = (unsigned)(*p - '0');
+        if (value > ((unsigned long)LONG_MAX - digit) / 10) return -1;
+        value = value * 10 + digit;
+        p++;
+    } while (*p >= '0' && *p <= '9');
+    p += strspn(p, " \t\r\n");
+    if (*p && *p != ',' && *p != '}') return -1;
+    *out = (long)value;
+    return 0;
 }
 
 static int env_or(const char *name, char *out, size_t n, const char *fallback) {
@@ -697,14 +722,92 @@ static void local_arch(char *out, size_t n) {
 }
 
 /* ---- index fetch + verify ---- */
+/* One bounded immutable byte snapshot is both verified and parsed/persisted. */
+static unsigned char *signed_bytes;
+static size_t signed_len;
+static unsigned char signed_sig[64];
+
+static ssize_t retry_read(int fd, void *buf, size_t n) {
+    for (int tries = 0; tries < 64; tries++) {
+        ssize_t r = read(fd, buf, n);
+        if (r >= 0 || errno != EINTR) return r;
+    }
+    errno = EINTR;
+    return -1;
+}
+
+static int write_all(int fd, const void *data, size_t n) {
+    const unsigned char *p = data;
+    int interrupts = 0;
+    while (n) {
+        ssize_t w = write(fd, p, n);
+        if (w < 0 && errno == EINTR && ++interrupts < 64) continue;
+        if (w <= 0) return -1;
+        p += w; n -= (size_t)w;
+    }
+    return 0;
+}
+
+static int read_bounded(const char *path, unsigned char *buf, size_t cap, size_t *len) {
+    int fd = open(path, O_RDONLY | O_NOFOLLOW | O_CLOEXEC | O_NONBLOCK);
+    if (fd < 0) return -1;
+    struct stat st;
+    int rc = -1;
+    if (fstat(fd, &st) < 0 || !S_ISREG(st.st_mode) || st.st_size < 0 ||
+        (unsigned long long)st.st_size > cap) goto done;
+    size_t total = 0;
+    while (total < cap) {
+        ssize_t r = retry_read(fd, buf + total, cap - total);
+        if (r < 0) goto done;
+        if (!r) break;
+        total += (size_t)r;
+    }
+    unsigned char extra;
+    if (retry_read(fd, &extra, 1) != 0) goto done;
+    *len = total;
+    rc = 0;
+done:
+    close(fd);
+    return rc;
+}
+
 static int verify_index_sig(const char *index_path, const char *sig_path) {
-    /* Native ed25519 check against the pinned key (vendored Monocypher).
-     * No openssl binary is executed. */
-    return xed25519_verify_file(g_pubkey, index_path, sig_path);
+    uint8_t pub[32]; size_t sn;
+    free(signed_bytes); signed_bytes = NULL; signed_len = 0;
+    unsigned char *bytes = malloc(XED_MSG_MAX + 1);
+    if (!bytes) return -1;
+    if (read_bounded(index_path, bytes, XED_MSG_MAX, &signed_len) < 0 ||
+        read_bounded(sig_path, signed_sig, sizeof(signed_sig), &sn) < 0 || sn != 64 ||
+        xed25519_load_pub(g_pubkey, pub) < 0 ||
+        crypto_ed25519_check(signed_sig, pub, bytes, signed_len) != 0 ||
+        memchr(bytes, 0, signed_len)) { free(bytes); return -1; }
+    bytes[signed_len] = 0;
+    signed_bytes = bytes;
+    return 0;
+}
+
+static int save_signed_index(const char *dir) {
+    const char *names[] = {"release-index.json", "release-index.json.sig"};
+    const unsigned char *data[] = {signed_bytes, signed_sig};
+    size_t sizes[] = {signed_len, sizeof(signed_sig)};
+    for (int i = 0; i < 2; i++) {
+        char path[4096], temp[4096];
+        if (snprintf(path, sizeof(path), "%s/%s", dir, names[i]) >= (int)sizeof(path) ||
+            snprintf(temp, sizeof(temp), "%s/.signed-XXXXXX", dir) >= (int)sizeof(temp)) return -1;
+        int fd = mkstemp(temp);
+        if (fd < 0) return -1;
+        int rc = write_all(fd, data[i], sizes[i]);
+        if (rc == 0) rc = fsync(fd);
+        if (close(fd) < 0) rc = -1;
+        if (rc == 0) rc = rename(temp, path);
+        if (rc) { unlink(temp); return -1; }
+    }
+    return 0;
 }
 
 static int parse_index(const char *path, struct index_latest *latest, const char *expect_kind) {
-    FILE *f = fopen(path, "r");
+    FILE *f = strcmp(expect_kind, "xtos-release-index") == 0 && signed_bytes
+        ? fmemopen(signed_bytes, signed_len, "r") : fopen(path, "r");
     if (!f) return -1;
     char line[LINE_BUF];
     memset(latest, 0, sizeof(*latest));
@@ -747,7 +850,7 @@ static int parse_index(const char *path, struct index_latest *latest, const char
                 else if (strstr(line, "\"name\"")) { if (!json_str(line, "name", cur->name, sizeof(cur->name))) { rc = -1; break; } }
                 else if (strstr(line, "\"sha256\"")) { if (!json_str(line, "sha256", cur->sha256, sizeof(cur->sha256))) { rc = -1; break; } }
                 else if (strstr(line, "\"url\"")) { if (!json_str(line, "url", cur->url, sizeof(cur->url))) { rc = -1; break; } }
-                else if (strstr(line, "\"size\"")) { char *p = strstr(line, "\"size\""); p = strchr(p, ':'); if (!p) { rc = -1; break; } cur->size = atol(p + 1); }
+                else if (strstr(line, "\"size\"")) { if (json_artifact_size(line, &cur->size) < 0) { rc = -1; break; } }
                 continue;
             }
         }
@@ -911,33 +1014,68 @@ static int target_refusal_reason(const char *devpath, char *why, size_t whyn) {
     return 0;
 }
 
-/* Stream the image to the device (4 MiB chunks, short-write safe) and sync. */
-static int copy_iso_to_device(const char *iso, const char *dev, long long size) {
-    int in = open(iso, O_RDONLY);
-    if (in < 0) return -1;
-    int out = open(dev, O_WRONLY);
-    if (out < 0) { close(in); return -1; }
+/* The journal is an exact, bounded operation receipt, never trust authority. */
+static int format_apply_journal(char *record, size_t capacity, const char *state,
+                                const char *version, const char *target,
+                                const char *hash, long size) {
+    int n = snprintf(record, capacity,
+        "{\"schema_version\":1,\"state\":\"%s\",\"version\":\"%s\",\"target\":\"%s\","
+        "\"sha256\":\"%s\",\"bytes\":%ld,\"rollback_available\":false}\n", state, version, target, hash, size);
+    return n < 0 || (size_t)n >= capacity ? -1 : n;
+}
+
+static int recovery_journal_matches(const char *path, const char *version,
+                                     const char *target, const char *hash, long size) {
+    unsigned char actual[8192]; char expected[8192]; size_t length;
+    if (read_bounded(path, actual, sizeof(actual), &length) < 0) return 0;
+    const char *states[] = {"prepared", "write-failed", "verification-failed", "verified"};
+    for (size_t i = 0; i < sizeof(states) / sizeof(states[0]); i++) {
+        int n = format_apply_journal(expected, sizeof(expected), states[i], version, target, hash, size);
+        if (n >= 0 && length == (size_t)n && memcmp(actual, expected, length) == 0) return 1;
+    }
+    return 0;
+}
+
+/* Durable progress record, not an automatic rollback/A-B transaction. */
+static int write_apply_journal(const char *path, const char *state, const char *version,
+                               const char *target, const char *hash, long size) {
+    char tmp[4096], record[8192], parent[4096];
+    if (snprintf(tmp, sizeof(tmp), "%s.XXXXXX", path) >= (int)sizeof(tmp)) return -1;
+    int n = format_apply_journal(record, sizeof(record), state, version, target, hash, size);
+    if (n < 0) return -1;
+    int fd = mkstemp(tmp);
+    if (fd < 0) return -1;
+    int rc = write_all(fd, record, (size_t)n);
+    if (!rc) rc = fsync(fd);
+    if (close(fd) < 0) rc = -1;
+    if (!rc) rc = rename(tmp, path);
+    if (rc) { unlink(tmp); return -1; }
+    if (snprintf(parent, sizeof(parent), "%s", path) >= (int)sizeof(parent)) return -1;
+    char *slash = strrchr(parent, '/');
+    if (slash) *slash = 0; else strcpy(parent, ".");
+    fd = open(parent[0] ? parent : "/", O_RDONLY | O_DIRECTORY | O_CLOEXEC);
+    if (fd < 0) return -1;
+    rc = fsync(fd);
+    if (close(fd) < 0) rc = -1;
+    return rc;
+}
+
+/* Stream the retained image descriptor; never reopen an untrusted pathname. */
+static int copy_iso_to_fd(int in, int out, long long size) {
+    if (size <= 0 || lseek(out, 0, SEEK_SET) < 0) return -1;
     static char buf[4 * 1024 * 1024];
     long long total = 0;
     int rc = 0;
     while (total < size) {
         size_t want = (size_t)(size - total);
         if (want > sizeof(buf)) want = sizeof(buf);
-        ssize_t r = read(in, buf, want);
+        ssize_t r = retry_read(in, buf, want);
         if (r <= 0) { rc = -1; break; }
-        ssize_t off = 0;
-        while (off < r) {
-            ssize_t w = write(out, buf + off, (size_t)(r - off));
-            if (w < 0) { rc = -1; break; }
-            off += w;
-        }
-        if (rc) break;
+        if (write_all(out, buf, (size_t)r) < 0) { rc = -1; break; }
         total += r;
     }
     if (rc == 0 && total != size) rc = -1;
     if (rc == 0 && fdatasync(out) < 0) rc = -1;
-    close(in);
-    close(out);
     return rc;
 }
 
@@ -990,6 +1128,9 @@ static void usage(void) {
         "  update apply --from DIR --to DEV --confirm ERASE-XTOS\n"
         "                               write the verified installer image to a spare whole disk\n"
         "                               (bootable upgrade medium; refuses mounted/running media)\n"
+        "  update recover --from DIR --to DEV --confirm ERASE-XTOS\n"
+        "                               re-authenticate and fully rewrite an interrupted spare medium\n"
+        "                               (matching journal required; no automatic rollback)\n"
         "  update compare <a> <b>       compare two versions (prints older/equal/newer)\n"
         "Environment: XTOS_UPDATE_MIRRORS (space-separated), XTOS_UPDATE_PUBKEY,\n"
         "  XTOS_UPDATE_LOCAL_RELEASE (default /etc/xtos-release), XTOS_UPDATE_TIMEOUT_SEC,\n"
@@ -1119,6 +1260,7 @@ int main(int argc, char **argv) {
         if (fetched) { unlink(index_path); unlink(sig_path); }
         rmdir(tmpdir);
         if (mkdir(destdir, 0755) < 0 && errno != EEXIST) { fprintf(stderr, "update: cannot create %s\n", destdir); return 2; }
+        if (save_signed_index(destdir) < 0) { fprintf(stderr, "update: cannot save signed index\n"); return 2; }
         char arch[32];
         local_arch(arch, sizeof(arch));
         char part[4096], final[4096];
@@ -1168,7 +1310,8 @@ int main(int argc, char **argv) {
         return done > 0 ? 0 : 2;
     }
 
-    if (strcmp(cmd, "apply") == 0 && argc == argstart + 7) {
+    if ((strcmp(cmd, "apply") == 0 || strcmp(cmd, "recover") == 0) && argc == argstart + 7) {
+        int recovery = strcmp(cmd, "recover") == 0;
         const char *from = NULL, *to = NULL, *token = NULL;
         for (int i = argstart + 1; i < argc; i += 2) {
             if (strcmp(argv[i], "--from") == 0) from = argv[i + 1];
@@ -1180,39 +1323,65 @@ int main(int argc, char **argv) {
             fprintf(stderr, "update: refusing: --confirm must be exactly ERASE-XTOS\n");
             return 2;
         }
-        /* 1. The download manifest is the unit apply consumes. */
-        char manifest[4096];
-        if (snprintf(manifest, sizeof(manifest), "%s/download-manifest.json", from) >= (int)sizeof(manifest)) return 2;
+        /* Unsigned legacy manifests are informational only, never authority. */
+        char manifest[4096], signature[4096];
+        if (snprintf(manifest, sizeof(manifest), "%s/release-index.json", from) >= (int)sizeof(manifest) ||
+            snprintf(signature, sizeof(signature), "%s.sig", manifest) >= (int)sizeof(signature)) return 2;
         struct index_latest dl;
-        if (parse_index(manifest, &dl, "xtos-download-manifest") < 0) {
-            fprintf(stderr, "update: %s is not a download manifest; run `update download --dest %s` first\n",
-                    manifest, from);
+        if (verify_index_sig(manifest, signature) < 0 || parse_index(manifest, &dl, "xtos-release-index") < 0) {
+            fprintf(stderr, "update: not a download manifest with trusted signed metadata; signature verification failed\n");
             return 2;
         }
-        /* 2. Re-verify every artifact against the manifest before any device is opened. */
+        char arch[32]; local_arch(arch, sizeof(arch));
         struct artifact *iso = NULL;
+        int matches = 0;
         for (int i = 0; i < dl.narts; i++) {
             struct artifact *a = &dl.arts[i];
-            char path[4096];
-            struct stat st;
-            if (snprintf(path, sizeof(path), "%s/%s", from, a->name) >= (int)sizeof(path)) return 2;
-            if (stat(path, &st) < 0) { fprintf(stderr, "update: missing artifact %s\n", a->name); return 2; }
-            if (a->sha256[0]) {
-                char hex[65];
-                if (sha256_file(path, hex) < 0 || strcmp(hex, a->sha256) != 0) {
-                    fprintf(stderr, "update: corrupt artifact (hash mismatch): %s\n", a->name);
-                    return 2;
-                }
+            if (strcmp(a->kind, "installer-iso") == 0 && strcmp(a->arch, arch) == 0) {
+                iso = a; matches++;
             }
-            if (a->size > 0 && (long long)st.st_size != a->size) {
-                fprintf(stderr, "update: artifact size mismatch: %s\n", a->name);
-                return 2;
-            }
-            if (strcmp(a->kind, "installer-iso") == 0) iso = a;
         }
-        if (!iso || iso->size <= 0 || !iso->sha256[0]) {
-            fprintf(stderr, "update: no installer-iso artifact (with size and sha256) in %s\n", manifest);
+        struct verpart ver;
+        if (matches != 1 || !dl.channel[0] || parse_version(dl.version, &ver) < 0 ||
+            !iso || iso->size <= 0 || strlen(iso->sha256) != 64 ||
+            strspn(iso->sha256, "0123456789abcdef") != 64 || !iso->name[0] ||
+            iso->name[0] == '.' || strchr(iso->name, '/') || strchr(iso->name, '\\')) {
+            fprintf(stderr, "update: invalid signed installer metadata (architecture/unique ISO/name/size/hash/version/channel)\n");
             return 2;
+        }
+        int dirfd = open(from, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
+        int source = dirfd < 0 ? -1 : openat(dirfd, iso->name, O_RDONLY | O_NOFOLLOW | O_NONBLOCK | O_CLOEXEC);
+        if (dirfd >= 0) close(dirfd);
+        struct stat ist;
+        if (source < 0 || fstat(source, &ist) < 0 || !S_ISREG(ist.st_mode) || ist.st_size != iso->size) {
+            if (source >= 0) close(source);
+            fprintf(stderr, "update: corrupt artifact (size/type/symlink): %s\n", iso->name); return 2;
+        }
+        /* Private unlinked snapshot prevents both rename and in-place input races.
+         * Stream with bounded memory; retain the same descriptor through writing. */
+        FILE *snapshot = tmpfile();
+        if (!snapshot) { close(source); return 2; }
+        int imagefd = fileno(snapshot);
+        unsigned char buf[65536]; long long total = 0;
+        sha256_ctx ctx; sha256_init(&ctx);
+        int bad = 0;
+        while (total < iso->size) {
+            size_t want = (size_t)(iso->size - total);
+            if (want > sizeof(buf)) want = sizeof(buf);
+            ssize_t r = retry_read(source, buf, want);
+            if (r <= 0 || write_all(imagefd, buf, (size_t)r) < 0) { bad = 1; break; }
+            sha256_update(&ctx, buf, (size_t)r); total += r;
+        }
+        close(source);
+        unsigned char digest[32]; char verified[65]; sha256_final(&ctx, digest);
+        for (int i = 0; i < 32; i++) sprintf(verified + i*2, "%02x", digest[i]);
+        if (bad || total != iso->size || strcmp(verified, iso->sha256) != 0 || lseek(imagefd, 0, SEEK_SET) < 0) {
+            fclose(snapshot); fprintf(stderr, "update: corrupt artifact (hash mismatch): %s\n", iso->name); return 2;
+        }
+        char journal[4096];
+        if (snprintf(journal, sizeof(journal), "%s/apply-journal.json", from) >= (int)sizeof(journal) ||
+            (recovery && !recovery_journal_matches(journal, dl.version, to, iso->sha256, iso->size))) {
+            fclose(snapshot); fprintf(stderr, "update: missing or mismatched recovery journal\n"); return 2;
         }
         /* 3. Target safety: canonical whole-disk path, not mounted, not swap. */
         char real[4096];
@@ -1232,30 +1401,46 @@ int main(int argc, char **argv) {
             fprintf(stderr, "update: refusing %s: %s\n", real, why);
             return 2;
         }
-        int tfd = open(real, O_RDONLY);
+        /* One exclusive descriptor owns capacity, writing and readback. */
+        int tfd = open(real, O_RDWR | O_EXCL | O_NOFOLLOW | O_NONBLOCK | O_CLOEXEC);
+        struct stat opened;
         unsigned long long cap = 0;
-        if (tfd < 0 || ioctl(tfd, BLKGETSIZE64, &cap) < 0) {
+        if (tfd < 0 || fstat(tfd, &opened) < 0 || !S_ISBLK(opened.st_mode) ||
+            opened.st_dev != dst.st_dev || opened.st_ino != dst.st_ino ||
+            opened.st_rdev != dst.st_rdev || ioctl(tfd, BLKGETSIZE64, &cap) < 0 ||
+            target_refusal_reason(real, why, sizeof(why))) {
             if (tfd >= 0) close(tfd);
-            fprintf(stderr, "update: cannot determine the size of %s\n", real);
+            fclose(snapshot);
+            fprintf(stderr, "update: cannot determine the size or exclusive identity of %s\n", real);
             return 2;
         }
-        close(tfd);
         if (cap < (unsigned long long)iso->size) {
+            close(tfd); fclose(snapshot);
             fprintf(stderr, "update: refusing: %s (%llu bytes) is smaller than the image (%ld bytes)\n",
                     real, cap, iso->size);
             return 2;
         }
-        /* 4. Write, then verify by reading back exactly the image extent. */
-        char ipath[4096];
-        if (snprintf(ipath, sizeof(ipath), "%s/%s", from, iso->name) >= (int)sizeof(ipath)) return 2;
-        if (copy_iso_to_device(ipath, real, iso->size) < 0) {
+        /* 4. A durable journal survives failure; it does not promise rollback. */
+        if (write_apply_journal(journal, "prepared", dl.version, real, iso->sha256, iso->size) < 0) {
+            close(tfd); fclose(snapshot); fprintf(stderr, "update: cannot persist apply journal\n"); return 2;
+        }
+        if (copy_iso_to_fd(imagefd, tfd, iso->size) < 0) {
+            (void)write_apply_journal(journal, "write-failed", dl.version, real, iso->sha256, iso->size);
+            close(tfd); fclose(snapshot);
             fprintf(stderr, "update: write to %s failed\n", real);
             return 2;
         }
+        fclose(snapshot);
         char hex[65];
-        if (sha256_prefix(real, iso->size, hex) < 0 || strcmp(hex, iso->sha256) != 0) {
+        int readback = sha256_prefix_fd(tfd, iso->size, hex);
+        int closed = close(tfd);
+        if (readback < 0 || closed < 0 || strcmp(hex, iso->sha256) != 0) {
+            (void)write_apply_journal(journal, "verification-failed", dl.version, real, iso->sha256, iso->size);
             fprintf(stderr, "update: read-back verification failed on %s\n", real);
             return 2;
+        }
+        if (write_apply_journal(journal, "verified", dl.version, real, iso->sha256, iso->size) < 0) {
+            fprintf(stderr, "update: cannot persist verified apply journal\n"); return 2;
         }
         if (json) {
             printf("{\"applied\": true, \"version\": \"%s\", \"target\": \"%s\", \"bytes\": %ld, \"sha256\": \"%s\"}\n",
