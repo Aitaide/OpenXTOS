@@ -36,7 +36,7 @@ jobs:
         run: |
           set -euo pipefail
           sudo apt-get update
-          sudo apt-get install -y build-essential xorriso python3-yaml libssl-dev liblzo2-dev pkg-config file opensbi qemu-system-misc qemu-system-arm qemu-system-x86 cpio kmod iproute2
+          sudo apt-get install -y build-essential xorriso python3-yaml libssl-dev liblzo2-dev pkg-config file opensbi qemu-system-misc qemu-system-arm qemu-system-x86 cpio kmod iproute2 nftables util-linux openssl busybox binutils libc6-dev
           if [ ! -f /usr/share/qemu/opensbi-riscv64-generic-fw_dynamic.bin ]; then
             firmware="$(dpkg -L opensbi | python3 -c 'import sys; paths=[x.strip() for x in sys.stdin if x.strip().endswith("riscv64-linux-gnu/opensbi/generic/fw_dynamic.bin")]; print(paths[0] if len(paths)==1 else "")')"
             test -n "$firmware"
@@ -60,11 +60,41 @@ jobs:
           python recipe/release-tools/test_source_packaging.py
           (cd source && ./scripts/verify_source_tree.sh)
           sudo install -d -m 0755 /var/lib/openxtos-release-validation /var/lib/openxtos-release-validation/tmp /root/.hermes/cache/scratch
-          sudo env PATH="$PATH" TMPDIR=/var/lib/openxtos-release-validation/tmp PYTHONDONTWRITEBYTECODE=1 XTOS_AI_PYTHON="$RUNNER_TEMP/ai-validation/bin/python" GIT_CONFIG_COUNT=2 GIT_CONFIG_KEY_0=safe.directory GIT_CONFIG_VALUE_0="$GITHUB_WORKSPACE/source" GIT_CONFIG_KEY_1=safe.directory GIT_CONFIG_VALUE_1="$GITHUB_WORKSPACE/recipe" python recipe/release-tools/validate_source.py source /var/lib/openxtos-release-validation/source 2>&1 | tee validation/userspace.log
+          sudo env PATH="/usr/bin:/bin:$PATH" bash -ec '
+            python3 -c "import sys,yaml; print(sys.executable,sys.version); assert sys.version_info >= (3,12)"
+            for command in gcc cc make readelf ldd nft ip unshare nsenter openssl busybox; do command -v "$command"; done
+            unshare -Urn nft list ruleset
+            unshare -mnpf /bin/true
+          '
+          cat > validation/landlock-preflight.c <<'C'
+          #include <linux/landlock.h>
+          #include <stdio.h>
+          #include <sys/syscall.h>
+          #include <unistd.h>
+          int main(void) {
+              long abi = syscall(SYS_landlock_create_ruleset, NULL, 0, LANDLOCK_CREATE_RULESET_VERSION);
+              printf("landlock_abi=%ld\n", abi);
+              return abi < 3;
+          }
+          C
+          cc -Wall -Werror validation/landlock-preflight.c -o validation/landlock-preflight
+          sudo validation/landlock-preflight
+          sudo env PATH="/usr/bin:/bin:$PATH" TMPDIR=/var/lib/openxtos-release-validation/tmp PYTHONDONTWRITEBYTECODE=1 XTOS_AI_PYTHON="$RUNNER_TEMP/ai-validation/bin/python" GIT_CONFIG_COUNT=2 GIT_CONFIG_KEY_0=safe.directory GIT_CONFIG_VALUE_0="$GITHUB_WORKSPACE/source" GIT_CONFIG_KEY_1=safe.directory GIT_CONFIG_VALUE_1="$GITHUB_WORKSPACE/recipe" python3 recipe/release-tools/validate_source.py source /var/lib/openxtos-release-validation/source 2>&1 | tee validation/userspace.log
           test -z "$(git -C source status --porcelain --untracked-files=all)"
       - name: Emit bounded diagnostics
         if: failure()
-        run: python recipe/release-tools/emit_diagnostics.py validation
+        run: |
+          python recipe/release-tools/emit_diagnostics.py validation
+          python3 - <<'PY'
+          from pathlib import Path
+          path = Path('validation/userspace.log')
+          if path.is_file():
+              lines = path.read_text(errors='replace').splitlines()[-90:]
+              for start in range(0, len(lines), 10):
+                  text = '\n'.join(lines[start:start+10])[-3500:]
+                  text = text.replace('%', '%25').replace('\r', '%0D').replace('\n', '%0A')
+                  print(f'::warning title=Final validation context {start//10+1}::{text}')
+          PY
       - uses: actions/upload-artifact@v4
         if: always()
         with:
