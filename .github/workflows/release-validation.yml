@@ -48,7 +48,7 @@ jobs:
           python -m pip install PyYAML
           python -m venv "$RUNNER_TEMP/ai-validation"
           "$RUNNER_TEMP/ai-validation/bin/python" -m pip install --require-hashes -r source/tools/xtos-onnx-baseline/requirements-ai.lock
-      - name: Run maintained source validation with isolated compiler fixtures
+      - name: Run maintained validation with compiler and XR diagnostic overlays
         run: |
           set -euo pipefail
           mkdir -p "$RUNNER_TEMP/xtos-tests" validation

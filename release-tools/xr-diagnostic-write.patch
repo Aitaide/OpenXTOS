@@ -1,0 +1,8 @@
+--- a/tools/xtos-xr/src/xr_eye_probe.c
++++ b/tools/xtos-xr/src/xr_eye_probe.c
+@@ -88 +88,4 @@
+- (void)write(STDERR_FILENO,message,sizeof message-1);
++ if(write(STDERR_FILENO,message,sizeof message-1)<0){
++  (void)fcntl(STDERR_FILENO,F_SETFL,flags);
++  return;
++ }
