@@ -1,0 +1,29 @@
+--- a/tests/test_native_tools_runner.py
++++ b/tests/test_native_tools_runner.py
+@@ -38,0 +39,11 @@
++static void write_checked(int fd, const char *text) {
++    size_t size = strlen(text);
++    size_t used = 0;
++    while (used < size) {
++        ssize_t count = write(fd, text + used, size - used);
++        if (count < 0 && errno == EINTR) continue;
++        if (count <= 0) _exit(97);
++        used += (size_t)count;
++    }
++}
++
+@@ -40 +51 @@
+-    (void)write(STDOUT_FILENO, text, strlen(text));
++    write_checked(STDOUT_FILENO, text);
+@@ -83 +94 @@
+-        (void)write(marker_fd, "executed\n", 9);
++        write_checked(marker_fd, "executed\n");
+@@ -97 +108 @@
+-        (void)write(marker_fd, "executed\n", 9);
++        write_checked(marker_fd, "executed\n");
+@@ -114 +125 @@
+-        if (allowed >= 0) { (void)write(allowed, "allowed\n", 8); (void)close(allowed); }
++        if (allowed >= 0) { write_checked(allowed, "allowed\n"); (void)close(allowed); }
+@@ -189 +200 @@
+-        (void)write(marker_fd, "root-isolated\n", strlen("root-isolated\n"));
++        write_checked(marker_fd, "root-isolated\n");

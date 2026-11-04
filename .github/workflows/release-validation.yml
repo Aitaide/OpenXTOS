@@ -48,7 +48,7 @@ jobs:
           python -m pip install PyYAML
           python -m venv "$RUNNER_TEMP/ai-validation"
           "$RUNNER_TEMP/ai-validation/bin/python" -m pip install --require-hashes -r source/tools/xtos-onnx-baseline/requirements-ai.lock
-      - name: Run complete maintained source validation
+      - name: Run maintained source validation with isolated compiler fixtures
         run: |
           set -euo pipefail
           mkdir -p "$RUNNER_TEMP/xtos-tests" validation
@@ -59,7 +59,7 @@ jobs:
           python recipe/release-tools/test_distribution_packaging.py
           python recipe/release-tools/test_source_packaging.py
           (cd source && ./scripts/verify_source_tree.sh)
-          sudo install -d -m 0755 /var/lib/openxtos-release-validation /var/lib/openxtos-release-validation/tmp /root/.hermes/cache/scratch
+          sudo install -d -m 0755 /var/lib/openxtos-release-validation /var/lib/xtos-v102 /var/lib/xtos-v102/tmp /root/.hermes/cache/scratch
           sudo env PATH="/usr/bin:/bin:$PATH" bash -ec '
             python3 -c "import sys,yaml; print(sys.executable,sys.version); sys.exit(0 if sys.version_info >= (3,12) else 1)"
             for command in gcc cc make readelf ldd nft ip unshare nsenter openssl busybox; do command -v "$command"; done
@@ -79,7 +79,7 @@ jobs:
           C
           cc -Wall -Werror validation/landlock-preflight.c -o validation/landlock-preflight
           sudo validation/landlock-preflight
-          sudo env PATH="/usr/bin:/bin:$PATH" TMPDIR=/var/lib/openxtos-release-validation/tmp XTOS_CHRONYC_PATH=/var/lib/openxtos-release-validation/no-host-chronyc PYTHONDONTWRITEBYTECODE=1 XTOS_AI_PYTHON="$RUNNER_TEMP/ai-validation/bin/python" GIT_CONFIG_COUNT=2 GIT_CONFIG_KEY_0=safe.directory GIT_CONFIG_VALUE_0="$GITHUB_WORKSPACE/source" GIT_CONFIG_KEY_1=safe.directory GIT_CONFIG_VALUE_1="$GITHUB_WORKSPACE/recipe" python3 recipe/release-tools/validate_source.py source /var/lib/openxtos-release-validation/source 2>&1 | tee validation/userspace.log
+          sudo env PATH="/usr/bin:/bin:$PATH" TMPDIR=/var/lib/xtos-v102/tmp XTOS_CHRONYC_PATH=/var/lib/openxtos-release-validation/no-host-chronyc PYTHONDONTWRITEBYTECODE=1 XTOS_AI_PYTHON="$RUNNER_TEMP/ai-validation/bin/python" GIT_CONFIG_COUNT=2 GIT_CONFIG_KEY_0=safe.directory GIT_CONFIG_VALUE_0="$GITHUB_WORKSPACE/source" GIT_CONFIG_KEY_1=safe.directory GIT_CONFIG_VALUE_1="$GITHUB_WORKSPACE/recipe" python3 recipe/release-tools/validate_source.py source /var/lib/openxtos-release-validation/source 2>&1 | tee validation/userspace.log
           test -z "$(git -C source status --porcelain --untracked-files=all)"
       - name: Emit bounded diagnostics
         if: failure()

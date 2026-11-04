@@ -1,11 +1,7 @@
 name: OpenXTOS v1.0.2 image release
 
 on:
-  push:
-    branches: ['release/v1.0.2-images']
-    paths:
-      - '.github/workflows/release-images.yml'
-      - 'release-tools/**'
+  workflow_dispatch:
 
 permissions:
   contents: read

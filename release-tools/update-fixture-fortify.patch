@@ -1,0 +1,32 @@
+--- a/tests/test_update_apply_security.py
++++ b/tests/test_update_apply_security.py
+@@ -68,0 +69,10 @@
++/* Fortified libc calls must reach the same adversarial OS seam. */
++char *__wrap___realpath_chk(const char *path, char *out, size_t size) {
++    char *resolved = __wrap_realpath(path, NULL);
++    if (resolved == NULL || out == NULL) return resolved;
++    size_t length = strlen(resolved) + 1;
++    if (length > size) { free(resolved); errno = ERANGE; return NULL; }
++    memcpy(out, resolved, length);
++    free(resolved);
++    return out;
++}
+@@ -79 +89 @@
+-        compile_update(cls.race_binary, extra=('-Wl,--wrap=fmemopen', '-Wl,--wrap=realpath'), source=wrapper)
++        compile_update(cls.race_binary, extra=('-Wl,--wrap=fmemopen', '-Wl,--wrap=realpath', '-Wl,--wrap=__realpath_chk'), source=wrapper)
+--- a/tests/test_update_recovery.py
++++ b/tests/test_update_recovery.py
+@@ -72,0 +73,10 @@
++/* Fortified libc calls must reach the same adversarial OS seam. */
++char *__wrap___realpath_chk(const char *path, char *out, size_t size) {
++    char *resolved = __wrap_realpath(path, NULL);
++    if (resolved == NULL || out == NULL) return resolved;
++    size_t length = strlen(resolved) + 1;
++    if (length > size) { free(resolved); errno = ERANGE; return NULL; }
++    memcpy(out, resolved, length);
++    free(resolved);
++    return out;
++}
+@@ -141 +151 @@
+-            '-Wl,--wrap=' + n for n in ['open', 'close', 'fstat', 'stat', 'realpath', 'opendir', 'fopen', 'ioctl', 'write']]])
++            '-Wl,--wrap=' + n for n in ['open', 'close', 'fstat', 'stat', 'realpath', '__realpath_chk', 'opendir', 'fopen', 'ioctl', 'write']]])
