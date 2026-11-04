@@ -1,0 +1,124 @@
+name: OpenXTOS v1.0.2 validation and publication
+
+on:
+  push:
+    branches: ['release/v1.0.2-images']
+    paths: ['.github/workflows/release-validation.yml']
+
+permissions:
+  contents: read
+  actions: read
+
+env:
+  SOURCE_SHA: c24e923717670c4724cdaf24c7c105caee8dc2fb
+  BUILD_RECIPE_SHA: 110048c955c71a0701f5eee04351ab7a4903b0f6
+  BUILD_RUN: '41776418970'
+  PYTHONDONTWRITEBYTECODE: '1'
+
+jobs:
+  source-validation:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: 110048c955c71a0701f5eee04351ab7a4903b0f6
+          path: recipe
+      - uses: actions/checkout@v4
+        with:
+          ref: c24e923717670c4724cdaf24c7c105caee8dc2fb
+          path: source
+          fetch-depth: 2
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Prepare complete validation environment
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y build-essential xorriso python3-yaml libssl-dev liblzo2-dev pkg-config file opensbi qemu-system-misc qemu-system-arm qemu-system-x86 cpio kmod iproute2
+          if [ ! -f /usr/share/qemu/opensbi-riscv64-generic-fw_dynamic.bin ]; then
+            firmware="$(dpkg -L opensbi | python3 -c 'import sys; paths=[x.strip() for x in sys.stdin if x.strip().endswith("riscv64-linux-gnu/opensbi/generic/fw_dynamic.bin")]; print(paths[0] if len(paths)==1 else "")')"
+            test -n "$firmware"
+            test -s "$firmware"
+            sudo mkdir -p /usr/share/qemu
+            sudo ln -s "$firmware" /usr/share/qemu/opensbi-riscv64-generic-fw_dynamic.bin
+          fi
+          test -s /usr/share/qemu/opensbi-riscv64-generic-fw_dynamic.bin
+          python -m pip install PyYAML
+          python -m venv "$RUNNER_TEMP/ai-validation"
+          "$RUNNER_TEMP/ai-validation/bin/python" -m pip install --require-hashes -r source/tools/xtos-onnx-baseline/requirements-ai.lock
+      - name: Run complete maintained source validation
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/xtos-tests" validation
+          export TMPDIR="$RUNNER_TEMP/xtos-tests"
+          export XTOS_RELEASE_SOURCE_ROOT="$GITHUB_WORKSPACE/source"
+          python recipe/release-tools/test_release_recipe.py -v
+          python -O recipe/release-tools/test_release_recipe.py -v
+          python recipe/release-tools/test_distribution_packaging.py
+          python recipe/release-tools/test_source_packaging.py
+          (cd source && ./scripts/verify_source_tree.sh)
+          sudo env PATH="$PATH" TMPDIR="$TMPDIR" PYTHONDONTWRITEBYTECODE=1 XTOS_AI_PYTHON="$RUNNER_TEMP/ai-validation/bin/python" GIT_CONFIG_COUNT=2 GIT_CONFIG_KEY_0=safe.directory GIT_CONFIG_VALUE_0="$GITHUB_WORKSPACE/source" GIT_CONFIG_KEY_1=safe.directory GIT_CONFIG_VALUE_1="$GITHUB_WORKSPACE/recipe" python recipe/release-tools/validate_source.py source source-validation 2>&1 | tee validation/userspace.log
+          test -z "$(git -C source status --porcelain --untracked-files=all)"
+      - name: Emit bounded diagnostics
+        if: failure()
+        run: python recipe/release-tools/emit_diagnostics.py validation
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: v1.0.2-source-validation-complete
+          path: validation/
+          if-no-files-found: warn
+          retention-days: 14
+
+  publish:
+    needs: source-validation
+    runs-on: ubuntu-24.04
+    timeout-minutes: 360
+    permissions:
+      contents: write
+      actions: read
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: 110048c955c71a0701f5eee04351ab7a4903b0f6
+          path: recipe
+      - name: Require original architecture builds to complete successfully
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import json, os, time, urllib.request
+          base='https://api.github.com/repos/Aitaide/OpenXTOS/'
+          def get(path):
+              request=urllib.request.Request(base+path, headers={'Authorization':'Bearer '+os.environ['GH_TOKEN'], 'Accept':'application/vnd.github+json'})
+              with urllib.request.urlopen(request,timeout=45) as response: return json.load(response)
+          for attempt in range(75):
+              run=get('actions/runs/'+os.environ['BUILD_RUN'])
+              if run['head_sha']!=os.environ['BUILD_RECIPE_SHA']: raise RuntimeError('wrong build recipe commit')
+              jobs=get('actions/runs/'+os.environ['BUILD_RUN']+'/jobs?per_page=100')['jobs']
+              selected=[x for x in jobs if x['name'] in ['build (x86_64)','build (arm64)']]
+              if len(selected)!=2: raise RuntimeError('missing architecture build jobs')
+              if all(x['status']=='completed' for x in selected):
+                  if any(x['conclusion']!='success' for x in selected): raise RuntimeError('architecture build failed; preserve logs and artifacts')
+                  print('original_architecture_builds=pass'); break
+              time.sleep(240)
+          else: raise RuntimeError('build wait deadline exceeded')
+          PY
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: v1.0.2-*-release
+          path: dist
+          merge-multiple: true
+          run-id: 41776418970
+          github-token: ${{ github.token }}
+      - name: Verify unchanged tag and publish complete artifact set
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          test "$(gh api repos/Aitaide/OpenXTOS/git/tags/17fc8322ae0893e06568d01df82cf4277a537ca4 --jq .object.sha)" = "$SOURCE_SHA"
+          test "$(gh api repos/Aitaide/OpenXTOS/git/ref/tags/v1.0.2 --jq .object.sha)" = '17fc8322ae0893e06568d01df82cf4277a537ca4'
+          python3 recipe/release-tools/publish.py dist --recipe-sha "$BUILD_RECIPE_SHA"
