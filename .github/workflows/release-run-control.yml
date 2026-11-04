@@ -1,0 +1,37 @@
+name: Cancel duplicate v1.0.2 image attempt
+
+on:
+  push:
+    branches: ['release/v1.0.2-images']
+    paths: ['.github/workflows/release-run-control.yml']
+
+permissions:
+  contents: read
+  actions: write
+
+jobs:
+  cancel-exact-duplicate:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - name: Cancel only the unintended duplicate image workflow
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import json, os, urllib.request
+          base = 'https://api.github.com/repos/Aitaide/OpenXTOS/actions/runs/41791295538'
+          headers = {'Authorization': 'Bearer ' + os.environ['GH_TOKEN'], 'Accept': 'application/vnd.github+json'}
+          with urllib.request.urlopen(urllib.request.Request(base, headers=headers), timeout=30) as response:
+              run = json.load(response)
+          if run['id'] != 41791295538 or run['head_sha'] != '13ac61bf7f540f7ede5a588acd0cca36e0728df2' or run['workflow_id'] != 406531688 or run['path'] != '.github/workflows/release-images.yml':
+              raise RuntimeError('refusing to cancel an unexpected run')
+          if run['status'] != 'completed':
+              with urllib.request.urlopen(urllib.request.Request(base + '/cancel', headers=headers, data=b'', method='POST'), timeout=30) as response:
+                  if response.status != 202:
+                      raise RuntimeError('cancellation was not accepted')
+              print('duplicate_cancellation_requested=41791295538')
+          else:
+              print('duplicate_already_completed=' + str(run['conclusion']))
+          PY
