@@ -1,0 +1,44 @@
+name: OpenXTOS v1.0.2 release diagnostics
+
+on:
+  push:
+    branches: ['release/v1.0.2-images']
+    paths: ['.github/workflows/release-diagnostics.yml']
+
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  inspect-failed-tag:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - name: Read original v1.0.2 failures
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          mkdir -p diagnostics
+          gh run view 41756148844 --repo Aitaide/OpenXTOS --log-failed > diagnostics/original-tag-failures.log
+          python3 - <<'PY'
+          import pathlib
+          text = pathlib.Path('diagnostics/original-tag-failures.log').read_text()
+          groups = {}
+          for line in text.splitlines():
+              fields = line.split('\t', 2)
+              key = '\t'.join(fields[:2]) if len(fields) > 2 else 'other'
+              groups.setdefault(key, []).append(line)
+          for key, lines in groups.items():
+              excerpt = '\n'.join(lines[-65:])[-14000:]
+              escaped = excerpt.replace('%', '%25').replace('\r', '%0D').replace('\n', '%0A')
+              title = key.replace(',', ' ').replace('\r', ' ').replace('\n', ' ')[:120]
+              print(f'::warning title=Original tag failure {title}::{escaped}')
+          PY
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: original-v1.0.2-tag-failure-logs
+          path: diagnostics/
+          if-no-files-found: error
+          retention-days: 14

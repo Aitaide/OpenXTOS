@@ -2,6 +2,7 @@ name: XTOS source and system CI
 
 on:
   push:
+    branches-ignore: ['release/**']
   pull_request:
 
 jobs:
