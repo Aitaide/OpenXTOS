@@ -36,7 +36,8 @@ jobs:
         run: |
           set -euo pipefail
           sudo apt-get update
-          sudo apt-get install -y --no-install-recommends qemu-system-arm
+          sudo apt-get install -y --no-install-recommends qemu-system-arm ipxe-qemu
+          test -s /usr/lib/ipxe/qemu/efi-virtio.rom
           test "$(git -C source rev-parse HEAD)" = c24e923717670c4724cdaf24c7c105caee8dc2fb
           test "$(git -C recipe rev-parse v1.0.2^{commit})" = c24e923717670c4724cdaf24c7c105caee8dc2fb
           python3 recipe/release-tools/test_public_readback.py
