@@ -1,0 +1,86 @@
+name: OpenXTOS v1.0.2 public download readback
+
+on:
+  push:
+    branches: ['release/v1.0.2-images']
+    paths: ['.github/workflows/release-readback.yml']
+
+permissions:
+  contents: read
+
+jobs:
+  public-byte-source-and-normal-boot:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    env:
+      PYTHONDONTWRITEBYTECODE: '1'
+      XTOS_RELEASE_ROOT: ${{ github.workspace }}/recipe
+      XTOS_TAGGED_SOURCE: ${{ github.workspace }}/source
+      XTOS_PUBLIC_READBACK_OUT: ${{ github.workspace }}/public-readback
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          path: recipe
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+          sparse-checkout: |
+            release-tools
+            .github/workflows
+      - uses: actions/checkout@v4
+        with:
+          path: source
+          ref: c24e923717670c4724cdaf24c7c105caee8dc2fb
+          sparse-checkout: VERSION
+          sparse-checkout-cone-mode: false
+      - name: Prepare read-only public verification tools
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends qemu-system-arm
+          test "$(git -C source rev-parse HEAD)" = c24e923717670c4724cdaf24c7c105caee8dc2fb
+          test "$(git -C recipe rev-parse v1.0.2^{commit})" = c24e923717670c4724cdaf24c7c105caee8dc2fb
+          python3 recipe/release-tools/test_public_readback.py
+          python3 -O recipe/release-tools/test_public_readback.py
+          python3 recipe/release-tools/test_public_arm64.py
+          python3 -O recipe/release-tools/test_public_arm64.py
+      - name: Download public attachments and verify exact sources
+        run: |
+          set -euo pipefail
+          python3 -u recipe/release-tools/verify_public_release.py
+      - name: Boot downloaded ARM64 bundle through unmodified shipped init
+        run: |
+          set -euo pipefail
+          python3 -u recipe/release-tools/verify_public_arm64.py
+      - name: Emit bounded verification receipt
+        if: always()
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          import base64, hashlib, json, os
+          root = Path(os.environ['XTOS_PUBLIC_READBACK_OUT'])
+          for rel in ['verified.json', 'arm64-normal-boot/verified.json', 'arm64-normal-boot/guest.log']:
+              path = root / rel
+              if path.is_file():
+                  print('READBACK_RECEIPT=' + rel)
+                  data = path.read_bytes()
+                  text = data.decode(errors='replace')
+                  print(text if rel.endswith('.json') else '\n'.join(text.splitlines()[-60:]))
+                  if rel.endswith('.json'):
+                      encoded = base64.b64encode(data).decode('ascii')
+                      chunks = [encoded[i:i+2800] for i in range(0, len(encoded), 2800)]
+                      for part, chunk in enumerate(chunks, 1):
+                          receipt = {'path': rel, 'sha256': hashlib.sha256(data).hexdigest(), 'bytes': len(data), 'part': part, 'parts': len(chunks), 'encoding': 'base64', 'data': chunk}
+                          print('::notice title=Public readback receipt::' + json.dumps(receipt, separators=(',', ':')))
+          PY
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: v1.0.2-public-readback-receipts
+          path: |
+            public-readback/*.json
+            public-readback/*.jsonl
+            public-readback/*.txt
+            public-readback/arm64-normal-boot/*.json
+            public-readback/arm64-normal-boot/*.log
+          if-no-files-found: warn
+          retention-days: 14
