@@ -1,0 +1,27 @@
+--- a/tools/xtos-cyton/cyton_diagnostic_serial.c
++++ b/tools/xtos-cyton/cyton_diagnostic_serial.c
+@@ -307,7 +307,8 @@
+ static int capture_frames(struct transport *t)
+ {
+     unsigned char frame[33];
+-    unsigned int used = 0, previous = 0, have_previous = 0;
++    size_t used = 0;
++    unsigned int previous = 0, have_previous = 0;
+     struct cyton_diagnostic_result *r = t->r;
+     if (send_command(t, "b", 1, command_deadline(t))) return -1;
+     while (r->sample_count < t->o->sample_frames) {
+@@ -315,11 +316,13 @@
+         unsigned int ch;
+         int32_t selected = 0;
+         int64_t nv;
++        if (used >= sizeof(frame)) return fail(EOVERFLOW);
+         if (wait_fd(t, POLLIN, t->deadline)) return -1;
+         n = read(t->fd, frame + used, sizeof(frame) - used);
+         if (n < 0) { if (errno == EINTR || errno == EAGAIN) continue; return -1; }
+         if (!n) return fail(EIO);
+-        used += (unsigned int)n;
++        if ((size_t)n > sizeof(frame) - used) return fail(EOVERFLOW);
++        used += (size_t)n;
+         if (used < sizeof(frame)) continue;
+         used = 0; ++r->frames_observed;
+         if (frame[0] != 0xa0 || (frame[32] & 0xf0) != 0xc0) {

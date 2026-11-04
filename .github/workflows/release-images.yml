@@ -1,0 +1,152 @@
+name: OpenXTOS v1.0.2 image release
+
+on:
+  push:
+    branches: ['release/v1.0.2-images']
+    paths:
+      - '.github/workflows/release-images.yml'
+      - 'release-tools/**'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: openxtos-v1.0.2-image-publication
+  cancel-in-progress: false
+
+env:
+  SOURCE_SHA: c24e923717670c4724cdaf24c7c105caee8dc2fb
+  PYTHONDONTWRITEBYTECODE: '1'
+  JOBS: '4'
+
+jobs:
+  source-validation:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          path: recipe
+      - uses: actions/checkout@v4
+        with:
+          ref: c24e923717670c4724cdaf24c7c105caee8dc2fb
+          path: source
+          fetch-depth: 2
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Install validation dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential xorriso python3-yaml libssl-dev liblzo2-dev pkg-config
+          python -m pip install PyYAML
+          python -m venv "$RUNNER_TEMP/ai-validation"
+          "$RUNNER_TEMP/ai-validation/bin/python" -m pip install --require-hashes -r source/tools/xtos-onnx-baseline/requirements-ai.lock
+      - name: Validate source and release recipe
+        run: |
+          set -euo pipefail
+          umask 022
+          mkdir -p "$RUNNER_TEMP/xtos-tests" validation
+          export TMPDIR="$RUNNER_TEMP/xtos-tests"
+          export XTOS_RELEASE_SOURCE_ROOT="$GITHUB_WORKSPACE/source"
+          python recipe/release-tools/test_release_recipe.py -v
+          python -O recipe/release-tools/test_release_recipe.py -v
+          python recipe/release-tools/test_distribution_packaging.py
+          python recipe/release-tools/test_source_packaging.py
+          test "$(git -C source rev-parse HEAD)" = "$SOURCE_SHA"
+          (cd source && ./scripts/verify_source_tree.sh)
+          XTOS_AI_PYTHON="$RUNNER_TEMP/ai-validation/bin/python" python recipe/release-tools/validate_source.py source source-validation 2>&1 | tee validation/userspace.log
+          test -z "$(git -C source status --porcelain --untracked-files=all)"
+      - name: Emit bounded failure diagnostics
+        if: failure()
+        run: python recipe/release-tools/emit_diagnostics.py validation
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: v1.0.2-source-validation
+          path: validation/
+          if-no-files-found: warn
+          retention-days: 14
+
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        arch: [x86_64, arm64]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 360
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          path: recipe
+      - uses: actions/checkout@v4
+        with:
+          ref: c24e923717670c4724cdaf24c7c105caee8dc2fb
+          path: source
+          fetch-depth: 1
+      - name: Install build and source-distribution tools
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y build-essential flex bison bc libssl-dev libelf-dev libc6-dev liblzo2-dev python3 curl ca-certificates cpio gzip rsync kmod file grub-pc-bin grub-efi-amd64-bin grub2-common xorriso mtools dosfstools e2fsprogs fdisk util-linux dropbear-bin rt-tests pciutils iproute2 openssh-client qemu-system-x86 ovmf dpkg-dev crossbuild-essential-arm64 libc6-dev-arm64-cross qemu-system-arm
+          sudo python3 recipe/release-tools/enable_deb_src.py /etc/apt/sources.list.d/ubuntu.sources
+          sudo apt-get update
+      - name: Build, boot, validate and package exact tagged source
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/xtos-build" validation dist
+          export TMPDIR="$RUNNER_TEMP/xtos-build"
+          sudo env PATH="$PATH" TMPDIR="$TMPDIR" JOBS="$JOBS" PYTHONDONTWRITEBYTECODE=1 GIT_CONFIG_COUNT=2 GIT_CONFIG_KEY_0=safe.directory GIT_CONFIG_VALUE_0="$GITHUB_WORKSPACE/source" GIT_CONFIG_KEY_1=safe.directory GIT_CONFIG_VALUE_1="$GITHUB_WORKSPACE/recipe" python3 recipe/release-tools/release.py '${{ matrix.arch }}' --source "$GITHUB_WORKSPACE/source" --dist "$GITHUB_WORKSPACE/dist" 2>&1 | tee validation/build.log
+      - name: Emit bounded failure diagnostics
+        if: failure()
+        run: python3 recipe/release-tools/emit_diagnostics.py validation source/.build
+      - uses: actions/upload-artifact@v4
+        if: success()
+        with:
+          name: v1.0.2-${{ matrix.arch }}-release
+          path: |
+            dist/openxtos-*.iso
+            dist/openxtos-*.tar.gz
+            dist/*manifest.json
+            dist/*results.json
+          if-no-files-found: error
+          retention-days: 14
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: v1.0.2-${{ matrix.arch }}-validation
+          path: |
+            validation/
+            source/.build/baremetal-release/evidence/*.json
+            source/.build/baremetal-release/evidence/*.log
+            source/.build/*qemu*.log
+            source/.build/*guest*.log
+          if-no-files-found: warn
+          retention-days: 14
+
+  publish:
+    needs: [source-validation, build]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          path: recipe
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: v1.0.2-*-release
+          path: dist
+          merge-multiple: true
+      - name: Verify immutable tag identity
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          test "$(gh api repos/Aitaide/OpenXTOS/git/tags/17fc8322ae0893e06568d01df82cf4277a537ca4 --jq .object.sha)" = "$SOURCE_SHA"
+          test "$(gh api repos/Aitaide/OpenXTOS/git/ref/tags/v1.0.2 --jq .object.sha)" = '17fc8322ae0893e06568d01df82cf4277a537ca4'
+      - name: Publish complete prerelease without overwriting existing release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: python3 recipe/release-tools/publish.py dist --recipe-sha "$GITHUB_SHA"
