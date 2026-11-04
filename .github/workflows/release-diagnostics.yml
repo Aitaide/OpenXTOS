@@ -30,7 +30,12 @@ jobs:
               key = '\t'.join(fields[:2]) if len(fields) > 2 else 'other'
               groups.setdefault(key, []).append(line)
           for key, lines in groups.items():
-              excerpt = '\n'.join(lines[-16:])[-3500:]
+              needles = ('error:', 'Error ', 'FAILED', 'Traceback', 'FileNotFoundError', '##[error]', 'FAIL:', 'ModuleNotFoundError')
+              hits = [i for i, line in enumerate(lines) if any(n in line for n in needles)]
+              selected = set()
+              for i in hits[-4:]:
+                  selected.update(range(max(0, i - 2), min(len(lines), i + 5)))
+              excerpt = '\n'.join(lines[i] for i in sorted(selected))[-3600:]
               escaped = excerpt.replace('%', '%25').replace('\r', '%0D').replace('\n', '%0A')
               title = key.replace(',', ' ').replace('\r', ' ').replace('\n', ' ')[:120]
               print(f'::warning title=Original tag failure {title}::{escaped}')
