@@ -30,7 +30,7 @@ jobs:
               key = '\t'.join(fields[:2]) if len(fields) > 2 else 'other'
               groups.setdefault(key, []).append(line)
           for key, lines in groups.items():
-              excerpt = '\n'.join(lines[-65:])[-14000:]
+              excerpt = '\n'.join(lines[-16:])[-3500:]
               escaped = excerpt.replace('%', '%25').replace('\r', '%0D').replace('\n', '%0A')
               title = key.replace(',', ' ').replace('\r', ' ').replace('\n', ' ')[:120]
               print(f'::warning title=Original tag failure {title}::{escaped}')
