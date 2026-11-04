@@ -1,0 +1,14 @@
+--- a/tools/xtos-native/cgroup/cgroup.c
++++ b/tools/xtos-native/cgroup/cgroup.c
+@@ -101,7 +101,10 @@
+     memcpy(effective + prefix, leaf, sizeof(leaf));
+     int fd = open(effective, O_WRONLY | O_TRUNC);
+     if (fd >= 0) {
+-        (void)write(fd, value, strlen(value));
++        if (write(fd, value, strlen(value)) < 0) {
++            close(fd);
++            return;
++        }
+         close(fd);
+     }
+ }

@@ -22,7 +22,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: 110048c955c71a0701f5eee04351ab7a4903b0f6
+          ref: ${{ github.sha }}
           path: recipe
       - uses: actions/checkout@v4
         with:
@@ -61,7 +61,7 @@ jobs:
           (cd source && ./scripts/verify_source_tree.sh)
           sudo install -d -m 0755 /var/lib/openxtos-release-validation /var/lib/openxtos-release-validation/tmp /root/.hermes/cache/scratch
           sudo env PATH="/usr/bin:/bin:$PATH" bash -ec '
-            python3 -c "import sys,yaml; print(sys.executable,sys.version); assert sys.version_info >= (3,12)"
+            python3 -c "import sys,yaml; print(sys.executable,sys.version); sys.exit(0 if sys.version_info >= (3,12) else 1)"
             for command in gcc cc make readelf ldd nft ip unshare nsenter openssl busybox; do command -v "$command"; done
             unshare -Urn nft list ruleset
             unshare -mnpf /bin/true

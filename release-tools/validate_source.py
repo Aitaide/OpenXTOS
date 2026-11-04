@@ -17,9 +17,11 @@ run(['git', 'clone', '--shared', '--no-hardlinks', str(source), str(target)])
 run(['git', '-C', target, 'config', 'user.name', 'OpenXTOS release validation'])
 run(['git', '-C', target, 'config', 'user.email', 'release-validation@example.invalid'])
 run(['patch', '--batch', '--fuzz=0', '-d', target, '-p1', '-i', TOOLS / 'cyton-read-bounds.patch'])
+# Validation-only compatibility: the added branch is excluded without TEST_MODE.
+run(['patch', '--batch', '--fuzz=0', '-d', target, '-p1', '-i', TOOLS / 'cgroup-fixture-write.patch'])
 run(['python3', target / 'tools/xtos-sbom/gen_sbom.py'], cwd=target)
-run(['git', '-C', target, 'add', 'tools/xtos-cyton/cyton_diagnostic_serial.c', 'docs/sbom.json'])
-run(['git', '-C', target, 'commit', '-m', 'Apply disclosed v1.0.2 release bounds patch for validation'])
+run(['git', '-C', target, 'add', 'tools/xtos-cyton/cyton_diagnostic_serial.c', 'tools/xtos-native/cgroup/cgroup.c', 'docs/sbom.json'])
+run(['git', '-C', target, 'commit', '-m', 'Apply disclosed release bounds patch and validation-only cgroup fixture repair'])
 with preserved(target):
     run(['bash', target / 'scripts/test.sh'], cwd=target)
 status = subprocess.check_output(['git', '-C', target, 'status', '--porcelain', '--untracked-files=all'], text=True)
