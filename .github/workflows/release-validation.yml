@@ -79,7 +79,7 @@ jobs:
           C
           cc -Wall -Werror validation/landlock-preflight.c -o validation/landlock-preflight
           sudo validation/landlock-preflight
-          sudo env PATH="/usr/bin:/bin:$PATH" TMPDIR=/var/lib/openxtos-release-validation/tmp PYTHONDONTWRITEBYTECODE=1 XTOS_AI_PYTHON="$RUNNER_TEMP/ai-validation/bin/python" GIT_CONFIG_COUNT=2 GIT_CONFIG_KEY_0=safe.directory GIT_CONFIG_VALUE_0="$GITHUB_WORKSPACE/source" GIT_CONFIG_KEY_1=safe.directory GIT_CONFIG_VALUE_1="$GITHUB_WORKSPACE/recipe" python3 recipe/release-tools/validate_source.py source /var/lib/openxtos-release-validation/source 2>&1 | tee validation/userspace.log
+          sudo env PATH="/usr/bin:/bin:$PATH" TMPDIR=/var/lib/openxtos-release-validation/tmp XTOS_CHRONYC_PATH=/var/lib/openxtos-release-validation/no-host-chronyc PYTHONDONTWRITEBYTECODE=1 XTOS_AI_PYTHON="$RUNNER_TEMP/ai-validation/bin/python" GIT_CONFIG_COUNT=2 GIT_CONFIG_KEY_0=safe.directory GIT_CONFIG_VALUE_0="$GITHUB_WORKSPACE/source" GIT_CONFIG_KEY_1=safe.directory GIT_CONFIG_VALUE_1="$GITHUB_WORKSPACE/recipe" python3 recipe/release-tools/validate_source.py source /var/lib/openxtos-release-validation/source 2>&1 | tee validation/userspace.log
           test -z "$(git -C source status --porcelain --untracked-files=all)"
       - name: Emit bounded diagnostics
         if: failure()
