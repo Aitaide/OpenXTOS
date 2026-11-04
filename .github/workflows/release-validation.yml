@@ -59,7 +59,8 @@ jobs:
           python recipe/release-tools/test_distribution_packaging.py
           python recipe/release-tools/test_source_packaging.py
           (cd source && ./scripts/verify_source_tree.sh)
-          sudo env PATH="$PATH" TMPDIR="$TMPDIR" PYTHONDONTWRITEBYTECODE=1 XTOS_AI_PYTHON="$RUNNER_TEMP/ai-validation/bin/python" GIT_CONFIG_COUNT=2 GIT_CONFIG_KEY_0=safe.directory GIT_CONFIG_VALUE_0="$GITHUB_WORKSPACE/source" GIT_CONFIG_KEY_1=safe.directory GIT_CONFIG_VALUE_1="$GITHUB_WORKSPACE/recipe" python recipe/release-tools/validate_source.py source source-validation 2>&1 | tee validation/userspace.log
+          sudo install -d -m 0755 /var/lib/openxtos-release-validation /var/lib/openxtos-release-validation/tmp
+          sudo env PATH="$PATH" TMPDIR=/var/lib/openxtos-release-validation/tmp PYTHONDONTWRITEBYTECODE=1 XTOS_AI_PYTHON="$RUNNER_TEMP/ai-validation/bin/python" GIT_CONFIG_COUNT=2 GIT_CONFIG_KEY_0=safe.directory GIT_CONFIG_VALUE_0="$GITHUB_WORKSPACE/source" GIT_CONFIG_KEY_1=safe.directory GIT_CONFIG_VALUE_1="$GITHUB_WORKSPACE/recipe" python recipe/release-tools/validate_source.py source /var/lib/openxtos-release-validation/source 2>&1 | tee validation/userspace.log
           test -z "$(git -C source status --porcelain --untracked-files=all)"
       - name: Emit bounded diagnostics
         if: failure()
