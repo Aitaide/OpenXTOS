@@ -10,44 +10,54 @@ permissions:
   actions: read
 
 jobs:
-  inspect-failed-tag:
+  read-public-boot-failure:
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     steps:
-      - name: Read original v1.0.2 failures
+      - name: Retrieve exact readback failure and retained receipt artifact
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
           mkdir -p diagnostics
-          gh run view 41781547792 --repo Aitaide/OpenXTOS --log-failed > diagnostics/original-tag-failures.log
+          gh api repos/Aitaide/OpenXTOS/actions/runs/41833286204 > diagnostics/run.json
+          gh api repos/Aitaide/OpenXTOS/actions/artifacts/13323946312 > diagnostics/artifact.json
           python3 - <<'PY'
-          import pathlib
-          text = pathlib.Path('diagnostics/original-tag-failures.log').read_text()
-          groups = {}
-          for line in text.splitlines():
-              fields = line.split('\t', 2)
-              key = '\t'.join(fields[:2]) if len(fields) > 2 else 'other'
-              groups.setdefault(key, []).append(line)
-          for line in text.splitlines():
-              if any(needle in line for needle in ('TrustError:', 'signature_verifier_unavailable', 'PermissionError:', 'ModuleNotFoundError:', 'ImportError:', 'libffi', 'libssl')):
-                  escaped=line.replace('%', '%25').replace('\r', '%0D').replace('\n', '%0A')
-                  print(f'::warning title=Exact trust failure::{escaped}')
-          for key, lines in groups.items():
-              needles = ('error:', 'Error ', 'FAILED', 'Traceback', 'FileNotFoundError', '##[error]', 'FAIL:', 'ModuleNotFoundError')
-              hits = [i for i, line in enumerate(lines) if any(n in line for n in needles)]
-              selected = set()
-              for i in hits[-4:]:
-                  selected.update(range(max(0, i - 2), min(len(lines), i + 18)))
-              excerpt = '\n'.join(lines[i] for i in sorted(selected))[-3600:]
-              escaped = excerpt.replace('%', '%25').replace('\r', '%0D').replace('\n', '%0A')
-              title = key.replace(',', ' ').replace('\r', ' ').replace('\n', ' ')[:120]
-              print(f'::warning title=Original tag failure {title}::{escaped}')
+          import json
+          from pathlib import Path
+          root = Path('diagnostics')
+          run = json.loads((root/'run.json').read_text())
+          artifact = json.loads((root/'artifact.json').read_text())
+          expected = '1388b95c61f331534d1fa4a3deff77239c78c6ee'
+          if run['id'] != 41833286204 or run['head_sha'] != expected or run['path'] != '.github/workflows/release-readback.yml' or run['conclusion'] != 'failure':
+              raise RuntimeError('wrong failure target')
+          if artifact['id'] != 13323946312 or artifact['workflow_run']['id'] != run['id'] or artifact['workflow_run']['head_sha'] != expected or artifact['digest'] != 'sha256:8c3129f84d9536beedf221be672f69351aa456582aa1d130d7a1eab1c6ad6147':
+              raise RuntimeError('wrong receipt artifact')
+          PY
+          gh run view 41833286204 --repo Aitaide/OpenXTOS --log-failed > diagnostics/failure.log
+          gh api repos/Aitaide/OpenXTOS/actions/artifacts/13323946312/zip > diagnostics/receipts.zip
+          python3 - <<'PY'
+          import base64, hashlib, json
+          from pathlib import Path
+          root = Path('diagnostics')
+          data = (root/'receipts.zip').read_bytes()
+          if hashlib.sha256(data).hexdigest() != '8c3129f84d9536beedf221be672f69351aa456582aa1d130d7a1eab1c6ad6147':
+              raise RuntimeError('receipt ZIP digest mismatch')
+          for name in ['receipts.zip','failure.log']:
+              data = (root/name).read_bytes()
+              if len(data) > 160000:
+                  raise RuntimeError('unexpected diagnostic size')
+              encoded = base64.b64encode(data).decode('ascii')
+              chunks = [encoded[i:i+2000] for i in range(0,len(encoded),2000)]
+              for part, chunk in enumerate(chunks,1):
+                  record = {'name':name,'sha256':hashlib.sha256(data).hexdigest(),'bytes':len(data),'part':part,'parts':len(chunks),'data':chunk}
+                  print('::notice title=Exact readback diagnostic::'+json.dumps(record,separators=(',',':')))
+          print((root/'failure.log').read_text(errors='replace'))
           PY
       - uses: actions/upload-artifact@v4
         if: always()
         with:
-          name: original-v1.0.2-tag-failure-logs
+          name: exact-v1.0.2-public-boot-failure
           path: diagnostics/
           if-no-files-found: error
           retention-days: 14
