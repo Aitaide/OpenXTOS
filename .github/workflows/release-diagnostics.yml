@@ -29,6 +29,10 @@ jobs:
               fields = line.split('\t', 2)
               key = '\t'.join(fields[:2]) if len(fields) > 2 else 'other'
               groups.setdefault(key, []).append(line)
+          for line in text.splitlines():
+              if any(needle in line for needle in ('TrustError:', 'signature_verifier_unavailable', 'PermissionError:')):
+                  escaped=line.replace('%', '%25').replace('\r', '%0D').replace('\n', '%0A')
+                  print(f'::warning title=Exact trust failure::{escaped}')
           for key, lines in groups.items():
               needles = ('error:', 'Error ', 'FAILED', 'Traceback', 'FileNotFoundError', '##[error]', 'FAIL:', 'ModuleNotFoundError')
               hits = [i for i, line in enumerate(lines) if any(n in line for n in needles)]
