@@ -20,7 +20,7 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p diagnostics
-          gh run view 41756148844 --repo Aitaide/OpenXTOS --log-failed > diagnostics/original-tag-failures.log
+          gh run view 41778252342 --repo Aitaide/OpenXTOS --log-failed > diagnostics/original-tag-failures.log
           python3 - <<'PY'
           import pathlib
           text = pathlib.Path('diagnostics/original-tag-failures.log').read_text()
@@ -34,7 +34,7 @@ jobs:
               hits = [i for i, line in enumerate(lines) if any(n in line for n in needles)]
               selected = set()
               for i in hits[-4:]:
-                  selected.update(range(max(0, i - 2), min(len(lines), i + 5)))
+                  selected.update(range(max(0, i - 2), min(len(lines), i + 18)))
               excerpt = '\n'.join(lines[i] for i in sorted(selected))[-3600:]
               escaped = excerpt.replace('%', '%25').replace('\r', '%0D').replace('\n', '%0A')
               title = key.replace(',', ' ').replace('\r', ' ').replace('\n', ' ')[:120]
